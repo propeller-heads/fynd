@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 num-bigint = "0.4.6"
-tycho-core = { git = "https://github.com/propeller-heads/tycho-indexer.git", package = "tycho-core", tag = "0.56.5" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation", tag = "0.82.1" }
 tycho-execution = { git = "https://github.com/propeller-heads/tycho-execution.git", package = "tycho-execution", features = ["evm"], tag = "0.60.0" }
+petgraph = "0.7.1"

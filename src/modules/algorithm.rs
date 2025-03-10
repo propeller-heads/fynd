@@ -67,8 +67,9 @@ impl Algorithm for MidPriceAlgorithm {
         );
         // 1. get routes between two tokens
         // 2. simulate get_amount_out on the routes and get_amount_out_reverse
-        // 3. calculate the mid price and spread
-        // 4. choose the route with the smalled mid price
+        // 3. subtract gas
+        // 4. calculate the mid price and spread
+        // 5. choose the route with the smalled mid price
     }
 
     fn get_route_amount_out(&self) {}
