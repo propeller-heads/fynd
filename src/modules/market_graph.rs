@@ -77,8 +77,8 @@ impl MarketGraph {
         // get state from self.states and update it with the new state
         println!("Updating MarketGraph");
     }
-    pub fn build_paths(&self) {
-        // search for all paths between all and all tokens (too ambitious?? if this is too slow we need to rethink it)
+    pub fn build_paths(&self, token_in: Bytes, token_out: Bytes) {
+        // search for all paths between the two tokens
         // store the paths in self.paths_cache (use self.graph.edge_weight(*edge_idx) get the pool ids
 
         println!("Building MarketGraph");
