@@ -27,4 +27,10 @@ impl Route {
         // 4. return the mid price and spread
         todo!()
     }
+
+    pub fn spot_price(&self) -> BigUint {
+        // loop through all pools and corresponding tokens
+        // multiply the spot prices and subtract the pool's fee
+        todo!()
+    }
 }

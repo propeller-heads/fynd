@@ -106,5 +106,3 @@ impl MarketMaker {
         // 3. encode/execute the trades self.executor(solution)
     }
 }
-
-// TODO: who needs to know about gas?

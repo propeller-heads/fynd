@@ -53,13 +53,18 @@ impl MarketGraph {
         //     add it to self.tokens
         //     add it to self.graph.add_node(token.address)
 
+        // if state is a EVMPoolState, we need to set spot prices
         // add state as an edge
         // retrieve the node index of the tokens
         // self.graph.add_edge(token0_node_index, token1_node_index, state.id)
 
         // add state to self.states
 
-        // TODO: how could we build only new paths?? not sure if it's possible
+        // loop through paths_cache to see if there is already an entry for the tokens
+        //   if there is, call self.build_paths(token0, token1) and replace it
+        //   if there isn't -> do nothing
+        // NOTE: this assumes that when a new pool is added we won't be able to consider it in already cached paths as a middle hop. Is this good enough?
+        // if this isn't enough, we could rebuild the paths for all the entries already present in the paths_cache
 
         println!("Inserting into MarketGraph");
     }
@@ -87,8 +92,9 @@ impl MarketGraph {
         println!("Getting routes from MarketGraph between two tokens");
         // Use self.tokens to get the node indexes of the tokens
         // loop through self.paths_cache and select only the paths that start with token_in and end with token_out
-        // For each path:
-        //   build the Route using self.tokens and self.states
+        //   if there are paths, for each path:
+        //     build the Route using self.tokens and self.states
+        //   if there are no paths, call self.build_paths(token_in, token_out) and then get the routes
         todo!()
     }
 }

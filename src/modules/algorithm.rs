@@ -6,7 +6,6 @@ use tycho_simulation::tycho_core::Bytes;
 // Trait for a generic solving algorithm
 pub trait Algorithm {
     fn get_route(&self, token_in: Bytes, token_out: Bytes, amount_in: BigUint) -> Route;
-    // Sometimes this returns exactly 1 route (solver and TQ) and sometimes it returns multiple routes (MM)
 }
 
 // One algorithm per use case :|
@@ -32,7 +31,8 @@ impl Algorithm for SimpleAlgorithm {
         //   a. get_amount_out of all routes
         //   b. choose the route with the highest get_amount_out and use that as buy token price
         // 2. get routes between two tokens
-        // 3. simulate get_amount_out on the routes
+        // 3. sort routes by highest spot price (in our previous MostLiquid algo we were also multiplying the spot price by the pools' inertia)
+        // 4. simulate get_amount_out on the routes on the top n routes
         // 4. choose the route with the highest get_amount_out
         // Note: it needs to take max_search_time into account
         todo!()
