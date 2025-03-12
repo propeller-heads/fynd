@@ -1,29 +1,34 @@
 use crate::models::Route;
+use crate::modules::algorithm::Algorithm;
 use crate::modules::market_graph::MarketGraph;
 use num_bigint::BigUint;
+use std::collections::HashMap;
 use tycho_simulation::tycho_core::Bytes;
 
-pub struct TychoWorker {
+pub struct TychoSolver {
     protocols: Vec<String>,
     tokens: Option<String>,
     tvl_filter: f64,
 
     graph: MarketGraph,
+    algorithm: Box<dyn Algorithm>,
     gas_price: BigUint,
 }
 
-impl TychoWorker {
+impl TychoSolver {
     pub fn new(
         protocols: Vec<String>,
         tokens: Option<String>,
         tvl_filter: f64,
         graph: MarketGraph,
+        algorithm: Box<dyn Algorithm>,
     ) -> Self {
-        TychoWorker {
+        TychoSolver {
             protocols,
             tokens,
             tvl_filter,
             graph,
+            algorithm,
             gas_price: BigUint::ZERO,
         }
     }
@@ -36,8 +41,16 @@ impl TychoWorker {
         //   b. If it's a new block -> update the graph
     }
 
-    fn get_routes(&self, token_in: Bytes, token_out: Bytes) -> Vec<Route> {
+    fn get_route(
+        &self,
+        token_in: Bytes,
+        token_out: Bytes,
+        amount_in: BigUint,
+        token_prices: Option<HashMap<Bytes, BigUint>>,
+    ) -> Route {
         // let routes = self.graph.get_routes(token_in, token_out)
+        // if token_prices are passed, calculate the gas price in token_out
+        // let route = self.algorithm.get_route(routes, amount_in, gas_price)
         println!("Getting route from TychoWorker");
         todo!()
     }
