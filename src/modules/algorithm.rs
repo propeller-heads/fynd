@@ -1,17 +1,6 @@
 use crate::models::Route;
 use num_bigint::BigUint;
 
-// Trait for a generic solving algorithm
-pub trait Algorithm {
-    fn get_route(
-        &self,
-        routes: Vec<Route>,
-        amount_in: BigUint,
-        gas_price: Option<BigUint>,
-    ) -> Route;
-    // gas_price is in token_out
-}
-
 pub struct SimpleAlgorithm {
     max_search_time: u64,
 }
@@ -20,9 +9,7 @@ impl SimpleAlgorithm {
     pub fn new(max_search_time: u64) -> Self {
         SimpleAlgorithm { max_search_time }
     }
-}
 
-impl Algorithm for SimpleAlgorithm {
     fn get_route(
         &self,
         routes: Vec<Route>,

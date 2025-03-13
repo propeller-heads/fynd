@@ -1,4 +1,4 @@
-use crate::modules::algorithm::{Algorithm, SimpleAlgorithm};
+use crate::modules::algorithm::SimpleAlgorithm;
 use crate::modules::executor::Executor;
 use crate::modules::market_graph::MarketGraph;
 use crate::solver::TychoSolver;
@@ -22,7 +22,7 @@ impl TokenQuoter {
         max_search_time: u64,
     ) -> Self {
         let graph = MarketGraph::new(max_hops);
-        let algorithm = Box::new(SimpleAlgorithm::new(max_search_time));
+        let algorithm = SimpleAlgorithm::new(max_search_time);
         let solver = TychoSolver::new(protocols, tokens, tvl_filter, graph, algorithm);
         TokenQuoter {
             quote_token,
@@ -55,7 +55,7 @@ impl Solver {
         max_search_time: u64,
     ) -> Self {
         let graph = MarketGraph::new(max_hops);
-        let algorithm = Box::new(SimpleAlgorithm::new(max_search_time));
+        let algorithm = SimpleAlgorithm::new(max_search_time);
         let solver = TychoSolver::new(protocols, tokens, tvl_filter, graph, algorithm);
         let executor = Executor {};
         Solver { solver, executor }
@@ -85,7 +85,7 @@ impl MarketMaker {
         target_price: BigUint,
     ) -> Self {
         let graph = MarketGraph::new(1);
-        let algorithm = Box::new(SimpleAlgorithm::new(max_search_time));
+        let algorithm = SimpleAlgorithm::new(max_search_time);
         let solver = TychoSolver::new(protocols, tokens, tvl_filter, graph.clone(), algorithm);
         let executor = Executor {};
         MarketMaker {

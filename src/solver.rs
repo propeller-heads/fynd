@@ -1,5 +1,5 @@
 use crate::models::Route;
-use crate::modules::algorithm::Algorithm;
+use crate::modules::algorithm::SimpleAlgorithm;
 use crate::modules::market_graph::MarketGraph;
 use num_bigint::BigUint;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ pub struct TychoSolver {
     tvl_filter: f64,
 
     graph: MarketGraph,
-    algorithm: Box<dyn Algorithm>,
+    algorithm: SimpleAlgorithm,
     gas_price: BigUint,
 }
 
@@ -21,7 +21,7 @@ impl TychoSolver {
         tokens: Option<String>,
         tvl_filter: f64,
         graph: MarketGraph,
-        algorithm: Box<dyn Algorithm>,
+        algorithm: SimpleAlgorithm,
     ) -> Self {
         TychoSolver {
             protocols,
