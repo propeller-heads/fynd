@@ -1,16 +1,25 @@
 use crate::models::Route;
+use crate::modules::algorithms::algorithm::Algorithm;
+use crate::modules::algorithms::market_graph::MarketGraph;
 use num_bigint::BigUint;
 
-pub struct SimpleAlgorithm {
+pub struct MostLiquidAlgorithm {
+    // TODO: add missing attributes here
     max_search_time: u64,
+    graph: MarketGraph,
 }
 
-impl SimpleAlgorithm {
-    pub fn new(max_search_time: u64) -> Self {
-        SimpleAlgorithm { max_search_time }
+impl MostLiquidAlgorithm {
+    pub fn new(max_search_time: u64, n_hops: usize) -> Self {
+        MostLiquidAlgorithm {
+            max_search_time,
+            graph: MarketGraph::new(n_hops),
+        }
     }
+}
 
-    fn get_route(
+impl Algorithm for MostLiquidAlgorithm {
+    fn get_best_route(
         &self,
         routes: Vec<Route>,
         amount_in: BigUint,

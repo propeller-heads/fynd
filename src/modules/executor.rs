@@ -7,6 +7,14 @@ pub struct Executor {
 
 impl Executor {
     pub fn execute() {
-        println!("Encoding and executing the trade");
+        todo!()
+    }
+
+    pub fn encode() {
+        todo!()
+    }
+
+    pub fn simulate() {
+        todo!()
     }
 }

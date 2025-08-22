@@ -1,4 +1,3 @@
-pub mod algorithm;
+pub mod algorithms;
 pub mod executor;
 pub mod gas_price;
-pub mod market_graph;
