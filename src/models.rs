@@ -251,6 +251,12 @@ impl Route {
         // Loop through the paths and calculate the consecutive amount outs
         todo!()
     }
+
+    pub fn spot_price(&self) -> BigUint {
+        // loop through all pools and corresponding tokens
+        // multiply the spot prices and subtract the pool's fee
+        todo!()
+    }
 }
 
 /// Solver error types that aggregate lower-level errors  
