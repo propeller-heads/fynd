@@ -1,8 +1,10 @@
-use crate::models::{Order, Route, GasPrice};
 use num_bigint::BigUint;
-use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
-use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
-use tycho_simulation::tycho_core::Bytes;
+use tycho_simulation::{
+    tycho_common::{models::protocol::ProtocolComponent, simulation::protocol_sim::ProtocolSim},
+    tycho_core::Bytes,
+};
+
+use crate::models::{GasPrice, Order, Route};
 
 /// Core algorithm error types
 #[derive(Debug)]
@@ -37,7 +39,7 @@ pub trait Algorithm {
         &self,
         order: &Order,
         gas_price: Option<&GasPrice>,
-        token_prices: &std::collections::HashMap<Bytes, BigUint>, // Prices in native token
+        token_out_price: Option<BigUint>, // Price in native token
     ) -> Option<Route>;
 
     /// Add market data

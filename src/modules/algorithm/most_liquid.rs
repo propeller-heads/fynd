@@ -28,7 +28,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         order: &Order,
         _gas_price: Option<&GasPrice>,
-        _token_prices: &std::collections::HashMap<Bytes, BigUint>,
+        token_out_price: Option<BigUint>,
     ) -> Option<Route> {
         println!("Getting best route using MostLiquidAlgorithm for order {}", order.external_id());
 
@@ -82,10 +82,9 @@ impl Algorithm for MostLiquidAlgorithm {
         // - For exact_in: forward-calculate expected outputs
         // - Sort by spot prices for each path
         // - Simulate get_amount_out/get_amount_in for top N routes
-        // - If gas_price and token_prices are provided, calculate real amount out:
+        // - If gas_price and token_out_price are provided, calculate real amount out:
         //   * Estimate gas usage for the route
         //   * Convert gas cost to native token: gas_cost = gas_price * gas_usage
-        //   * Get token_out price in native token from token_prices
         //   * Deduct gas cost from token_out amount: real_amount_out = amount_out - (gas_cost /
         //     token_out_price_in_eth)
         // - Check that result meets order.min_amount() constraint

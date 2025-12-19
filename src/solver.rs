@@ -12,10 +12,7 @@ use tycho_simulation::{
 
 use crate::{
     models::{GasPrice, Order, Route},
-    modules::{
-        algorithm::algorithm::Algorithm, gas_price_fetcher::GasPriceFetcher,
-        token_prices_provider::TokenPricesProvider,
-    },
+    modules::{algorithm::algorithm::Algorithm, gas_price_fetcher::GasPriceFetcher},
 };
 
 pub struct Solver<A: Algorithm> {
@@ -26,9 +23,7 @@ pub struct Solver<A: Algorithm> {
     protocols: Option<Vec<String>>,
     tokens: HashMap<Bytes, Token>,
     gas_price_fetcher: GasPriceFetcher,
-    token_prices_provider: TokenPricesProvider,
     current_gas_price: Option<GasPrice>,
-    token_prices: HashMap<Bytes, BigUint>, // Prices in native token (ETH for Ethereum)
     tvl_threshold: (f64, f64), // (min_tvl, max_tvl) for protocol stream builder
 }
 
@@ -75,32 +70,38 @@ impl<A: Algorithm> Solver<A> {
             protocols,
             tokens,
             gas_price_fetcher: GasPriceFetcher::new(),
-            token_prices_provider: TokenPricesProvider::new(),
             current_gas_price: None,
-            token_prices: HashMap::new(),
             tvl_threshold,
         })
     }
 
     /// Find the best route for an Order (delegates to algorithm)
     pub fn solve_order(&self, order: &Order) -> Option<Route> {
-        // Extract only relevant token prices for this order
-        let mut relevant_prices = HashMap::new();
-        if let Some(price) = self
-            .token_prices
-            .get(&order.token_in().address)
-        {
-            relevant_prices.insert(order.token_in().address.clone(), price.clone());
-        }
-        if let Some(price) = self
-            .token_prices
-            .get(&order.token_out().address)
-        {
-            relevant_prices.insert(order.token_out().address.clone(), price.clone());
-        }
+        // First do a 1 ETH -> token out order to get the token price
+        let native_token = self.chain.native_token();
+        let native_order = Order::new(
+            "".to_string(),
+            native_token.clone(),
+            order.token_out().clone(),
+            Some(native_token.one().clone()),
+            None,
+            false,
+            BigUint::ZERO,
+            Bytes::zero(20),
+            None,
+        );
 
-        self.algorithm
-            .get_best_route(order, self.current_gas_price.as_ref(), &relevant_prices)
+        let route = self
+            .algorithm
+            .get_best_route(&native_order, self.current_gas_price.as_ref(), None)
+            .unwrap();
+
+        // then use the price from the previous route in the actual solve
+        self.algorithm.get_best_route(
+            order,
+            self.current_gas_price.as_ref(),
+            Some(native_token.one().clone() / route.amount_out()),
+        )
     }
 
     /// Add market data - delegates to algorithm
@@ -131,11 +132,6 @@ impl<A: Algorithm> Solver<A> {
         self.current_gas_price.as_ref()
     }
 
-    /// Get current token prices
-    pub fn get_token_prices(&self) -> &HashMap<Bytes, BigUint> {
-        &self.token_prices
-    }
-
     pub fn get_tokens(&self) -> &HashMap<Bytes, Token> {
         &self.tokens
     }
@@ -152,7 +148,6 @@ impl<A: Algorithm> Solver<A> {
         // Create channels for inter-task communication
         let (indexer_tx, mut indexer_rx) = mpsc::channel(100);
         let (gas_tx, mut gas_rx) = mpsc::channel(10);
-        let (price_tx, mut price_rx) = mpsc::channel(10);
 
         // 1. Spawn task to connect to Tycho indexer
         let indexer_handle = self
@@ -162,12 +157,9 @@ impl<A: Algorithm> Solver<A> {
         // 2. Spawn task to get gas prices periodically
         let gas_handle = self.spawn_gas_price_task(gas_tx);
 
-        // 3. Spawn task to get token prices periodically
-        let price_handle = self.spawn_token_prices_task(price_tx);
-
         println!("Background tasks spawned, starting main loop...");
 
-        // 4. Main event loop to handle updates
+        // 3. Main event loop to handle updates
         loop {
             tokio::select! {
                 // Handle indexer updates
@@ -193,21 +185,12 @@ impl<A: Algorithm> Solver<A> {
                         self.current_gas_price = Some(gas_price);
                     }
                 }
-
-                // Handle token price updates
-                price_msg = price_rx.recv() => {
-                    if let Some(prices) = price_msg {
-                        println!("Updated token prices for {} tokens", prices.len());
-                        self.token_prices = prices;
-                    }
-                }
             }
         }
 
         // Clean up background tasks
         indexer_handle.abort();
         gas_handle.abort();
-        price_handle.abort();
 
         Ok(())
     }
@@ -239,7 +222,8 @@ impl<A: Algorithm> Solver<A> {
             // 3. Set authentication key with tycho_api_key
             // 4. Configure stream options (skip decode failures, timeout, etc.)
             // 5. Set tokens filter using the tokens vec
-            // 6. Set TVL threshold using tvl_threshold (min_tvl: tvl_threshold.0, max_tvl: tvl_threshold.1)
+            // 6. Set TVL threshold using tvl_threshold (min_tvl: tvl_threshold.0, max_tvl:
+            //    tvl_threshold.1)
             // 7. Build the stream
             // 8. Listen for updates in a loop
             // 9. Send updates through the tx channel to main event loop
@@ -271,25 +255,6 @@ impl<A: Algorithm> Solver<A> {
 
                 if tx.send(mock_gas_price).await.is_err() {
                     println!("Main loop receiver dropped, stopping gas price fetcher");
-                    break;
-                }
-            }
-        })
-    }
-
-    fn spawn_token_prices_task(&self, tx: mpsc::Sender<HashMap<Bytes, BigUint>>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            println!("Token prices fetcher task started");
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
-
-            loop {
-                interval.tick().await;
-
-                // TODO: Implement actual token price fetching from external API
-                let mock_prices = HashMap::new(); // Empty for now
-
-                if tx.send(mock_prices).await.is_err() {
-                    println!("Main loop receiver dropped, stopping token prices fetcher");
                     break;
                 }
             }
