@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use alloy::{primitives::B256, signers::local::PrivateKeySigner};
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     evm::encoder_builders::TychoRouterEncoderBuilder,
-    models::{EncodedSolution, Solution, Transaction, UserTransferType},
+    models::{Solution, Transaction, UserTransferType},
 };
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
@@ -25,6 +26,25 @@ impl std::fmt::Display for ExecutorError {
 }
 
 impl std::error::Error for ExecutorError {}
+
+/// Transaction status information
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransactionStatus {
+    pub hash: String,
+    pub status: TxStatus,
+    pub block_number: Option<u64>,
+    pub confirmations: Option<u64>,
+    pub gas_used: Option<u64>,
+}
+
+/// Transaction status enum  
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TxStatus {
+    Pending,
+    Confirmed,
+    Failed,
+    Unknown,
+}
 
 /// Result of simulating a transaction
 #[derive(Debug, Clone)]
@@ -71,7 +91,7 @@ impl Executor {
     /// Encode solutions without execution
     pub fn encode(&self, _solutions: &[Solution]) -> Result<Vec<Transaction>, ExecutorError> {
         // Initialize the encoder
-        let encoder = TychoRouterEncoderBuilder::new()
+        let _encoder = TychoRouterEncoderBuilder::new()
             .chain(self.chain)
             .user_transfer_type(self.user_transfer_type.clone())
             .router_address(self.router_address.clone())
@@ -109,5 +129,42 @@ impl Executor {
         // 5. Return simulation results with gas estimates, success/failure, etc.
         // 6. Consider using self.allowed_slippage for realistic simulations
         todo!("Implement transaction simulation")
+    }
+
+    /// Track the status of multiple transactions
+    /// 
+    /// Takes transaction hashes and returns their current status including
+    /// block number, confirmation count, and execution status.
+    pub async fn track_transactions(
+        &self,
+        tx_hashes: &[String],
+    ) -> Result<HashMap<String, TransactionStatus>, ExecutorError> {
+        // 1. Use alloy provider to query transaction status for each hash
+        // 2. Get transaction receipt if available
+        // 3. Calculate confirmations based on current block - tx block
+        // 4. Determine status (pending/confirmed/failed) from receipt
+        // 5. Extract gas usage from receipt
+        // 6. Return HashMap mapping each hash to its status
+        
+        let mut statuses = HashMap::new();
+        
+        for hash in tx_hashes {
+            // Placeholder implementation - in real implementation would query RPC
+            let status = TransactionStatus {
+                hash: hash.clone(),
+                status: TxStatus::Unknown, // Would query actual status
+                block_number: None,        // Would get from receipt
+                confirmations: None,       // Would calculate from current block
+                gas_used: None,           // Would get from receipt
+            };
+            statuses.insert(hash.clone(), status);
+        }
+        
+        Ok(statuses)
+        // TODO: Implement actual transaction tracking using:
+        // - self.rpc_url for provider connection
+        // - provider.get_transaction_by_hash() for transaction details  
+        // - provider.get_transaction_receipt() for receipt/confirmation
+        // - provider.get_block_number() for current block to calc confirmations
     }
 }

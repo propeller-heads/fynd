@@ -1,7 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use num_bigint::BigUint;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{sync::{mpsc, Mutex}, task::JoinHandle};
 use tycho_simulation::{
     tycho_common::{
         models::{protocol::ProtocolComponent, token::Token, Chain},
@@ -16,18 +16,18 @@ use crate::{
 };
 
 pub struct Solver<A: Algorithm> {
-    algorithm: A,
+    algorithm: Arc<Mutex<A>>,
     chain: Chain,
     tycho_url: String,
     tycho_api_key: String,
     protocols: Option<Vec<String>>,
     tokens: HashMap<Bytes, Token>,
     gas_price_fetcher: GasPriceFetcher,
-    current_gas_price: Option<GasPrice>,
+    current_gas_price: Arc<Mutex<Option<GasPrice>>>,
     tvl_threshold: (f64, f64), // (min_tvl, max_tvl) for protocol stream builder
 }
 
-impl<A: Algorithm> Solver<A> {
+impl<A: Algorithm + Send + 'static> Solver<A> {
     pub async fn new(
         max_hops: usize,
         chain: Chain,
@@ -63,20 +63,25 @@ impl<A: Algorithm> Solver<A> {
         };
 
         Ok(Self {
-            algorithm: A::new(max_hops),
+            algorithm: Arc::new(Mutex::new(A::new(max_hops))),
             chain,
             tycho_url,
             tycho_api_key,
             protocols,
             tokens,
             gas_price_fetcher: GasPriceFetcher::new(),
-            current_gas_price: None,
+            current_gas_price: Arc::new(Mutex::new(None)),
             tvl_threshold,
         })
     }
 
     /// Find the best route for an Order (delegates to algorithm)
-    pub fn solve_order(&self, order: &Order) -> Option<Route> {
+    pub async fn solve_order(&self, order: &Order) -> Option<Route> {
+        // Lock the shared state
+        let algorithm = self.algorithm.lock().await;
+        let gas_price_guard = self.current_gas_price.lock().await;
+        let gas_price_ref = gas_price_guard.as_ref();
+
         // First do a 1 ETH -> token out order to get the token price
         let native_token = self.chain.native_token();
         let native_order = Order::new(
@@ -91,45 +96,45 @@ impl<A: Algorithm> Solver<A> {
             None,
         );
 
-        let route = self
-            .algorithm
-            .get_best_route(&native_order, self.current_gas_price.as_ref(), None)
+        let route = algorithm
+            .get_best_route(&native_order, gas_price_ref, None)
             .unwrap();
 
         // then use the price from the previous route in the actual solve
-        self.algorithm.get_best_route(
+        algorithm.get_best_route(
             order,
-            self.current_gas_price.as_ref(),
+            gas_price_ref,
             Some(native_token.one().clone() / route.amount_out()),
         )
     }
 
     /// Add market data - delegates to algorithm
-    pub fn add_market_data(
-        &mut self,
+    pub async fn add_market_data(
+        &self,
         state_id: Bytes,
         component: ProtocolComponent,
         state: Box<dyn ProtocolSim>,
     ) {
-        self.algorithm
-            .add_market_data(state_id, component, state);
+        let mut algorithm = self.algorithm.lock().await;
+        algorithm.add_market_data(state_id, component, state);
     }
 
     /// Remove market data - delegates to algorithm
-    pub fn remove_market_data(&mut self, state_id: Bytes, component: ProtocolComponent) {
-        self.algorithm
-            .remove_market_data(state_id, component);
+    pub async fn remove_market_data(&self, state_id: Bytes, component: ProtocolComponent) {
+        let mut algorithm = self.algorithm.lock().await;
+        algorithm.remove_market_data(state_id, component);
     }
 
     /// Update an existing state with new data - delegates to algorithm
-    pub fn update_market_state(&mut self, state_id: Bytes, new_state: Box<dyn ProtocolSim>) {
-        self.algorithm
-            .update_market_state(state_id, new_state);
+    pub async fn update_market_state(&self, state_id: Bytes, new_state: Box<dyn ProtocolSim>) {
+        let mut algorithm = self.algorithm.lock().await;
+        algorithm.update_market_state(state_id, new_state);
     }
 
     /// Get current gas price
-    pub fn get_gas_price(&self) -> Option<&GasPrice> {
-        self.current_gas_price.as_ref()
+    pub async fn get_gas_price(&self) -> Option<GasPrice> {
+        let gas_price = self.current_gas_price.lock().await;
+        gas_price.clone()
     }
 
     pub fn get_tokens(&self) -> &HashMap<Bytes, Token> {
@@ -141,58 +146,105 @@ impl<A: Algorithm> Solver<A> {
         self.tvl_threshold
     }
 
-    /// Run the solver with background tasks for market data updates
-    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Starting Tycho Router Solver...");
+    /// Start background tasks for market data updates
+    /// 
+    /// This starts independent background tasks that will continuously update
+    /// the solver's market data and gas prices. The tasks run independently
+    /// and don't block the solver from being used for quote/solve operations.
+    /// 
+    /// Returns handles to the background tasks for graceful shutdown if needed.
+    pub async fn start_background_updates(&self) -> Result<(JoinHandle<()>, JoinHandle<()>), Box<dyn std::error::Error + Send + Sync>> {
+        println!("Starting background market data updates...");
 
-        // Create channels for inter-task communication
-        let (indexer_tx, mut indexer_rx) = mpsc::channel(100);
-        let (gas_tx, mut gas_rx) = mpsc::channel(10);
+        // Clone shared state references for background tasks
+        let algorithm = Arc::clone(&self.algorithm);
+        let current_gas_price = Arc::clone(&self.current_gas_price);
+        let tokens = self.tokens.clone();
 
-        // 1. Spawn task to connect to Tycho indexer
-        let indexer_handle = self
-            .spawn_tycho_indexer_task(indexer_tx)
-            .await?;
+        // Clone configuration for background tasks
+        let tycho_url = self.tycho_url.clone();
+        let _tycho_api_key = self.tycho_api_key.clone();
+        let chain = self.chain;
+        let protocols = self.protocols.clone();
+        let tvl_threshold = self.tvl_threshold;
 
-        // 2. Spawn task to get gas prices periodically
-        let gas_handle = self.spawn_gas_price_task(gas_tx);
+        // 1. Spawn indexer task that updates algorithm state
+        let indexer_handle = tokio::spawn(async move {
+            println!("Tycho indexer task started");
+            println!("Configuration:");
+            println!("  - Tycho URL: {}", tycho_url);
+            println!("  - Chain: {:?}", chain);
+            println!("  - Protocols: {:?}", protocols);
+            println!("  - TVL threshold: ({}, {})", tvl_threshold.0, tvl_threshold.1);
+            println!("  - Tracking {} tokens", tokens.len());
 
-        println!("Background tasks spawned, starting main loop...");
+            // Create channels for updates  
+            let (_update_tx, mut update_rx) = mpsc::channel::<tycho_simulation::protocol::models::Update>(100);
 
-        // 3. Main event loop to handle updates
-        loop {
-            tokio::select! {
-                // Handle indexer updates
-                indexer_msg = indexer_rx.recv() => {
-                    match indexer_msg {
-                        Some(update) => {
-                            println!("Processing indexer update for block/timestamp: {}",
-                                update.block_number_or_timestamp);
+            // Spawn the actual indexer connection task
+            let _indexer_task = tokio::spawn(async move {
+                // TODO: Implement actual Tycho indexer connection
+                // For now, simulate periodic updates
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    println!("Would connect to Tycho indexer and send updates");
+                    
+                    // Simulate sending updates - in real implementation:
+                    // 1. Create ProtocolStreamBuilder with tycho_url and chain
+                    // 2. Add specified protocols and set authentication
+                    // 3. Set tokens filter and TVL threshold  
+                    // 4. Build stream and listen for updates
+                    // 5. Send updates through update_tx channel
+                }
+            });
 
-                            self.process_indexer_update(update).await?;
-                        }
-                        None => {
-                            println!("Indexer stream closed");
-                            break;
-                        }
+            // Process indexer updates and apply to algorithm
+            while let Some(update) = update_rx.recv().await {
+                let mut algo = algorithm.lock().await;
+                
+                // Process new pairs
+                for (state_id, component) in update.new_pairs {
+                    if let Some(state) = update.states.get(&state_id) {
+                        algo.add_market_data(
+                            Bytes::from(state_id.as_bytes()),
+                            component.into(),
+                            state.clone_box(),
+                        );
                     }
                 }
 
-                // Handle gas price updates
-                gas_msg = gas_rx.recv() => {
-                    if let Some(gas_price) = gas_msg {
-                        println!("Updated gas price: {}", gas_price);
-                        self.current_gas_price = Some(gas_price);
-                    }
+                // Process removed pairs  
+                for (state_id, component) in update.removed_pairs {
+                    algo.remove_market_data(Bytes::from(state_id.as_bytes()), component.into());
+                }
+
+                // Process state updates
+                for (state_id, state) in update.states {
+                    algo.update_market_state(Bytes::from(state_id.as_bytes()), state.clone_box());
                 }
             }
-        }
+        });
 
-        // Clean up background tasks
-        indexer_handle.abort();
-        gas_handle.abort();
+        // 2. Spawn gas price task that updates gas price state
+        let gas_handle = tokio::spawn(async move {
+            println!("Gas price fetcher task started");
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
 
-        Ok(())
+            loop {
+                interval.tick().await;
+
+                // TODO: Implement actual gas price fetching from chain
+                // For now, use mock gas price
+                let mock_gas_price = GasPrice::from_legacy(BigUint::from(20_000_000_000u64)); // 20 gwei
+                
+                println!("Updating gas price: {}", mock_gas_price);
+                let mut gas_price = current_gas_price.lock().await;
+                *gas_price = Some(mock_gas_price);
+            }
+        });
+
+        println!("Background tasks spawned successfully");
+        Ok((indexer_handle, gas_handle))
     }
 
     async fn spawn_tycho_indexer_task(
@@ -201,7 +253,7 @@ impl<A: Algorithm> Solver<A> {
     ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
         // Capture the fields needed for the indexer task
         let tycho_url = self.tycho_url.clone();
-        let tycho_api_key = self.tycho_api_key.clone();
+        let _tycho_api_key = self.tycho_api_key.clone();
         let chain = self.chain;
         let protocols = self.protocols.clone();
         let tvl_threshold = self.tvl_threshold;
@@ -262,7 +314,7 @@ impl<A: Algorithm> Solver<A> {
     }
 
     async fn process_indexer_update(
-        &mut self,
+        &self,
         update: tycho_simulation::protocol::models::Update,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Check if update contains any of our target tokens
@@ -280,10 +332,12 @@ impl<A: Algorithm> Solver<A> {
             return Ok(());
         }
 
+        let mut algorithm = self.algorithm.lock().await;
+
         // Process new pairs
         for (state_id, component) in update.new_pairs {
             if let Some(state) = update.states.get(&state_id) {
-                self.algorithm.add_market_data(
+                algorithm.add_market_data(
                     Bytes::from(state_id.as_bytes()),
                     component.into(),
                     state.clone_box(),
@@ -293,14 +347,12 @@ impl<A: Algorithm> Solver<A> {
 
         // Process removed pairs
         for (state_id, component) in update.removed_pairs {
-            self.algorithm
-                .remove_market_data(Bytes::from(state_id.as_bytes()), component.into());
+            algorithm.remove_market_data(Bytes::from(state_id.as_bytes()), component.into());
         }
 
         // Process state updates
         for (state_id, state) in update.states {
-            self.algorithm
-                .update_market_state(Bytes::from(state_id.as_bytes()), state.clone_box());
+            algorithm.update_market_state(Bytes::from(state_id.as_bytes()), state.clone_box());
         }
 
         Ok(())

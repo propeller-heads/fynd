@@ -2,7 +2,7 @@ use num_bigint::BigUint;
 use tycho_execution::encoding::models::Swap;
 use tycho_simulation::tycho_common::{models::token::Token, Bytes};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559) - the minimum fee required
     pub base_fee: BigUint,
@@ -79,7 +79,7 @@ impl std::fmt::Display for GasPrice {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Order {
     /// An external id for this order can be used to identify it if dealing with multiple orders.
     external_id: String,
@@ -178,7 +178,7 @@ impl Order {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Route {
     swaps: Vec<Swap>,
     token_in: Token,

@@ -28,7 +28,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         order: &Order,
         _gas_price: Option<&GasPrice>,
-        token_out_price: Option<BigUint>,
+        _token_out_price: Option<BigUint>,
     ) -> Option<Route> {
         println!("Getting best route using MostLiquidAlgorithm for order {}", order.external_id());
 

@@ -1,5 +1,4 @@
-use tycho_execution::encoding::models::{NativeAction, Solution};
-use tycho_simulation::tycho_common::models::token::Token;
+use tycho_execution::encoding::models::Solution;
 
 use crate::models::{Order, Route};
 
