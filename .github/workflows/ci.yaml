@@ -1,0 +1,76 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  compile_and_test:
+    name: Compile & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Compile
+        run: cargo nextest run --workspace --all-targets --all-features --no-run --locked
+      - name: Test
+        run: cargo nextest run --workspace --all-targets --all-features
+
+  lint:
+    name: Code Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup toolchain
+        id: toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo +${{steps.toolchain.outputs.name}} clippy --workspace --all-targets --all-features
+
+      - name: Rustfmt
+        run: cargo +${{steps.toolchain.outputs.name}} fmt --all --check
+
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Run security audit
+        run: cargo audit
