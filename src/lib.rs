@@ -13,7 +13,7 @@
 //! - **API Layer** (`api`): Actix Web HTTP handlers for `/solve`, `/health`, `/metrics`
 //! - **Task Queue** (`task_queue`): Bounded queue with backpressure for solve requests
 //! - **Worker Pool** (`worker_pool`): Dedicated OS threads for CPU-bound route finding
-//! - **Solver** (`solver`): Route finding logic, owns local RouteGraph copy
+//! - **Solver** (`solver`): Route finding logic, owns local MarketGraph copy
 //! - **Algorithm** (`algorithm`): Pluggable route-finding algorithms
 //! - **Market Data** (`market_data`): Shared state (pools, tokens, gas prices)
 //! - **Route Graph** (`route_graph`): Lightweight clonable graph topology
@@ -75,7 +75,7 @@ pub mod algorithm;
 pub mod api;
 pub mod events;
 pub mod market_data;
-pub mod route_graph;
+pub mod market_graph;
 pub mod solver;
 pub mod task_queue;
 pub mod tycho_feed;
@@ -87,7 +87,7 @@ pub use algorithm::{Algorithm, AlgorithmError, AlgorithmRegistry, MostLiquidAlgo
 pub use api::{ApiError, AppState};
 pub use events::MarketEvent;
 pub use market_data::{SharedMarketData, SharedMarketDataRef};
-pub use route_graph::RouteGraph;
+pub use market_graph::MarketGraph;
 pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use tycho_feed::{TychoFeed, TychoFeedBuilder, TychoFeedConfig, TychoFeedError};

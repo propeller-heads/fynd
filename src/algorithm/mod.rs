@@ -8,7 +8,7 @@ pub mod most_liquid;
 use std::time::Duration;
 
 use crate::market_data::SharedMarketData;
-use crate::route_graph::RouteGraph;
+use crate::market_graph::MarketGraph;
 use crate::types::{Order, Route};
 
 pub use most_liquid::MostLiquidAlgorithm;
@@ -41,7 +41,7 @@ pub trait Algorithm: Send + Sync {
     /// The best route found, or an error if no route could be found.
     fn find_best_route(
         &self,
-        graph: &RouteGraph,
+        graph: &MarketGraph,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError>;

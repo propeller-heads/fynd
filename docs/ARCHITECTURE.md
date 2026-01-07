@@ -55,7 +55,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 │  │    └── state: Box<dyn ProtocolSim>    ← Heavy data, never cloned   │    │
 │  │    └── tokens: Vec<Token>                                           │    │
 │  │  tokens: HashMap<Address, Token>                                    │    │
-│  │  route_graph: RouteGraph              ← Lightweight, clonable      │    │
+│  │  route_graph: MarketGraph              ← Lightweight, clonable      │    │
 │  │  gas_price: GasPrice                                                │    │
 │  │  gas_constants: HashMap<ProtocolSystem, u64>                         │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
@@ -142,16 +142,16 @@ pub struct WorkerPool {
 pub struct SharedMarketData {
     pools: HashMap<PoolId, PoolData>,
     tokens: HashMap<Address, Token>,
-    route_graph: RouteGraph,
+    route_graph: MarketGraph,
     gas_price: GasPrice,
     gas_constants: HashMap<ProtocolSystem, u64>,
-    last_updated: Instant,
+    last_updated: Block,
 }
 ```
 
 ---
 
-### 5. RouteGraph (Lightweight, Clonable)
+### 5. MarketGraph (Lightweight, Clonable)
 
 **File:** `src/route_graph.rs`
 
@@ -159,7 +159,7 @@ pub struct SharedMarketData {
 
 ```rust
 #[derive(Clone)]
-pub struct RouteGraph {
+pub struct MarketGraph {
     adjacency: HashMap<Address, Vec<Edge>>,
     pool_tokens: HashMap<PoolId, Vec<Address>>,
 }
@@ -171,7 +171,7 @@ pub struct RouteGraph {
 
 **File:** `src/tycho_feed.rs`
 
-**Responsibility:** Connect to Tycho WebSocket, update SharedMarketData, broadcast events.
+**Responsibility:** Connect to Tycho Stream, update SharedMarketData, broadcast events.
 
 ---
 
@@ -197,11 +197,11 @@ pub enum MarketEvent {
 
 **File:** `src/solver.rs`
 
-**Responsibility:** Own local RouteGraph, subscribe to events, execute algorithm.
+**Responsibility:** Own local MarketGraph, subscribe to events, execute algorithm.
 
 ```rust
 pub struct Solver {
-    local_graph: RouteGraph,
+    local_graph: MarketGraph,
     algorithm: Box<dyn Algorithm>,
     market_data: SharedMarketDataRef,
     event_rx: broadcast::Receiver<MarketEvent>,
@@ -220,7 +220,7 @@ pub struct Solver {
 ```rust
 pub trait Algorithm: Send + Sync {
     fn name(&self) -> &str;
-    fn find_best_route(&self, graph: &RouteGraph, market: &SharedMarketData, order: &Order) -> Result<Route, AlgorithmError>;
+    fn find_best_route(&self, graph: &MarketGraph, market: &SharedMarketData, order: &Order) -> Result<Route, AlgorithmError>;
     fn supports_exact_out(&self) -> bool { false }
     fn max_hops(&self) -> usize { 3 }
     fn timeout(&self) -> Duration { Duration::from_millis(50) }
@@ -264,7 +264,7 @@ pub trait Algorithm: Send + Sync {
      ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
      │ 1. Find paths  │   │ 2. For each    │   │ 3. Rank by     │
      │    in local    │   │    path, read  │   │    net output  │
-     │    RouteGraph  │   │    states from │   │    (minus gas) │
+     │    MarketGraph  │   │    states from │   │    (minus gas) │
      │                │   │    SharedData  │   │                │
      │                │   │    & simulate  │   │                │
      └────────────────┘   └────────────────┘   └────────────────┘
@@ -357,7 +357,7 @@ src/
 │   └── primitives.rs         # PoolId, Address, etc.
 │
 ├── market_data.rs            # SharedMarketData
-├── route_graph.rs            # RouteGraph (clonable)
+├── route_graph.rs            # MarketGraph (clonable)
 ├── events.rs                 # MarketEvent enum
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use alloy::primitives::U256;
 
 use crate::market_data::SharedMarketData;
-use crate::route_graph::{Path, RouteGraph};
+use crate::market_graph::{MarketGraph, Path};
 use crate::types::{Order, Route, Swap};
 
 use super::{Algorithm, AlgorithmError};
@@ -125,7 +125,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
     fn find_best_route(
         &self,
-        graph: &RouteGraph,
+        graph: &MarketGraph,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {

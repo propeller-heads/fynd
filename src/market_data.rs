@@ -7,13 +7,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use tycho_common::dto::Block;
 
+use crate::market_graph::MarketGraph;
+use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
 use alloy::primitives::Address;
 use tokio::sync::RwLock;
-
-use crate::route_graph::RouteGraph;
-use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -33,13 +32,13 @@ pub struct SharedMarketData {
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
     /// The route graph (lightweight, clonable).
-    route_graph: RouteGraph,
+    route_graph: MarketGraph,
     /// Current gas price.
     gas_price: GasPrice,
     /// Gas costs per protocol system.
     gas_constants: HashMap<ProtocolSystem, u64>,
     /// When the data was last updated.
-    last_updated: Instant,
+    last_updated: Block,
 }
 
 /// Data for a single pool.
@@ -101,10 +100,10 @@ impl SharedMarketData {
         Self {
             pools: HashMap::new(),
             tokens: HashMap::new(),
-            route_graph: RouteGraph::new(),
+            route_graph: MarketGraph::new(),
             gas_price: GasPrice::default(),
             gas_constants,
-            last_updated: Instant::now(),
+            last_updated: Block::default(),
         }
     }
 
@@ -137,12 +136,12 @@ impl SharedMarketData {
     ///
     /// Solvers can clone this to have their own copy that they can
     /// prune or optimize without affecting others.
-    pub fn clone_route_graph(&self) -> RouteGraph {
+    pub fn clone_route_graph(&self) -> MarketGraph {
         self.route_graph.clone()
     }
 
     /// Returns a reference to the route graph.
-    pub fn route_graph(&self) -> &RouteGraph {
+    pub fn route_graph(&self) -> &MarketGraph {
         &self.route_graph
     }
 
@@ -157,13 +156,13 @@ impl SharedMarketData {
     }
 
     /// Returns when the data was last updated.
-    pub fn last_updated(&self) -> Instant {
-        self.last_updated
+    pub fn last_updated(&self) -> Block {
+        self.last_updated.clone()
     }
 
     /// Returns the age of the data in milliseconds.
     pub fn age_ms(&self) -> u64 {
-        self.last_updated.elapsed().as_millis() as u64
+        self.last_updated.ts.and_utc().timestamp() as u64
     }
 
     /// Returns an iterator over all pools.
@@ -183,7 +182,7 @@ impl SharedMarketData {
     ) {
         self.route_graph
             .add_pool(pool_id.clone(), tokens, protocol_system);
-        self.last_updated = Instant::now();
+        self.last_updated = Block::default();
     }
 
     /// Inserts or updates a pool.
@@ -206,14 +205,14 @@ impl SharedMarketData {
         // Store pool data
         self.pools.insert(pool_id, pool);
 
-        self.last_updated = Instant::now();
+        self.last_updated = Block::default();
     }
 
     /// Removes a pool.
     pub fn remove_pool(&mut self, id: &PoolId) {
         if self.pools.remove(id).is_some() {
             self.route_graph.remove_pool(id);
-            self.last_updated = Instant::now();
+            self.last_updated = Block::default();
         }
     }
 
@@ -221,14 +220,14 @@ impl SharedMarketData {
     pub fn update_state(&mut self, id: &PoolId, state: ProtocolState) {
         if let Some(pool) = self.pools.get_mut(id) {
             pool.state = state;
-            self.last_updated = Instant::now();
+            self.last_updated = Block::default();
         }
     }
 
     /// Updates the gas price.
     pub fn update_gas_price(&mut self, gas_price: GasPrice) {
         self.gas_price = gas_price;
-        self.last_updated = Instant::now();
+        self.last_updated = Block::default();
     }
 
     /// Updates gas constants for a protocol.

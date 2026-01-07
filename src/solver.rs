@@ -1,7 +1,7 @@
 //! Solver component that processes solve requests.
 //!
 //! Each worker thread owns a Solver instance. The solver:
-//! - Owns a local copy of the RouteGraph (can be pruned/optimized)
+//! - Owns a local copy of the MarketGraph (can be pruned/optimized)
 //! - Holds a reference to SharedMarketData (for state lookups)
 //! - Subscribes to MarketEvents to keep local graph in sync
 //! - Uses an Algorithm to find routes
@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 use crate::algorithm::{Algorithm, AlgorithmError};
 use crate::events::{MarketEvent, MarketEventHandler};
 use crate::market_data::SharedMarketDataRef;
-use crate::route_graph::RouteGraph;
+use crate::market_graph::MarketGraph;
 use crate::types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError};
 
 /// Configuration for a Solver instance.
@@ -40,11 +40,11 @@ impl Default for SolverConfig {
 /// A solver instance that processes solve requests.
 ///
 /// Each worker thread owns one Solver. The solver maintains its own
-/// copy of the RouteGraph which it keeps synchronized with market
+/// copy of the MarketGraph which it keeps synchronized with market
 /// events from the indexer.
 pub struct Solver {
     /// Local copy of the route graph (can be pruned/optimized).
-    local_graph: RouteGraph,
+    local_graph: MarketGraph,
     /// Algorithm used for route finding.
     algorithm: Box<dyn Algorithm>,
     /// Reference to shared market data.
@@ -73,7 +73,7 @@ impl Solver {
         config: SolverConfig,
     ) -> Self {
         Self {
-            local_graph: RouteGraph::new(),
+            local_graph: MarketGraph::new(),
             algorithm,
             market_data,
             event_rx,
@@ -252,7 +252,7 @@ impl MarketEventHandler for Solver {
             }
             MarketEvent::Snapshot { pools, .. } => {
                 // Full rebuild
-                self.local_graph = RouteGraph::new();
+                self.local_graph = MarketGraph::new();
                 for pool in pools {
                     self.local_graph
                         .add_pool(pool.id.clone(), &pool.tokens, pool.protocol_system);

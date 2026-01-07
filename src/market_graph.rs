@@ -1,4 +1,4 @@
-//! Lightweight route graph for path finding.
+//! Lightweight market graph for path finding.
 //!
 //! This graph stores only the topology (tokens and pool connections),
 //! not the actual pool states. It's designed to be cloned cheaply
@@ -19,7 +19,7 @@ use crate::types::{PoolId, ProtocolSystem};
 ///
 /// It does NOT store pool states (reserves, etc.) - those are in SharedMarketData.
 #[derive(Debug, Clone, Default)]
-pub struct RouteGraph {
+pub struct MarketGraph {
     /// Adjacency list: token -> list of edges (outgoing connections)
     adjacency: HashMap<Address, Vec<Edge>>,
     /// Reverse mapping: pool_id -> tokens it connects
@@ -28,7 +28,7 @@ pub struct RouteGraph {
     tokens: HashSet<Address>,
 }
 
-/// An edge in the route graph representing a possible swap.
+/// An edge in the market graph representing a possible swap.
 #[derive(Debug, Clone)]
 pub struct Edge {
     /// The pool that enables this swap.
@@ -65,8 +65,8 @@ impl Path {
     }
 }
 
-impl RouteGraph {
-    /// Creates a new empty route graph.
+impl MarketGraph {
+    /// Creates a new empty market graph.
     pub fn new() -> Self {
         Self::default()
     }
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_add_and_find_paths() {
-        let mut graph = RouteGraph::new();
+        let mut graph = MarketGraph::new();
 
         let token_a = Address::repeat_byte(0x0A);
         let token_b = Address::repeat_byte(0x0B);

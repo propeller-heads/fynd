@@ -30,8 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-actix-web = "0.7"
 
 # Tycho (commented out until we have proper paths/versions)
-# tycho-simulation = { ... }
-# tycho-execution = { ... }
+tycho-common = ">=0.123.0"
 
 # Ethereum
 alloy = { version = "1.0", features = ["full"] }
