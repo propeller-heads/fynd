@@ -74,11 +74,11 @@
 pub mod algorithm;
 pub mod api;
 pub mod events;
-pub mod tycho_feed;
 pub mod market_data;
 pub mod route_graph;
 pub mod solver;
 pub mod task_queue;
+pub mod tycho_feed;
 pub mod types;
 pub mod worker_pool;
 
@@ -86,13 +86,14 @@ pub mod worker_pool;
 pub use algorithm::{Algorithm, AlgorithmError, AlgorithmRegistry, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use events::MarketEvent;
-pub use tycho_feed::{TychoFeedBuilder, TychoFeedConfig, TychoFeedError, TychoFeed};
 pub use market_data::{SharedMarketData, SharedMarketDataRef};
 pub use route_graph::RouteGraph;
 pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
+pub use tycho_feed::{TychoFeed, TychoFeedBuilder, TychoFeedConfig, TychoFeedError};
 pub use types::{
     GasPrice, HealthStatus, Order, OrderSolution, OrderStatus, PoolId, ProtocolSystem, Route,
-    Solution, SolveError, SolutionOptions, SolutionRequest, SolveResult, SolveTask, Swap, TaskId, Token,
+    Solution, SolutionOptions, SolutionRequest, SolveError, SolveResult, SolveTask, Swap, TaskId,
+    Token,
 };
 pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

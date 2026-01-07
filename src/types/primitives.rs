@@ -94,10 +94,7 @@ impl GasPrice {
 impl Default for GasPrice {
     fn default() -> Self {
         // Default to 20 gwei base + 1 gwei priority
-        Self::new(
-            U256::from(20_000_000_000u64),
-            U256::from(1_000_000_000u64),
-        )
+        Self::new(U256::from(20_000_000_000u64), U256::from(1_000_000_000u64))
     }
 }
 

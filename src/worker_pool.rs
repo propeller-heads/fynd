@@ -112,7 +112,7 @@ impl WorkerPool {
                                     match task {
                                         Some(task) => {
                                             let task_id = task.id;
-                                            let wait_time = task.wait_time();
+                                            let _wait_time = task.wait_time();
 
                                             // Process the task
                                             let result = solver.solve(&task.request).await;

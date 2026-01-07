@@ -84,10 +84,14 @@ impl RouteGraph {
     /// Adds a pool to the graph.
     ///
     /// This creates edges between all token pairs in the pool.
-    pub fn add_pool(&mut self, pool_id: PoolId, tokens: &[Address], protocol_system: ProtocolSystem) {
+    pub fn add_pool(
+        &mut self,
+        pool_id: PoolId,
+        tokens: &[Address],
+        protocol_system: ProtocolSystem,
+    ) {
         // Store the pool -> tokens mapping
-        self.pool_tokens
-            .insert(pool_id.clone(), tokens.to_vec());
+        self.pool_tokens.insert(pool_id.clone(), tokens.to_vec());
 
         // Add all tokens
         for token in tokens {
@@ -143,7 +147,10 @@ impl RouteGraph {
 
     /// Returns the neighbors (outgoing edges) for a token.
     pub fn neighbors(&self, token: &Address) -> &[Edge] {
-        self.adjacency.get(token).map(|v| v.as_slice()).unwrap_or(&[])
+        self.adjacency
+            .get(token)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Returns true if the token exists in the graph.
@@ -220,7 +227,12 @@ impl RouteGraph {
             .keys()
             .filter(|pool_id| {
                 // Find the protocol system for this pool
-                self.adjacency.values().flatten().find(|e| &e.pool_id == *pool_id).map(|e| !keep_set.contains(&e.protocol_system)).unwrap_or(true)
+                self.adjacency
+                    .values()
+                    .flatten()
+                    .find(|e| &e.pool_id == *pool_id)
+                    .map(|e| !keep_set.contains(&e.protocol_system))
+                    .unwrap_or(true)
             })
             .cloned()
             .collect();

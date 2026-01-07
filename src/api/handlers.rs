@@ -107,8 +107,5 @@ pub async fn info() -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use actix_web::{test, App};
-
     // TODO: Add integration tests for handlers
 }

@@ -214,9 +214,3 @@ struct SimulationResult {
     amount_out: U256,
     gas_estimate: U256,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-}

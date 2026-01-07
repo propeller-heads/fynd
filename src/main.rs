@@ -14,10 +14,10 @@ use tracing_subscriber::FmtSubscriber;
 
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
-    tycho_feed::{TychoFeedBuilder, TychoFeed},
     market_data::SharedMarketData,
     solver::SolverConfig,
     task_queue::{TaskQueue, TaskQueueConfig},
+    tycho_feed::{TychoFeed, TychoFeedBuilder},
     worker_pool::{WorkerPoolBuilder, WorkerPoolConfig},
 };
 
@@ -55,8 +55,7 @@ async fn main() -> std::io::Result<()> {
         .with_max_level(Level::INFO)
         .with_target(true)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 
     // Load configuration
     let config = Config::default();

@@ -6,13 +6,13 @@
 //! - `solution`: Solution, Route, Swap types
 //! - `internal`: Internal task and error types
 
-pub mod primitives;
 pub mod api;
-pub mod solution;
 pub mod internal;
+pub mod primitives;
+pub mod solution;
 
 // Re-export commonly used types
+pub use api::{HealthStatus, Order, SolutionOptions, SolutionRequest};
+pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
-pub use api::{Order, SolutionRequest, SolutionOptions, HealthStatus};
-pub use solution::{Solution, OrderSolution, Route, Swap, OrderStatus};
-pub use internal::{SolveTask, SolveResult, SolveError, TaskId};
+pub use solution::{OrderSolution, OrderStatus, Route, Solution, Swap};

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::types::{SolveError, SolutionRequest, SolveResult, SolveTask, Solution, TaskId};
+use crate::types::{Solution, SolutionRequest, SolveError, SolveTask};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -113,7 +113,6 @@ impl TaskQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SolutionOptions;
 
     #[tokio::test]
     async fn test_task_queue_creation() {

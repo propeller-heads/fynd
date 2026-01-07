@@ -94,9 +94,7 @@ impl SolveError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            SolveError::Timeout { .. }
-                | SolveError::MarketDataStale { .. }
-                | SolveError::QueueFull
+            SolveError::Timeout { .. } | SolveError::MarketDataStale { .. } | SolveError::QueueFull
         )
     }
 }

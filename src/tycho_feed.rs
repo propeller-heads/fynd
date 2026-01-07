@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, RwLock};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::api::HealthTracker;
 use crate::events::{MarketEvent, PoolSummary};
@@ -93,6 +93,7 @@ pub struct TychoFeed {
     market_data: Arc<RwLock<SharedMarketData>>,
     /// Event broadcaster.
     event_tx: broadcast::Sender<MarketEvent>,
+    #[allow(dead_code)]
     /// Health tracker for API health checks.
     health_tracker: HealthTracker,
 }
@@ -210,11 +211,14 @@ impl TychoFeed {
 
         drop(market);
 
-        let _ = self.event_tx.send(MarketEvent::Snapshot { pools, gas_price });
+        let _ = self
+            .event_tx
+            .send(MarketEvent::Snapshot { pools, gas_price });
 
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Handles a pool added event from Tycho.
     async fn handle_pool_added(
         &self,
@@ -241,6 +245,7 @@ impl TychoFeed {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Handles a pool removed event from Tycho.
     async fn handle_pool_removed(&self, pool_id: PoolId) -> Result<(), TychoFeedError> {
         // Update shared market data
@@ -258,6 +263,7 @@ impl TychoFeed {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Handles a state update event from Tycho.
     async fn handle_state_updated(&self, pool_id: PoolId) -> Result<(), TychoFeedError> {
         // TODO: Update pool state in market_data
@@ -272,6 +278,7 @@ impl TychoFeed {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Updates gas price from RPC.
     async fn refresh_gas_price(&self) -> Result<(), TychoFeedError> {
         // TODO: Fetch gas price from RPC
@@ -292,7 +299,9 @@ impl TychoFeed {
         self.health_tracker.update();
 
         // Broadcast event
-        let _ = self.event_tx.send(MarketEvent::GasPriceUpdated { gas_price });
+        let _ = self
+            .event_tx
+            .send(MarketEvent::GasPriceUpdated { gas_price });
 
         Ok(())
     }

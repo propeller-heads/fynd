@@ -14,7 +14,7 @@ use crate::algorithm::{Algorithm, AlgorithmError};
 use crate::events::{MarketEvent, MarketEventHandler};
 use crate::market_data::SharedMarketDataRef;
 use crate::route_graph::RouteGraph;
-use crate::types::{Solution, SolveError, SolutionRequest, OrderSolution, OrderStatus};
+use crate::types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError};
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
