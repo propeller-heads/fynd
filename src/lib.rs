@@ -86,7 +86,7 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use events::MarketEvent;
-pub use graph::{Edge, GraphManager, Path, PetgraphGraphManager};
+pub use graph::{GraphManager, Hop, Path, PetgraphUnGraphManager};
 pub use market_data::{SharedMarketData, SharedMarketDataRef};
 pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};

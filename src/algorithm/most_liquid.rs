@@ -6,10 +6,7 @@
 //! 3. Ranking by net output (output - gas cost in output token terms)
 //! 4. Returning the best route
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use petgraph::graph::UnGraph;
@@ -17,9 +14,10 @@ use tycho_common::models::Address;
 
 use super::{Algorithm, AlgorithmError};
 use crate::{
-    graph::{Edge, Path},
+    graph::Path,
     market_data::SharedMarketData,
     types::{Order, Route, Swap},
+    PoolId,
 };
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -55,14 +53,14 @@ impl MostLiquidAlgorithm {
         let divisor = BigUint::from(1000u32).pow(hops);
         let amount_out = &amount_in * &fee_multiplier / &divisor;
 
-        // Estimate gas based on protocols in path
-        let gas_estimate: u64 = _path
-            .edges
-            .iter()
-            .map(|e| e.protocol_system.typical_gas_cost())
-            .sum();
+        // TODO: Estimate gas based on protocols in path
+        // let gas_estimate: u64 = _path
+        //     .hops
+        //     .iter()
+        //     .map(|e| e.protocol_system.typical_gas_cost())
+        //     .sum();
 
-        Ok(SimulationResult { amount_out, gas_estimate: BigUint::from(gas_estimate) })
+        Ok(SimulationResult { amount_out, gas_estimate: BigUint::ZERO })
     }
 
     /// Converts a Path to a Route with simulated amounts.
@@ -77,29 +75,34 @@ impl MostLiquidAlgorithm {
 
         // Build swaps
         // TODO: Calculate intermediate amounts properly
-        let mut swaps = Vec::with_capacity(path.edges.len());
+        let mut swaps = Vec::with_capacity(path.hops.len());
         let mut current_amount = amount_in;
 
-        for (i, edge) in path.edges.iter().enumerate() {
+        for (i, edge) in path.hops.iter().enumerate() {
             let token_in = path.tokens[i].clone();
             let token_out = edge.token_out.clone();
 
             // Placeholder: distribute output evenly for now
-            let amount_out = if i == path.edges.len() - 1 {
+            let amount_out = if i == path.hops.len() - 1 {
                 sim_result.amount_out.clone()
             } else {
                 // Estimate intermediate amount
                 &current_amount * BigUint::from(997u32) / BigUint::from(1000u32)
             };
 
+            let protocol_system = market
+                .get_pool(&edge.pool_id)
+                .unwrap()
+                .protocol_system;
+
             swaps.push(Swap {
                 pool_id: edge.pool_id.clone(),
-                protocol: edge.protocol_system,
+                protocol: protocol_system,
                 token_in,
                 token_out,
                 amount_in: current_amount.clone(),
                 amount_out: amount_out.clone(),
-                gas_estimate: BigUint::from(edge.protocol_system.typical_gas_cost()),
+                gas_estimate: BigUint::from(protocol_system.typical_gas_cost()),
             });
 
             current_amount = amount_out;
@@ -116,15 +119,15 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = UnGraph<Address, Edge>;
-    type GraphManager = crate::graph::PetgraphGraphManager;
+    type GraphType = UnGraph<Address, PoolId>;
+    type GraphManager = crate::graph::PetgraphUnGraphManager;
     fn name(&self) -> &str {
         "most_liquid"
     }
 
     fn find_best_route(
         &self,
-        graph: &UnGraph<Address, Edge>,
+        graph: &UnGraph<Address, PoolId>,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
@@ -218,7 +221,7 @@ impl MostLiquidAlgorithm {
     /// Finds all paths between two tokens using BFS on a petgraph.
     fn find_paths(
         &self,
-        graph: &UnGraph<Address, Edge>,
+        graph: &UnGraph<Address, PoolId>,
         from: &Address,
         to: &Address,
     ) -> Vec<Path> {
@@ -238,55 +241,59 @@ impl MostLiquidAlgorithm {
             return vec![];
         }
 
-        let mut paths = Vec::new();
-        let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<Edge>, Vec<Address>)> =
-            VecDeque::new();
+        vec![]
 
-        // Start BFS from the source token
-        queue.push_back((from_idx, vec![], vec![from.clone()]));
+        // TODO: Use petgraph's all_simple_paths to find all paths
 
-        while let Some((current_idx, edges, tokens)) = queue.pop_front() {
-            // Check hop limit
-            if edges.len() >= self.max_hops {
-                continue;
-            }
+        // let mut paths = Vec::new();
+        // let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<PoolId>, Vec<Address>)> =
+        //     VecDeque::new();
 
-            // Explore neighbors
-            for neighbor_idx in graph.neighbors(current_idx) {
-                let neighbor_token = graph[neighbor_idx].clone();
+        // // Start BFS from the source token
+        // queue.push_back((from_idx, vec![], vec![from.clone()]));
 
-                // Avoid cycles (don't revisit tokens)
-                if tokens.contains(&neighbor_token) {
-                    continue;
-                }
+        // while let Some((current_idx, edges, tokens)) = queue.pop_front() {
+        //     // Check hop limit
+        //     if edges.len() >= self.max_hops {
+        //         continue;
+        //     }
 
-                // Get the edge data
-                let edge = graph
-                    .edges_connecting(current_idx, neighbor_idx)
-                    .next()
-                    .map(|e| e.weight().clone());
+        //     // Explore neighbors
+        //     for neighbor_idx in graph.neighbors(current_idx) {
+        //         let neighbor_token = graph[neighbor_idx].clone();
 
-                let Some(edge) = edge else {
-                    continue;
-                };
+        //         // Avoid cycles (don't revisit tokens)
+        //         if tokens.contains(&neighbor_token) {
+        //             continue;
+        //         }
 
-                let mut new_edges = edges.clone();
-                new_edges.push(edge.clone());
+        //         // Get the edge data
+        //         let edge = graph
+        //             .edges_connecting(current_idx, neighbor_idx)
+        //             .next()
+        //             .map(|e| e.weight().clone());
 
-                let mut new_tokens = tokens.clone();
-                new_tokens.push(neighbor_token.clone());
+        //         let Some(edge) = edge else {
+        //             continue;
+        //         };
 
-                // Found a path to destination
-                if neighbor_token == to.clone() {
-                    paths.push(Path { edges: new_edges, tokens: new_tokens });
-                } else {
-                    // Continue searching
-                    queue.push_back((neighbor_idx, new_edges, new_tokens));
-                }
-            }
-        }
+        //         let mut new_edges = edges.clone();
+        //         new_edges.push(edge.clone());
 
-        paths
+        //         let mut new_tokens = tokens.clone();
+        //         new_tokens.push(neighbor_token.clone());
+
+        //         // Found a path to destination
+        //         if neighbor_token == to.clone() {
+        //             paths.push(Path { hops: new_edges, tokens: new_tokens });
+        //         } else {
+        //             // Continue searching
+        //             queue.push_back((neighbor_idx, new_edges, new_tokens));
+        //         }
+        //     }
+        // }
+
+        // paths
     }
 }
 

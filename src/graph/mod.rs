@@ -4,37 +4,34 @@
 //! representation. GraphManager handles both building graphs from market data and updating them
 //! based on market events.
 
+pub mod petgraph;
+
 use std::collections::HashMap;
 
+pub use petgraph::PetgraphUnGraphManager;
 use tycho_common::models::Address;
 
-use crate::{
-    events::MarketEvent,
-    types::{PoolId, ProtocolSystem},
-};
+use crate::{events::MarketEvent, types::PoolId};
 
-/// An edge in the market graph representing a possible swap.
+/// An edge in the market graph representing a possible hop.
 ///
-/// This is used as the edge weight type in petgraph graphs.
-/// It stores the pool information needed for route construction.
+/// This is used as the edge weight type in petgraph graphs. It stores the pool information needed
+/// for route construction.
 #[derive(Debug, Clone)]
-pub struct Edge {
+pub struct Hop {
     /// The pool that enables this swap.
     pub pool_id: PoolId,
     /// The output token of this swap.
     pub token_out: Address,
-    /// The protocol system (for gas estimation).
-    pub protocol_system: ProtocolSystem,
 }
 
-/// A path through the graph (sequence of edges).
+/// A path through the graph (sequence of hops).
 ///
-/// This is a shared type that can be used by multiple algorithms
-/// to represent a sequence of swaps.
+/// This is a shared type that can be used to represent a sequence of swaps.
 #[derive(Debug, Clone)]
 pub struct Path {
-    /// The edges in this path, in order.
-    pub edges: Vec<Edge>,
+    /// The hops in this path, in order.
+    pub hops: Vec<Hop>,
     /// The tokens in this path, including start and end.
     pub tokens: Vec<Address>,
 }
@@ -42,7 +39,7 @@ pub struct Path {
 impl Path {
     /// Returns the number of hops (swaps) in this path.
     pub fn hop_count(&self) -> usize {
-        self.edges.len()
+        self.hops.len()
     }
 
     /// Returns the starting token.
@@ -56,18 +53,16 @@ impl Path {
     }
 }
 
-/// Trait for managing algorithm-specific graph representations.
+/// Trait for managing graph representations.
 ///
-/// Graph managers are stateful - they maintain the graph internally and update it
-/// based on market events. The solver initializes the graph on startup using topology
-/// from SharedMarketData, and then the graph manager maintains it.
+/// Graph managers are stateful - they maintain the graph internally and update it based on market
+/// events.
 pub trait GraphManager<G>: Send + Sync
 where
     G: Send + Sync,
 {
     /// Initializes the graph from the market topology.
     ///
-    /// This is called once on solver startup to build the initial graph.
     /// The `pools` parameter maps pool IDs to the tokens they contain.
     fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>);
 
@@ -79,7 +74,3 @@ where
     /// This method is called by the solver when market events occur.
     fn handle_event(&mut self, event: &MarketEvent);
 }
-
-pub mod petgraph;
-
-pub use petgraph::PetgraphGraphManager;
