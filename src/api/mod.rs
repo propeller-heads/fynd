@@ -7,14 +7,17 @@
 pub mod error;
 pub mod handlers;
 
-pub use error::ApiError;
-pub use handlers::configure_routes;
-
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use actix_web::web;
+pub use error::ApiError;
+pub use handlers::configure_routes;
 
 use crate::task_queue::TaskQueueHandle;
 
@@ -31,9 +34,7 @@ pub struct HealthTracker {
 impl HealthTracker {
     /// Creates a new health tracker.
     pub fn new() -> Self {
-        Self {
-            last_update_ms: Arc::new(AtomicU64::new(0)),
-        }
+        Self { last_update_ms: Arc::new(AtomicU64::new(0)) }
     }
 
     /// Updates the last update timestamp to now.
@@ -43,12 +44,15 @@ impl HealthTracker {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        self.last_update_ms.store(now, Ordering::Relaxed);
+        self.last_update_ms
+            .store(now, Ordering::Relaxed);
     }
 
     /// Returns milliseconds since the last update.
     pub fn age_ms(&self) -> u64 {
-        let last = self.last_update_ms.load(Ordering::Relaxed);
+        let last = self
+            .last_update_ms
+            .load(Ordering::Relaxed);
         if last == 0 {
             return u64::MAX; // Never updated
         }
@@ -78,10 +82,7 @@ pub struct AppState {
 impl AppState {
     /// Creates new application state.
     pub fn new(task_queue: TaskQueueHandle, health_tracker: HealthTracker) -> Self {
-        Self {
-            task_queue,
-            health_tracker,
-        }
+        Self { task_queue, health_tracker }
     }
 }
 

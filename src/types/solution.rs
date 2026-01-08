@@ -75,12 +75,16 @@ impl Route {
 
     /// Returns the input token of the route.
     pub fn input_token(&self) -> Option<Address> {
-        self.swaps.first().map(|s| s.token_in.clone())
+        self.swaps
+            .first()
+            .map(|s| s.token_in.clone())
     }
 
     /// Returns the output token of the route.
     pub fn output_token(&self) -> Option<Address> {
-        self.swaps.last().map(|s| s.token_out.clone())
+        self.swaps
+            .last()
+            .map(|s| s.token_out.clone())
     }
 
     /// Returns all intermediate tokens in the route.
@@ -153,15 +157,7 @@ impl Swap {
         amount_out: BigUint,
     ) -> Self {
         let gas_estimate = BigUint::from(protocol.typical_gas_cost());
-        Self {
-            pool_id,
-            protocol,
-            token_in,
-            token_out,
-            amount_in,
-            amount_out,
-            gas_estimate,
-        }
+        Self { pool_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
     }
 }
 
@@ -171,8 +167,5 @@ pub enum RouteValidationError {
     #[error("route has no swaps")]
     EmptyRoute,
     #[error("swaps are not connected: first outputs {first_out}, second inputs {second_in}")]
-    DisconnectedSwaps {
-        first_out: Address,
-        second_in: Address,
-    },
+    DisconnectedSwaps { first_out: Address, second_in: Address },
 }

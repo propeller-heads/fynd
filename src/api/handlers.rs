@@ -9,7 +9,9 @@ use crate::types::{HealthStatus, SolutionRequest};
 
 /// Configures API routes.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(solve).service(health).service(info);
+    cfg.service(solve)
+        .service(health)
+        .service(info);
 }
 
 /// POST /solve - Submit a solve request.
@@ -37,10 +39,7 @@ pub async fn solve(
 
     for order in &request.orders {
         if let Err(e) = order.validate() {
-            return Err(ApiError::BadRequest(format!(
-                "invalid order {}: {}",
-                order.id, e
-            )));
+            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id, e)));
         }
     }
 
@@ -51,7 +50,10 @@ pub async fn solve(
     }
 
     // Enqueue and wait for result
-    let solution = state.task_queue.enqueue(request).await?;
+    let solution = state
+        .task_queue
+        .enqueue(request)
+        .await?;
 
     info!(
         solve_time_ms = solution.solve_time_ms,

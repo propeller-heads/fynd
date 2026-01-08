@@ -5,13 +5,12 @@
 //! - TychoIndexer: WRITE access to update data
 //! - Solvers: READ access to query states during solving
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tycho_common::dto::Block;
+use std::{collections::HashMap, sync::Arc};
+
+use tokio::sync::RwLock;
+use tycho_common::{dto::Block, models::Address};
 
 use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
-use tokio::sync::RwLock;
-use tycho_common::models::Address;
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -161,7 +160,10 @@ impl SharedMarketData {
 
     /// Returns the age of the data in milliseconds.
     pub fn age_ms(&self) -> u64 {
-        self.last_updated.ts.and_utc().timestamp() as u64
+        self.last_updated
+            .ts
+            .and_utc()
+            .timestamp() as u64
     }
 
     /// Returns an iterator over all pools.
@@ -174,14 +176,19 @@ impl SharedMarketData {
     /// Adds a pool to the topology without full pool data.
     /// Used when we receive pool info from Tycho but don't have full state yet.
     pub fn add_pool_topology(&mut self, pool_id: PoolId, tokens: Vec<Address>) {
-        self.pool_topology.insert(pool_id, tokens);
+        self.pool_topology
+            .insert(pool_id, tokens);
         self.last_updated = Block::default();
     }
 
     /// Inserts or updates a pool.
     pub fn insert_pool(&mut self, pool: PoolData) {
         let pool_id = pool.id.clone();
-        let tokens: Vec<Address> = pool.tokens.iter().map(|t| t.address.clone()).collect();
+        let tokens: Vec<Address> = pool
+            .tokens
+            .iter()
+            .map(|t| t.address.clone())
+            .collect();
 
         // Update tokens map
         for token in &pool.tokens {
@@ -191,7 +198,8 @@ impl SharedMarketData {
         }
 
         // Update pool topology
-        self.pool_topology.insert(pool_id.clone(), tokens);
+        self.pool_topology
+            .insert(pool_id.clone(), tokens);
 
         // Store pool data
         self.pools.insert(pool_id, pool);

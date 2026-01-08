@@ -10,11 +10,13 @@ pub mod most_liquid;
 
 use std::time::Duration;
 
-use crate::graph::GraphManager;
-use crate::market_data::SharedMarketData;
-use crate::types::{Order, Route};
-
 pub use most_liquid::MostLiquidAlgorithm;
+
+use crate::{
+    graph::GraphManager,
+    market_data::SharedMarketData,
+    types::{Order, Route},
+};
 
 /// Trait for route-finding algorithms.
 ///

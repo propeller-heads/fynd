@@ -1,8 +1,9 @@
 //! Primitive types used throughout the solver.
 
+use std::fmt;
+
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use tycho_common::models::Address;
 
 /// Unique identifier for a liquidity pool.
@@ -69,11 +70,7 @@ impl GasPrice {
             .unwrap()
             .as_millis() as u64;
 
-        Self {
-            base_fee,
-            priority_fee,
-            timestamp_ms,
-        }
+        Self { base_fee, priority_fee, timestamp_ms }
     }
 
     /// Returns the effective gas price (base + priority).
@@ -95,10 +92,7 @@ impl GasPrice {
 impl Default for GasPrice {
     fn default() -> Self {
         // Default to 20 gwei base + 1 gwei priority
-        Self::new(
-            BigUint::from(20_000_000_000u64),
-            BigUint::from(1_000_000_000u64),
-        )
+        Self::new(BigUint::from(20_000_000_000u64), BigUint::from(1_000_000_000u64))
     }
 }
 
@@ -112,10 +106,6 @@ pub struct Token {
 
 impl Token {
     pub fn new(address: Address, symbol: impl Into<String>, decimals: u8) -> Self {
-        Self {
-            address,
-            symbol: symbol.into(),
-            decimals,
-        }
+        Self { address, symbol: symbol.into(), decimals }
     }
 }

@@ -11,11 +11,7 @@ use crate::types::{GasPrice, PoolId, ProtocolSystem};
 #[derive(Debug, Clone)]
 pub enum MarketEvent {
     /// A new pool was added to the market.
-    PoolAdded {
-        pool_id: PoolId,
-        tokens: Vec<Address>,
-        protocol_system: ProtocolSystem,
-    },
+    PoolAdded { pool_id: PoolId, tokens: Vec<Address>, protocol_system: ProtocolSystem },
 
     /// A pool was removed from the market.
     PoolRemoved { pool_id: PoolId },
@@ -29,10 +25,7 @@ pub enum MarketEvent {
 
     /// Full market snapshot.
     /// Sent to new subscribers for initial synchronization.
-    Snapshot {
-        pools: Vec<PoolSummary>,
-        gas_price: GasPrice,
-    },
+    Snapshot { pools: Vec<PoolSummary>, gas_price: GasPrice },
 }
 
 /// Summary of a pool for snapshot events.
@@ -45,11 +38,7 @@ pub struct PoolSummary {
 
 impl PoolSummary {
     pub fn new(id: PoolId, tokens: Vec<Address>, protocol_system: ProtocolSystem) -> Self {
-        Self {
-            id,
-            tokens,
-            protocol_system,
-        }
+        Self { id, tokens, protocol_system }
     }
 }
 

@@ -1,13 +1,17 @@
 //! Graph management for algorithms.
 //!
-//! This module provides the GraphManager trait which algorithms implement
-//! to manage their graph representation. GraphManager handles both building
-//! graphs from market data and updating them based on market events.
+//! This module provides the GraphManager trait which solvers use to manage their market graph
+//! representation. GraphManager handles both building graphs from market data and updating them
+//! based on market events.
 
-use crate::events::MarketEvent;
-use crate::types::{PoolId, ProtocolSystem};
 use std::collections::HashMap;
+
 use tycho_common::models::Address;
+
+use crate::{
+    events::MarketEvent,
+    types::{PoolId, ProtocolSystem},
+};
 
 /// An edge in the market graph representing a possible swap.
 ///

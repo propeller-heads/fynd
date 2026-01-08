@@ -8,14 +8,16 @@
 
 use std::time::{Duration, Instant};
 
+use num_bigint::BigUint;
 use tokio::sync::broadcast;
 
-use crate::algorithm::{Algorithm, AlgorithmError};
-use crate::events::MarketEvent;
-use crate::graph::GraphManager;
-use crate::market_data::SharedMarketDataRef;
-use crate::types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError};
-use num_bigint::BigUint;
+use crate::{
+    algorithm::{Algorithm, AlgorithmError},
+    events::MarketEvent,
+    graph::GraphManager,
+    market_data::SharedMarketDataRef,
+    types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError},
+};
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
@@ -105,7 +107,8 @@ where
     pub async fn initialize_graph(&mut self) {
         let market = self.market_data.read().await;
         let topology = market.pool_topology();
-        self.graph_manager.initialize_graph(&topology);
+        self.graph_manager
+            .initialize_graph(&topology);
         self.initialized = true;
     }
 
@@ -151,7 +154,10 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_in: order
+                        .amount_in
+                        .clone()
+                        .unwrap_or_default(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
@@ -164,7 +170,9 @@ where
             let graph = self.graph_manager.graph();
 
             // Find route using algorithm
-            let result = self.algorithm.find_best_route(graph, &market, order);
+            let result = self
+                .algorithm
+                .find_best_route(graph, &market, order);
 
             let order_solution = match result {
                 Ok(route) => {
@@ -195,7 +203,10 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_in: order
+                        .amount_in
+                        .clone()
+                        .unwrap_or_default(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
@@ -205,7 +216,10 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::InsufficientLiquidity,
                     route: None,
-                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_in: order
+                        .amount_in
+                        .clone()
+                        .unwrap_or_default(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
@@ -215,7 +229,10 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::Timeout,
                     route: None,
-                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_in: order
+                        .amount_in
+                        .clone()
+                        .unwrap_or_default(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
@@ -225,7 +242,10 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_in: order
+                        .amount_in
+                        .clone()
+                        .unwrap_or_default(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
@@ -244,11 +264,7 @@ where
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
-        Ok(Solution {
-            orders: order_solutions,
-            total_gas_estimate,
-            solve_time_ms,
-        })
+        Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
     }
 
     /// Returns the algorithm name.

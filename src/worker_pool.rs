@@ -3,17 +3,21 @@
 //! The worker pool manages dedicated OS threads for CPU-bound route finding.
 //! Each worker owns a Solver instance and processes tasks from the queue.
 
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::algorithm::MostLiquidAlgorithm;
-use crate::events::MarketEvent;
-use crate::market_data::SharedMarketDataRef;
-use crate::solver::{Solver, SolverConfig};
-use crate::types::SolveTask;
+use crate::{
+    algorithm::MostLiquidAlgorithm,
+    events::MarketEvent,
+    market_data::SharedMarketDataRef,
+    solver::{Solver, SolverConfig},
+    types::SolveTask,
+};
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
@@ -26,10 +30,7 @@ pub struct WorkerPoolConfig {
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
-        Self {
-            num_workers: num_cpus::get(),
-            solver_config: SolverConfig::default(),
-        }
+        Self { num_workers: num_cpus::get(), solver_config: SolverConfig::default() }
     }
 }
 
@@ -86,7 +87,8 @@ impl WorkerPool {
                             solver_config.timeout.as_millis() as u64,
                         );
 
-                        // Create solver (graph type and manager are automatically inferred from algorithm)
+                        // Create solver (graph type and manager are automatically inferred from
+                        // algorithm)
                         let mut solver =
                             Solver::new(market_data, event_rx, algorithm, solver_config);
 
@@ -144,10 +146,7 @@ impl WorkerPool {
             workers.push(handle);
         }
 
-        Self {
-            workers,
-            shutdown_tx,
-        }
+        Self { workers, shutdown_tx }
     }
 
     /// Returns the number of workers.
@@ -180,9 +179,7 @@ pub struct WorkerPoolBuilder {
 
 impl WorkerPoolBuilder {
     pub fn new() -> Self {
-        Self {
-            config: WorkerPoolConfig::default(),
-        }
+        Self { config: WorkerPoolConfig::default() }
     }
 
     pub fn num_workers(mut self, n: usize) -> Self {

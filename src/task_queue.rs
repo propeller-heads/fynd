@@ -4,8 +4,10 @@
 //! It provides backpressure and allows the HTTP layer to remain
 //! responsive even when workers are busy.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -42,7 +44,9 @@ impl TaskQueueHandle {
         let (response_tx, response_rx) = oneshot::channel();
 
         // Generate task ID
-        let task_id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
+        let task_id = self
+            .next_task_id
+            .fetch_add(1, Ordering::Relaxed);
 
         // Create task
         let task = SolveTask::new(task_id, request, response_tx);
@@ -84,10 +88,7 @@ impl TaskQueue {
     /// Creates a new task queue with the given configuration.
     pub fn new(config: TaskQueueConfig) -> Self {
         let (sender, receiver) = mpsc::channel(config.capacity);
-        let handle = TaskQueueHandle {
-            sender,
-            next_task_id: Arc::new(AtomicU64::new(1)),
-        };
+        let handle = TaskQueueHandle { sender, next_task_id: Arc::new(AtomicU64::new(1)) };
 
         Self { receiver, handle }
     }
