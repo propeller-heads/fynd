@@ -35,6 +35,9 @@ tycho-common = ">=0.123.0"
 # Ethereum
 alloy = { version = "1.0", features = ["full"] }
 
+# Graph algorithms
+petgraph = "0.6"
+
 # Utilities
 num-bigint = "0.4"
 num_cpus = "1.16"

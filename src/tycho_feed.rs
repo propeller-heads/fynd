@@ -229,7 +229,7 @@ impl TychoFeed {
         // Update shared market data
         {
             let mut market = self.market_data.write().await;
-            market.add_pool_topology(&pool_id, &tokens, protocol_system);
+            market.add_pool_topology(pool_id.clone(), tokens.clone());
         }
 
         // Update health tracker

@@ -1,17 +1,19 @@
 //! Most Liquid algorithm implementation.
 //!
 //! This algorithm finds routes by:
-//! 1. Finding all paths up to max_hops using BFS
+//! 1. Finding all paths up to max_hops using BFS (via petgraph)
 //! 2. Simulating each path to get expected output
 //! 3. Ranking by net output (output - gas cost in output token terms)
 //! 4. Returning the best route
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
+use petgraph::graph::UnGraph;
 
+use crate::graph::{Edge, Path};
 use crate::market_data::SharedMarketData;
-use crate::market_graph::{MarketGraph, Path};
 use crate::types::{Order, Route, Swap};
 
 use super::{Algorithm, AlgorithmError};
@@ -119,13 +121,15 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
+    type GraphType = UnGraph<Address, Edge>;
+    type GraphManager = crate::graph::PetgraphGraphManager;
     fn name(&self) -> &str {
         "most_liquid"
     }
 
     fn find_best_route(
         &self,
-        graph: &MarketGraph,
+        graph: &UnGraph<Address, Edge>,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
@@ -140,8 +144,8 @@ impl Algorithm for MostLiquidAlgorithm {
             .amount_in
             .ok_or_else(|| AlgorithmError::Other("missing amount_in".to_string()))?;
 
-        // Find all paths
-        let paths = graph.find_paths(&order.token_in, &order.token_out, self.max_hops);
+        // Find all paths using BFS
+        let paths = self.find_paths(graph, &order.token_in, &order.token_out);
 
         if paths.is_empty() {
             return Err(AlgorithmError::NoPath {
@@ -206,6 +210,81 @@ impl Algorithm for MostLiquidAlgorithm {
 
     fn timeout(&self) -> Duration {
         self.timeout
+    }
+}
+
+impl MostLiquidAlgorithm {
+    /// Finds all paths between two tokens using BFS on a petgraph.
+    fn find_paths(
+        &self,
+        graph: &UnGraph<Address, Edge>,
+        from: &Address,
+        to: &Address,
+    ) -> Vec<Path> {
+        // Find node indices for from and to tokens
+        let from_idx = graph.node_indices().find(|&idx| graph[idx] == *from);
+        let to_idx = graph.node_indices().find(|&idx| graph[idx] == *to);
+
+        let (Some(from_idx), Some(to_idx)) = (from_idx, to_idx) else {
+            return vec![];
+        };
+
+        if from_idx == to_idx {
+            return vec![];
+        }
+
+        let mut paths = Vec::new();
+        let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<Edge>, Vec<Address>)> =
+            VecDeque::new();
+
+        // Start BFS from the source token
+        queue.push_back((from_idx, vec![], vec![*from]));
+
+        while let Some((current_idx, edges, tokens)) = queue.pop_front() {
+            // Check hop limit
+            if edges.len() >= self.max_hops {
+                continue;
+            }
+
+            // Explore neighbors
+            for neighbor_idx in graph.neighbors(current_idx) {
+                let neighbor_token = graph[neighbor_idx];
+
+                // Avoid cycles (don't revisit tokens)
+                if tokens.contains(&neighbor_token) {
+                    continue;
+                }
+
+                // Get the edge data
+                let edge = graph
+                    .edges_connecting(current_idx, neighbor_idx)
+                    .next()
+                    .map(|e| e.weight().clone());
+
+                let Some(edge) = edge else {
+                    continue;
+                };
+
+                let mut new_edges = edges.clone();
+                new_edges.push(edge.clone());
+
+                let mut new_tokens = tokens.clone();
+                new_tokens.push(neighbor_token);
+
+                // Found a path to destination
+                if neighbor_token == *to {
+                    paths.push(Path {
+                        edges: new_edges,
+                        tokens: new_tokens,
+                    });
+                } else {
+                    // Continue searching
+                    queue.push_back((neighbor_idx, new_edges, new_tokens));
+                }
+            }
+        }
+
+        paths
     }
 }
 
