@@ -37,6 +37,7 @@ impl Default for PetgraphGraphManager {
     }
 }
 
+#[allow(unused_variables)] // TODO: Implement these methods and remove this allow
 impl GraphManager<petgraph::graph::UnGraph<Address, Edge>> for PetgraphGraphManager {
     fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>) {
         unimplemented!("initialize_graph is not implemented for PetgraphGraphManager");

@@ -62,7 +62,10 @@ pub enum SolveError {
 
     /// Insufficient liquidity for the requested amount.
     #[error("insufficient liquidity: need {required}, have {available}")]
-    InsufficientLiquidity { required: BigUint, available: BigUint },
+    InsufficientLiquidity {
+        required: BigUint,
+        available: BigUint,
+    },
 
     /// Solving timed out.
     #[error("solve timeout after {elapsed_ms}ms")]
