@@ -202,7 +202,7 @@ impl TychoFeed {
             .pools()
             .map(|(id, data)| PoolSummary {
                 id: id.clone(),
-                tokens: data.tokens.iter().map(|t| t.address).collect(),
+                tokens: data.tokens.iter().map(|t| t.address.clone()).collect(),
                 protocol_system: data.protocol_system,
             })
             .collect();
@@ -223,13 +223,13 @@ impl TychoFeed {
     async fn handle_pool_added(
         &self,
         pool_id: PoolId,
-        tokens: Vec<alloy::primitives::Address>,
+        tokens: Vec<tycho_common::models::Address>,
         protocol_system: ProtocolSystem,
     ) -> Result<(), TychoFeedError> {
         // Update shared market data
         {
             let mut market = self.market_data.write().await;
-            market.add_pool_topology(&pool_id, &tokens, protocol_system);
+            market.add_pool_topology(pool_id.clone(), tokens.clone());
         }
 
         // Update health tracker
@@ -285,8 +285,8 @@ impl TychoFeed {
         // For now, use placeholder values
 
         let gas_price = GasPrice::new(
-            alloy::primitives::U256::from(30_000_000_000u64), // 30 gwei
-            alloy::primitives::U256::from(1_000_000_000u64),  // 1 gwei
+            num_bigint::BigUint::from(30_000_000_000u64), // 30 gwei
+            num_bigint::BigUint::from(1_000_000_000u64),  // 1 gwei
         );
 
         // Update shared market data

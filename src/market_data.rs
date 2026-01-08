@@ -9,10 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tycho_common::dto::Block;
 
-use crate::market_graph::MarketGraph;
 use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
-use alloy::primitives::Address;
 use tokio::sync::RwLock;
+use tycho_common::models::Address;
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -31,8 +30,9 @@ pub struct SharedMarketData {
     pools: HashMap<PoolId, PoolData>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
-    /// The route graph (lightweight, clonable).
-    route_graph: MarketGraph,
+    /// Market topology: pool_id -> tokens in that pool.
+    /// This is the source of truth for graph construction.
+    pool_topology: HashMap<PoolId, Vec<Address>>,
     /// Current gas price.
     gas_price: GasPrice,
     /// Gas costs per protocol system.
@@ -100,7 +100,7 @@ impl SharedMarketData {
         Self {
             pools: HashMap::new(),
             tokens: HashMap::new(),
-            route_graph: MarketGraph::new(),
+            pool_topology: HashMap::new(),
             gas_price: GasPrice::default(),
             gas_constants,
             last_updated: Block::default(),
@@ -132,17 +132,16 @@ impl SharedMarketData {
             .unwrap_or(150_000)
     }
 
-    /// Clones the route graph for solver-local use.
+    /// Returns a clone of the pool topology.
     ///
-    /// Solvers can clone this to have their own copy that they can
-    /// prune or optimize without affecting others.
-    pub fn clone_route_graph(&self) -> MarketGraph {
-        self.route_graph.clone()
+    /// Solvers can use this to build their algorithm-specific graphs.
+    pub fn pool_topology(&self) -> HashMap<PoolId, Vec<Address>> {
+        self.pool_topology.clone()
     }
 
-    /// Returns a reference to the route graph.
-    pub fn route_graph(&self) -> &MarketGraph {
-        &self.route_graph
+    /// Returns a reference to the pool topology.
+    pub fn pool_topology_ref(&self) -> &HashMap<PoolId, Vec<Address>> {
+        &self.pool_topology
     }
 
     /// Returns the number of pools.
@@ -172,35 +171,27 @@ impl SharedMarketData {
 
     // ==================== Write Methods (for Indexer only) ====================
 
-    /// Adds a pool to the route graph topology without full pool data.
+    /// Adds a pool to the topology without full pool data.
     /// Used when we receive pool info from Tycho but don't have full state yet.
-    pub fn add_pool_topology(
-        &mut self,
-        pool_id: &PoolId,
-        tokens: &[Address],
-        protocol_system: ProtocolSystem,
-    ) {
-        self.route_graph
-            .add_pool(pool_id.clone(), tokens, protocol_system);
+    pub fn add_pool_topology(&mut self, pool_id: PoolId, tokens: Vec<Address>) {
+        self.pool_topology.insert(pool_id, tokens);
         self.last_updated = Block::default();
     }
 
     /// Inserts or updates a pool.
     pub fn insert_pool(&mut self, pool: PoolData) {
         let pool_id = pool.id.clone();
-        let tokens: Vec<Address> = pool.tokens.iter().map(|t| t.address).collect();
-        let protocol_system = pool.protocol_system;
+        let tokens: Vec<Address> = pool.tokens.iter().map(|t| t.address.clone()).collect();
 
         // Update tokens map
         for token in &pool.tokens {
             self.tokens
-                .entry(token.address)
+                .entry(token.address.clone())
                 .or_insert_with(|| token.clone());
         }
 
-        // Update route graph
-        self.route_graph
-            .add_pool(pool_id.clone(), &tokens, protocol_system);
+        // Update pool topology
+        self.pool_topology.insert(pool_id.clone(), tokens);
 
         // Store pool data
         self.pools.insert(pool_id, pool);
@@ -211,7 +202,7 @@ impl SharedMarketData {
     /// Removes a pool.
     pub fn remove_pool(&mut self, id: &PoolId) {
         if self.pools.remove(id).is_some() {
-            self.route_graph.remove_pool(id);
+            self.pool_topology.remove(id);
             self.last_updated = Block::default();
         }
     }

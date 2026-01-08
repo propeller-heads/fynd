@@ -3,7 +3,7 @@
 //! The indexer broadcasts these events when market data changes.
 //! Solvers subscribe to these events to keep their local graph in sync.
 
-use alloy::primitives::Address;
+use tycho_common::models::Address;
 
 use crate::types::{GasPrice, PoolId, ProtocolSystem};
 

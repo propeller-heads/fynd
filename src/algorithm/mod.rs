@@ -2,21 +2,26 @@
 //!
 //! This module defines the Algorithm trait and built-in implementations.
 //! New algorithms can be added by implementing the trait.
+//!
+//! Algorithms are generic over their preferred graph type, allowing them to use
+//! different graph crates (petgraph, custom, etc.) and leverage built-in algorithms.
 
 pub mod most_liquid;
 
 use std::time::Duration;
 
+use crate::graph::GraphManager;
 use crate::market_data::SharedMarketData;
-use crate::market_graph::MarketGraph;
 use crate::types::{Order, Route};
 
 pub use most_liquid::MostLiquidAlgorithm;
 
 /// Trait for route-finding algorithms.
 ///
-/// Algorithms are stateless - they receive references to the graph and market
-/// data, and return the best route they can find.
+/// Algorithms are generic over their preferred graph type `G`, allowing them to:
+/// - Use different graph crates (petgraph, custom, etc.)
+/// - Leverage built-in algorithms from graph libraries
+/// - Optimize their graph representation for their specific needs
 ///
 /// # Implementation Notes
 ///
@@ -25,6 +30,13 @@ pub use most_liquid::MostLiquidAlgorithm;
 /// - They should use `market` to read pool states for simulation
 /// - They should NOT modify the graph or market data
 pub trait Algorithm: Send + Sync {
+    /// The graph type this algorithm uses.
+    type GraphType: Send + Sync;
+
+    /// The graph manager type for this algorithm.
+    /// This allows the solver to automatically create the appropriate graph manager.
+    type GraphManager: GraphManager<Self::GraphType> + Default;
+
     /// Returns the algorithm's name.
     fn name(&self) -> &str;
 
@@ -32,7 +44,7 @@ pub trait Algorithm: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `graph` - The route graph to search (may be a solver-local copy)
+    /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
     /// * `market` - Reference to shared market data for state lookups
     /// * `order` - The order to solve
     ///
@@ -41,7 +53,7 @@ pub trait Algorithm: Send + Sync {
     /// The best route found, or an error if no route could be found.
     fn find_best_route(
         &self,
-        graph: &MarketGraph,
+        graph: &Self::GraphType,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError>;
@@ -84,47 +96,4 @@ pub enum AlgorithmError {
     /// Other algorithm-specific error.
     #[error("{0}")]
     Other(String),
-}
-
-/// Registry of available algorithms.
-pub struct AlgorithmRegistry {
-    algorithms: Vec<Box<dyn Algorithm>>,
-}
-
-impl AlgorithmRegistry {
-    /// Creates a new registry with default algorithms.
-    pub fn new() -> Self {
-        Self {
-            algorithms: vec![Box::new(MostLiquidAlgorithm::new())],
-        }
-    }
-
-    /// Registers a new algorithm.
-    pub fn register(&mut self, algorithm: Box<dyn Algorithm>) {
-        self.algorithms.push(algorithm);
-    }
-
-    /// Gets an algorithm by name.
-    pub fn get(&self, name: &str) -> Option<&dyn Algorithm> {
-        self.algorithms
-            .iter()
-            .find(|a| a.name() == name)
-            .map(|a| a.as_ref())
-    }
-
-    /// Returns the default algorithm.
-    pub fn default_algorithm(&self) -> Option<&dyn Algorithm> {
-        self.algorithms.first().map(|a| a.as_ref())
-    }
-
-    /// Returns all registered algorithm names.
-    pub fn names(&self) -> Vec<&str> {
-        self.algorithms.iter().map(|a| a.name()).collect()
-    }
-}
-
-impl Default for AlgorithmRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }

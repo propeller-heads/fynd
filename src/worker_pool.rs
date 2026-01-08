@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::algorithm::{Algorithm, MostLiquidAlgorithm};
+use crate::algorithm::MostLiquidAlgorithm;
 use crate::events::MarketEvent;
 use crate::market_data::SharedMarketDataRef;
 use crate::solver::{Solver, SolverConfig};
@@ -81,18 +81,17 @@ impl WorkerPool {
 
                     rt.block_on(async move {
                         // Create algorithm
-                        let algorithm: Box<dyn Algorithm> =
-                            Box::new(MostLiquidAlgorithm::with_config(
-                                solver_config.max_hops,
-                                solver_config.timeout.as_millis() as u64,
-                            ));
+                        let algorithm = MostLiquidAlgorithm::with_config(
+                            solver_config.max_hops,
+                            solver_config.timeout.as_millis() as u64,
+                        );
 
-                        // Create solver
+                        // Create solver (graph type and manager are automatically inferred from algorithm)
                         let mut solver =
                             Solver::new(market_data, event_rx, algorithm, solver_config);
 
-                        // Initialize solver
-                        solver.sync_graph().await;
+                        // Initialize solver graph
+                        solver.initialize_graph().await;
 
                         info!(worker_id, "worker started");
 

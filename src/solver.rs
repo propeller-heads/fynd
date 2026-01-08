@@ -1,9 +1,9 @@
 //! Solver component that processes solve requests.
 //!
 //! Each worker thread owns a Solver instance. The solver:
-//! - Owns a local copy of the MarketGraph (can be pruned/optimized)
+//! - Initializes graph from pool topology (HashMap<PoolId, Vec<Address>>)
 //! - Holds a reference to SharedMarketData (for state lookups)
-//! - Subscribes to MarketEvents to keep local graph in sync
+//! - Subscribes to MarketEvents to keep local topology in sync
 //! - Uses an Algorithm to find routes
 
 use std::time::{Duration, Instant};
@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::algorithm::{Algorithm, AlgorithmError};
-use crate::events::{MarketEvent, MarketEventHandler};
+use crate::events::MarketEvent;
+use crate::graph::GraphManager;
 use crate::market_data::SharedMarketDataRef;
-use crate::market_graph::MarketGraph;
 use crate::types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError};
+use num_bigint::BigUint;
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
@@ -39,26 +40,41 @@ impl Default for SolverConfig {
 
 /// A solver instance that processes solve requests.
 ///
-/// Each worker thread owns one Solver. The solver maintains its own
-/// copy of the MarketGraph which it keeps synchronized with market
-/// events from the indexer.
-pub struct Solver {
-    /// Local copy of the route graph (can be pruned/optimized).
-    local_graph: MarketGraph,
+/// Each worker thread owns one Solver. The solver initializes the graph on startup
+/// from SharedMarketData, and the graph manager maintains the graph and updates it
+/// based on market events.
+///
+/// The solver is generic over the algorithm type `A`, and automatically infers
+/// the graph type `G` and graph manager type from the algorithm.
+pub struct Solver<A>
+where
+    A: Algorithm,
+    A::GraphType: Send + Sync,
+    A::GraphManager: GraphManager<A::GraphType>,
+{
     /// Algorithm used for route finding.
-    algorithm: Box<dyn Algorithm>,
+    algorithm: A,
+    /// Graph manager that maintains the graph.
+    graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
     /// Receiver for market events.
     event_rx: broadcast::Receiver<MarketEvent>,
     /// Configuration.
     config: SolverConfig,
-    /// Whether we've received the initial snapshot.
+    /// Whether the graph has been initialized.
     initialized: bool,
 }
 
-impl Solver {
+impl<A> Solver<A>
+where
+    A: Algorithm,
+    A::GraphType: Send + Sync,
+    A::GraphManager: GraphManager<A::GraphType>,
+{
     /// Creates a new Solver.
+    ///
+    /// The graph manager is automatically created from the algorithm's associated type.
     ///
     /// # Arguments
     ///
@@ -69,12 +85,12 @@ impl Solver {
     pub fn new(
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
-        algorithm: Box<dyn Algorithm>,
+        algorithm: A,
         config: SolverConfig,
     ) -> Self {
         Self {
-            local_graph: MarketGraph::new(),
             algorithm,
+            graph_manager: A::GraphManager::default(),
             market_data,
             event_rx,
             config,
@@ -82,12 +98,14 @@ impl Solver {
         }
     }
 
-    /// Synchronizes the local graph from SharedMarketData.
+    /// Initializes the graph from SharedMarketData.
     ///
     /// Call this on startup or when recovering from missed events.
-    pub async fn sync_graph(&mut self) {
+    /// Gets the pool topology from SharedMarketData and uses it to build the graph.
+    pub async fn initialize_graph(&mut self) {
         let market = self.market_data.read().await;
-        self.local_graph = market.clone_route_graph();
+        let topology = market.pool_topology();
+        self.graph_manager.initialize_graph(&topology);
         self.initialized = true;
     }
 
@@ -98,6 +116,12 @@ impl Solver {
         while let Ok(event) = self.event_rx.try_recv() {
             self.handle_event(&event);
         }
+    }
+
+    /// Handles a market event by updating the graph via the graph manager.
+    fn handle_event(&mut self, event: &MarketEvent) {
+        // Graph manager updates its internal graph based on the event
+        self.graph_manager.handle_event(event);
     }
 
     /// Solves a request and returns the solution.
@@ -111,7 +135,7 @@ impl Solver {
 
         // Ensure we're initialized
         if !self.initialized {
-            self.sync_graph().await;
+            self.initialize_graph().await;
         }
 
         // Get a read lock on market data
@@ -127,25 +151,34 @@ impl Solver {
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: String::new(),
                 });
                 continue;
             }
 
+            // Get the graph from the graph manager
+            let graph = self.graph_manager.graph();
+
             // Find route using algorithm
-            let result = self
-                .algorithm
-                .find_best_route(&self.local_graph, &market, order);
+            let result = self.algorithm.find_best_route(graph, &market, order);
 
             let order_solution = match result {
                 Ok(route) => {
                     let gas_estimate = route.total_gas();
-                    let amount_in = route.swaps.first().map(|s| s.amount_in).unwrap_or_default();
-                    let amount_out = route.swaps.last().map(|s| s.amount_out).unwrap_or_default();
+                    let amount_in = route
+                        .swaps
+                        .first()
+                        .map(|s| s.amount_in.clone())
+                        .unwrap_or_else(|| BigUint::ZERO);
+                    let amount_out = route
+                        .swaps
+                        .last()
+                        .map(|s| s.amount_out.clone())
+                        .unwrap_or_else(|| BigUint::ZERO);
 
                     OrderSolution {
                         order_id: order.id.clone(),
@@ -162,9 +195,9 @@ impl Solver {
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -172,9 +205,9 @@ impl Solver {
                     order_id: order.id.clone(),
                     status: OrderStatus::InsufficientLiquidity,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -182,9 +215,9 @@ impl Solver {
                     order_id: order.id.clone(),
                     status: OrderStatus::Timeout,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -192,9 +225,9 @@ impl Solver {
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -206,8 +239,8 @@ impl Solver {
         // Calculate totals
         let total_gas_estimate = order_solutions
             .iter()
-            .map(|o| o.gas_estimate)
-            .fold(alloy::primitives::U256::ZERO, |acc, g| acc + g);
+            .map(|o| &o.gas_estimate)
+            .fold(BigUint::ZERO, |acc, g| acc + g);
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
@@ -226,39 +259,5 @@ impl Solver {
     /// Returns the config.
     pub fn config(&self) -> &SolverConfig {
         &self.config
-    }
-}
-
-impl MarketEventHandler for Solver {
-    fn handle_event(&mut self, event: &MarketEvent) {
-        match event {
-            MarketEvent::PoolAdded {
-                pool_id,
-                tokens,
-                protocol_system,
-            } => {
-                self.local_graph
-                    .add_pool(pool_id.clone(), tokens, *protocol_system);
-            }
-            MarketEvent::PoolRemoved { pool_id } => {
-                self.local_graph.remove_pool(pool_id);
-            }
-            MarketEvent::StateUpdated { .. } => {
-                // State updates don't affect the graph topology,
-                // only the simulation results which are read from SharedMarketData
-            }
-            MarketEvent::GasPriceUpdated { .. } => {
-                // Gas price is read from SharedMarketData during solving
-            }
-            MarketEvent::Snapshot { pools, .. } => {
-                // Full rebuild
-                self.local_graph = MarketGraph::new();
-                for pool in pools {
-                    self.local_graph
-                        .add_pool(pool.id.clone(), &pool.tokens, pool.protocol_system);
-                }
-                self.initialized = true;
-            }
-        }
     }
 }

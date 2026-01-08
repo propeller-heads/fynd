@@ -29,14 +29,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-actix-web = "0.7"
 
-# Tycho (commented out until we have proper paths/versions)
+# Tycho
 tycho-common = ">=0.123.0"
 
-# Ethereum
-alloy = { version = "1.0", features = ["full"] }
+# Graph algorithms
+petgraph = "0.6"
 
 # Utilities
-num-bigint = "0.4"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
 num_cpus = "1.16"
 
 [dev-dependencies]

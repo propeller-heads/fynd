@@ -7,12 +7,14 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 ## Design Decisions
 
 - **Concurrency Model**: RwLock upgrade (simpler, sufficient for initial load)
-- **Path-Finding**: Flexible algorithm architecture, originally shipped with MostLiquid algorithm
+- **Path-Finding**: Flexible algorithm architecture with generic graph types, originally shipped with MostLiquid algorithm
+- **Graph Management**: Algorithms specify their graph type and graph manager via associated types, allowing different graph crates (petgraph, custom, etc.)
 - **Scope**: Production-ready (tracing, metrics, proper error types, token filtering)
 - **Multi-Solver**: Shared data model with stateless algorithms
 - **Output Format**: Structured Solution (not calldata) - encoding is separate concern
 - **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime)
 - **Event Bus**: Broadcast channel for market updates to Solvers
+- **Market Topology**: Simple HashMap<PoolId, Vec<Address>> representation, algorithms build their preferred graph structure
 
 ---
 
@@ -55,7 +57,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 │  │    └── state: Box<dyn ProtocolSim>    ← Heavy data, never cloned   │    │
 │  │    └── tokens: Vec<Token>                                           │    │
 │  │  tokens: HashMap<Address, Token>                                    │    │
-│  │  route_graph: MarketGraph              ← Lightweight, clonable      │    │
+│  │  pool_topology: HashMap<PoolId, Vec<Address>>  ← Simple topology   │    │
 │  │  gas_price: GasPrice                                                │    │
 │  │  gas_constants: HashMap<ProtocolSystem, u64>                         │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
@@ -76,9 +78,10 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
                     ▼              ▼              ▼
               ┌──────────┐   ┌──────────┐   ┌──────────┐
               │ Solver 1 │   │ Solver 2 │   │ Solver N │
-              │ Updates  │   │ Updates  │   │ Updates  │
-              │ local    │   │ local    │   │ local    │
+              │ GraphMgr │   │ GraphMgr │   │ GraphMgr │
+              │ updates  │   │ updates  │   │ updates  │
               │ graph    │   │ graph    │   │ graph    │
+              │ on event │   │ on event │   │ on event │
               └──────────┘   └──────────┘   └──────────┘
 ```
 
@@ -142,28 +145,43 @@ pub struct WorkerPool {
 pub struct SharedMarketData {
     pools: HashMap<PoolId, PoolData>,
     tokens: HashMap<Address, Token>,
-    route_graph: MarketGraph,
+    pool_topology: HashMap<PoolId, Vec<Address>>,  // Simple market graph representation
     gas_price: GasPrice,
     gas_constants: HashMap<ProtocolSystem, u64>,
     last_updated: Block,
 }
 ```
 
+The `pool_topology` field stores a simple mapping from pool IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
+
 ---
 
-### 5. MarketGraph (Lightweight, Clonable)
+### 5. Graph Module
 
-**File:** `src/route_graph.rs`
+**File:** `src/graph/`
 
-**Responsibility:** Graph topology only. Cloned by Solvers for local optimization.
+**Responsibility:** Graph management infrastructure for algorithms.
+
+**Components:**
+- **GraphManager trait**: Defines interface for building and updating graphs from pool topology
+- **Edge & Path types**: Shared types for representing graph edges and paths
+- **PetgraphGraphManager**: Implementation for petgraph::UnGraph
 
 ```rust
-#[derive(Clone)]
-pub struct MarketGraph {
-    adjacency: HashMap<Address, Vec<Edge>>,
-    pool_tokens: HashMap<PoolId, Vec<Address>>,
+pub trait GraphManager<G>: Send + Sync {
+    /// Initializes the graph from the market topology.
+    /// Called once on solver startup.
+    fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>);
+    
+    /// Returns a reference to the managed graph.
+    fn graph(&self) -> &G;
+    
+    /// Updates the graph based on a market event.
+    fn handle_event(&mut self, event: &MarketEvent);
 }
 ```
+
+Algorithms specify their graph type and graph manager via associated types, allowing them to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms from graph libraries.
 
 ---
 
@@ -183,7 +201,7 @@ pub struct MarketGraph {
 
 ```rust
 pub enum MarketEvent {
-    PoolAdded { pool_id, tokens, protocol_type },
+    PoolAdded { pool_id, tokens, protocol_system },
     PoolRemoved { pool_id },
     StateUpdated { pool_id },
     GasPriceUpdated { gas_price },
@@ -197,17 +215,27 @@ pub enum MarketEvent {
 
 **File:** `src/solver.rs`
 
-**Responsibility:** Own local MarketGraph, subscribe to events, execute algorithm.
+**Responsibility:** Initialize graph on startup, subscribe to events, execute algorithm.
+
+The solver is generic over the algorithm type and automatically infers the graph type and graph manager from the algorithm's associated types.
 
 ```rust
-pub struct Solver {
-    local_graph: MarketGraph,
-    algorithm: Box<dyn Algorithm>,
+pub struct Solver<A>
+where
+    A: Algorithm,
+    A::GraphType: Send + Sync,
+    A::GraphManager: GraphManager<A::GraphType>,
+{
+    algorithm: A,
+    graph_manager: A::GraphManager,  // Maintains the graph internally
     market_data: SharedMarketDataRef,
     event_rx: broadcast::Receiver<MarketEvent>,
     config: SolverConfig,
+    initialized: bool,
 }
 ```
+
+The solver initializes the graph on startup by reading the pool topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver gets the graph from the graph manager via `graph_manager.graph()`.
 
 ---
 
@@ -217,15 +245,53 @@ pub struct Solver {
 
 **Responsibility:** Define interface for route-finding algorithms.
 
+Algorithms specify their graph type and graph manager via associated types, allowing them to use different graph crates and leverage built-in algorithms.
+
 ```rust
 pub trait Algorithm: Send + Sync {
+    /// The graph type this algorithm uses (e.g., petgraph::UnGraph<Address, Edge>)
+    type GraphType: Send + Sync;
+    
+    /// The graph manager type for this algorithm
+    type GraphManager: GraphManager<Self::GraphType> + Default;
+
     fn name(&self) -> &str;
-    fn find_best_route(&self, graph: &MarketGraph, market: &SharedMarketData, order: &Order) -> Result<Route, AlgorithmError>;
+    fn find_best_route(
+        &self,
+        graph: &Self::GraphType,
+        market: &SharedMarketData,
+        order: &Order,
+    ) -> Result<Route, AlgorithmError>;
     fn supports_exact_out(&self) -> bool { false }
     fn max_hops(&self) -> usize { 3 }
     fn timeout(&self) -> Duration { Duration::from_millis(50) }
 }
 ```
+
+**Example Implementation:**
+```rust
+impl Algorithm for MostLiquidAlgorithm {
+    type GraphType = UnGraph<Address, Edge>;
+    type GraphManager = PetgraphGraphManager;
+    
+    fn find_best_route(
+        &self,
+        graph: &Self::GraphType,
+        market: &SharedMarketData,
+        order: &Order,
+    ) -> Result<Route, AlgorithmError> {
+        // Use petgraph's built-in algorithms here!
+        // ...
+    }
+}
+```
+
+**Key Design Points:**
+- Algorithms are **stateless** - they receive graphs as parameters
+- Each algorithm specifies its preferred graph type and graph manager via associated types
+- The solver automatically creates the graph manager using `Default::default()`
+- Graph managers handle converting `HashMap<PoolId, Vec<Address>>` to the algorithm's graph type
+- This allows algorithms to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms
 
 ---
 
@@ -262,10 +328,11 @@ pub trait Algorithm: Send + Sync {
               │                     │                     │
               ▼                     ▼                     ▼
      ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-     │ 1. Find paths  │   │ 2. For each    │   │ 3. Rank by     │
-     │    in local    │   │    path, read  │   │    net output  │
-     │    MarketGraph  │   │    states from │   │    (minus gas) │
-     │                │   │    SharedData  │   │                │
+     │ 1. Get graph   │   │ 2. Find paths  │   │ 3. Rank by     │
+     │    from        │   │    in graph,   │   │    net output  │
+     │    GraphManager│   │    read states │   │    (minus gas) │
+     │    (maintained │   │    from        │   │                │
+     │    internally) │   │    SharedData  │   │                │
      │                │   │    & simulate  │   │                │
      └────────────────┘   └────────────────┘   └────────────────┘
 ```
@@ -295,8 +362,10 @@ pub trait Algorithm: Send + Sync {
                                     ▼          ▼          ▼
                               ┌──────────┐┌──────────┐┌──────────┐
                               │ Solver 1 ││ Solver 2 ││ Solver N │
-                              │ handle_  ││ handle_  ││ handle_  │
-                              │ event()  ││ event()  ││ event()  │
+                              │ GraphMgr ││ GraphMgr ││ GraphMgr │
+                              │ updates  ││ updates  ││ updates  │
+                              │ graph    ││ graph    ││ graph    │
+                              │ on event ││ on event ││ on event │
                               └──────────┘└──────────┘└──────────┘
 ```
 
@@ -321,9 +390,10 @@ pub trait Algorithm: Send + Sync {
 │  │   Thread 1      │  │   Thread 2      │  │   Thread N      │         │
 │  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
 │  │   │ Solver  │   │  │   │ Solver  │   │  │   │ Solver  │   │         │
-│  │   │ (owns   │   │  │   │ (owns   │   │  │   │ (owns   │   │         │
-│  │   │  local  │   │  │   │  local  │   │  │   │  local  │   │         │
-│  │   │  graph) │   │  │   │  graph) │   │  │   │  graph) │   │         │
+│  │   │ (graph  │   │  │   │ (graph  │   │  │   │ (graph  │   │         │
+│  │   │ manager │   │  │   │ manager │   │  │   │ manager │   │         │
+│  │   │ maintains│   │  │   │ maintains│   │  │   │ maintains│   │         │
+│  │   │ graph)  │   │  │   │ graph)  │   │  │   │ graph)  │   │         │
 │  │   └─────────┘   │  │   └─────────┘   │  │   └─────────┘   │         │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -357,14 +427,17 @@ src/
 │   └── primitives.rs         # PoolId, Address, etc.
 │
 ├── market_data.rs            # SharedMarketData
-├── route_graph.rs            # MarketGraph (clonable)
 ├── events.rs                 # MarketEvent enum
+│
+├── graph/                    # Graph management
+│   ├── mod.rs                # GraphManager trait, Edge, Path
+│   └── petgraph.rs           # PetgraphGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
 ├── worker_pool.rs            # WorkerPool
 ├── solver.rs                 # Solver
 │
-├── tycho_feed.rs                # TychoFeed
+├── tycho_feed.rs             # TychoFeed
 │
 └── algorithm/                # Algorithm implementations
     ├── mod.rs                # Algorithm trait
@@ -380,4 +453,4 @@ src/
 3. **Memory**: Single copy of ProtocolSim states (not duplicated per solver)
 4. **Reliability**: No panics, graceful error handling
 5. **Observability**: Prometheus metrics for latency, queue depth, cache hits
-6. **Extensibility**: New algorithm = implement trait, register, done
+6. **Extensibility**: New algorithm = implement trait with associated types, specify graph type and manager, done
