@@ -1,0 +1,49 @@
+[package]
+name = "tycho-solver"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance DEX router built on Tycho"
+license = "MIT"
+
+[dependencies]
+# HTTP
+actix-web = "4"
+actix-rt = "2"
+
+# Async
+tokio = { version = "1", features = ["full", "sync"] }
+
+# Channels
+crossbeam-channel = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-actix-web = "0.7"
+
+# Tycho
+tycho-common = ">=0.123.0"
+
+# Graph algorithms
+petgraph = "0.6"
+
+# Utilities
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = "0.5"
+
+# Benchmarks (uncomment when ready)
+# [[bench]]
+# name = "solve_benchmark"
+# harness = false
