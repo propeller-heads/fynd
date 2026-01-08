@@ -4,13 +4,13 @@
 //! for petgraph::graph::UnGraph, providing a reusable implementation for
 //! algorithms that use petgraph.
 
-use crate::events::MarketEvent;
-use crate::types::PoolId;
-use petgraph::Graph;
 use std::collections::HashMap;
+
+use petgraph::Graph;
 use tycho_common::models::Address;
 
 use super::{Edge, GraphManager};
+use crate::{events::MarketEvent, types::PoolId};
 
 /// Petgraph implementation of GraphManager.
 ///
@@ -25,9 +25,7 @@ pub struct PetgraphGraphManager {
 impl PetgraphGraphManager {
     /// Creates a new PetgraphGraphManager with an empty graph.
     pub fn new() -> Self {
-        Self {
-            graph: Graph::new_undirected(),
-        }
+        Self { graph: Graph::new_undirected() }
     }
 }
 

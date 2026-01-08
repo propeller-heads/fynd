@@ -6,18 +6,21 @@
 //! 3. Ranking by net output (output - gas cost in output token terms)
 //! 4. Returning the best route
 
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use num_bigint::BigUint;
 use petgraph::graph::UnGraph;
 use tycho_common::models::Address;
 
-use crate::graph::{Edge, Path};
-use crate::market_data::SharedMarketData;
-use crate::types::{Order, Route, Swap};
-
 use super::{Algorithm, AlgorithmError};
+use crate::{
+    graph::{Edge, Path},
+    market_data::SharedMarketData,
+    types::{Order, Route, Swap},
+};
 
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
@@ -28,18 +31,12 @@ pub struct MostLiquidAlgorithm {
 impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {
-        Self {
-            max_hops: 3,
-            timeout: Duration::from_millis(50),
-        }
+        Self { max_hops: 3, timeout: Duration::from_millis(50) }
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
     pub fn with_config(max_hops: usize, timeout_ms: u64) -> Self {
-        Self {
-            max_hops,
-            timeout: Duration::from_millis(timeout_ms),
-        }
+        Self { max_hops, timeout: Duration::from_millis(timeout_ms) }
     }
 
     /// Simulates a path and returns the expected output amount.
@@ -65,10 +62,7 @@ impl MostLiquidAlgorithm {
             .map(|e| e.protocol_system.typical_gas_cost())
             .sum();
 
-        Ok(SimulationResult {
-            amount_out,
-            gas_estimate: BigUint::from(gas_estimate),
-        })
+        Ok(SimulationResult { amount_out, gas_estimate: BigUint::from(gas_estimate) })
     }
 
     /// Converts a Path to a Route with simulated amounts.
@@ -229,8 +223,12 @@ impl MostLiquidAlgorithm {
         to: &Address,
     ) -> Vec<Path> {
         // Find node indices for from and to tokens
-        let from_idx = graph.node_indices().find(|&idx| &graph[idx] == from);
-        let to_idx = graph.node_indices().find(|&idx| &graph[idx] == to);
+        let from_idx = graph
+            .node_indices()
+            .find(|&idx| &graph[idx] == from);
+        let to_idx = graph
+            .node_indices()
+            .find(|&idx| &graph[idx] == to);
 
         let (Some(from_idx), Some(to_idx)) = (from_idx, to_idx) else {
             return vec![];
@@ -280,10 +278,7 @@ impl MostLiquidAlgorithm {
 
                 // Found a path to destination
                 if neighbor_token == to.clone() {
-                    paths.push(Path {
-                        edges: new_edges,
-                        tokens: new_tokens,
-                    });
+                    paths.push(Path { edges: new_edges, tokens: new_tokens });
                 } else {
                     // Continue searching
                     queue.push_back((neighbor_idx, new_edges, new_tokens));

@@ -71,11 +71,8 @@ impl ResponseError for ApiError {
             ApiError::StaleData { .. } => "STALE_DATA",
         };
 
-        let response = ErrorResponse {
-            error: self.to_string(),
-            code: code.to_string(),
-            details: None,
-        };
+        let response =
+            ErrorResponse { error: self.to_string(), code: code.to_string(), details: None };
 
         HttpResponse::build(self.status_code()).json(response)
     }

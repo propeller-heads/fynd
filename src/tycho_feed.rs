@@ -5,16 +5,17 @@
 //! - Updates SharedMarketData (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info};
 
-use crate::api::HealthTracker;
-use crate::events::{MarketEvent, PoolSummary};
-use crate::market_data::SharedMarketData;
-use crate::types::{GasPrice, PoolId, ProtocolSystem};
+use crate::{
+    api::HealthTracker,
+    events::{MarketEvent, PoolSummary},
+    market_data::SharedMarketData,
+    types::{GasPrice, PoolId, ProtocolSystem},
+};
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
@@ -119,15 +120,7 @@ impl TychoFeed {
         let (event_tx, _) = broadcast::channel(1024);
         let sender = event_tx.clone();
 
-        (
-            Self {
-                config,
-                market_data,
-                event_tx,
-                health_tracker,
-            },
-            sender,
-        )
+        (Self { config, market_data, event_tx, health_tracker }, sender)
     }
 
     /// Returns a new subscriber for market events.
@@ -202,7 +195,11 @@ impl TychoFeed {
             .pools()
             .map(|(id, data)| PoolSummary {
                 id: id.clone(),
-                tokens: data.tokens.iter().map(|t| t.address.clone()).collect(),
+                tokens: data
+                    .tokens
+                    .iter()
+                    .map(|t| t.address.clone())
+                    .collect(),
                 protocol_system: data.protocol_system,
             })
             .collect();
@@ -236,11 +233,9 @@ impl TychoFeed {
         self.health_tracker.update();
 
         // Broadcast event
-        let _ = self.event_tx.send(MarketEvent::PoolAdded {
-            pool_id,
-            tokens,
-            protocol_system,
-        });
+        let _ = self
+            .event_tx
+            .send(MarketEvent::PoolAdded { pool_id, tokens, protocol_system });
 
         Ok(())
     }
@@ -258,7 +253,9 @@ impl TychoFeed {
         self.health_tracker.update();
 
         // Broadcast event
-        let _ = self.event_tx.send(MarketEvent::PoolRemoved { pool_id });
+        let _ = self
+            .event_tx
+            .send(MarketEvent::PoolRemoved { pool_id });
 
         Ok(())
     }
@@ -273,7 +270,9 @@ impl TychoFeed {
         self.health_tracker.update();
 
         // Broadcast event
-        let _ = self.event_tx.send(MarketEvent::StateUpdated { pool_id });
+        let _ = self
+            .event_tx
+            .send(MarketEvent::StateUpdated { pool_id });
 
         Ok(())
     }
@@ -314,9 +313,7 @@ pub struct TychoFeedBuilder {
 
 impl TychoFeedBuilder {
     pub fn new() -> Self {
-        Self {
-            config: TychoFeedConfig::default(),
-        }
+        Self { config: TychoFeedConfig::default() }
     }
 
     pub fn tycho_url(mut self, url: impl Into<String>) -> Self {

@@ -32,12 +32,7 @@ impl SolveTask {
         request: SolutionRequest,
         response_tx: oneshot::Sender<SolveResult>,
     ) -> Self {
-        Self {
-            id,
-            request,
-            response_tx,
-            created_at: Instant::now(),
-        }
+        Self { id, request, response_tx, created_at: Instant::now() }
     }
 
     /// Returns how long this task has been waiting.
@@ -62,10 +57,7 @@ pub enum SolveError {
 
     /// Insufficient liquidity for the requested amount.
     #[error("insufficient liquidity: need {required}, have {available}")]
-    InsufficientLiquidity {
-        required: BigUint,
-        available: BigUint,
-    },
+    InsufficientLiquidity { required: BigUint, available: BigUint },
 
     /// Solving timed out.
     #[error("solve timeout after {elapsed_ms}ms")]

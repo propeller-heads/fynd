@@ -63,12 +63,16 @@ impl Order {
 
     /// Returns the amount being specified (either in or out).
     pub fn specified_amount(&self) -> Option<BigUint> {
-        self.amount_in.clone().or_else(|| self.amount_out.clone())
+        self.amount_in
+            .clone()
+            .or_else(|| self.amount_out.clone())
     }
 
     /// Returns the effective receiver address.
     pub fn effective_receiver(&self) -> Address {
-        self.receiver.clone().unwrap_or_else(|| self.sender.clone())
+        self.receiver
+            .clone()
+            .unwrap_or_else(|| self.sender.clone())
     }
 
     /// Validates the order structure.

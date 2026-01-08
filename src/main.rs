@@ -11,7 +11,6 @@ use actix_web::{App, HttpServer};
 use tokio::sync::RwLock;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
     market_data::SharedMarketData,
@@ -71,9 +70,7 @@ async fn main() -> std::io::Result<()> {
     let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
 
     // Create task queue
-    let task_queue = TaskQueue::new(TaskQueueConfig {
-        capacity: config.task_queue_capacity,
-    });
+    let task_queue = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
     let (task_handle, task_rx) = task_queue.split();
 
     // Create health tracker (shared between TychoFeed and API)
@@ -86,28 +83,19 @@ async fn main() -> std::io::Result<()> {
         .rpc_url(&config.rpc_url)
         .build();
 
-    let (tycho_feed, event_tx) = TychoFeed::new(
-        feed_config,
-        Arc::clone(&market_data),
-        health_tracker.clone(),
-    );
+    let (tycho_feed, event_tx) =
+        TychoFeed::new(feed_config, Arc::clone(&market_data), health_tracker.clone());
 
     // Create worker pool
     let solver_config = SolverConfig::default();
-    let worker_pool_config = WorkerPoolConfig {
-        num_workers: config.num_workers,
-        solver_config,
-    };
+    let worker_pool_config = WorkerPoolConfig { num_workers: config.num_workers, solver_config };
 
     let worker_pool = WorkerPoolBuilder::new()
         .num_workers(worker_pool_config.num_workers)
         .solver_config(worker_pool_config.solver_config)
         .build(task_rx, Arc::clone(&market_data), event_tx);
 
-    info!(
-        num_workers = worker_pool.num_workers(),
-        "worker pool started"
-    );
+    info!(num_workers = worker_pool.num_workers(), "worker pool started");
 
     // Start Tycho feed in background
     let feed_handle = tokio::spawn(async move {
