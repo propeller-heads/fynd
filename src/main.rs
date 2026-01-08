@@ -13,10 +13,12 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
-    market_data::SharedMarketData,
+    feed::{
+        market_data::SharedMarketData,
+        tycho_feed::{TychoFeed, TychoFeedBuilder},
+    },
     solver::SolverConfig,
     task_queue::{TaskQueue, TaskQueueConfig},
-    tycho_feed::{TychoFeed, TychoFeedBuilder},
     worker_pool::{WorkerPoolBuilder, WorkerPoolConfig},
 };
 

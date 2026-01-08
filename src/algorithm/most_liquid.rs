@@ -14,10 +14,10 @@ use tycho_common::models::Address;
 
 use super::{Algorithm, AlgorithmError};
 use crate::{
+    feed::market_data::SharedMarketData,
     graph::Path,
-    market_data::SharedMarketData,
     types::{Order, Route, Swap},
-    PoolId,
+    ComponentId,
 };
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -91,12 +91,12 @@ impl MostLiquidAlgorithm {
             };
 
             let protocol_system = market
-                .get_pool(&edge.pool_id)
+                .get_component(&edge.component_id)
                 .unwrap()
                 .protocol_system;
 
             swaps.push(Swap {
-                pool_id: edge.pool_id.clone(),
+                component_id: edge.component_id.clone(),
                 protocol: protocol_system,
                 token_in,
                 token_out,
@@ -119,7 +119,7 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = UnGraph<Address, PoolId>;
+    type GraphType = UnGraph<Address, ComponentId>;
     type GraphManager = crate::graph::PetgraphUnGraphManager;
     fn name(&self) -> &str {
         "most_liquid"
@@ -127,7 +127,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
     fn find_best_route(
         &self,
-        graph: &UnGraph<Address, PoolId>,
+        graph: &UnGraph<Address, ComponentId>,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
@@ -221,7 +221,7 @@ impl MostLiquidAlgorithm {
     /// Finds all paths between two tokens using BFS on a petgraph.
     fn find_paths(
         &self,
-        graph: &UnGraph<Address, PoolId>,
+        graph: &UnGraph<Address, ComponentId>,
         from: &Address,
         to: &Address,
     ) -> Vec<Path> {
@@ -246,7 +246,7 @@ impl MostLiquidAlgorithm {
         // TODO: Use petgraph's all_simple_paths to find all paths
 
         // let mut paths = Vec::new();
-        // let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<PoolId>, Vec<Address>)> =
+        // let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<ComponentId>, Vec<Address>)> =
         //     VecDeque::new();
 
         // // Start BFS from the source token

@@ -9,7 +9,7 @@ use petgraph::Graph;
 use tycho_common::models::Address;
 
 use super::GraphManager;
-use crate::{events::MarketEvent, types::PoolId};
+use crate::{feed::events::MarketEvent, types::ComponentId};
 
 /// Petgraph implementation of GraphManager.
 ///
@@ -19,7 +19,7 @@ use crate::{events::MarketEvent, types::PoolId};
 /// The graph manager maintains the graph internally and updates it based on market events.
 pub struct PetgraphUnGraphManager {
     // Undirected graph with token addresses as nodes and edges as possible swaps.
-    graph: petgraph::graph::UnGraph<Address, PoolId>,
+    graph: petgraph::graph::UnGraph<Address, ComponentId>,
 }
 
 impl PetgraphUnGraphManager {
@@ -35,13 +35,13 @@ impl Default for PetgraphUnGraphManager {
     }
 }
 
-#[allow(unused_variables)] // TODO: Implement these methods and remove this allow
-impl GraphManager<petgraph::graph::UnGraph<Address, PoolId>> for PetgraphUnGraphManager {
-    fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>) {
-        unimplemented!("initialize_graph is not implemented for PetgraphUnGraphManager");
+#[allow(unused_variables)]
+impl GraphManager<petgraph::graph::UnGraph<Address, ComponentId>> for PetgraphUnGraphManager {
+    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>) {
+        unimplemented!("initialize_graph is not implemented for PetgraphGraphManager");
     }
 
-    fn graph(&self) -> &petgraph::graph::UnGraph<Address, PoolId> {
+    fn graph(&self) -> &petgraph::graph::UnGraph<Address, ComponentId> {
         &self.graph
     }
 

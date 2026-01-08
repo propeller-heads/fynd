@@ -13,9 +13,9 @@
 //! - **API Layer** (`api`): Actix Web HTTP handlers for `/solve`, `/health`, `/metrics`
 //! - **Task Queue** (`task_queue`): Bounded queue with backpressure for solve requests
 //! - **Worker Pool** (`worker_pool`): Dedicated OS threads for CPU-bound route finding
-//! - **Solver** (`solver`): Route finding logic, owns local pool topology copy
+//! - **Solver** (`solver`): Route finding logic, owns local market topology copy
 //! - **Algorithm** (`algorithm`): Pluggable route-finding algorithms
-//! - **Market Data** (`market_data`): Shared state (pools, tokens, gas prices)
+//! - **Market Data** (`market_data`): Shared state (components, tokens, gas prices)
 //! - **Graph** (`graph`): Graph management for algorithms
 //! - **Indexer** (`indexer`): Tycho WebSocket connection, updates market data
 //! - **Events** (`events`): Market events broadcast from indexer to solvers
@@ -73,26 +73,26 @@
 
 pub mod algorithm;
 pub mod api;
-pub mod events;
+pub mod feed;
 pub mod graph;
-pub mod market_data;
 pub mod solver;
 pub mod task_queue;
-pub mod tycho_feed;
 pub mod types;
 pub mod worker_pool;
 
 // Re-export commonly used types at crate root
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
-pub use events::MarketEvent;
-pub use graph::{GraphManager, Hop, Path, PetgraphUnGraphManager};
-pub use market_data::{SharedMarketData, SharedMarketDataRef};
+pub use feed::{
+    events::{ComponentSummary, MarketEvent},
+    market_data::{SharedMarketData, SharedMarketDataRef},
+    tycho_feed::{TychoFeed, TychoFeedBuilder, TychoFeedConfig, TychoFeedError},
+};
+pub use graph::{GraphManager, Path};
 pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
-pub use tycho_feed::{TychoFeed, TychoFeedBuilder, TychoFeedConfig, TychoFeedError};
 pub use types::{
-    GasPrice, HealthStatus, Order, OrderSolution, OrderStatus, PoolId, ProtocolSystem, Route,
+    ComponentId, GasPrice, HealthStatus, Order, OrderSolution, OrderStatus, ProtocolSystem, Route,
     Solution, SolutionOptions, SolutionRequest, SolveError, SolveResult, SolveTask, Swap, TaskId,
     Token,
 };

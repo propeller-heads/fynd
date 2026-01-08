@@ -1,7 +1,7 @@
 //! Solver component that processes solve requests.
 //!
 //! Each worker thread owns a Solver instance. The solver:
-//! - Initializes graph from pool topology (HashMap<PoolId, Vec<Address>>)
+//! - Initializes graph from market topology (HashMap<ComponentId, Vec<Address>>)
 //! - Holds a reference to SharedMarketData (for state lookups)
 //! - Subscribes to MarketEvents to keep local topology in sync
 //! - Uses an Algorithm to find routes
@@ -13,9 +13,8 @@ use tokio::sync::broadcast;
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
-    events::MarketEvent,
+    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     graph::GraphManager,
-    market_data::SharedMarketDataRef,
     types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError},
 };
 
@@ -103,10 +102,10 @@ where
     /// Initializes the graph from SharedMarketData.
     ///
     /// Call this on startup or when recovering from missed events.
-    /// Gets the pool topology from SharedMarketData and uses it to build the graph.
+    /// Gets the market topology from SharedMarketData and uses it to build the graph.
     pub async fn initialize_graph(&mut self) {
         let market = self.market_data.read().await;
-        let topology = market.pool_topology();
+        let topology = market.component_topology();
         self.graph_manager
             .initialize_graph(&topology);
         self.initialized = true;

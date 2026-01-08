@@ -6,8 +6,8 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::models::Address;
 
-/// Unique identifier for a liquidity pool.
-pub type PoolId = String;
+/// Unique identifier for a liquidity component.
+pub type ComponentId = String;
 
 /// Protocol system identifier matching Tycho Simulation naming.
 ///

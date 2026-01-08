@@ -13,8 +13,8 @@ use std::time::Duration;
 pub use most_liquid::MostLiquidAlgorithm;
 
 use crate::{
+    feed::market_data::SharedMarketData,
     graph::GraphManager,
-    market_data::SharedMarketData,
     types::{Order, Route},
 };
 
@@ -29,7 +29,7 @@ use crate::{
 ///
 /// - Algorithms should respect the timeout from `timeout()`
 /// - They should use `graph` for path finding (BFS/etc)
-/// - They should use `market` to read pool states for simulation
+/// - They should use `market` to read component states for simulation
 /// - They should NOT modify the graph or market data
 pub trait Algorithm: Send + Sync {
     /// The graph type this algorithm uses.

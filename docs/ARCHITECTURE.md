@@ -14,7 +14,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 - **Output Format**: Structured Solution (not calldata) - encoding is separate concern
 - **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime)
 - **Event Bus**: Broadcast channel for market updates to Solvers
-- **Market Topology**: Simple HashMap<PoolId, Vec<Address>> representation, algorithms build their preferred graph structure
+- **Market Topology**: Simple HashMap<ComponentId, Vec<Address>> representation, algorithms build their preferred graph structure
 
 ---
 
@@ -49,19 +49,19 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │ Reads shared data
                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         SharedMarketData (Arc<RwLock<>>)                    │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  pools: HashMap<PoolId, PoolData>                                   │    │
-│  │    └── component: ProtocolComponent                                 │    │
-│  │    └── state: Box<dyn ProtocolSim>    ← Heavy data, never cloned   │    │
-│  │    └── tokens: Vec<Token>                                           │    │
-│  │  tokens: HashMap<Address, Token>                                    │    │
-│  │  pool_topology: HashMap<PoolId, Vec<Address>>  ← Simple topology   │    │
-│  │  gas_price: GasPrice                                                │    │
-│  │  gas_constants: HashMap<ProtocolSystem, u64>                         │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────▲──────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                         SharedMarketData (Arc<RwLock<>>)                           │
+│  ┌────────────────────────────────────────────────────────────────────────────┐    │
+│  │  component: HashMap<ComponentId, ComponentData>                            │    │
+│  │    └── component: ProtocolComponent                                        │    │
+│  │    └── state: Box<dyn ProtocolSim>    ← Heavy data, never cloned           │    │
+│  │    └── tokens: Vec<Token>                                                  │    │
+│  │  tokens: HashMap<Address, Token>                                           │    │
+│  │  component_topology: HashMap<ComponentId, Vec<Address>>  ← Simple topology │    │
+│  │  gas_price: GasPrice                                                       │    │
+│  │  gas_constants: HashMap<ProtocolSystem, u64>                               │    │
+│  └────────────────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────▲─────────────────────────────────────────────────┘
                                    │ WRITE lock
                                    │
 ┌──────────────────────────────────┴──────────────────────────────────────────┐
@@ -96,6 +96,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 **Responsibility:** Accept HTTP requests, validate input, enqueue tasks, return responses.
 
 **Endpoints:**
+
 - `POST /solve` - Submit solve requests
 - `GET /health` - Health check
 - `GET /info` - Service information
@@ -143,16 +144,16 @@ pub struct WorkerPool {
 
 ```rust
 pub struct SharedMarketData {
-    pools: HashMap<PoolId, PoolData>,
+    components: HashMap<ComponentId, ComponentData>,
     tokens: HashMap<Address, Token>,
-    pool_topology: HashMap<PoolId, Vec<Address>>,  // Simple market graph representation
+    component_topology: HashMap<ComponentId, Vec<Address>>,  // Simple market graph representation
     gas_price: GasPrice,
     gas_constants: HashMap<ProtocolSystem, u64>,
     last_updated: Block,
 }
 ```
 
-The `pool_topology` field stores a simple mapping from pool IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
+The `component_topology` field stores a simple mapping from component IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
 
 ---
 
@@ -163,7 +164,8 @@ The `pool_topology` field stores a simple mapping from pool IDs to their token a
 **Responsibility:** Graph management infrastructure for algorithms.
 
 **Components:**
-- **GraphManager trait**: Defines interface for building and updating graphs from pool topology
+
+- **GraphManager trait**: Defines interface for building and updating graphs from component topology
 - **Edge & Path types**: Shared types for representing graph edges and paths
 - **PetgraphGraphManager**: Implementation for petgraph::UnGraph
 
@@ -171,11 +173,11 @@ The `pool_topology` field stores a simple mapping from pool IDs to their token a
 pub trait GraphManager<G>: Send + Sync {
     /// Initializes the graph from the market topology.
     /// Called once on solver startup.
-    fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>);
-    
+    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
-    
+
     /// Updates the graph based on a market event.
     fn handle_event(&mut self, event: &MarketEvent);
 }
@@ -201,11 +203,11 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ```rust
 pub enum MarketEvent {
-    PoolAdded { pool_id, tokens, protocol_system },
-    PoolRemoved { pool_id },
-    StateUpdated { pool_id },
+    ComponentAdded { component_id, tokens, protocol_system },
+    ComponentRemoved { component_id },
+    StateUpdated { component_id },
     GasPriceUpdated { gas_price },
-    Snapshot { pools, gas_price },
+    Snapshot { components, gas_price },
 }
 ```
 
@@ -235,7 +237,7 @@ where
 }
 ```
 
-The solver initializes the graph on startup by reading the pool topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver gets the graph from the graph manager via `graph_manager.graph()`.
+The solver initializes the graph on startup by reading the component topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver gets the graph from the graph manager via `graph_manager.graph()`.
 
 ---
 
@@ -251,7 +253,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 pub trait Algorithm: Send + Sync {
     /// The graph type this algorithm uses (e.g., petgraph::UnGraph<Address, Edge>)
     type GraphType: Send + Sync;
-    
+
     /// The graph manager type for this algorithm
     type GraphManager: GraphManager<Self::GraphType> + Default;
 
@@ -269,11 +271,12 @@ pub trait Algorithm: Send + Sync {
 ```
 
 **Example Implementation:**
+
 ```rust
 impl Algorithm for MostLiquidAlgorithm {
     type GraphType = UnGraph<Address, Edge>;
     type GraphManager = PetgraphGraphManager;
-    
+
     fn find_best_route(
         &self,
         graph: &Self::GraphType,
@@ -287,10 +290,11 @@ impl Algorithm for MostLiquidAlgorithm {
 ```
 
 **Key Design Points:**
+
 - Algorithms are **stateless** - they receive graphs as parameters
 - Each algorithm specifies its preferred graph type and graph manager via associated types
 - The solver automatically creates the graph manager using `Default::default()`
-- Graph managers handle converting `HashMap<PoolId, Vec<Address>>` to the algorithm's graph type
+- Graph managers handle converting `HashMap<ComponentId, Vec<Address>>` to the algorithm's graph type
 - This allows algorithms to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms
 
 ---
@@ -424,7 +428,7 @@ src/
 │   ├── api.rs                # Request/Response types
 │   ├── solution.rs           # Solution, Route, Swap
 │   ├── internal.rs           # SolveTask, SolveError
-│   └── primitives.rs         # PoolId, Address, etc.
+│   └── primitives.rs         # ComponentId, Address, etc.
 │
 ├── market_data.rs            # SharedMarketData
 ├── events.rs                 # MarketEvent enum
