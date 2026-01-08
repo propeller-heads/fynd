@@ -11,16 +11,16 @@ use std::collections::HashMap;
 pub use petgraph::PetgraphUnGraphManager;
 use tycho_common::models::Address;
 
-use crate::{events::MarketEvent, types::PoolId};
+use crate::{feed::events::MarketEvent, types::ComponentId};
 
 /// An edge in the market graph representing a possible hop.
 ///
-/// This is used as the edge weight type in petgraph graphs. It stores the pool information needed
-/// for route construction.
+/// This is used as the edge weight type in petgraph graphs. It stores the component information
+/// needed for route construction.
 #[derive(Debug, Clone)]
 pub struct Hop {
-    /// The pool that enables this swap.
-    pub pool_id: PoolId,
+    /// The component that enables this swap.
+    pub component_id: ComponentId,
     /// The output token of this swap.
     pub token_out: Address,
 }
@@ -63,8 +63,8 @@ where
 {
     /// Initializes the graph from the market topology.
     ///
-    /// The `pools` parameter maps pool IDs to the tokens they contain.
-    fn initialize_graph(&mut self, pools: &HashMap<PoolId, Vec<Address>>);
+    /// The `components` parameter maps component IDs to the tokens they contain.
+    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;

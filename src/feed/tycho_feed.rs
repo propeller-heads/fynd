@@ -1,7 +1,7 @@
 //! Tycho feed for keeping market data synchronized.
 //!
 //! The TychoFeed connects to Tycho's WebSocket API and:
-//! - Receives pool/state updates
+//! - Receives component/state updates
 //! - Updates SharedMarketData (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
@@ -12,9 +12,11 @@ use tracing::{error, info};
 
 use crate::{
     api::HealthTracker,
-    events::{MarketEvent, PoolSummary},
-    market_data::SharedMarketData,
-    types::{GasPrice, PoolId, ProtocolSystem},
+    feed::{
+        events::{ComponentSummary, MarketEvent},
+        market_data::SharedMarketData,
+    },
+    types::{ComponentId, GasPrice, ProtocolSystem},
 };
 
 /// Configuration for the TychoFeed.
@@ -83,7 +85,7 @@ pub enum TychoFeedError {
 /// # Responsibilities
 ///
 /// - Connect to Tycho WebSocket and maintain connection
-/// - Process incoming pool/state updates
+/// - Process incoming component/state updates
 /// - Update SharedMarketData (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
@@ -170,8 +172,8 @@ impl TychoFeed {
         // 1. Connect to Tycho WebSocket
         // 2. Subscribe to configured protocols
         // 3. Process messages in a loop:
-        //    - Pool added -> update market_data, broadcast PoolAdded
-        //    - Pool removed -> update market_data, broadcast PoolRemoved
+        //    - Component added -> update market_data, broadcast ComponentAdded
+        //    - Component removed -> update market_data, broadcast ComponentRemoved
         //    - State update -> update market_data, broadcast StateUpdated
         // 4. Handle disconnects gracefully
 
@@ -191,9 +193,9 @@ impl TychoFeed {
     async fn send_initial_snapshot(&self) -> Result<(), TychoFeedError> {
         let market = self.market_data.read().await;
 
-        let pools: Vec<PoolSummary> = market
-            .pools()
-            .map(|(id, data)| PoolSummary {
+        let components: Vec<ComponentSummary> = market
+            .components()
+            .map(|(id, data)| ComponentSummary {
                 id: id.clone(),
                 tokens: data
                     .tokens
@@ -210,23 +212,23 @@ impl TychoFeed {
 
         let _ = self
             .event_tx
-            .send(MarketEvent::Snapshot { pools, gas_price });
+            .send(MarketEvent::Snapshot { components, gas_price });
 
         Ok(())
     }
 
     #[allow(dead_code)]
-    /// Handles a pool added event from Tycho.
-    async fn handle_pool_added(
+    /// Handles a component added event from Tycho.
+    async fn handle_component_added(
         &self,
-        pool_id: PoolId,
+        id: ComponentId,
         tokens: Vec<tycho_common::models::Address>,
         protocol_system: ProtocolSystem,
     ) -> Result<(), TychoFeedError> {
         // Update shared market data
         {
             let mut market = self.market_data.write().await;
-            market.add_pool_topology(pool_id.clone(), tokens.clone());
+            market.add_component_topology(id.clone(), tokens.clone());
         }
 
         // Update health tracker
@@ -235,18 +237,21 @@ impl TychoFeed {
         // Broadcast event
         let _ = self
             .event_tx
-            .send(MarketEvent::PoolAdded { pool_id, tokens, protocol_system });
+            .send(MarketEvent::ComponentAdded { component_id: id, tokens, protocol_system });
 
         Ok(())
     }
 
     #[allow(dead_code)]
-    /// Handles a pool removed event from Tycho.
-    async fn handle_pool_removed(&self, pool_id: PoolId) -> Result<(), TychoFeedError> {
+    /// Handles a component removed event from Tycho.
+    async fn handle_component_removed(
+        &self,
+        component_id: ComponentId,
+    ) -> Result<(), TychoFeedError> {
         // Update shared market data
         {
             let mut market = self.market_data.write().await;
-            market.remove_pool(&pool_id);
+            market.remove_component(&component_id);
         }
 
         // Update health tracker
@@ -255,15 +260,15 @@ impl TychoFeed {
         // Broadcast event
         let _ = self
             .event_tx
-            .send(MarketEvent::PoolRemoved { pool_id });
+            .send(MarketEvent::ComponentRemoved { component_id });
 
         Ok(())
     }
 
     #[allow(dead_code)]
     /// Handles a state update event from Tycho.
-    async fn handle_state_updated(&self, pool_id: PoolId) -> Result<(), TychoFeedError> {
-        // TODO: Update pool state in market_data
+    async fn handle_state_updated(&self, component_id: ComponentId) -> Result<(), TychoFeedError> {
+        // TODO: Update component state in market_data
         // The actual state (reserves, etc.) would come from Tycho
 
         // Update health tracker
@@ -272,7 +277,7 @@ impl TychoFeed {
         // Broadcast event
         let _ = self
             .event_tx
-            .send(MarketEvent::StateUpdated { pool_id });
+            .send(MarketEvent::StateUpdated { component_id });
 
         Ok(())
     }

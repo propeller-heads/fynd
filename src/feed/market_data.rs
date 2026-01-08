@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tycho_common::{dto::Block, models::Address};
 
-use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
+use crate::types::{ComponentId, GasPrice, ProtocolSystem, Token};
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -20,18 +20,18 @@ pub fn new_shared_market_data() -> SharedMarketDataRef {
     Arc::new(RwLock::new(SharedMarketData::new()))
 }
 
-/// Shared market data containing all pool states and market information.
+/// Shared market data containing all component states and market information.
 ///
 /// This struct is the single source of truth for market data.
 /// The indexer updates it, and solvers read from it.
 pub struct SharedMarketData {
-    /// All pools indexed by their ID.
-    pools: HashMap<PoolId, PoolData>,
+    /// All components indexed by their ID.
+    components: HashMap<ComponentId, ComponentData>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
-    /// Market topology: pool_id -> tokens in that pool.
+    /// Market topology: component_id -> tokens in that component.
     /// This is the source of truth for graph construction.
-    pool_topology: HashMap<PoolId, Vec<Address>>,
+    component_topology: HashMap<ComponentId, Vec<Address>>,
     /// Current gas price.
     gas_price: GasPrice,
     /// Gas costs per protocol system.
@@ -40,17 +40,17 @@ pub struct SharedMarketData {
     last_updated: Block,
 }
 
-/// Data for a single pool.
-pub struct PoolData {
+/// Data for a single component.
+pub struct ComponentData {
     /// Unique identifier.
-    pub id: PoolId,
+    pub id: ComponentId,
     /// Protocol component (from Tycho).
     /// TODO: Replace with actual ProtocolComponent type from tycho-simulation
     pub component: ProtocolComponent,
     /// Protocol simulation state (from Tycho).
     /// TODO: Replace with actual Box<dyn ProtocolSim> from tycho-simulation
     pub state: ProtocolState,
-    /// Tokens in this pool.
+    /// Tokens in this component.
     pub tokens: Vec<Token>,
     /// Protocol system for gas estimation.
     pub protocol_system: ProtocolSystem,
@@ -97,9 +97,9 @@ impl SharedMarketData {
         gas_constants.insert(ProtocolSystem::Other, 150_000);
 
         Self {
-            pools: HashMap::new(),
+            components: HashMap::new(),
             tokens: HashMap::new(),
-            pool_topology: HashMap::new(),
+            component_topology: HashMap::new(),
             gas_price: GasPrice::default(),
             gas_constants,
             last_updated: Block::default(),
@@ -108,9 +108,9 @@ impl SharedMarketData {
 
     // ==================== Read Methods (for Solvers) ====================
 
-    /// Gets a pool by ID.
-    pub fn get_pool(&self, id: &PoolId) -> Option<&PoolData> {
-        self.pools.get(id)
+    /// Gets a component by ID.
+    pub fn get_component(&self, id: &ComponentId) -> Option<&ComponentData> {
+        self.components.get(id)
     }
 
     /// Gets a token by address.
@@ -131,21 +131,21 @@ impl SharedMarketData {
             .unwrap_or(150_000)
     }
 
-    /// Returns a clone of the pool topology.
+    /// Returns a clone of the component topology.
     ///
     /// Solvers can use this to build their algorithm-specific graphs.
-    pub fn pool_topology(&self) -> HashMap<PoolId, Vec<Address>> {
-        self.pool_topology.clone()
+    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+        self.component_topology.clone()
     }
 
-    /// Returns a reference to the pool topology.
-    pub fn pool_topology_ref(&self) -> &HashMap<PoolId, Vec<Address>> {
-        &self.pool_topology
+    /// Returns a reference to the component topology.
+    pub fn component_topology_ref(&self) -> &HashMap<ComponentId, Vec<Address>> {
+        &self.component_topology
     }
 
-    /// Returns the number of pools.
-    pub fn pool_count(&self) -> usize {
-        self.pools.len()
+    /// Returns the number of components.
+    pub fn component_count(&self) -> usize {
+        self.components.len()
     }
 
     /// Returns the number of tokens.
@@ -166,59 +166,60 @@ impl SharedMarketData {
             .timestamp() as u64
     }
 
-    /// Returns an iterator over all pools.
-    pub fn pools(&self) -> impl Iterator<Item = (&PoolId, &PoolData)> {
-        self.pools.iter()
+    /// Returns an iterator over all components.
+    pub fn components(&self) -> impl Iterator<Item = (&ComponentId, &ComponentData)> {
+        self.components.iter()
     }
 
     // ==================== Write Methods (for Indexer only) ====================
 
-    /// Adds a pool to the topology without full pool data.
-    /// Used when we receive pool info from Tycho but don't have full state yet.
-    pub fn add_pool_topology(&mut self, pool_id: PoolId, tokens: Vec<Address>) {
-        self.pool_topology
-            .insert(pool_id, tokens);
+    /// Adds a component to the topology without full component data.
+    /// Used when we receive component info from Tycho but don't have full state yet.
+    pub fn add_component_topology(&mut self, component_id: ComponentId, tokens: Vec<Address>) {
+        self.component_topology
+            .insert(component_id, tokens);
         self.last_updated = Block::default();
     }
 
-    /// Inserts or updates a pool.
-    pub fn insert_pool(&mut self, pool: PoolData) {
-        let pool_id = pool.id.clone();
-        let tokens: Vec<Address> = pool
+    /// Inserts or updates a component.
+    pub fn insert_component(&mut self, component: ComponentData) {
+        let component_id = component.id.clone();
+        let tokens: Vec<Address> = component
             .tokens
             .iter()
             .map(|t| t.address.clone())
             .collect();
 
         // Update tokens map
-        for token in &pool.tokens {
+        for token in &component.tokens {
             self.tokens
                 .entry(token.address.clone())
                 .or_insert_with(|| token.clone());
         }
 
-        // Update pool topology
-        self.pool_topology
-            .insert(pool_id.clone(), tokens);
+        // Update component topology
+        self.component_topology
+            .insert(component_id.clone(), tokens);
 
-        // Store pool data
-        self.pools.insert(pool_id, pool);
+        // Store component data
+        self.components
+            .insert(component_id, component);
 
         self.last_updated = Block::default();
     }
 
-    /// Removes a pool.
-    pub fn remove_pool(&mut self, id: &PoolId) {
-        if self.pools.remove(id).is_some() {
-            self.pool_topology.remove(id);
+    /// Removes a component.
+    pub fn remove_component(&mut self, id: &ComponentId) {
+        if self.components.remove(id).is_some() {
+            self.component_topology.remove(id);
             self.last_updated = Block::default();
         }
     }
 
-    /// Updates a pool's state.
-    pub fn update_state(&mut self, id: &PoolId, state: ProtocolState) {
-        if let Some(pool) = self.pools.get_mut(id) {
-            pool.state = state;
+    /// Updates a component's state.
+    pub fn update_state(&mut self, id: &ComponentId, state: ProtocolState) {
+        if let Some(component) = self.components.get_mut(id) {
+            component.state = state;
             self.last_updated = Block::default();
         }
     }

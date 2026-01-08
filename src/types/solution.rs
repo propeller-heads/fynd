@@ -4,7 +4,7 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::models::Address;
 
-use super::primitives::{PoolId, ProtocolSystem};
+use super::primitives::{ComponentId, ProtocolSystem};
 
 /// Complete solution for a solve request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,9 +130,9 @@ impl Route {
 /// A single swap in a route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
-    /// Pool to execute the swap on.
-    pub pool_id: PoolId,
-    /// Protocol system of the pool.
+    /// Component to execute the swap on.
+    pub component_id: ComponentId,
+    /// Protocol system of the component.
     pub protocol: ProtocolSystem,
     /// Input token address.
     pub token_in: Address,
@@ -149,7 +149,7 @@ pub struct Swap {
 impl Swap {
     /// Creates a new swap.
     pub fn new(
-        pool_id: PoolId,
+        component_id: ComponentId,
         protocol: ProtocolSystem,
         token_in: Address,
         token_out: Address,
@@ -157,7 +157,7 @@ impl Swap {
         amount_out: BigUint,
     ) -> Self {
         let gas_estimate = BigUint::from(protocol.typical_gas_cost());
-        Self { pool_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
     }
 }
 

@@ -13,8 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     algorithm::MostLiquidAlgorithm,
-    events::MarketEvent,
-    market_data::SharedMarketDataRef,
+    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     solver::{Solver, SolverConfig},
     types::SolveTask,
 };
