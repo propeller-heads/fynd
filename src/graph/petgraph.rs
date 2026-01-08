@@ -6,9 +6,9 @@
 
 use crate::events::MarketEvent;
 use crate::types::PoolId;
-use alloy::primitives::Address;
 use petgraph::Graph;
 use std::collections::HashMap;
+use tycho_common::models::Address;
 
 use super::{Edge, GraphManager};
 

@@ -1,8 +1,9 @@
 //! Primitive types used throughout the solver.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use tycho_common::models::Address;
 
 /// Unique identifier for a liquidity pool.
 pub type PoolId = String;

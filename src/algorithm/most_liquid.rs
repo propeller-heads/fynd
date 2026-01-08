@@ -9,8 +9,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use petgraph::graph::UnGraph;
+use tycho_common::models::Address;
 
 use crate::graph::{Edge, Path};
 use crate::market_data::SharedMarketData;
@@ -86,8 +87,8 @@ impl MostLiquidAlgorithm {
         let mut current_amount = amount_in;
 
         for (i, edge) in path.edges.iter().enumerate() {
-            let token_in = path.tokens[i];
-            let token_out = edge.token_out;
+            let token_in = path.tokens[i].clone();
+            let token_out = edge.token_out.clone();
 
             // Placeholder: distribute output evenly for now
             let amount_out = if i == path.edges.len() - 1 {
@@ -222,8 +223,8 @@ impl MostLiquidAlgorithm {
         to: &Address,
     ) -> Vec<Path> {
         // Find node indices for from and to tokens
-        let from_idx = graph.node_indices().find(|&idx| graph[idx] == *from);
-        let to_idx = graph.node_indices().find(|&idx| graph[idx] == *to);
+        let from_idx = graph.node_indices().find(|&idx| &graph[idx] == from);
+        let to_idx = graph.node_indices().find(|&idx| &graph[idx] == to);
 
         let (Some(from_idx), Some(to_idx)) = (from_idx, to_idx) else {
             return vec![];
@@ -238,7 +239,7 @@ impl MostLiquidAlgorithm {
             VecDeque::new();
 
         // Start BFS from the source token
-        queue.push_back((from_idx, vec![], vec![*from]));
+        queue.push_back((from_idx, vec![], vec![from.clone()]));
 
         while let Some((current_idx, edges, tokens)) = queue.pop_front() {
             // Check hop limit
@@ -248,7 +249,7 @@ impl MostLiquidAlgorithm {
 
             // Explore neighbors
             for neighbor_idx in graph.neighbors(current_idx) {
-                let neighbor_token = graph[neighbor_idx];
+                let neighbor_token = graph[neighbor_idx].clone();
 
                 // Avoid cycles (don't revisit tokens)
                 if tokens.contains(&neighbor_token) {
@@ -269,10 +270,10 @@ impl MostLiquidAlgorithm {
                 new_edges.push(edge.clone());
 
                 let mut new_tokens = tokens.clone();
-                new_tokens.push(neighbor_token);
+                new_tokens.push(neighbor_token.clone());
 
                 // Found a path to destination
-                if neighbor_token == *to {
+                if neighbor_token == to.clone() {
                     paths.push(Path {
                         edges: new_edges,
                         tokens: new_tokens,

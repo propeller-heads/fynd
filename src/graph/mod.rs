@@ -6,8 +6,8 @@
 
 use crate::events::MarketEvent;
 use crate::types::{PoolId, ProtocolSystem};
-use alloy::primitives::Address;
 use std::collections::HashMap;
+use tycho_common::models::Address;
 
 /// An edge in the market graph representing a possible swap.
 ///
@@ -43,12 +43,12 @@ impl Path {
 
     /// Returns the starting token.
     pub fn start_token(&self) -> Option<Address> {
-        self.tokens.first().copied()
+        self.tokens.first().cloned()
     }
 
     /// Returns the ending token.
     pub fn end_token(&self) -> Option<Address> {
-        self.tokens.last().copied()
+        self.tokens.last().cloned()
     }
 }
 

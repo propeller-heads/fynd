@@ -202,7 +202,7 @@ impl TychoFeed {
             .pools()
             .map(|(id, data)| PoolSummary {
                 id: id.clone(),
-                tokens: data.tokens.iter().map(|t| t.address).collect(),
+                tokens: data.tokens.iter().map(|t| t.address.clone()).collect(),
                 protocol_system: data.protocol_system,
             })
             .collect();
@@ -223,7 +223,7 @@ impl TychoFeed {
     async fn handle_pool_added(
         &self,
         pool_id: PoolId,
-        tokens: Vec<alloy::primitives::Address>,
+        tokens: Vec<tycho_common::models::Address>,
         protocol_system: ProtocolSystem,
     ) -> Result<(), TychoFeedError> {
         // Update shared market data

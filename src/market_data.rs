@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tycho_common::dto::Block;
 
 use crate::types::{GasPrice, PoolId, ProtocolSystem, Token};
-use alloy::primitives::Address;
 use tokio::sync::RwLock;
+use tycho_common::models::Address;
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -173,11 +173,7 @@ impl SharedMarketData {
 
     /// Adds a pool to the topology without full pool data.
     /// Used when we receive pool info from Tycho but don't have full state yet.
-    pub fn add_pool_topology(
-        &mut self,
-        pool_id: PoolId,
-        tokens: Vec<Address>,
-    ) {
+    pub fn add_pool_topology(&mut self, pool_id: PoolId, tokens: Vec<Address>) {
         self.pool_topology.insert(pool_id, tokens);
         self.last_updated = Block::default();
     }
@@ -185,12 +181,12 @@ impl SharedMarketData {
     /// Inserts or updates a pool.
     pub fn insert_pool(&mut self, pool: PoolData) {
         let pool_id = pool.id.clone();
-        let tokens: Vec<Address> = pool.tokens.iter().map(|t| t.address).collect();
+        let tokens: Vec<Address> = pool.tokens.iter().map(|t| t.address.clone()).collect();
 
         // Update tokens map
         for token in &pool.tokens {
             self.tokens
-                .entry(token.address)
+                .entry(token.address.clone())
                 .or_insert_with(|| token.clone());
         }
 

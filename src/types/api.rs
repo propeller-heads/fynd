@@ -1,7 +1,8 @@
 //! API request and response types.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
+use tycho_common::models::Address;
 
 /// Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +67,7 @@ impl Order {
 
     /// Returns the effective receiver address.
     pub fn effective_receiver(&self) -> Address {
-        self.receiver.unwrap_or(self.sender)
+        self.receiver.clone().unwrap_or_else(|| self.sender.clone())
     }
 
     /// Validates the order structure.

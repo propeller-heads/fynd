@@ -1,7 +1,7 @@
 //! Solver component that processes solve requests.
 //!
 //! Each worker thread owns a Solver instance. The solver:
-//! - Owns a local copy of the pool topology (HashMap<PoolId, Vec<Address>>)
+//! - Initializes graph from pool topology (HashMap<PoolId, Vec<Address>>)
 //! - Holds a reference to SharedMarketData (for state lookups)
 //! - Subscribes to MarketEvents to keep local topology in sync
 //! - Uses an Algorithm to find routes

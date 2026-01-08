@@ -1,7 +1,8 @@
 //! Solution types returned by the solver.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
+use tycho_common::models::Address;
 
 use super::primitives::{PoolId, ProtocolSystem};
 
@@ -74,12 +75,12 @@ impl Route {
 
     /// Returns the input token of the route.
     pub fn input_token(&self) -> Option<Address> {
-        self.swaps.first().map(|s| s.token_in)
+        self.swaps.first().map(|s| s.token_in.clone())
     }
 
     /// Returns the output token of the route.
     pub fn output_token(&self) -> Option<Address> {
-        self.swaps.last().map(|s| s.token_out)
+        self.swaps.last().map(|s| s.token_out.clone())
     }
 
     /// Returns all intermediate tokens in the route.
@@ -90,7 +91,7 @@ impl Route {
 
         self.swaps[..self.swaps.len() - 1]
             .iter()
-            .map(|s| s.token_out)
+            .map(|s| s.token_out.clone())
             .collect()
     }
 
@@ -112,8 +113,8 @@ impl Route {
         for window in self.swaps.windows(2) {
             if window[0].token_out != window[1].token_in {
                 return Err(RouteValidationError::DisconnectedSwaps {
-                    first_out: window[0].token_out,
-                    second_in: window[1].token_in,
+                    first_out: window[0].token_out.clone(),
+                    second_in: window[1].token_in.clone(),
                 });
             }
         }
