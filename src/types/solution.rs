@@ -1,6 +1,6 @@
 //! Solution types returned by the solver.
 
-use alloy::primitives::U256;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::models::Address;
 
@@ -12,7 +12,7 @@ pub struct Solution {
     /// Solutions for each order in the request.
     pub orders: Vec<OrderSolution>,
     /// Total estimated gas for all swaps.
-    pub total_gas_estimate: U256,
+    pub total_gas_estimate: BigUint,
     /// Time taken to solve in milliseconds.
     pub solve_time_ms: u64,
 }
@@ -28,11 +28,11 @@ pub struct OrderSolution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<Route>,
     /// Actual input amount.
-    pub amount_in: U256,
+    pub amount_in: BigUint,
     /// Actual output amount.
-    pub amount_out: U256,
+    pub amount_out: BigUint,
     /// Estimated gas for this order's swaps.
-    pub gas_estimate: U256,
+    pub gas_estimate: BigUint,
     /// Price impact in basis points (if calculable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_impact_bps: Option<u16>,
@@ -96,11 +96,11 @@ impl Route {
     }
 
     /// Returns the total gas estimate for this route.
-    pub fn total_gas(&self) -> U256 {
+    pub fn total_gas(&self) -> BigUint {
         self.swaps
             .iter()
-            .map(|s| s.gas_estimate)
-            .fold(U256::ZERO, |acc, g| acc + g)
+            .map(|s| &s.gas_estimate)
+            .fold(BigUint::ZERO, |acc, g| acc + g)
     }
 
     /// Validates the route structure.
@@ -135,11 +135,11 @@ pub struct Swap {
     /// Output token address.
     pub token_out: Address,
     /// Amount of input token.
-    pub amount_in: U256,
+    pub amount_in: BigUint,
     /// Amount of output token.
-    pub amount_out: U256,
+    pub amount_out: BigUint,
     /// Estimated gas for this swap.
-    pub gas_estimate: U256,
+    pub gas_estimate: BigUint,
 }
 
 impl Swap {
@@ -149,10 +149,10 @@ impl Swap {
         protocol: ProtocolSystem,
         token_in: Address,
         token_out: Address,
-        amount_in: U256,
-        amount_out: U256,
+        amount_in: BigUint,
+        amount_out: BigUint,
     ) -> Self {
-        let gas_estimate = U256::from(protocol.typical_gas_cost());
+        let gas_estimate = BigUint::from(protocol.typical_gas_cost());
         Self {
             pool_id,
             protocol,

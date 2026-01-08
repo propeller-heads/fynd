@@ -285,8 +285,8 @@ impl TychoFeed {
         // For now, use placeholder values
 
         let gas_price = GasPrice::new(
-            alloy::primitives::U256::from(30_000_000_000u64), // 30 gwei
-            alloy::primitives::U256::from(1_000_000_000u64),  // 1 gwei
+            num_bigint::BigUint::from(30_000_000_000u64), // 30 gwei
+            num_bigint::BigUint::from(1_000_000_000u64),  // 1 gwei
         );
 
         // Update shared market data

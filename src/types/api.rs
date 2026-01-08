@@ -1,6 +1,7 @@
 //! API request and response types.
 
-use alloy::primitives::U256;
+use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::models::Address;
 
@@ -33,12 +34,12 @@ pub struct Order {
     /// Amount of input token (for exact-in orders).
     /// Mutually exclusive with `amount_out`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount_in: Option<U256>,
+    pub amount_in: Option<BigUint>,
     /// Amount of output token (for exact-out orders).
     /// Mutually exclusive with `amount_in`.
     /// TODO: Verify if we aim to accept exact-out orders
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount_out: Option<U256>,
+    pub amount_out: Option<BigUint>,
     /// Address that will send the input tokens.
     pub sender: Address,
     /// Address that will receive the output tokens (if different from sender).
@@ -61,8 +62,8 @@ impl Order {
     }
 
     /// Returns the amount being specified (either in or out).
-    pub fn specified_amount(&self) -> Option<U256> {
-        self.amount_in.or(self.amount_out)
+    pub fn specified_amount(&self) -> Option<BigUint> {
+        self.amount_in.clone().or_else(|| self.amount_out.clone())
     }
 
     /// Returns the effective receiver address.
@@ -73,7 +74,7 @@ impl Order {
     /// Validates the order structure.
     pub fn validate(&self) -> Result<(), OrderValidationError> {
         // Must have exactly one of amount_in or amount_out
-        match (self.amount_in, self.amount_out) {
+        match (self.amount_in.as_ref(), self.amount_out.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(OrderValidationError::BothAmountsSpecified);
             }

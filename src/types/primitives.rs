@@ -1,6 +1,6 @@
 //! Primitive types used throughout the solver.
 
-use alloy::primitives::U256;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tycho_common::models::Address;
@@ -55,15 +55,15 @@ impl fmt::Display for ProtocolSystem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559)
-    pub base_fee: U256,
+    pub base_fee: BigUint,
     /// Priority fee per gas (EIP-1559)
-    pub priority_fee: U256,
+    pub priority_fee: BigUint,
     /// Timestamp when this price was fetched
     pub timestamp_ms: u64,
 }
 
 impl GasPrice {
-    pub fn new(base_fee: U256, priority_fee: U256) -> Self {
+    pub fn new(base_fee: BigUint, priority_fee: BigUint) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -77,8 +77,8 @@ impl GasPrice {
     }
 
     /// Returns the effective gas price (base + priority).
-    pub fn effective_gas_price(&self) -> U256 {
-        self.base_fee + self.priority_fee
+    pub fn effective_gas_price(&self) -> BigUint {
+        &self.base_fee + &self.priority_fee
     }
 
     /// Check if this gas price is stale (older than threshold).
@@ -95,7 +95,10 @@ impl GasPrice {
 impl Default for GasPrice {
     fn default() -> Self {
         // Default to 20 gwei base + 1 gwei priority
-        Self::new(U256::from(20_000_000_000u64), U256::from(1_000_000_000u64))
+        Self::new(
+            BigUint::from(20_000_000_000u64),
+            BigUint::from(1_000_000_000u64),
+        )
     }
 }
 

@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::U256;
+use num_bigint::BigUint;
 use petgraph::graph::UnGraph;
 use tycho_common::models::Address;
 
@@ -49,14 +49,14 @@ impl MostLiquidAlgorithm {
         &self,
         _path: &Path,
         _market: &SharedMarketData,
-        amount_in: U256,
+        amount_in: BigUint,
     ) -> Result<SimulationResult, AlgorithmError> {
         // TODO: Implement actual simulation
         // For now, return a placeholder that assumes 0.3% fee per hop
         let hops = _path.hop_count() as u32;
-        let fee_multiplier = U256::from(997).pow(U256::from(hops));
-        let divisor = U256::from(1000).pow(U256::from(hops));
-        let amount_out = amount_in * fee_multiplier / divisor;
+        let fee_multiplier = BigUint::from(997u32).pow(hops);
+        let divisor = BigUint::from(1000u32).pow(hops);
+        let amount_out = &amount_in * &fee_multiplier / &divisor;
 
         // Estimate gas based on protocols in path
         let gas_estimate: u64 = _path
@@ -67,7 +67,7 @@ impl MostLiquidAlgorithm {
 
         Ok(SimulationResult {
             amount_out,
-            gas_estimate: U256::from(gas_estimate),
+            gas_estimate: BigUint::from(gas_estimate),
         })
     }
 
@@ -76,10 +76,10 @@ impl MostLiquidAlgorithm {
         &self,
         path: &Path,
         market: &SharedMarketData,
-        amount_in: U256,
+        amount_in: BigUint,
     ) -> Result<Route, AlgorithmError> {
         // Simulate to get amounts
-        let sim_result = self.simulate_path(path, market, amount_in)?;
+        let sim_result = self.simulate_path(path, market, amount_in.clone())?;
 
         // Build swaps
         // TODO: Calculate intermediate amounts properly
@@ -92,10 +92,10 @@ impl MostLiquidAlgorithm {
 
             // Placeholder: distribute output evenly for now
             let amount_out = if i == path.edges.len() - 1 {
-                sim_result.amount_out
+                sim_result.amount_out.clone()
             } else {
                 // Estimate intermediate amount
-                current_amount * U256::from(997) / U256::from(1000)
+                &current_amount * BigUint::from(997u32) / BigUint::from(1000u32)
             };
 
             swaps.push(Swap {
@@ -103,9 +103,9 @@ impl MostLiquidAlgorithm {
                 protocol: edge.protocol_system,
                 token_in,
                 token_out,
-                amount_in: current_amount,
-                amount_out,
-                gas_estimate: U256::from(edge.protocol_system.typical_gas_cost()),
+                amount_in: current_amount.clone(),
+                amount_out: amount_out.clone(),
+                gas_estimate: BigUint::from(edge.protocol_system.typical_gas_cost()),
             });
 
             current_amount = amount_out;
@@ -143,7 +143,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
         let amount_in = order
             .amount_in
-            .ok_or_else(|| AlgorithmError::Other("missing amount_in".to_string()))?;
+            .as_ref()
+            .ok_or_else(|| AlgorithmError::Other("missing amount_in".to_string()))?
+            .clone();
 
         // Find all paths using BFS
         let paths = self.find_paths(graph, &order.token_in, &order.token_out);
@@ -159,7 +161,7 @@ impl Algorithm for MostLiquidAlgorithm {
         let gas_price = market.gas_price().effective_gas_price();
 
         // Simulate and rank paths
-        let mut best_route: Option<(Route, U256)> = None;
+        let mut best_route: Option<(Route, BigUint)> = None;
 
         for path in &paths {
             // Check timeout
@@ -173,15 +175,19 @@ impl Algorithm for MostLiquidAlgorithm {
             }
 
             // Simulate path
-            let sim_result = match self.simulate_path(path, market, amount_in) {
+            let sim_result = match self.simulate_path(path, market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(_) => continue, // Skip paths that fail simulation
             };
 
             // Calculate net output (output - gas cost)
             // TODO: Convert gas cost to output token terms using price oracle
-            let gas_cost_wei = sim_result.gas_estimate * gas_price;
-            let net_output = sim_result.amount_out.saturating_sub(gas_cost_wei);
+            let gas_cost_wei = &sim_result.gas_estimate * &gas_price;
+            let net_output = if sim_result.amount_out > gas_cost_wei {
+                &sim_result.amount_out - &gas_cost_wei
+            } else {
+                BigUint::ZERO
+            };
 
             // Update best if this is better
             let is_better = best_route
@@ -190,7 +196,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 .unwrap_or(true);
 
             if is_better {
-                if let Ok(route) = self.path_to_route(path, market, amount_in) {
+                if let Ok(route) = self.path_to_route(path, market, amount_in.clone()) {
                     best_route = Some((route, net_output));
                 }
             }
@@ -291,6 +297,6 @@ impl MostLiquidAlgorithm {
 
 /// Result of simulating a path.
 struct SimulationResult {
-    amount_out: U256,
-    gas_estimate: U256,
+    amount_out: BigUint,
+    gas_estimate: BigUint,
 }

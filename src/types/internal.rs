@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use alloy::primitives::U256;
+use num_bigint::BigUint;
 use tokio::sync::oneshot;
 
 use super::{Solution, SolutionRequest};
@@ -62,7 +62,7 @@ pub enum SolveError {
 
     /// Insufficient liquidity for the requested amount.
     #[error("insufficient liquidity: need {required}, have {available}")]
-    InsufficientLiquidity { required: U256, available: U256 },
+    InsufficientLiquidity { required: BigUint, available: BigUint },
 
     /// Solving timed out.
     #[error("solve timeout after {elapsed_ms}ms")]

@@ -15,6 +15,7 @@ use crate::events::MarketEvent;
 use crate::graph::GraphManager;
 use crate::market_data::SharedMarketDataRef;
 use crate::types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError};
+use num_bigint::BigUint;
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
@@ -150,9 +151,9 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: String::new(),
                 });
@@ -168,8 +169,16 @@ where
             let order_solution = match result {
                 Ok(route) => {
                     let gas_estimate = route.total_gas();
-                    let amount_in = route.swaps.first().map(|s| s.amount_in).unwrap_or_default();
-                    let amount_out = route.swaps.last().map(|s| s.amount_out).unwrap_or_default();
+                    let amount_in = route
+                        .swaps
+                        .first()
+                        .map(|s| s.amount_in.clone())
+                        .unwrap_or_else(|| BigUint::ZERO);
+                    let amount_out = route
+                        .swaps
+                        .last()
+                        .map(|s| s.amount_out.clone())
+                        .unwrap_or_else(|| BigUint::ZERO);
 
                     OrderSolution {
                         order_id: order.id.clone(),
@@ -186,9 +195,9 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -196,9 +205,9 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::InsufficientLiquidity,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -206,9 +215,9 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::Timeout,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -216,9 +225,9 @@ where
                     order_id: order.id.clone(),
                     status: OrderStatus::NoRouteFound,
                     route: None,
-                    amount_in: order.amount_in.unwrap_or_default(),
-                    amount_out: alloy::primitives::U256::ZERO,
-                    gas_estimate: alloy::primitives::U256::ZERO,
+                    amount_in: order.amount_in.clone().unwrap_or_default(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     algorithm: self.algorithm.name().to_string(),
                 },
@@ -230,8 +239,8 @@ where
         // Calculate totals
         let total_gas_estimate = order_solutions
             .iter()
-            .map(|o| o.gas_estimate)
-            .fold(alloy::primitives::U256::ZERO, |acc, g| acc + g);
+            .map(|o| &o.gas_estimate)
+            .fold(BigUint::ZERO, |acc, g| acc + g);
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
