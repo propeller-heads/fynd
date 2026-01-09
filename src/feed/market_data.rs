@@ -64,7 +64,9 @@ impl SharedMarketData {
             tokens: HashMap::new(),
             component_topology: HashMap::new(),
             gas_price: GasPrice::default(),
-            gas_constants: GAS_COST_PER_SWAP.clone(),
+            gas_constants: GAS_COST_PER_SWAP.clone(), /* TODO: maybe we want a way to override
+                                                       * this? if not we can use the constants
+                                                       * directly in the algorithm. */
             last_updated: Block::default(),
         }
     }
