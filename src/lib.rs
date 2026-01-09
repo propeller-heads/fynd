@@ -94,6 +94,5 @@ pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     ComponentId, GasPrice, HealthStatus, Order, OrderSolution, OrderStatus, ProtocolSystem, Route,
     Solution, SolutionOptions, SolutionRequest, SolveError, SolveResult, SolveTask, Swap, TaskId,
-    Token,
 };
 pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

@@ -6779,6 +6779,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossbeam-channel",
+ "lazy_static",
  "num-bigint",
  "num-traits",
  "num_cpus",

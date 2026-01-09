@@ -8,9 +8,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::RwLock;
-use tycho_simulation::tycho_core::{dto::Block, models::Address};
+use tycho_simulation::tycho_core::{
+    dto::Block,
+    models::{protocol::ProtocolComponent, token::Token, Address},
+    simulation::protocol_sim::ProtocolSim,
+};
 
-use crate::types::{ComponentId, GasPrice, ProtocolSystem, Token};
+use crate::types::{constants::GAS_COST_PER_SWAP, ComponentId, GasPrice, ProtocolSystem};
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -24,6 +28,7 @@ pub fn new_shared_market_data() -> SharedMarketDataRef {
 ///
 /// This struct is the single source of truth for market data.
 /// The indexer updates it, and solvers read from it.
+#[derive(Debug, Default)]
 pub struct SharedMarketData {
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ComponentData>,
@@ -34,74 +39,34 @@ pub struct SharedMarketData {
     component_topology: HashMap<ComponentId, Vec<Address>>,
     /// Current gas price.
     gas_price: GasPrice,
-    /// Gas costs per protocol system.
+    /// Average gas cost per swap on protocol system.
     gas_constants: HashMap<ProtocolSystem, u64>,
     /// When the data was last updated.
     last_updated: Block,
 }
 
 /// Data for a single component.
+#[derive(Debug)]
 pub struct ComponentData {
     /// Unique identifier.
     pub id: ComponentId,
-    /// Protocol component (from Tycho).
-    /// TODO: Replace with actual ProtocolComponent type from tycho-simulation
+    /// Protocol component information.
     pub component: ProtocolComponent,
-    /// Protocol simulation state (from Tycho).
-    /// TODO: Replace with actual Box<dyn ProtocolSim> from tycho-simulation
-    pub state: ProtocolState,
+    /// Protocol simulation object.
+    pub state: Box<dyn ProtocolSim>,
     /// Tokens in this component.
     pub tokens: Vec<Token>,
-    /// Protocol system for gas estimation.
-    pub protocol_system: ProtocolSystem,
-}
-
-/// Placeholder for Tycho's ProtocolComponent.
-/// TODO: Replace with actual type from tycho-simulation crate.
-#[derive(Debug, Clone)]
-pub struct ProtocolComponent {
-    pub id: String,
-    pub protocol: String,
-    pub tokens: Vec<Address>,
-}
-
-/// Placeholder for Tycho's ProtocolSim state.
-/// TODO: Replace with actual Box<dyn ProtocolSim> from tycho-simulation crate.
-pub struct ProtocolState {
-    // Placeholder - will contain actual simulation state
-    _data: Vec<u8>,
-}
-
-impl ProtocolState {
-    pub fn new() -> Self {
-        Self { _data: vec![] }
-    }
-}
-
-impl Default for ProtocolState {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl SharedMarketData {
     /// Creates a new empty SharedMarketData.
     pub fn new() -> Self {
-        let mut gas_constants = HashMap::new();
-        // Initialize default gas costs
-        gas_constants.insert(ProtocolSystem::UniswapV2, 100_000);
-        gas_constants.insert(ProtocolSystem::UniswapV3, 150_000);
-        gas_constants.insert(ProtocolSystem::SushiSwap, 100_000);
-        gas_constants.insert(ProtocolSystem::Curve, 200_000);
-        gas_constants.insert(ProtocolSystem::Balancer, 150_000);
-        gas_constants.insert(ProtocolSystem::Other, 150_000);
-
         Self {
             components: HashMap::new(),
             tokens: HashMap::new(),
             component_topology: HashMap::new(),
             gas_price: GasPrice::default(),
-            gas_constants,
+            gas_constants: GAS_COST_PER_SWAP.clone(),
             last_updated: Block::default(),
         }
     }
@@ -182,16 +147,16 @@ impl SharedMarketData {
     }
 
     /// Inserts or updates a component.
-    pub fn insert_component(&mut self, component: ComponentData) {
-        let component_id = component.id.clone();
-        let tokens: Vec<Address> = component
+    pub fn insert_component(&mut self, component_data: ComponentData) {
+        let component_id = component_data.id.clone();
+        let tokens: Vec<Address> = component_data
             .tokens
             .iter()
             .map(|t| t.address.clone())
             .collect();
 
         // Update tokens map
-        for token in &component.tokens {
+        for token in &component_data.tokens {
             self.tokens
                 .entry(token.address.clone())
                 .or_insert_with(|| token.clone());
@@ -203,7 +168,7 @@ impl SharedMarketData {
 
         // Store component data
         self.components
-            .insert(component_id, component);
+            .insert(component_id, component_data);
 
         self.last_updated = Block::default();
     }
@@ -217,9 +182,9 @@ impl SharedMarketData {
     }
 
     /// Updates a component's state.
-    pub fn update_state(&mut self, id: &ComponentId, state: ProtocolState) {
-        if let Some(component) = self.components.get_mut(id) {
-            component.state = state;
+    pub fn update_state(&mut self, id: &ComponentId, state: Box<dyn ProtocolSim>) {
+        if let Some(component_data) = self.components.get_mut(id) {
+            component_data.state = state;
             self.last_updated = Block::default();
         }
     }
@@ -233,11 +198,5 @@ impl SharedMarketData {
     /// Updates gas constants for a protocol.
     pub fn set_gas_constant(&mut self, protocol: ProtocolSystem, gas: u64) {
         self.gas_constants.insert(protocol, gas);
-    }
-}
-
-impl Default for SharedMarketData {
-    fn default() -> Self {
-        Self::new()
     }
 }

@@ -93,7 +93,10 @@ impl MostLiquidAlgorithm {
             let protocol_system = market
                 .get_component(&edge.component_id)
                 .unwrap()
-                .protocol_system;
+                .component
+                .protocol_system
+                .as_str()
+                .into();
 
             swaps.push(Swap {
                 component_id: edge.component_id.clone(),

@@ -198,12 +198,12 @@ impl TychoFeed {
             .components()
             .map(|(id, data)| ComponentSummary {
                 id: id.clone(),
-                tokens: data
-                    .tokens
-                    .iter()
-                    .map(|t| t.address.clone())
-                    .collect(),
-                protocol_system: data.protocol_system,
+                tokens: data.component.tokens.clone(),
+                protocol_system: data
+                    .component
+                    .protocol_system
+                    .as_str()
+                    .into(),
             })
             .collect();
 
