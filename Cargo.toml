@@ -31,7 +31,7 @@ tracing-actix-web = "0.7"
 
 # Tycho
 tycho-common = ">=0.123.0"
-# tycho-simulation = ">=0.226.1"
+tycho-simulation = ">=0.226.1"
 
 # Graph algorithms
 petgraph = "0.6"
