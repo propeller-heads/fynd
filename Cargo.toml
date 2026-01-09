@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 criterion = "0.5"
+rstest = "0.18"
 
 # Benchmarks (uncomment when ready)
 # [[bench]]

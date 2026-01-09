@@ -347,3 +347,298 @@ impl Swap {
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn make_address(byte: u8) -> Address {
+        Address::from([byte; 20])
+    }
+
+    fn make_order(token_in_byte: u8, token_out_byte: u8, amount: u64) -> Order {
+        Order {
+            id: generate_order_id(),
+            token_in: make_address(token_in_byte),
+            token_out: make_address(token_out_byte),
+            amount: BigUint::from(amount),
+            kind: OrderKind::Sell,
+            sender: make_address(0xAA),
+            receiver: None,
+        }
+    }
+
+    fn make_swap(token_in_byte: u8, token_out_byte: u8, amount_in: u64, amount_out: u64) -> Swap {
+        Swap {
+            component_id: "pool-1".to_string(),
+            protocol: ProtocolSystem::UniswapV2,
+            token_in: make_address(token_in_byte),
+            token_out: make_address(token_out_byte),
+            amount_in: BigUint::from(amount_in),
+            amount_out: BigUint::from(amount_out),
+            gas_estimate: BigUint::from(100_000u64),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Order Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_order_is_sell() {
+        let order = make_order(0x01, 0x02, 1000);
+        assert!(order.is_sell());
+    }
+
+    #[rstest]
+    #[case::with_receiver(Some(0xBB), 0xBB)]
+    #[case::without_receiver(None, 0xAA)]
+    fn test_order_effective_receiver(#[case] receiver: Option<u8>, #[case] expected: u8) {
+        let mut order = make_order(0x01, 0x02, 1000);
+        order.receiver = receiver.map(make_address);
+        assert_eq!(order.effective_receiver(), make_address(expected));
+    }
+
+    #[rstest]
+    #[case::valid(0x01, 0x02, 1000, true, None)]
+    #[case::same_tokens(0x01, 0x01, 1000, false, Some("SameTokens"))]
+    #[case::zero_amount(0x01, 0x02, 0, false, Some("ZeroAmount"))]
+    fn test_order_validation(
+        #[case] token_in: u8,
+        #[case] token_out: u8,
+        #[case] amount: u64,
+        #[case] should_pass: bool,
+        #[case] error_type: Option<&str>,
+    ) {
+        let order = make_order(token_in, token_out, amount);
+        let result = order.validate();
+
+        assert_eq!(result.is_ok(), should_pass);
+        if let Some(err_name) = error_type {
+            let err = result.unwrap_err();
+            match err_name {
+                "SameTokens" => assert!(matches!(err, OrderValidationError::SameTokens)),
+                "ZeroAmount" => assert!(matches!(err, OrderValidationError::ZeroAmount)),
+                _ => panic!("Unknown error type"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_order_id_auto_generated() {
+        let id = generate_order_id();
+        assert!(!id.is_empty());
+        assert!(id.contains('-')); // UUIDs contain dashes
+    }
+
+    // -------------------------------------------------------------------------
+    // Route Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case::empty(vec![], 0)]
+    #[case::single(vec![(0x01, 0x02)], 1)]
+    #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], 2)]
+    #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], 3)]
+    fn test_route_hop_count(#[case] swaps: Vec<(u8, u8)>, #[case] expected: usize) {
+        let route = Route::new(
+            swaps
+                .into_iter()
+                .map(|(a, b)| make_swap(a, b, 1000, 990))
+                .collect(),
+        );
+        assert_eq!(route.hop_count(), expected);
+    }
+
+    #[rstest]
+    #[case::empty(vec![], None)]
+    #[case::single(vec![(0x01, 0x02)], Some(0x01))]
+    #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x01))]
+    fn test_route_input_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
+        let route = Route::new(
+            swaps
+                .into_iter()
+                .map(|(a, b)| make_swap(a, b, 1000, 990))
+                .collect(),
+        );
+        assert_eq!(route.input_token(), expected.map(make_address));
+    }
+
+    #[rstest]
+    #[case::empty(vec![], None)]
+    #[case::single(vec![(0x01, 0x02)], Some(0x02))]
+    #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x03))]
+    fn test_route_output_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
+        let route = Route::new(
+            swaps
+                .into_iter()
+                .map(|(a, b)| make_swap(a, b, 1000, 990))
+                .collect(),
+        );
+        assert_eq!(route.output_token(), expected.map(make_address));
+    }
+
+    #[rstest]
+    #[case::empty(vec![], vec![])]
+    #[case::single(vec![(0x01, 0x02)], vec![])]
+    #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], vec![0x02])]
+    #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], vec![0x02, 0x03])]
+    fn test_route_intermediate_tokens(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Vec<u8>) {
+        let route = Route::new(
+            swaps
+                .into_iter()
+                .map(|(a, b)| make_swap(a, b, 1000, 990))
+                .collect(),
+        );
+        let intermediates = route.intermediate_tokens();
+        assert_eq!(
+            intermediates,
+            expected
+                .into_iter()
+                .map(make_address)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest]
+    #[case::empty(0, 0u64)]
+    #[case::single(1, 100_000u64)]
+    #[case::two_swaps(2, 200_000u64)]
+    #[case::three_swaps(3, 300_000u64)]
+    fn test_route_total_gas(#[case] num_swaps: usize, #[case] expected_gas: u64) {
+        let swaps: Vec<Swap> = (0..num_swaps)
+            .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
+            .collect();
+        let route = Route::new(swaps);
+        assert_eq!(route.total_gas(), BigUint::from(expected_gas));
+    }
+
+    #[rstest]
+    #[case::valid_single(vec![(0x01, 0x02)], true, None)]
+    #[case::valid_connected(vec![(0x01, 0x02), (0x02, 0x03)], true, None)]
+    #[case::empty(vec![], false, Some("EmptyRoute"))]
+    #[case::disconnected(vec![(0x01, 0x02), (0x03, 0x04)], false, Some("DisconnectedSwaps"))]
+    fn test_route_validation(
+        #[case] swaps: Vec<(u8, u8)>,
+        #[case] should_pass: bool,
+        #[case] error_type: Option<&str>,
+    ) {
+        let route = Route::new(
+            swaps
+                .into_iter()
+                .map(|(a, b)| make_swap(a, b, 1000, 990))
+                .collect(),
+        );
+        let result = route.validate();
+
+        assert_eq!(result.is_ok(), should_pass);
+        if let Some(err_name) = error_type {
+            let err = result.unwrap_err();
+            match err_name {
+                "EmptyRoute" => assert!(matches!(err, RouteValidationError::EmptyRoute)),
+                "DisconnectedSwaps" => {
+                    assert!(matches!(err, RouteValidationError::DisconnectedSwaps { .. }))
+                }
+                _ => panic!("Unknown error type"),
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Serialization Tests - BigUint as String
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_order_serializes_amount_as_string() {
+        let order = make_order(0x01, 0x02, 1_000_000_000_000_000_000);
+        let json = serde_json::to_string(&order).unwrap();
+
+        assert!(json.contains(r#""amount":"1000000000000000000""#));
+        assert!(!json.contains(r#""amount":1000000000000000000"#));
+    }
+
+    #[test]
+    fn test_order_deserializes_amount_from_string() {
+        let json = r#"{
+            "token_in": "0x0101010101010101010101010101010101010101",
+            "token_out": "0x0202020202020202020202020202020202020202",
+            "amount": "1000000000000000000",
+            "kind": "sell",
+            "sender": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }"#;
+
+        let order: Order = serde_json::from_str(json).unwrap();
+        assert_eq!(order.amount, BigUint::from(1_000_000_000_000_000_000u64));
+    }
+
+    #[test]
+    fn test_swap_serializes_amounts_as_strings() {
+        let swap = make_swap(0x01, 0x02, 1_000_000_000, 999_000_000);
+        let json = serde_json::to_string(&swap).unwrap();
+
+        assert!(json.contains(r#""amount_in":"1000000000""#));
+        assert!(json.contains(r#""amount_out":"999000000""#));
+        assert!(json.contains(r#""gas_estimate":"100000""#));
+    }
+
+    #[test]
+    fn test_swap_deserializes_amounts_from_strings() {
+        let json = r#"{
+            "component_id": "pool-1",
+            "protocol": "uniswap_v2",
+            "token_in": "0x0101010101010101010101010101010101010101",
+            "token_out": "0x0202020202020202020202020202020202020202",
+            "amount_in": "1000000000000000000",
+            "amount_out": "999000000000000000",
+            "gas_estimate": "150000"
+        }"#;
+
+        let swap: Swap = serde_json::from_str(json).unwrap();
+        assert_eq!(swap.amount_in, BigUint::from(1_000_000_000_000_000_000u64));
+        assert_eq!(swap.amount_out, BigUint::from(999_000_000_000_000_000u64));
+        assert_eq!(swap.gas_estimate, BigUint::from(150_000u64));
+    }
+
+    #[test]
+    fn test_large_amounts_serialize_correctly() {
+        // 2^256 - 1, larger than JS safe integer (2^53 - 1)
+        let large_amount = BigUint::parse_bytes(
+            b"115792089237316195423570985008687907853269984665640564039457584007913129639935",
+            10,
+        )
+        .unwrap();
+
+        let order = Order {
+            id: "test".to_string(),
+            token_in: make_address(0x01),
+            token_out: make_address(0x02),
+            amount: large_amount.clone(),
+            kind: OrderKind::Sell,
+            sender: make_address(0xAA),
+            receiver: None,
+        };
+
+        let json = serde_json::to_string(&order).unwrap();
+        assert!(json.contains(
+            r#""amount":"115792089237316195423570985008687907853269984665640564039457584007913129639935""#
+        ));
+
+        // Round-trip preserves value
+        let deserialized: Order = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.amount, large_amount);
+    }
+
+    #[test]
+    fn test_solution_serializes_amounts_as_strings() {
+        let solution = Solution {
+            orders: vec![],
+            total_gas_estimate: BigUint::from(500_000u64),
+            solve_time_ms: 10,
+        };
+
+        let json = serde_json::to_string(&solution).unwrap();
+        assert!(json.contains(r#""total_gas_estimate":"500000""#));
+    }
+}
