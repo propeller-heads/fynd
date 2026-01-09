@@ -48,8 +48,6 @@ pub struct SharedMarketData {
 /// Data for a single component.
 #[derive(Debug)]
 pub struct ComponentData {
-    /// Unique identifier.
-    pub id: ComponentId,
     /// Protocol component information.
     pub component: ProtocolComponent,
     /// Protocol simulation object.
@@ -148,7 +146,7 @@ impl SharedMarketData {
 
     /// Inserts or updates a component.
     pub fn insert_component(&mut self, component_data: ComponentData) {
-        let component_id = component_data.id.clone();
+        let component_id = component_data.component.id.clone();
         let tokens: Vec<Address> = component_data
             .tokens
             .iter()
