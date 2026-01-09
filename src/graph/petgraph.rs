@@ -78,8 +78,9 @@ impl GraphManager<UnGraph<Address, ComponentId>> for PetgraphUnGraphManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     /// Helper function to create a test address from a hex string.
     fn addr(s: &str) -> Address {
