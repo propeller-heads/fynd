@@ -15,9 +15,8 @@ pub use most_liquid::MostLiquidAlgorithm;
 use crate::{
     feed::market_data::SharedMarketData,
     graph::GraphManager,
-    types::Route,
+    types::{solution::Order, Route},
 };
-use crate::types::solution::Order;
 
 /// Trait for route-finding algorithms.
 ///

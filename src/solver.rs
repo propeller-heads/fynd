@@ -15,9 +15,10 @@ use crate::{
     algorithm::{Algorithm, AlgorithmError},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     graph::GraphManager,
-    types::{BlockInfo, OrderSolution, SolutionStatus, Solution, SolveError},
+    types::{
+        solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
+    },
 };
-use crate::types::solution::SolutionRequest;
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
@@ -176,7 +177,9 @@ where
             let graph = self.graph_manager.graph();
 
             // Find route using algorithm
-            let result = self.algorithm.find_best_route(graph, &market, order);
+            let result = self
+                .algorithm
+                .find_best_route(graph, &market, order);
 
             let order_solution = match result {
                 Ok(route) => {

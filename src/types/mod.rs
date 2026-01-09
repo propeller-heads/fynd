@@ -14,18 +14,25 @@ pub mod serde_helpers;
 pub mod solution;
 
 // Re-export primitive types
-pub use primitives::*;
-
-// Re-export internal types
-pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
-
 // Re-export API types
 pub use api::HealthStatus;
-
+// Re-export internal types
+pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
+pub use primitives::*;
 // Re-export public solution types
 pub use solution::{
-    // Request types
-    Order, OrderKind, OrderValidationError, SolutionOptions, SolutionRequest,
     // Response types
-    BlockInfo, OrderSolution, SolutionStatus, Route, RouteValidationError, Solution, Swap,
+    BlockInfo,
+    // Request types
+    Order,
+    OrderKind,
+    OrderSolution,
+    OrderValidationError,
+    Route,
+    RouteValidationError,
+    Solution,
+    SolutionOptions,
+    SolutionRequest,
+    SolutionStatus,
+    Swap,
 };

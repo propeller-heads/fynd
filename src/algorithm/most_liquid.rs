@@ -16,10 +16,9 @@ use super::{Algorithm, AlgorithmError};
 use crate::{
     feed::market_data::SharedMarketData,
     graph::Path,
-    types::{Route, Swap},
+    types::{solution::Order, Route, Swap},
     ComponentId,
 };
-use crate::types::solution::Order;
 
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
