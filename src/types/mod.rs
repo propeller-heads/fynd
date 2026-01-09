@@ -7,6 +7,7 @@
 //! - `internal`: Internal task and error types
 
 pub mod api;
+pub mod constants;
 pub mod internal;
 pub mod primitives;
 pub mod solution;

@@ -4,7 +4,6 @@ use std::fmt;
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use tycho_simulation::tycho_core::models::Address;
 
 /// Unique identifier for a liquidity component.
 pub type ComponentId = String;
@@ -22,6 +21,19 @@ pub enum ProtocolSystem {
     Balancer,
     /// Custom or unknown protocol
     Other,
+}
+
+impl From<&str> for ProtocolSystem {
+    fn from(system: &str) -> Self {
+        match system {
+            "uniswap_v2" => ProtocolSystem::UniswapV2,
+            "uniswap_v3" => ProtocolSystem::UniswapV3,
+            "sushiswap" => ProtocolSystem::SushiSwap,
+            "vm:curve" => ProtocolSystem::Curve,
+            "vm:balancer" => ProtocolSystem::Balancer,
+            _ => ProtocolSystem::Other,
+        }
+    }
 }
 
 impl ProtocolSystem {
@@ -93,19 +105,5 @@ impl Default for GasPrice {
     fn default() -> Self {
         // Default to 20 gwei base + 1 gwei priority
         Self::new(BigUint::from(20_000_000_000u64), BigUint::from(1_000_000_000u64))
-    }
-}
-
-/// Token information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Token {
-    pub address: Address,
-    pub symbol: String,
-    pub decimals: u8,
-}
-
-impl Token {
-    pub fn new(address: Address, symbol: impl Into<String>, decimals: u8) -> Self {
-        Self { address, symbol: symbol.into(), decimals }
     }
 }
