@@ -8,7 +8,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::RwLock;
-use tycho_common::{dto::Block, models::Address};
+use tycho_simulation::tycho_core::{dto::Block, models::Address};
 
 use crate::types::{ComponentId, GasPrice, ProtocolSystem, Token};
 

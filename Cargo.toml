@@ -30,7 +30,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-actix-web = "0.7"
 
 # Tycho
-tycho-common = ">=0.123.0"
 tycho-simulation = ">=0.226.1"
 
 # Graph algorithms

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use petgraph::Graph;
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 use super::GraphManager;
 use crate::{feed::events::MarketEvent, types::ComponentId};

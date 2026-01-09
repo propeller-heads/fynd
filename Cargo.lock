@@ -6790,7 +6790,6 @@ dependencies = [
  "tracing",
  "tracing-actix-web",
  "tracing-subscriber 0.3.22",
- "tycho-common",
  "tycho-simulation",
 ]
 

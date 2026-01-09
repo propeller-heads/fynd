@@ -9,7 +9,7 @@ pub mod petgraph;
 use std::collections::HashMap;
 
 pub use petgraph::PetgraphUnGraphManager;
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 use crate::{feed::events::MarketEvent, types::ComponentId};
 

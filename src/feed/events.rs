@@ -3,7 +3,7 @@
 //! The indexer broadcasts these events when market data changes.
 //! Solvers subscribe to these events to keep their local graph in sync.
 
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 use crate::types::{ComponentId, GasPrice, ProtocolSystem};
 
