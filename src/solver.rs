@@ -15,8 +15,9 @@ use crate::{
     algorithm::{Algorithm, AlgorithmError},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     graph::GraphManager,
-    types::{BlockInfo, OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError},
+    types::{BlockInfo, OrderSolution, SolutionStatus, Solution, SolveError},
 };
+use crate::types::solution::SolutionRequest;
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
@@ -159,10 +160,10 @@ where
             if let Err(_e) = order.validate() {
                 order_solutions.push(OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    sell_amount: order.amount.clone(),
-                    buy_amount: BigUint::ZERO,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info.clone(),
@@ -193,10 +194,10 @@ where
 
                     OrderSolution {
                         order_id: order.id.clone(),
-                        status: OrderStatus::Success,
+                        status: SolutionStatus::Success,
                         route: Some(route),
-                        sell_amount: amount_in,
-                        buy_amount: amount_out,
+                        amount_in,
+                        amount_out,
                         gas_estimate,
                         price_impact_bps: None, // TODO: Calculate price impact
                         block: block_info.clone(),
@@ -205,10 +206,10 @@ where
                 }
                 Err(AlgorithmError::NoPath { .. }) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    sell_amount: order.amount.clone(),
-                    buy_amount: BigUint::ZERO,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info.clone(),
@@ -216,10 +217,10 @@ where
                 },
                 Err(AlgorithmError::InsufficientLiquidity) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::InsufficientLiquidity,
+                    status: SolutionStatus::InsufficientLiquidity,
                     route: None,
-                    sell_amount: order.amount.clone(),
-                    buy_amount: BigUint::ZERO,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info.clone(),
@@ -227,10 +228,10 @@ where
                 },
                 Err(AlgorithmError::Timeout { .. }) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::Timeout,
+                    status: SolutionStatus::Timeout,
                     route: None,
-                    sell_amount: order.amount.clone(),
-                    buy_amount: BigUint::ZERO,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info.clone(),
@@ -238,10 +239,10 @@ where
                 },
                 Err(_) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    sell_amount: order.amount.clone(),
-                    buy_amount: BigUint::ZERO,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info.clone(),

@@ -5,8 +5,8 @@ use std::time::Instant;
 use num_bigint::BigUint;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-
-use super::{Solution, SolutionRequest};
+use crate::types::solution::SolutionRequest;
+use super::Solution;
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;

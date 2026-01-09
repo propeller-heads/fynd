@@ -7,7 +7,8 @@
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::types::{Solution, SolutionRequest, SolveError, SolveTask};
+use crate::types::{Solution, SolveError, SolveTask};
+use crate::types::solution::SolutionRequest;
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]

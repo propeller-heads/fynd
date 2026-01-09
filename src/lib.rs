@@ -93,7 +93,10 @@ pub use graph::{GraphManager, Path};
 pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
-    ComponentId, GasPrice, HealthStatus, Order, OrderSolution, OrderStatus, ProtocolSystem, Route,
-    Solution, SolutionOptions, SolutionRequest, SolveError, SolveResult, SolveTask, Swap, TaskId,
+    ComponentId, GasPrice, HealthStatus, OrderSolution, SolutionStatus, ProtocolSystem, Route,
+    Solution, SolveError, SolveResult, SolveTask, Swap, TaskId,
 };
+pub use types::solution::Order;
+pub use types::solution::SolutionOptions;
+pub use types::solution::SolutionRequest;
 pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};
