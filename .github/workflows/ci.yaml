@@ -73,4 +73,4 @@ jobs:
         with:
           tool: cargo-audit
       - name: Run security audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2025-0055 # The dependency relation is tycho-simulation <- revm <- ark-bn254 <- ark-r1cs-std <- ark-relations <- tracing-subscriber ^0.2 (which is the problematic version). We need ark to update their dependencies to fix this.
