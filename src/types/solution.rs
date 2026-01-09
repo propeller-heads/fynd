@@ -2,7 +2,7 @@
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 use super::primitives::{ComponentId, ProtocolSystem};
 

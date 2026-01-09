@@ -9,6 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info};
+use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     api::HealthTracker,
@@ -222,7 +223,7 @@ impl TychoFeed {
     async fn handle_component_added(
         &self,
         id: ComponentId,
-        tokens: Vec<tycho_common::models::Address>,
+        tokens: Vec<Address>,
         protocol_system: ProtocolSystem,
     ) -> Result<(), TychoFeedError> {
         // Update shared market data

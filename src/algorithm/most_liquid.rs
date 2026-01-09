@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use petgraph::graph::UnGraph;
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 use super::{Algorithm, AlgorithmError};
 use crate::{

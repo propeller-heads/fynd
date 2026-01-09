@@ -3,7 +3,7 @@
 use num_bigint::BigUint;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
-use tycho_common::models::Address;
+use tycho_simulation::tycho_core::models::Address;
 
 /// Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
