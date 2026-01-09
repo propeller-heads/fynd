@@ -5,6 +5,8 @@ use std::fmt;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
+use super::serde_helpers::biguint_as_string;
+
 /// Unique identifier for a liquidity component.
 pub type ComponentId = String;
 
@@ -19,8 +21,6 @@ pub enum ProtocolSystem {
     SushiSwap,
     Curve,
     Balancer,
-    /// Custom or unknown protocol
-    Other,
 }
 
 impl From<&str> for ProtocolSystem {
@@ -46,7 +46,6 @@ impl ProtocolSystem {
             ProtocolSystem::SushiSwap => 100_000,
             ProtocolSystem::Curve => 200_000,
             ProtocolSystem::Balancer => 150_000,
-            ProtocolSystem::Other => 150_000,
         }
     }
 }
@@ -59,7 +58,6 @@ impl fmt::Display for ProtocolSystem {
             ProtocolSystem::SushiSwap => write!(f, "sushiswap"),
             ProtocolSystem::Curve => write!(f, "curve"),
             ProtocolSystem::Balancer => write!(f, "balancer"),
-            ProtocolSystem::Other => write!(f, "other"),
         }
     }
 }
@@ -68,8 +66,10 @@ impl fmt::Display for ProtocolSystem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559)
+    #[serde(with = "biguint_as_string")]
     pub base_fee: BigUint,
     /// Priority fee per gas (EIP-1559)
+    #[serde(with = "biguint_as_string")]
     pub priority_fee: BigUint,
     /// Timestamp when this price was fetched
     pub timestamp_ms: u64,

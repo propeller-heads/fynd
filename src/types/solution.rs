@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_core::models::Address;
 use uuid::Uuid;
 
-use super::primitives::{ComponentId, ProtocolSystem};
+use super::{
+    primitives::{ComponentId, ProtocolSystem},
+    serde_helpers::biguint_as_string,
+};
 
 // ============================================================================
 // REQUEST TYPES
@@ -56,7 +59,8 @@ pub struct Order {
     pub token_in: Address,
     /// Output token address (the token being bought).
     pub token_out: Address,
-    /// Amount to swap, interpreted according to `kind`.
+    /// Amount to swap, interpreted according to `kind` (in token units, as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub amount: BigUint,
     /// Whether this is a sell (exact input) or buy (exact output) order.
     pub kind: OrderKind,
@@ -136,7 +140,8 @@ pub enum OrderValidationError {
 pub struct Solution {
     /// Solutions for each order, in the same order as the request.
     pub orders: Vec<OrderSolution>,
-    /// Total estimated gas for executing all swaps.
+    /// Total estimated gas for executing all swaps (as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub total_gas_estimate: BigUint,
     /// Time taken to compute this solution, in milliseconds.
     pub solve_time_ms: u64,
@@ -155,11 +160,14 @@ pub struct OrderSolution {
     /// The route to execute, if a valid route was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<Route>,
-    /// Amount of input token.
+    /// Amount of input token (in token units, as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub amount_in: BigUint,
-    /// Amount of output token.
+    /// Amount of output token (in token units, as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub amount_out: BigUint,
-    /// Estimated gas cost for executing this route.
+    /// Estimated gas cost for executing this route (as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub gas_estimate: BigUint,
     /// Price impact in basis points (1 bp = 0.01%).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,12 +234,16 @@ impl Route {
 
     /// Returns the input token of the route (first swap's input).
     pub fn input_token(&self) -> Option<Address> {
-        self.swaps.first().map(|s| s.token_in.clone())
+        self.swaps
+            .first()
+            .map(|s| s.token_in.clone())
     }
 
     /// Returns the output token of the route (last swap's output).
     pub fn output_token(&self) -> Option<Address> {
-        self.swaps.last().map(|s| s.token_out.clone())
+        self.swaps
+            .last()
+            .map(|s| s.token_out.clone())
     }
 
     /// Returns intermediate tokens (excluding input and output).
@@ -285,10 +297,7 @@ pub enum RouteValidationError {
     #[error("route must contain at least one swap")]
     EmptyRoute,
     #[error("swaps are not connected: {first_out} != {second_in}")]
-    DisconnectedSwaps {
-        first_out: Address,
-        second_in: Address,
-    },
+    DisconnectedSwaps { first_out: Address, second_in: Address },
 }
 
 /// A single swap within a route.
@@ -304,11 +313,14 @@ pub struct Swap {
     pub token_in: Address,
     /// Output token address.
     pub token_out: Address,
-    /// Amount of input token.
+    /// Amount of input token (in token units, as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub amount_in: BigUint,
-    /// Amount of output token.
+    /// Amount of output token (in token units, as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub amount_out: BigUint,
-    /// Estimated gas cost for this swap.
+    /// Estimated gas cost for this swap (as decimal string).
+    #[serde(with = "biguint_as_string")]
     pub gas_estimate: BigUint,
 }
 
@@ -323,15 +335,7 @@ impl Swap {
         amount_out: BigUint,
     ) -> Self {
         let gas_estimate = BigUint::from(protocol.typical_gas_cost());
-        Self {
-            component_id,
-            protocol,
-            token_in,
-            token_out,
-            amount_in,
-            amount_out,
-            gas_estimate,
-        }
+        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
     }
 }
 
