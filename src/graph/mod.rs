@@ -8,10 +8,11 @@ pub mod petgraph;
 
 use std::collections::HashMap;
 
-pub use petgraph::PetgraphUnGraphManager;
+pub use petgraph::{EdgeData, PetgraphGraphManager};
+use thiserror::Error;
 use tycho_simulation::tycho_core::models::Address;
 
-use crate::{feed::events::MarketEvent, types::ComponentId};
+use crate::types::ComponentId;
 
 /// An edge in the market graph representing a possible hop.
 ///
@@ -68,9 +69,4 @@ where
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
-
-    /// Updates the graph based on a market event.
-    ///
-    /// This method is called by the solver when market events occur.
-    fn handle_event(&mut self, event: &MarketEvent);
 }

@@ -13,7 +13,10 @@ use tokio::sync::broadcast;
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
-    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    feed::{
+        events::{MarketEvent, MarketEventHandler},
+        market_data::SharedMarketDataRef,
+    },
     graph::GraphManager,
     types::{
         solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
@@ -43,7 +46,7 @@ pub struct SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType>,
+    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
 {
     /// Algorithm used for route finding.
     algorithm: A,
@@ -63,7 +66,7 @@ impl<A> SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType>,
+    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
 {
     /// Creates a new Solver.
     ///

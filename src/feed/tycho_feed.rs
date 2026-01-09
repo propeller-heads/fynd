@@ -174,8 +174,8 @@ impl TychoFeed {
 
     // #[allow(dead_code)]
     // /// Handles a state update event from Tycho.
-    // async fn handle_state_updated(&self, component_id: ComponentId) -> Result<(), TychoFeedError> {
-    //     // TODO: Update component state in market_data
+    // async fn handle_state_updated(&self, component_id: ComponentId) -> Result<(), TychoFeedError>
+    // {     // TODO: Update component state in market_data
     //     // The actual state (reserves, etc.) would come from Tycho
 
     //     // Update health tracker
