@@ -54,7 +54,7 @@ impl WorkerPool {
         config: WorkerPoolConfig,
         task_rx: mpsc::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
-        event_tx: broadcast::Sender<MarketEvent>,
+        event_rx: broadcast::Receiver<MarketEvent>,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -66,7 +66,7 @@ impl WorkerPool {
         for worker_id in 0..config.num_workers {
             let task_rx = Arc::clone(&task_rx);
             let market_data = Arc::clone(&market_data);
-            let event_rx = event_tx.subscribe();
+            let event_rx = event_rx.resubscribe();
             let solver_config = config.solver_config.clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -195,9 +195,9 @@ impl WorkerPoolBuilder {
         self,
         task_rx: mpsc::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
-        event_tx: broadcast::Sender<MarketEvent>,
+        event_rx: broadcast::Receiver<MarketEvent>,
     ) -> WorkerPool {
-        WorkerPool::spawn(self.config, task_rx, market_data, event_tx)
+        WorkerPool::spawn(self.config, task_rx, market_data, event_rx)
     }
 }
 

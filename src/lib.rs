@@ -84,9 +84,11 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use feed::{
+    builder::TychoFeedBuilder,
     events::{ComponentSummary, MarketEvent},
     market_data::{SharedMarketData, SharedMarketDataRef},
-    tycho_feed::{TychoFeed, TychoFeedBuilder, TychoFeedConfig, TychoFeedError},
+    tycho_feed::TychoFeed,
+    TychoFeedConfig, TychoFeedError,
 };
 pub use graph::{GraphManager, Path};
 pub use solver::{Solver, SolverConfig};
