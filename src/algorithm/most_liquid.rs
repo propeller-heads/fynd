@@ -137,15 +137,11 @@ impl Algorithm for MostLiquidAlgorithm {
         let start_time = Instant::now();
 
         // Check for exact-out (not supported yet)
-        if order.is_exact_out() {
+        if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        let amount_in = order
-            .amount_in
-            .as_ref()
-            .ok_or_else(|| AlgorithmError::Other("missing amount_in".to_string()))?
-            .clone();
+        let amount_in = order.amount.clone();
 
         // Find all paths using BFS
         let paths = self.find_paths(graph, &order.token_in, &order.token_out);

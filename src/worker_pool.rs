@@ -120,7 +120,7 @@ impl WorkerPool {
                                             if let Err(ref e) = result {
                                                 warn!(
                                                     worker_id,
-                                                    task_id,
+                                                    task_id = %task_id,
                                                     error = %e,
                                                     "solve failed"
                                                 );

@@ -16,4 +16,4 @@ pub mod solution;
 pub use api::{HealthStatus, Order, SolutionOptions, SolutionRequest};
 pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
-pub use solution::{OrderSolution, OrderStatus, Route, Solution, Swap};
+pub use solution::{BlockInfo, OrderSolution, OrderStatus, Route, Solution, Swap};

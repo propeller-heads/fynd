@@ -6,6 +6,17 @@ use tycho_simulation::tycho_core::models::Address;
 
 use super::primitives::{ComponentId, ProtocolSystem};
 
+/// Block information at which a quote was computed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInfo {
+    /// Block number.
+    pub number: u64,
+    /// Block hash.
+    pub hash: String,
+    /// Block timestamp (unix seconds).
+    pub timestamp: u64,
+}
+
 /// Complete solution for a solve request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Solution {
@@ -27,15 +38,17 @@ pub struct OrderSolution {
     /// The route found (if successful).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<Route>,
-    /// Actual input amount.
-    pub amount_in: BigUint,
-    /// Actual output amount.
-    pub amount_out: BigUint,
+    /// Actual sell amount.
+    pub sell_amount: BigUint,
+    /// Actual buy amount.
+    pub buy_amount: BigUint,
     /// Estimated gas for this order's swaps.
     pub gas_estimate: BigUint,
     /// Price impact in basis points (if calculable).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub price_impact_bps: Option<u16>,
+    pub price_impact_bps: Option<i32>,
+    /// Block at which this quote was computed.
+    pub block: BlockInfo,
     /// Algorithm that found this solution (internal, not exposed to API).
     #[serde(skip)]
     pub algorithm: String,

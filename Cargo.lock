@@ -6792,6 +6792,7 @@ dependencies = [
  "tracing-actix-web",
  "tracing-subscriber 0.3.22",
  "tycho-simulation",
+ "uuid",
 ]
 
 [[package]]
