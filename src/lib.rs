@@ -84,7 +84,7 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use feed::{
-    events::{ComponentSummary, MarketEvent},
+    events::MarketEvent,
     market_data::{SharedMarketData, SharedMarketDataRef},
     tycho_feed::TychoFeed,
     TychoFeedConfig, TychoFeedError,
