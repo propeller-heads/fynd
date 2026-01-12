@@ -104,6 +104,19 @@ impl PetgraphGraphManager {
     /// Helper function to add edges for all token pairs in a component.
     /// Takes a slice of node indices corresponding to the tokens.
     fn add_component_edges(&mut self, component_id: &ComponentId, node_indices: &[NodeIndex]) {
+        // Special case: if only 1 node, create a self-loop edge
+        if node_indices.len() == 1 {
+            let node_idx = node_indices[0];
+            let edge_idx =
+                self.graph
+                    .add_edge(node_idx, node_idx, EdgeData::new(component_id.clone()));
+            self.edge_map
+                .entry(component_id.clone())
+                .or_default()
+                .push(edge_idx);
+            return;
+        }
+
         // Create bidirectional edges for each token pair
         for (i, &from_idx) in node_indices.iter().enumerate() {
             for &to_idx in node_indices.iter().skip(i + 1) {
@@ -128,13 +141,16 @@ impl PetgraphGraphManager {
         }
     }
 
+    /// Adds components to the graph.
+    ///
+    /// If a component has no tokens, it is skipped.
+    ///
+    /// Arguments:
+    /// - components: A map of component IDs to their tokens.
     fn add_components(&mut self, components: &HashMap<ComponentId, Vec<Address>>) {
         for (comp_id, tokens) in components {
-            if tokens.len() < 2 {
-                warn!(
-                    "Skipping component {} with too few tokens (need at least 2 for edges)",
-                    comp_id
-                );
+            if tokens.is_empty() {
+                warn!("Skipping component {} with no tokens (need at least 1)", comp_id);
                 continue;
             }
             // Ensure all tokens are added as nodes (or get existing ones) and collect their indices
