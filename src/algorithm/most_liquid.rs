@@ -96,17 +96,17 @@ impl MostLiquidAlgorithm {
                 .component
                 .protocol_system
                 .as_str()
-                .into();
+                .try_into()
+                .map_err(|e| AlgorithmError::Other(format!("{}", e)))?;
 
-            swaps.push(Swap {
-                component_id: edge.component_id.clone(),
-                protocol: protocol_system,
+            swaps.push(Swap::new(
+                edge.component_id.clone(),
+                protocol_system,
                 token_in,
                 token_out,
-                amount_in: current_amount.clone(),
-                amount_out: amount_out.clone(),
-                gas_estimate: BigUint::from(protocol_system.typical_gas_cost()),
-            });
+                current_amount.clone(),
+                amount_out.clone(),
+            ));
 
             current_amount = amount_out;
         }

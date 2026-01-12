@@ -23,15 +23,22 @@ pub enum ProtocolSystem {
     Balancer,
 }
 
-impl From<&str> for ProtocolSystem {
-    fn from(system: &str) -> Self {
+/// Error when parsing an unknown protocol system.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("unknown protocol system: {0}")]
+pub struct UnknownProtocolSystem(pub String);
+
+impl TryFrom<&str> for ProtocolSystem {
+    type Error = UnknownProtocolSystem;
+
+    fn try_from(system: &str) -> Result<Self, Self::Error> {
         match system {
-            "uniswap_v2" => ProtocolSystem::UniswapV2,
-            "uniswap_v3" => ProtocolSystem::UniswapV3,
-            "sushiswap" => ProtocolSystem::SushiSwap,
-            "vm:curve" => ProtocolSystem::Curve,
-            "vm:balancer" => ProtocolSystem::Balancer,
-            _ => ProtocolSystem::Other,
+            "uniswap_v2" => Ok(ProtocolSystem::UniswapV2),
+            "uniswap_v3" => Ok(ProtocolSystem::UniswapV3),
+            "sushiswap" => Ok(ProtocolSystem::SushiSwap),
+            "vm:curve" => Ok(ProtocolSystem::Curve),
+            "vm:balancer" => Ok(ProtocolSystem::Balancer),
+            _ => Err(UnknownProtocolSystem(system.to_string())),
         }
     }
 }

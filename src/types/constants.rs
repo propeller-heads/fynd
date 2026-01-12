@@ -13,7 +13,6 @@ lazy_static! {
         map.insert(ProtocolSystem::SushiSwap, 100_000);
         map.insert(ProtocolSystem::Curve, 200_000);
         map.insert(ProtocolSystem::Balancer, 150_000);
-        map.insert(ProtocolSystem::Other, 150_000);
         map
     };
 }

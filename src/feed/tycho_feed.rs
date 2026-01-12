@@ -136,14 +136,23 @@ impl TychoFeed {
 
         let components: Vec<ComponentSummary> = market
             .components()
-            .map(|(id, data)| ComponentSummary {
-                id: id.clone(),
-                tokens: data.component.tokens.clone(),
-                protocol_system: data
+            .filter_map(|(id, data)| {
+                match data
                     .component
                     .protocol_system
                     .as_str()
-                    .into(),
+                    .try_into()
+                {
+                    Ok(protocol_system) => Some(ComponentSummary {
+                        id: id.clone(),
+                        tokens: data.component.tokens.clone(),
+                        protocol_system,
+                    }),
+                    Err(e) => {
+                        tracing::warn!("Skipping component {} with unknown protocol: {}", id, e);
+                        None
+                    }
+                }
             })
             .collect();
 

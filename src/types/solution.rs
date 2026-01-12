@@ -169,7 +169,7 @@ pub struct OrderSolution {
     /// Estimated gas cost for executing this route (as decimal string).
     #[serde(with = "biguint_as_string")]
     pub gas_estimate: BigUint,
-    /// Price impact in basis points (1 bp = 0.01%).
+    /// Price impact in basis points (1 bip = 0.01%).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_impact_bps: Option<i32>,
     /// Block at which this quote was computed.
