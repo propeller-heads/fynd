@@ -16,8 +16,15 @@ pub struct TychoFeedConfig {
     /// For example, "uniswap_v2", "uniswap_v3", "sushiswap", etc.
     pub(crate) protocols: Vec<String>,
     /// TVL filter in native token, usually ETH.
-    /// Components with TVL less than this will be ignored.
+    /// Components with TVL below this threshold will be ignored/removed from the market data.
     pub(crate) min_tvl: f64,
+    /// Multiplier used to define the upper bound of the TVL filter.
+    /// The upper bound is calculated as `min_tvl * tvl_buffer_multiplier`.
+    /// Only components with TVL above this upper bound will be added to the market data.
+    /// This approach helps to reduce fluctuations caused by components hovering around a single
+    /// threshold.
+    /// Default is 1.1 (10% buffer).
+    pub(crate) tvl_buffer_multiplier: f64,
     /// RPC URL for the target chain.
     /// Used to fetch gas prices.
     pub(crate) rpc_url: String,
@@ -42,10 +49,16 @@ impl TychoFeedConfig {
             tycho_api_key,
             protocols,
             min_tvl,
+            tvl_buffer_multiplier: 1.1,
             rpc_url,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
         }
+    }
+
+    pub fn tvl_buffer_multiplier(mut self, tvl_buffer_multiplier: f64) -> Self {
+        self.tvl_buffer_multiplier = tvl_buffer_multiplier;
+        self
     }
 
     pub fn gas_refresh_interval(mut self, gas_refresh_interval: Duration) -> Self {
