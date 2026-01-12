@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
-use tracing::error;
+use tracing::{error, warn};
 use tycho_simulation::tycho_core::models::Address;
 
 use super::GraphManager;
@@ -43,20 +43,20 @@ impl EdgeWeight {
 pub struct EdgeData {
     /// The component ID that enables this swap.
     pub component_id: ComponentId,
-    /// The weight of this edge
-    pub weight: EdgeWeight,
+    /// The weight of this edge. None if weight has not been set yet.
+    pub weight: Option<EdgeWeight>,
 }
 
 impl EdgeData {
-    /// Creates a new EdgeData with the given component ID and default weight.
+    /// Creates a new EdgeData with the given component ID and no weight set.
     pub fn new(component_id: ComponentId) -> Self {
-        Self { component_id, weight: EdgeWeight::default() }
+        Self { component_id, weight: None }
     }
 
     /// Extracts the numeric weight value for use in algorithms.
-    /// This is a convenience method that calls `weight.as_f64()`.
-    pub fn weight_as_f64(&self) -> f64 {
-        self.weight.as_f64()
+    /// Returns None if weight has not been set, otherwise returns Some(f64).
+    pub fn weight_as_f64(&self) -> Option<f64> {
+        self.weight.as_ref().map(|w| w.as_f64())
     }
 }
 
@@ -79,11 +79,10 @@ impl PetgraphGraphManager {
 
     /// Helper function to find a node index by address
     fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
-        Ok(self
-            .graph
+        self.graph
             .node_indices()
             .find(|&idx| self.graph[idx] == *addr)
-            .expect("Token not found in graph"))
+            .ok_or_else(|| GraphError::TokenNotFound(addr.clone()))
     }
 
     /// Helper function to get or create a node for the given address.
@@ -131,6 +130,13 @@ impl PetgraphGraphManager {
 
     fn add_components(&mut self, components: &HashMap<ComponentId, Vec<Address>>) {
         for (comp_id, tokens) in components {
+            if tokens.len() < 2 {
+                warn!(
+                    "Skipping component {} with too few tokens (need at least 2 for edges)",
+                    comp_id
+                );
+                continue;
+            }
             // Ensure all tokens are added as nodes (or get existing ones) and collect their indices
             let node_indices: Vec<NodeIndex> = tokens
                 .iter()
@@ -149,7 +155,7 @@ impl PetgraphGraphManager {
                     self.graph.remove_edge(edge_idx);
                 }
             } else {
-                return Err(GraphError::EdgeNotFound(comp_id.clone()));
+                return Err(GraphError::ComponentNotFound(comp_id.clone()));
             }
         }
         Ok(())
@@ -172,34 +178,51 @@ impl PetgraphGraphManager {
         let to_idx = self.find_node(token_out)?;
 
         // Get all edges for this component
-        if let Some(edge_indices) = self.edge_map.get(component_id) {
-            for &edge_idx in edge_indices {
-                // Check if this edge connects the specified token pair
-                let (edge_from, edge_to) = self
+        let edge_indices = self
+            .edge_map
+            .get(component_id)
+            .ok_or_else(|| GraphError::ComponentNotFound(component_id.clone()))?;
+
+        let mut updated = false;
+        for &edge_idx in edge_indices {
+            // Skip if edge endpoints are not found
+            let (edge_from, edge_to) = match self.graph.edge_endpoints(edge_idx) {
+                Some(endpoints) => endpoints,
+                None => continue,
+            };
+
+            // Determine if we should update this edge based on edge tokens and bidirectional flag
+            let should_update = if bidirectional {
+                // Update both directions
+                (edge_from == from_idx && edge_to == to_idx) ||
+                    (edge_from == to_idx && edge_to == from_idx)
+            } else {
+                // Update only forward direction
+                edge_from == from_idx && edge_to == to_idx
+            };
+
+            if should_update {
+                // Error if edge weight is not found
+                let edge_data = self
                     .graph
-                    .edge_endpoints(edge_idx)
-                    .ok_or_else(|| GraphError::EdgeNotFound(component_id.clone()))?;
-
-                // Determine if we should update this edge based on bidirectional flag
-                let should_update = if bidirectional {
-                    // Update both directions
-                    (edge_from == from_idx && edge_to == to_idx) ||
-                        (edge_from == to_idx && edge_to == from_idx)
-                } else {
-                    // Update only forward direction
-                    edge_from == from_idx && edge_to == to_idx
-                };
-
-                if should_update {
-                    if let Some(edge_data) = self.graph.edge_weight_mut(edge_idx) {
-                        // Verify the component ID matches
-                        if edge_data.component_id == *component_id {
-                            edge_data.weight = weight.clone();
-                        }
-                    }
+                    .edge_weight_mut(edge_idx)
+                    .ok_or_else(|| GraphError::ComponentNotFound(component_id.clone()))?;
+                // Verify the component ID matches
+                if edge_data.component_id == *component_id {
+                    edge_data.weight = Some(weight.clone());
+                    updated = true;
                 }
             }
         }
+
+        if !updated {
+            return Err(GraphError::ComponentTokensNotFound(
+                token_in.clone(),
+                token_out.clone(),
+                component_id.clone(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -435,7 +458,7 @@ mod tests {
         let node_b = manager.find_node(&token_b).unwrap();
         let node_c = manager.find_node(&token_c).unwrap();
 
-        // Verify initial weight is Depth(0.0)
+        // Verify initial weight is None (not set yet)
         {
             let graph = manager.graph();
             let edge_ab = graph.find_edge(node_a, node_b).unwrap();
@@ -444,7 +467,7 @@ mod tests {
                     .edge_weight(edge_ab)
                     .unwrap()
                     .weight,
-                EdgeWeight::Depth(0.0)
+                None
             );
         }
 
@@ -467,7 +490,7 @@ mod tests {
                 .edge_weight(edge_ab)
                 .unwrap()
                 .weight,
-            EdgeWeight::SpotPrice(42.5)
+            Some(EdgeWeight::SpotPrice(42.5))
         );
         let edge_ba = graph.find_edge(node_b, node_a).unwrap();
         assert_eq!(
@@ -475,10 +498,10 @@ mod tests {
                 .edge_weight(edge_ba)
                 .unwrap()
                 .weight,
-            EdgeWeight::SpotPrice(42.5)
+            Some(EdgeWeight::SpotPrice(42.5))
         );
 
-        // Reset to default for next test
+        // Clear weight for next test
         manager
             .set_edge_weight(&"pool1".to_string(), &token_a, &token_b, EdgeWeight::Depth(0.0), true)
             .unwrap();
@@ -502,19 +525,19 @@ mod tests {
                 .edge_weight(edge_ab)
                 .unwrap()
                 .weight,
-            EdgeWeight::SpotPrice(100.0)
+            Some(EdgeWeight::SpotPrice(100.0))
         );
-        // B-A should still be default
+        // B-A should still have the previous weight (Depth(0.0))
         let edge_ba = graph.find_edge(node_b, node_a).unwrap();
         assert_eq!(
             graph
                 .edge_weight(edge_ba)
                 .unwrap()
                 .weight,
-            EdgeWeight::Depth(0.0)
+            Some(EdgeWeight::Depth(0.0))
         );
 
-        // Verify other edges in the same component still have default weight
+        // Verify other edges in the same component still have no weight set
         {
             let edge_ac = graph.find_edge(node_a, node_c).unwrap();
             assert_eq!(
@@ -522,7 +545,7 @@ mod tests {
                     .edge_weight(edge_ac)
                     .unwrap()
                     .weight,
-                EdgeWeight::Depth(0.0) // Still default
+                None // Not set yet
             );
             let edge_ca = graph.find_edge(node_c, node_a).unwrap();
             assert_eq!(
@@ -530,7 +553,7 @@ mod tests {
                     .edge_weight(edge_ca)
                     .unwrap()
                     .weight,
-                EdgeWeight::Depth(0.0) // Still default
+                None // Not set yet
             );
         }
     }

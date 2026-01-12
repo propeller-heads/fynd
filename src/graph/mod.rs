@@ -56,10 +56,12 @@ impl Path {
 
 #[derive(Error, Debug)]
 pub enum GraphError {
-    #[error("Token not found in graph: {0}")]
+    #[error("Token not found in graph: {0:?}")]
     TokenNotFound(Address),
-    #[error("Edge not found in graph: {0}")]
-    EdgeNotFound(ComponentId),
+    #[error("Component not found in graph: {0}")]
+    ComponentNotFound(ComponentId),
+    #[error("Component not found between tokens {0:?} and {1:?} for component {2}")]
+    ComponentTokensNotFound(Address, Address, ComponentId),
 }
 
 /// Trait for managing graph representations.
