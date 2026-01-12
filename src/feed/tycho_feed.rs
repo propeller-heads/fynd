@@ -16,70 +16,11 @@ use crate::{
     feed::{
         events::{ComponentSummary, MarketEvent},
         market_data::SharedMarketData,
+        TychoFeedConfig, TychoFeedError,
     },
     types::{ComponentId, GasPrice, ProtocolSystem},
+    SharedMarketDataRef,
 };
-
-/// Configuration for the TychoFeed.
-#[derive(Debug, Clone)]
-pub struct TychoFeedConfig {
-    /// Tycho WebSocket URL.
-    pub tycho_url: String,
-    /// Tycho API key.
-    pub tycho_api_key: String,
-    /// Protocols to index.
-    pub protocols: Vec<String>,
-    /// Minimum TVL filter (in ETH).
-    pub min_tvl: f64,
-    /// Maximum TVL filter (in ETH).
-    pub max_tvl: f64,
-    /// RPC URL for gas price fetching.
-    pub rpc_url: String,
-    /// Gas price refresh interval.
-    pub gas_refresh_interval: Duration,
-    /// Reconnect delay on connection failure.
-    pub reconnect_delay: Duration,
-}
-
-impl Default for TychoFeedConfig {
-    fn default() -> Self {
-        Self {
-            tycho_url: "wss://tycho.propellerheads.xyz".to_string(),
-            tycho_api_key: String::new(),
-            protocols: vec![
-                "uniswap_v2".to_string(),
-                "uniswap_v3".to_string(),
-                "sushiswap".to_string(),
-                "balancer_v2".to_string(),
-            ],
-            min_tvl: 10.0,
-            max_tvl: 1_000_000.0,
-            rpc_url: String::new(),
-            gas_refresh_interval: Duration::from_secs(30),
-            reconnect_delay: Duration::from_secs(5),
-        }
-    }
-}
-
-/// Errors that can occur in the indexer.
-#[derive(Debug, thiserror::Error)]
-pub enum TychoFeedError {
-    /// Connection error.
-    #[error("connection error: {0}")]
-    Connection(String),
-
-    /// Protocol error.
-    #[error("protocol error: {0}")]
-    Protocol(String),
-
-    /// Market data lock error.
-    #[error("failed to acquire market data lock")]
-    LockError,
-
-    /// Configuration error.
-    #[error("configuration error: {0}")]
-    Config(String),
-}
 
 /// The Tycho indexer that keeps market data synchronized.
 ///
@@ -117,13 +58,12 @@ impl TychoFeed {
     /// used to subscribe additional consumers before calling `run()`.
     pub fn new(
         config: TychoFeedConfig,
-        market_data: Arc<RwLock<SharedMarketData>>,
+        market_data: SharedMarketDataRef,
         health_tracker: HealthTracker,
-    ) -> (Self, broadcast::Sender<MarketEvent>) {
-        let (event_tx, _) = broadcast::channel(1024);
-        let sender = event_tx.clone();
+    ) -> (Self, broadcast::Receiver<MarketEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(1024);
 
-        (Self { config, market_data, event_tx, health_tracker }, sender)
+        (Self { config, market_data, event_tx, health_tracker }, event_rx)
     }
 
     /// Returns a new subscriber for market events.
@@ -309,61 +249,5 @@ impl TychoFeed {
             .send(MarketEvent::GasPriceUpdated { gas_price });
 
         Ok(())
-    }
-}
-
-/// Builder for TychoFeed configuration.
-pub struct TychoFeedBuilder {
-    config: TychoFeedConfig,
-}
-
-impl TychoFeedBuilder {
-    pub fn new() -> Self {
-        Self { config: TychoFeedConfig::default() }
-    }
-
-    pub fn tycho_url(mut self, url: impl Into<String>) -> Self {
-        self.config.tycho_url = url.into();
-        self
-    }
-
-    pub fn tycho_api_key(mut self, key: impl Into<String>) -> Self {
-        self.config.tycho_api_key = key.into();
-        self
-    }
-
-    pub fn protocols(mut self, protocols: Vec<String>) -> Self {
-        self.config.protocols = protocols;
-        self
-    }
-
-    pub fn min_tvl(mut self, tvl: f64) -> Self {
-        self.config.min_tvl = tvl;
-        self
-    }
-
-    pub fn max_tvl(mut self, tvl: f64) -> Self {
-        self.config.max_tvl = tvl;
-        self
-    }
-
-    pub fn rpc_url(mut self, url: impl Into<String>) -> Self {
-        self.config.rpc_url = url.into();
-        self
-    }
-
-    pub fn gas_refresh_interval(mut self, interval: Duration) -> Self {
-        self.config.gas_refresh_interval = interval;
-        self
-    }
-
-    pub fn build(self) -> TychoFeedConfig {
-        self.config
-    }
-}
-
-impl Default for TychoFeedBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
