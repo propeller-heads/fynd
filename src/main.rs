@@ -13,10 +13,11 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
-    feed::{builder::TychoFeedBuilder, market_data::SharedMarketData},
+    feed::market_data::SharedMarketData,
     solver::SolverConfig,
     task_queue::{TaskQueue, TaskQueueConfig},
     worker_pool::{WorkerPoolBuilder, WorkerPoolConfig},
+    TychoFeed, TychoFeedConfig,
 };
 
 /// Application configuration.
@@ -75,17 +76,16 @@ async fn main() -> std::io::Result<()> {
     // Create health tracker (shared between TychoFeed and API)
     let health_tracker = HealthTracker::new();
 
-    // Create Tycho feed
-    let (tycho_feed, event_rx) = TychoFeedBuilder::builder()
-        .tycho_url(&config.tycho_url)
-        .tycho_api_key(&config.tycho_api_key)
-        .rpc_url(&config.rpc_url)
-        .protocols(vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()])
-        .min_tvl(10.0)
-        .max_tvl(1_000_000.0)
-        .market_data(Arc::clone(&market_data))
-        .health_tracker(health_tracker.clone())
-        .build();
+    let tycho_feed_config = TychoFeedConfig::new(
+        config.tycho_url,
+        config.tycho_api_key,
+        vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
+        10.0,
+        config.rpc_url,
+    );
+
+    let (tycho_feed, event_rx) =
+        TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
 
     // Create worker pool
     let solver_config = SolverConfig::default();

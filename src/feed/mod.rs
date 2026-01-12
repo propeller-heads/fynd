@@ -1,29 +1,62 @@
 use std::time::Duration;
 
-pub mod builder;
 pub mod events;
 pub mod market_data;
 pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] //TODO: remove this once we use all the fields
 pub struct TychoFeedConfig {
     /// Tycho WebSocket URL.
-    pub tycho_url: String,
+    pub(crate) tycho_url: String,
     /// Tycho API key.
-    pub tycho_api_key: String,
-    /// Protocols to index.
-    pub protocols: Vec<String>,
-    /// Minimum TVL filter (in ETH).
-    pub min_tvl: f64,
-    /// Maximum TVL filter (in ETH).
-    pub max_tvl: f64,
-    /// RPC URL for gas price fetching.
-    pub rpc_url: String,
+    pub(crate) tycho_api_key: String,
+    /// Names of the protocols to index.
+    /// For example, "uniswap_v2", "uniswap_v3", "sushiswap", etc.
+    pub(crate) protocols: Vec<String>,
+    /// TVL filter in native token, usually ETH.
+    /// Components with TVL less than this will be ignored.
+    pub(crate) min_tvl: f64,
+    /// RPC URL for the target chain.
+    /// Used to fetch gas prices.
+    pub(crate) rpc_url: String,
     /// Gas price refresh interval.
-    pub gas_refresh_interval: Duration,
+    /// Default is 30 seconds.
+    pub(crate) gas_refresh_interval: Duration,
     /// Reconnect delay on connection failure.
-    pub reconnect_delay: Duration,
+    /// Default is 5 seconds.
+    pub(crate) reconnect_delay: Duration,
+}
+
+impl TychoFeedConfig {
+    pub fn new(
+        tycho_url: String,
+        tycho_api_key: String,
+        protocols: Vec<String>,
+        min_tvl: f64,
+        rpc_url: String,
+    ) -> Self {
+        Self {
+            tycho_url,
+            tycho_api_key,
+            protocols,
+            min_tvl,
+            rpc_url,
+            gas_refresh_interval: Duration::from_secs(30),
+            reconnect_delay: Duration::from_secs(5),
+        }
+    }
+
+    pub fn gas_refresh_interval(mut self, gas_refresh_interval: Duration) -> Self {
+        self.gas_refresh_interval = gas_refresh_interval;
+        self
+    }
+
+    pub fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
+        self.reconnect_delay = reconnect_delay;
+        self
+    }
 }
 
 /// Errors that can occur in the indexer.
