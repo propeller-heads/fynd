@@ -54,6 +54,14 @@ impl Path {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum GraphError {
+    #[error("Token not found in graph: {0}")]
+    TokenNotFound(Address),
+    #[error("Edge not found in graph: {0}")]
+    EdgeNotFound(ComponentId),
+}
+
 /// Trait for managing graph representations.
 ///
 /// Graph managers are stateful - they maintain the graph internally and update it based on market
