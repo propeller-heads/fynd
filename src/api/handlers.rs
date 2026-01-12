@@ -1,22 +1,24 @@
 //! HTTP request handlers for the router API.
 
-use actix_web::{get, post, web, HttpResponse};
-use serde::Serialize;
+use actix_web::{web, HttpResponse};
 use tracing::{info, instrument, warn};
 
 use super::{ApiError, AppState};
-use crate::types::{HealthStatus, SolutionRequest};
+use crate::types::{solution::SolutionRequest, HealthStatus};
 
-/// Configures API routes.
+/// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(solve)
-        .service(health)
-        .service(info);
+    cfg.service(
+        web::scope("/v1")
+            .route("/solve", web::post().to(solve))
+            .route("/health", web::get().to(health)),
+    );
 }
 
-/// POST /solve - Submit a solve request.
+/// POST /v1/solve - Submit a solve request.
 ///
-/// Accepts a `SolutionRequest` and returns a `Solution` with the best routes found.
+/// Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error
+/// if the request could not be filled.
 ///
 /// # Errors
 ///
@@ -24,9 +26,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
 /// - 504 Gateway Timeout: Solve timeout
-#[post("/solve")]
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
-pub async fn solve(
+async fn solve(
     state: web::Data<AppState>,
     request: web::Json<SolutionRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -64,11 +65,10 @@ pub async fn solve(
     Ok(HttpResponse::Ok().json(solution))
 }
 
-/// GET /health - Health check endpoint.
+/// GET /v1/health - Health check endpoint.
 ///
 /// Returns the current health status of the service.
-#[get("/health")]
-pub async fn health(state: web::Data<AppState>) -> HttpResponse {
+async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker.age_ms();
     let is_healthy = age_ms < 60_000; // Healthy if data less than 60s old
 
@@ -83,28 +83,6 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     } else {
         HttpResponse::ServiceUnavailable().json(status)
     }
-}
-
-/// Response for the /info endpoint.
-#[derive(Serialize)]
-pub struct InfoResponse {
-    pub name: &'static str,
-    pub version: &'static str,
-    pub algorithms: Vec<&'static str>,
-}
-
-/// GET /info - Service information endpoint.
-///
-/// Returns information about the service.
-#[get("/info")]
-pub async fn info() -> HttpResponse {
-    let info = InfoResponse {
-        name: "tycho-router",
-        version: env!("CARGO_PKG_VERSION"),
-        algorithms: vec!["most_liquid"],
-    };
-
-    HttpResponse::Ok().json(info)
 }
 
 #[cfg(test)]

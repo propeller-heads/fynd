@@ -5,6 +5,8 @@ use std::fmt;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
+use super::serde_helpers::biguint_as_string;
+
 /// Unique identifier for a liquidity component.
 pub type ComponentId = String;
 
@@ -19,19 +21,24 @@ pub enum ProtocolSystem {
     SushiSwap,
     Curve,
     Balancer,
-    /// Custom or unknown protocol
-    Other,
 }
 
-impl From<&str> for ProtocolSystem {
-    fn from(system: &str) -> Self {
+/// Error when parsing an unknown protocol system.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("unknown protocol system: {0}")]
+pub struct UnknownProtocolSystem(pub String);
+
+impl TryFrom<&str> for ProtocolSystem {
+    type Error = UnknownProtocolSystem;
+
+    fn try_from(system: &str) -> Result<Self, Self::Error> {
         match system {
-            "uniswap_v2" => ProtocolSystem::UniswapV2,
-            "uniswap_v3" => ProtocolSystem::UniswapV3,
-            "sushiswap" => ProtocolSystem::SushiSwap,
-            "vm:curve" => ProtocolSystem::Curve,
-            "vm:balancer" => ProtocolSystem::Balancer,
-            _ => ProtocolSystem::Other,
+            "uniswap_v2" => Ok(ProtocolSystem::UniswapV2),
+            "uniswap_v3" => Ok(ProtocolSystem::UniswapV3),
+            "sushiswap" => Ok(ProtocolSystem::SushiSwap),
+            "vm:curve" => Ok(ProtocolSystem::Curve),
+            "vm:balancer" => Ok(ProtocolSystem::Balancer),
+            _ => Err(UnknownProtocolSystem(system.to_string())),
         }
     }
 }
@@ -46,7 +53,6 @@ impl ProtocolSystem {
             ProtocolSystem::SushiSwap => 100_000,
             ProtocolSystem::Curve => 200_000,
             ProtocolSystem::Balancer => 150_000,
-            ProtocolSystem::Other => 150_000,
         }
     }
 }
@@ -59,7 +65,6 @@ impl fmt::Display for ProtocolSystem {
             ProtocolSystem::SushiSwap => write!(f, "sushiswap"),
             ProtocolSystem::Curve => write!(f, "curve"),
             ProtocolSystem::Balancer => write!(f, "balancer"),
-            ProtocolSystem::Other => write!(f, "other"),
         }
     }
 }
@@ -68,8 +73,10 @@ impl fmt::Display for ProtocolSystem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559)
+    #[serde(with = "biguint_as_string")]
     pub base_fee: BigUint,
     /// Priority fee per gas (EIP-1559)
+    #[serde(with = "biguint_as_string")]
     pub priority_fee: BigUint,
     /// Timestamp when this price was fetched
     pub timestamp_ms: u64,

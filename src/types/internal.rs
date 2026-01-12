@@ -4,11 +4,13 @@ use std::time::Instant;
 
 use num_bigint::BigUint;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
-use super::{Solution, SolutionRequest};
+use super::Solution;
+use crate::types::solution::SolutionRequest;
 
 /// Unique identifier for a solve task.
-pub type TaskId = u64;
+pub type TaskId = Uuid;
 
 /// Result type for solve operations.
 pub type SolveResult = Result<Solution, SolveError>;

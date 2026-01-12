@@ -15,7 +15,9 @@ use crate::{
     algorithm::{Algorithm, AlgorithmError},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     graph::GraphManager,
-    types::{OrderSolution, OrderStatus, Solution, SolutionRequest, SolveError},
+    types::{
+        solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
+    },
 };
 
 /// Configuration for a Solver instance.
@@ -143,6 +145,14 @@ where
         // Get a read lock on market data
         let market = self.market_data.read().await;
 
+        // Get block info for the solution
+        let last_block = market.last_updated();
+        let block_info = BlockInfo {
+            number: last_block.number,
+            hash: format!("{:?}", last_block.hash),
+            timestamp: last_block.ts.and_utc().timestamp() as u64,
+        };
+
         // Solve each order
         let mut order_solutions = Vec::with_capacity(request.orders.len());
 
@@ -151,15 +161,13 @@ where
             if let Err(_e) = order.validate() {
                 order_solutions.push(OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    amount_in: order
-                        .amount_in
-                        .clone()
-                        .unwrap_or_default(),
+                    amount_in: order.amount.clone(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
+                    block: block_info.clone(),
                     algorithm: String::new(),
                 });
                 continue;
@@ -189,65 +197,58 @@ where
 
                     OrderSolution {
                         order_id: order.id.clone(),
-                        status: OrderStatus::Success,
+                        status: SolutionStatus::Success,
                         route: Some(route),
                         amount_in,
                         amount_out,
                         gas_estimate,
                         price_impact_bps: None, // TODO: Calculate price impact
+                        block: block_info.clone(),
                         algorithm: self.algorithm.name().to_string(),
                     }
                 }
                 Err(AlgorithmError::NoPath { .. }) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    amount_in: order
-                        .amount_in
-                        .clone()
-                        .unwrap_or_default(),
+                    amount_in: order.amount.clone(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
+                    block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 },
                 Err(AlgorithmError::InsufficientLiquidity) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::InsufficientLiquidity,
+                    status: SolutionStatus::InsufficientLiquidity,
                     route: None,
-                    amount_in: order
-                        .amount_in
-                        .clone()
-                        .unwrap_or_default(),
+                    amount_in: order.amount.clone(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
+                    block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 },
                 Err(AlgorithmError::Timeout { .. }) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::Timeout,
+                    status: SolutionStatus::Timeout,
                     route: None,
-                    amount_in: order
-                        .amount_in
-                        .clone()
-                        .unwrap_or_default(),
+                    amount_in: order.amount.clone(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
+                    block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 },
                 Err(_) => OrderSolution {
                     order_id: order.id.clone(),
-                    status: OrderStatus::NoRouteFound,
+                    status: SolutionStatus::NoRouteFound,
                     route: None,
-                    amount_in: order
-                        .amount_in
-                        .clone()
-                        .unwrap_or_default(),
+                    amount_in: order.amount.clone(),
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
+                    block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 },
             };
