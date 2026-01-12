@@ -13,7 +13,6 @@ pub mod primitives;
 pub mod serde_helpers;
 pub mod solution;
 
-// Re-export primitive types
 // Re-export API types
 pub use api::HealthStatus;
 // Re-export internal types
@@ -25,7 +24,7 @@ pub use solution::{
     BlockInfo,
     // Request types
     Order,
-    OrderKind,
+    OrderSide,
     OrderSolution,
     OrderValidationError,
     Route,

@@ -59,11 +59,11 @@ pub struct Order {
     pub token_in: Address,
     /// Output token address (the token being bought).
     pub token_out: Address,
-    /// Amount to swap, interpreted according to `kind` (in token units, as decimal string).
+    /// Amount to swap, interpreted according to `side` (in token units, as decimal string).
     #[serde(with = "biguint_as_string")]
     pub amount: BigUint,
     /// Whether this is a sell (exact input) or buy (exact output) order.
-    pub kind: OrderKind,
+    pub side: OrderSide,
     /// Address that will send the input tokens.
     pub sender: Address,
     /// Address that will receive the output tokens.
@@ -76,7 +76,7 @@ pub struct Order {
 impl Order {
     /// Returns `true` if this is a sell order (exact input amount).
     pub fn is_sell(&self) -> bool {
-        matches!(self.kind, OrderKind::Sell)
+        matches!(self.side, OrderSide::Sell)
     }
 
     /// Returns the address that will receive the output tokens.
@@ -108,12 +108,12 @@ impl Order {
     }
 }
 
-/// Specifies whether an order is a sell (exact input) or buy (exact output).
+/// Specifies the side of an order: sell (exact input) or buy (exact output).
 ///
 /// Currently only `Sell` is supported. `Buy` will be added in a future version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OrderKind {
+pub enum OrderSide {
     /// Sell exactly the specified amount of the input token.
     Sell,
     // TODO: Add Buy variant for exact output orders
@@ -364,7 +364,7 @@ mod tests {
             token_in: make_address(token_in_byte),
             token_out: make_address(token_out_byte),
             amount: BigUint::from(amount),
-            kind: OrderKind::Sell,
+            side: OrderSide::Sell,
             sender: make_address(0xAA),
             receiver: None,
         }
@@ -565,7 +565,7 @@ mod tests {
             "token_in": "0x0101010101010101010101010101010101010101",
             "token_out": "0x0202020202020202020202020202020202020202",
             "amount": "1000000000000000000",
-            "kind": "sell",
+            "side": "sell",
             "sender": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }"#;
 
@@ -615,7 +615,7 @@ mod tests {
             token_in: make_address(0x01),
             token_out: make_address(0x02),
             amount: large_amount.clone(),
-            kind: OrderKind::Sell,
+            side: OrderSide::Sell,
             sender: make_address(0xAA),
             receiver: None,
         };
