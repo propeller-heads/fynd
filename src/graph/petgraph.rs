@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use petgraph::{
     graph::{EdgeIndex, NodeIndex},
-    stable_graph::StableDiGraph,
+    stable_graph,
 };
 use tycho_simulation::tycho_core::models::Address;
 
@@ -69,6 +69,8 @@ impl EdgeData {
     }
 }
 
+pub type StableDiGraph = stable_graph::StableDiGraph<Address, EdgeData>;
+
 /// Petgraph implementation of GraphManager.
 ///
 /// This struct implements GraphManager for petgraph::stable_graph::StableDiGraph.
@@ -79,7 +81,7 @@ pub struct PetgraphStableDiGraphManager {
     // Stable directed graph with token addresses as nodes and edge data (component id + weight) as
     // edges. Using StableDiGraph ensures edge indices remain valid after removals, making
     // edge_map viable.
-    graph: StableDiGraph<Address, EdgeData>,
+    graph: StableDiGraph,
     // Map from ComponentId to edge indices for fast removal and weight updates.
     edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
     // Map from token address to node index for fast node lookups.
@@ -308,7 +310,7 @@ impl Default for PetgraphStableDiGraphManager {
     }
 }
 
-impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphManager {
+impl GraphManager<StableDiGraph> for PetgraphStableDiGraphManager {
     fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
@@ -337,7 +339,7 @@ impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphMan
         }
     }
 
-    fn graph(&self) -> &StableDiGraph<Address, EdgeData> {
+    fn graph(&self) -> &StableDiGraph {
         &self.graph
     }
 }
