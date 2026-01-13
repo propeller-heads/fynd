@@ -79,20 +79,21 @@ pub struct PetgraphStableDiGraphManager {
     // edge_map viable.
     graph: StableDiGraph<Address, EdgeData>,
     // Map from ComponentId to edge indices for fast removal and weight updates.
-    // This is safe to use with StableDiGraph since indices don't shift when edges are removed.
     edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
+    // Map from token address to node index for fast node lookups.
+    node_map: HashMap<Address, NodeIndex>,
 }
 
 impl PetgraphStableDiGraphManager {
     pub fn new() -> Self {
-        Self { graph: StableDiGraph::default(), edge_map: HashMap::new() }
+        Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
     }
 
     /// Helper function to find a node index by address
     fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
-        self.graph
-            .node_indices()
-            .find(|&idx| self.graph[idx] == *addr)
+        self.node_map
+            .get(addr)
+            .copied()
             .ok_or_else(|| GraphError::TokenNotFound(addr.clone()))
     }
 
@@ -100,16 +101,32 @@ impl PetgraphStableDiGraphManager {
     /// Returns the node index, creating the node if it doesn't exist.
     fn get_or_create_node(&mut self, addr: &Address) -> NodeIndex {
         // Check if node already exists
-        if let Some(node_idx) = self
-            .graph
-            .node_indices()
-            .find(|&idx| self.graph[idx] == *addr)
-        {
-            node_idx
-        } else {
-            // Create new node if it doesn't exist
-            self.graph.add_node(addr.clone())
+        match self.find_node(addr) {
+            Ok(node_idx) => node_idx,
+            Err(_) => {
+                let node_idx = self.graph.add_node(addr.clone());
+                self.node_map
+                    .insert(addr.clone(), node_idx);
+                node_idx
+            }
         }
+    }
+
+    /// Helper function to add an edge to the graph.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_idx` - The index of the from node.
+    /// * `to_idx` - The index of the to node.
+    /// * `component_id` - The ID of the component represented by this edge.
+    fn add_edge(&mut self, from_idx: NodeIndex, to_idx: NodeIndex, component_id: &ComponentId) {
+        let edge_idx = self
+            .graph
+            .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
+        self.edge_map
+            .entry(component_id.clone())
+            .or_default()
+            .push(edge_idx);
     }
 
     /// Helper function to add edges for all token pairs in a component.
@@ -118,13 +135,7 @@ impl PetgraphStableDiGraphManager {
         // Special case: if only 1 node, create a self-loop edge
         if node_indices.len() == 1 {
             let node_idx = node_indices[0];
-            let edge_idx =
-                self.graph
-                    .add_edge(node_idx, node_idx, EdgeData::new(component_id.clone()));
-            self.edge_map
-                .entry(component_id.clone())
-                .or_default()
-                .push(edge_idx);
+            self.add_edge(node_idx, node_idx, component_id);
             return;
         }
 
@@ -132,22 +143,10 @@ impl PetgraphStableDiGraphManager {
         for (i, &from_idx) in node_indices.iter().enumerate() {
             for &to_idx in node_indices.iter().skip(i + 1) {
                 // Create edge A -> B
-                let edge_idx_ab =
-                    self.graph
-                        .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
-                self.edge_map
-                    .entry(component_id.clone())
-                    .or_default()
-                    .push(edge_idx_ab);
+                self.add_edge(from_idx, to_idx, component_id);
 
                 // Create edge B -> A
-                let edge_idx_ba =
-                    self.graph
-                        .add_edge(to_idx, from_idx, EdgeData::new(component_id.clone()));
-                self.edge_map
-                    .entry(component_id.clone())
-                    .or_default()
-                    .push(edge_idx_ba);
+                self.add_edge(to_idx, from_idx, component_id);
             }
         }
     }
@@ -307,6 +306,7 @@ impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphMan
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
+        self.node_map.clear();
 
         let unique_tokens: HashSet<Address> = component_topology
             .values()
