@@ -140,15 +140,20 @@ impl PetgraphStableDiGraphManager {
         }
 
         // Create bidirectional edges for each token pair
-        for (i, &from_idx) in node_indices.iter().enumerate() {
-            for &to_idx in node_indices.iter().skip(i + 1) {
-                // Create edge A -> B
+        node_indices
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &from_idx)| {
+                node_indices
+                    .iter()
+                    .skip(i + 1)
+                    .map(move |&to_idx| (from_idx, to_idx))
+            })
+            .for_each(|(from_idx, to_idx)| {
+                // Create bidirectional edges A -> B and B -> A
                 self.add_edge(from_idx, to_idx, component_id);
-
-                // Create edge B -> A
                 self.add_edge(to_idx, from_idx, component_id);
-            }
-        }
+            });
     }
 
     /// Adds components to the graph.
@@ -253,7 +258,7 @@ impl PetgraphStableDiGraphManager {
 
         let mut updated = false;
         for &edge_idx in edge_indices {
-            // Skip if edge endpoints are not found
+            // Skip current edge if not found in graph, continue checking next edge
             let (edge_from, edge_to) = match self.graph.edge_endpoints(edge_idx) {
                 Some(endpoints) => endpoints,
                 None => continue,
@@ -270,7 +275,7 @@ impl PetgraphStableDiGraphManager {
             };
 
             if should_update {
-                // Error if edge weight is not found
+                // Error if edge weight is not found (edge is not in graph)
                 let edge_data = self
                     .graph
                     .edge_weight_mut(edge_idx)
@@ -306,6 +311,7 @@ impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphMan
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
+        // self.edge_map.clear();
         self.node_map.clear();
 
         let unique_tokens: HashSet<Address> = component_topology
@@ -315,17 +321,16 @@ impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphMan
             .collect();
 
         // Add all nodes (tokens) to the graph
-        let mut node_map: HashMap<Address, NodeIndex> = HashMap::with_capacity(unique_tokens.len());
         for token in unique_tokens {
             let node_idx = self.graph.add_node(token.clone());
-            node_map.insert(token, node_idx);
+            self.node_map.insert(token, node_idx);
         }
 
         // Add edges between all tokens in each component
         for (comp_id, tokens) in component_topology {
             let node_indices: Vec<NodeIndex> = tokens
                 .iter()
-                .map(|token| node_map[token])
+                .map(|token| self.node_map[token])
                 .collect();
             self.add_component_edges(comp_id, &node_indices);
         }
