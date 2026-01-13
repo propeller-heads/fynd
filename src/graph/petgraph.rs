@@ -27,6 +27,7 @@ use crate::{
 pub enum EdgeWeight {
     Depth(f64),
     SpotPrice(f64),
+    DepthAndSpotPrice(f64, f64),
 }
 
 impl Default for EdgeWeight {
@@ -41,6 +42,7 @@ impl EdgeWeight {
     pub fn as_f64(&self) -> f64 {
         match self {
             EdgeWeight::Depth(v) | EdgeWeight::SpotPrice(v) => *v,
+            EdgeWeight::DepthAndSpotPrice(depth, spot_price) => depth * spot_price,
         }
     }
 }
@@ -311,7 +313,6 @@ impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphMan
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
-        // self.edge_map.clear();
         self.node_map.clear();
 
         let unique_tokens: HashSet<Address> = component_topology
