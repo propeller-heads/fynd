@@ -7,15 +7,19 @@
 //! different graph crates (petgraph, custom, etc.) and leverage built-in algorithms.
 
 pub mod most_liquid;
+pub mod stats;
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 pub use most_liquid::MostLiquidAlgorithm;
+use num_bigint::BigUint;
+use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
 
 use crate::{
     feed::market_data::SharedMarketData,
-    graph::GraphManager,
+    graph::{petgraph::StableDiGraph, GraphManager, Path},
     types::{solution::Order, Route},
+    ProtocolSystem, Swap,
 };
 
 /// Trait for route-finding algorithms.
@@ -55,7 +59,7 @@ pub trait Algorithm: Send + Sync {
     /// The best route found, or an error if no route could be found.
     fn find_best_route(
         &self,
-        graph: &Self::GraphType,
+        graph: &Self::GraphManager,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError>;
@@ -98,4 +102,113 @@ pub enum AlgorithmError {
     /// Other algorithm-specific error.
     #[error("{0}")]
     Other(String),
+}
+
+/// Result of simulating a path.
+#[derive(Debug, Clone)]
+pub struct SimulationResult {
+    /// The execution-ready route with real amounts and gas
+    pub route: Route,
+    /// Input amount provided initially
+    pub amount_in: BigUint,
+    /// Output amount after all swaps
+    pub amount_out: BigUint,
+    /// Total gas estimate for the entire route
+    pub total_gas: BigUint,
+}
+
+/// Simulates a path and converts it to a Route with real amounts and gas.
+///
+/// Takes ownership of the Path and produces an execution-ready Route by simulating
+/// each hop using ProtocolSim. Returns both the Route and metadata needed for ranking.
+///
+/// For each hop:
+/// 1. Calls `get_amount_out` on the component's state
+/// 2. Stores the new_state for subsequent hops (handles same-pool-twice scenarios)
+fn simulate_path(
+    path: Path,
+    graph: &StableDiGraph,
+    market: &SharedMarketData,
+    amount_in: BigUint,
+) -> Result<SimulationResult, AlgorithmError> {
+    let mut current_amount = amount_in.clone();
+    let mut swaps = Vec::with_capacity(path.len());
+    let mut total_gas = BigUint::ZERO;
+
+    // Track state overrides for pools we've already swapped through.
+    let mut state_overrides: HashMap<&str, Box<dyn ProtocolSim>> = HashMap::new();
+
+    for edge in path {
+        let (in_node, out_node) = graph
+            .edge_endpoints(edge)
+            .ok_or_else(|| AlgorithmError::Other(format!("invalid edge: {:?}", edge)))?;
+
+        let edge_data = &graph[edge];
+        let address_in = &graph[in_node];
+        let address_out = &graph[out_node];
+
+        // Get token and component data for the simulation call
+        let token_in = market
+            .get_token(address_in)
+            .ok_or_else(|| AlgorithmError::Other(format!("token not found: {:?}", address_in)))?;
+        let token_out = market
+            .get_token(address_out)
+            .ok_or_else(|| AlgorithmError::Other(format!("token not found: {:?}", address_out)))?;
+        let component_id = &edge_data.component_id;
+
+        let component_data = market
+            .get_component(component_id)
+            .ok_or_else(|| {
+                AlgorithmError::Other(format!("component not found: {}", component_id))
+            })?;
+
+        // Select the correct state for simulation, using override if we've swapped through this
+        // pool, and otherwise the original state stored in market data
+        // TODO - is this stable for the VM states?
+        let state = state_overrides
+            .get(component_id.as_str())
+            .map(Box::as_ref)
+            .unwrap_or(component_data.state.as_ref());
+
+        // Simulate the swap
+        let result = state
+            .get_amount_out(current_amount.clone(), token_in, token_out)
+            .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
+
+        // Get protocol for the swap
+        let protocol: ProtocolSystem = component_data
+            .component
+            .protocol_system
+            .as_str()
+            .try_into()
+            .map_err(|e| {
+                AlgorithmError::Other(format!(
+                    "invalid protocol system: {} ({})",
+                    component_data.component.protocol_system, e
+                ))
+            })?;
+
+        // Record the swap
+        swaps.push(Swap {
+            component_id: component_id.clone(),
+            protocol,
+            token_in: token_in.address.clone(),
+            token_out: token_out.address.clone(),
+            amount_in: current_amount.clone(),
+            amount_out: result.amount.clone(),
+            gas_estimate: result.gas.clone(),
+        });
+
+        // Store new state for the following hops and update running totals
+        state_overrides.insert(component_id.as_str(), result.new_state);
+        total_gas += result.gas;
+        current_amount = result.amount;
+    }
+
+    Ok(SimulationResult {
+        route: Route::new(swaps),
+        amount_in,
+        amount_out: current_amount,
+        total_gas,
+    })
 }

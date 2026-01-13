@@ -1,24 +1,26 @@
 //! Most Liquid algorithm implementation.
 //!
 //! This algorithm finds routes by:
-//! 1. Finding all paths up to max_hops using BFS (via petgraph)
-//! 2. Simulating each path to get expected output
-//! 3. Ranking by net output (output - gas cost in output token terms)
-//! 4. Returning the best route
+//! 1. Finding all edge paths up to max_hops using BFS (shorter paths first, all parallel edges)
+//! 2. Scoring and sorting paths by spot price and liquidity depth
+//! 3. Simulating paths with actual ProtocolSim to get accurate output (best paths first)
+//! 4. Ranking by net output (output - gas cost in output token terms)
+//! 5. Returning the best route with comprehensive logging
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use num_bigint::BigUint;
-use tycho_simulation::tycho_core::models::Address;
 
-use super::{Algorithm, AlgorithmError};
+use super::{simulate_path, stats::SolveStats, Algorithm, AlgorithmError, SimulationResult};
 use crate::{
     feed::market_data::SharedMarketData,
-    graph::{petgraph::StableDiGraph, Path},
-    types::{solution::Order, Route, Swap},
+    graph::{petgraph::StableDiGraph, GraphManager, Path, PetgraphStableDiGraphManager},
+    types::{Order, Route},
 };
 
 /// Algorithm that selects routes based on expected output after gas.
+// TODO: Consider adding a `max_paths_to_simulate` parameter to limit simulation overhead
+// when there are many candidate paths. Currently all paths are scored and simulated.
 pub struct MostLiquidAlgorithm {
     max_hops: usize,
     timeout: Duration,
@@ -35,80 +37,32 @@ impl MostLiquidAlgorithm {
         Self { max_hops, timeout: Duration::from_millis(timeout_ms) }
     }
 
-    /// Simulates a path and returns the expected output amount.
+    /// Scores a path based on spot prices, fees, and minimum liquidity depth (inertia).
     ///
-    /// TODO: Implement actual simulation using ProtocolSim
-    fn simulate_path(
-        &self,
-        _path: &Path,
-        _market: &SharedMarketData,
-        amount_in: BigUint,
-    ) -> Result<SimulationResult, AlgorithmError> {
-        // TODO: Implement actual simulation
-        // For now, return a placeholder that assumes 0.3% fee per hop
-        let hops = _path.hop_count() as u32;
-        let fee_multiplier = BigUint::from(997u32).pow(hops);
-        let divisor = BigUint::from(1000u32).pow(hops);
-        let amount_out = &amount_in * &fee_multiplier / &divisor;
+    /// Uses the formula: `weight = (product of spot_prices) × (product of (1 - fee)) × min(depths)`
+    ///
+    /// This captures:
+    /// - Spot price: the theoretical exchange rate along the path
+    /// - Fees: deducted per hop as `price *= (1 - fee)`
+    /// - Depth (inertia): minimum depth acts as a liquidity bottleneck indicator
+    ///
+    /// Returns `None` if edge weights are missing required data (spot_price, depth).
+    /// Higher score = better path candidate. Paths through deeper, lower-fee pools rank higher.
+    fn score_path(&self, path: &Path, graph: &StableDiGraph) -> Option<f64> {
+        let mut price = 1.0;
+        let mut min_depth = f64::MAX;
 
-        // TODO: Estimate gas based on protocols in path
-        // let gas_estimate: u64 = _path
-        //     .hops
-        //     .iter()
-        //     .map(|e| e.protocol_system.typical_gas_cost())
-        //     .sum();
+        for edge in path {
+            let weight = graph[*edge].weight.as_ref()?;
+            let spot_price = weight.spot_price?;
+            let depth = weight.depth?;
 
-        Ok(SimulationResult { amount_out, gas_estimate: BigUint::ZERO })
-    }
-
-    /// Converts a Path to a Route with simulated amounts.
-    fn path_to_route(
-        &self,
-        path: &Path,
-        market: &SharedMarketData,
-        amount_in: BigUint,
-    ) -> Result<Route, AlgorithmError> {
-        // Simulate to get amounts
-        let sim_result = self.simulate_path(path, market, amount_in.clone())?;
-
-        // Build swaps
-        // TODO: Calculate intermediate amounts properly
-        let mut swaps = Vec::with_capacity(path.hops.len());
-        let mut current_amount = amount_in;
-
-        for (i, edge) in path.hops.iter().enumerate() {
-            let token_in = path.tokens[i].clone();
-            let token_out = edge.token_out.clone();
-
-            // Placeholder: distribute output evenly for now
-            let amount_out = if i == path.hops.len() - 1 {
-                sim_result.amount_out.clone()
-            } else {
-                // Estimate intermediate amount
-                &current_amount * BigUint::from(997u32) / BigUint::from(1000u32)
-            };
-
-            let protocol_system = market
-                .get_component(&edge.component_id)
-                .unwrap()
-                .protocol_system
-                .as_str()
-                .try_into()
-                .map_err(|e| AlgorithmError::Other(format!("{}", e)))?;
-
-            swaps.push(Swap::new(
-                edge.component_id.clone(),
-                protocol_system,
-                token_in,
-                token_out,
-                current_amount.clone(),
-                amount_out.clone(),
-            ));
-
-            current_amount = amount_out;
+            price *= spot_price;
+            price *= 1.0 - weight.fee.unwrap_or(0.0);
+            min_depth = min_depth.min(depth);
         }
 
-        Ok(Route::new(swaps))
+        Some(price * min_depth)
     }
 }
 
@@ -120,62 +74,84 @@ impl Default for MostLiquidAlgorithm {
 
 impl Algorithm for MostLiquidAlgorithm {
     type GraphType = StableDiGraph;
-    type GraphManager = crate::graph::PetgraphStableDiGraphManager;
+    type GraphManager = PetgraphStableDiGraphManager;
+
     fn name(&self) -> &str {
         "most_liquid"
     }
 
     fn find_best_route(
         &self,
-        graph: &StableDiGraph,
+        graph_manager: &Self::GraphManager,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
-        let start_time = Instant::now();
-
         // Check for exact-out (not supported yet)
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
         let amount_in = order.amount.clone();
+        let graph = graph_manager.graph();
 
-        // Find all paths using BFS
-        let paths = self.find_paths(graph, &order.token_in, &order.token_out);
+        // Phase 1: Find all edge paths using BFS (shorter paths first)
+        let all_paths = graph_manager
+            .find_paths(&order.token_in, &order.token_out, 0, self.max_hops)
+            .map_err(|e| AlgorithmError::Other(format!("Graph error: {}", e)))?;
 
-        if paths.is_empty() {
+        if all_paths.is_empty() {
             return Err(AlgorithmError::NoPath {
                 from: format!("{:?}", order.token_in),
                 to: format!("{:?}", order.token_out),
             });
         }
 
+        // Initialize stats tracking
+        let mut stats = SolveStats::new(market.last_updated().number, all_paths.len());
+
+        // Phase 2: Score and sort all paths by estimated output (higher score = better)
+        let mut scored_paths: Vec<(Path, f64)> = all_paths
+            .into_iter()
+            .filter_map(|path| {
+                let score = self.score_path(&path, graph)?;
+                Some((path, score))
+            })
+            .collect();
+
+        scored_paths.sort_by(|(_, a_score), (_, b_score)| {
+            b_score
+                .partial_cmp(a_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         // Get gas price for ranking
         let gas_price = market.gas_price().effective_gas_price();
 
-        // Simulate and rank paths
-        let mut best_route: Option<(Route, BigUint)> = None;
+        // Phase 3: Simulate all paths in score order
+        let mut best: Option<(SimulationResult, BigUint)> = None;
 
-        for path in &paths {
+        for (edge_path, _) in scored_paths {
             // Check timeout
-            if start_time.elapsed() > self.timeout {
-                // Return best found so far, or timeout error
-                return best_route
-                    .map(|(route, _)| route)
-                    .ok_or(AlgorithmError::Timeout {
-                        elapsed_ms: start_time.elapsed().as_millis() as u64,
-                    });
+            if stats.elapsed_ms() > self.timeout.as_millis() as u64 {
+                break;
             }
 
-            // Simulate path
-            let sim_result = match self.simulate_path(path, market, amount_in.clone()) {
+            // Track pools and protocols for this path
+            stats.record_path(&edge_path, graph, market);
+
+            let sim_result = match simulate_path(edge_path, graph, market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(_) => continue, // Skip paths that fail simulation
             };
 
-            // Calculate net output (output - gas cost)
-            // TODO: Convert gas cost to output token terms using price oracle
-            let gas_cost_wei = &sim_result.gas_estimate * &gas_price;
+            // Calculate net output (output - gas cost in wei)
+            // TODO: Convert gas cost to output token terms for proper ranking.
+            // Currently subtracting raw wei from output amount, which is incorrect when
+            // token_out != ETH. Need to:
+            // 1. Store ETH price per token (token/ETH rate) - likely in SharedMarketData
+            // 2. Look up ETH price for the output token of this path
+            // 3. Convert: gas_cost_in_token_out = gas_cost_wei * eth_price_in_token_out
+            let gas_cost_wei = &sim_result.total_gas * &gas_price;
             let net_output = if sim_result.amount_out > gas_cost_wei {
                 &sim_result.amount_out - &gas_cost_wei
             } else {
@@ -183,21 +159,29 @@ impl Algorithm for MostLiquidAlgorithm {
             };
 
             // Update best if this is better
-            let is_better = best_route
+            let is_better = best
                 .as_ref()
                 .map(|(_, best_net)| net_output > *best_net)
                 .unwrap_or(true);
 
             if is_better {
-                if let Ok(route) = self.path_to_route(path, market, amount_in.clone()) {
-                    best_route = Some((route, net_output));
-                }
+                best = Some((sim_result, net_output));
             }
         }
 
-        best_route
-            .map(|(route, _)| route)
-            .ok_or(AlgorithmError::InsufficientLiquidity)
+        // Log solve result
+        stats.log_result(self.name(), best.as_ref().map(|(r, _)| r), market, &amount_in);
+
+        let elapsed = stats.elapsed_ms();
+
+        best.map(|(sim_result, _)| sim_result.route)
+            .ok_or({
+                if elapsed > self.timeout.as_millis() as u64 {
+                    AlgorithmError::Timeout { elapsed_ms: elapsed }
+                } else {
+                    AlgorithmError::InsufficientLiquidity
+                }
+            })
     }
 
     fn supports_exact_out(&self) -> bool {
@@ -213,83 +197,136 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 }
 
-impl MostLiquidAlgorithm {
-    /// Finds all paths between two tokens using BFS on a petgraph.
-    fn find_paths(&self, graph: &StableDiGraph, from: &Address, to: &Address) -> Vec<Path> {
-        // Find node indices for from and to tokens
-        let from_idx = graph
-            .node_indices()
-            .find(|&idx| &graph[idx] == from);
-        let to_idx = graph
-            .node_indices()
-            .find(|&idx| &graph[idx] == to);
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
 
-        let (Some(from_idx), Some(to_idx)) = (from_idx, to_idx) else {
-            return vec![];
-        };
+    use tycho_simulation::tycho_core::models::Address;
 
-        if from_idx == to_idx {
-            return vec![];
+    use super::*;
+    use crate::graph::petgraph::EdgeWeight;
+
+    /// Creates a single-edge graph (A -> B) with optional edge weight.
+    fn single_edge_setup(weight: Option<EdgeWeight>) -> (StableDiGraph, Path) {
+        let mut manager = PetgraphStableDiGraphManager::default();
+        let token_a = Address::default();
+        let token_b = Address::from([1u8; 20]);
+
+        manager.initialize_graph(&HashMap::from([(
+            "pool1".to_string(),
+            vec![token_a.clone(), token_b.clone()],
+        )]));
+
+        if let Some(w) = weight {
+            manager
+                .set_edge_weight(&"pool1".to_string(), &token_a, &token_b, w, false)
+                .unwrap();
         }
 
-        vec![]
+        let graph = manager.graph().clone();
 
-        // TODO: Use petgraph's all_simple_paths to find all paths
+        let path = vec![graph
+            .edge_indices()
+            .find(|&e| {
+                let (src, _) = graph.edge_endpoints(e).unwrap();
+                graph[src] == token_a
+            })
+            .unwrap()];
 
-        // let mut paths = Vec::new();
-        // let mut queue: VecDeque<(petgraph::graph::NodeIndex, Vec<ComponentId>, Vec<Address>)> =
-        //     VecDeque::new();
-
-        // // Start BFS from the source token
-        // queue.push_back((from_idx, vec![], vec![from.clone()]));
-
-        // while let Some((current_idx, edges, tokens)) = queue.pop_front() {
-        //     // Check hop limit
-        //     if edges.len() >= self.max_hops {
-        //         continue;
-        //     }
-
-        //     // Explore neighbors
-        //     for neighbor_idx in graph.neighbors(current_idx) {
-        //         let neighbor_token = graph[neighbor_idx].clone();
-
-        //         // Avoid cycles (don't revisit tokens)
-        //         if tokens.contains(&neighbor_token) {
-        //             continue;
-        //         }
-
-        //         // Get the edge data
-        //         let edge = graph
-        //             .edges_connecting(current_idx, neighbor_idx)
-        //             .next()
-        //             .map(|e| e.weight().clone());
-
-        //         let Some(edge) = edge else {
-        //             continue;
-        //         };
-
-        //         let mut new_edges = edges.clone();
-        //         new_edges.push(edge.clone());
-
-        //         let mut new_tokens = tokens.clone();
-        //         new_tokens.push(neighbor_token.clone());
-
-        //         // Found a path to destination
-        //         if neighbor_token == to.clone() {
-        //             paths.push(Path { hops: new_edges, tokens: new_tokens });
-        //         } else {
-        //             // Continue searching
-        //             queue.push_back((neighbor_idx, new_edges, new_tokens));
-        //         }
-        //     }
-        // }
-
-        // paths
+        (graph, path)
     }
-}
 
-/// Result of simulating a path.
-struct SimulationResult {
-    amount_out: BigUint,
-    gas_estimate: BigUint,
+    #[test]
+    fn score_path_calculates_correctly() {
+        let mut manager = PetgraphStableDiGraphManager::default();
+        let token_a = Address::default();
+        let token_b = Address::from([1u8; 20]);
+        let token_c = Address::from([2u8; 20]);
+
+        manager.initialize_graph(&HashMap::from([
+            ("pool1".to_string(), vec![token_a.clone(), token_b.clone()]),
+            ("pool2".to_string(), vec![token_b.clone(), token_c.clone()]),
+        ]));
+
+        // pool1 A->B: spot=2.0, depth=1000, fee=0.3%; pool2 B->C: spot=0.5, depth=500, fee=0.1%
+        manager
+            .set_edge_weight(
+                &"pool1".to_string(),
+                &token_a,
+                &token_b,
+                EdgeWeight::new(2.0, 1000.0, 0.003),
+                false,
+            )
+            .unwrap();
+        manager
+            .set_edge_weight(
+                &"pool2".to_string(),
+                &token_b,
+                &token_c,
+                EdgeWeight::new(0.5, 500.0, 0.001),
+                false,
+            )
+            .unwrap();
+
+        let graph = manager.graph();
+        let path: Path = graph
+            .edge_indices()
+            .filter(|&e| {
+                let (src, dst) = graph.edge_endpoints(e).unwrap();
+                (graph[src] == token_a && graph[dst] == token_b) ||
+                    (graph[src] == token_b && graph[dst] == token_c)
+            })
+            .collect();
+
+        // price = 2.0 * 0.997 * 0.5 * 0.999, min_depth = 500.0
+        let expected = 2.0 * 0.997 * 0.5 * 0.999 * 500.0;
+        let score = MostLiquidAlgorithm::new()
+            .score_path(&path, graph)
+            .unwrap();
+        assert!((score - expected).abs() < 0.0001, "expected {expected}, got {score}");
+    }
+
+    #[test]
+    fn score_path_empty_returns_max() {
+        let graph = StableDiGraph::default();
+        assert_eq!(MostLiquidAlgorithm::new().score_path(&vec![], &graph), Some(f64::MAX));
+    }
+
+    #[test]
+    fn score_path_missing_weight_returns_none() {
+        let (graph, path) = single_edge_setup(None);
+        assert!(MostLiquidAlgorithm::new()
+            .score_path(&path, &graph)
+            .is_none());
+    }
+
+    #[test]
+    fn score_path_missing_spot_price_returns_none() {
+        let (graph, path) = single_edge_setup(Some(EdgeWeight::default().with_depth(1000.0)));
+        assert!(MostLiquidAlgorithm::new()
+            .score_path(&path, &graph)
+            .is_none());
+    }
+
+    #[test]
+    fn score_path_missing_depth_returns_none() {
+        let (graph, path) = single_edge_setup(Some(EdgeWeight::default().with_spot_price(2.0)));
+        assert!(MostLiquidAlgorithm::new()
+            .score_path(&path, &graph)
+            .is_none());
+    }
+
+    #[test]
+    fn score_path_missing_fee_uses_zero() {
+        let (graph, path) = single_edge_setup(Some(
+            EdgeWeight::default()
+                .with_spot_price(2.0)
+                .with_depth(1000.0),
+        ));
+        // price = 2.0 * (1 - 0.0), depth = 1000.0 -> score = 2000.0
+        let score = MostLiquidAlgorithm::new()
+            .score_path(&path, &graph)
+            .unwrap();
+        assert_eq!(score, 2000.0);
+    }
 }

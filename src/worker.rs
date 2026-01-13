@@ -162,13 +162,10 @@ where
                 continue;
             }
 
-            // Get the graph from the graph manager
-            let graph = self.graph_manager.graph();
-
             // Find route using algorithm
             let result = self
                 .algorithm
-                .find_best_route(graph, &market, order);
+                .find_best_route(&self.graph_manager, &market, order);
 
             let order_solution = match result {
                 Ok(route) => {
