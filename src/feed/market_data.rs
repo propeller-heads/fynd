@@ -12,7 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
-    tycho_core::{
+    tycho_common::{
         models::{protocol::ProtocolComponent, token::Token, Address},
         simulation::protocol_sim::ProtocolSim,
     },

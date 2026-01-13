@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tycho_simulation::tycho_core::models::Chain;
+use tycho_simulation::tycho_common::models::Chain;
 
 pub mod events;
 pub mod market_data;

@@ -11,7 +11,7 @@ use actix_web::{App, HttpServer};
 use tokio::sync::RwLock;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-use tycho_simulation::tycho_core::models::Chain;
+use tycho_simulation::tycho_common::models::Chain;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
     feed::market_data::SharedMarketData,
