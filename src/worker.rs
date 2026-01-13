@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use tokio::sync::broadcast;
+use tracing::warn;
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
@@ -109,16 +110,14 @@ where
     /// Processes pending market events.
     ///
     /// Call this periodically or before each solve to stay in sync.
+    ///
+    /// Errors are logged but do not stop processing of subsequent events.
     pub fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(&event);
+            if let Err(e) = self.graph_manager.handle_event(&event) {
+                warn!("Warning: Error handling market event: {:?}", e);
+            }
         }
-    }
-
-    /// Handles a market event by updating the graph via the graph manager.
-    fn handle_event(&mut self, event: &MarketEvent) {
-        // Graph manager updates its internal graph based on the event
-        self.graph_manager.handle_event(event);
     }
 
     /// Solves a request and returns the solution.

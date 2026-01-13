@@ -6,12 +6,11 @@
 use std::collections::{HashMap, HashSet};
 
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
-use tracing::{error, warn};
 use tycho_simulation::tycho_core::models::Address;
 
 use super::GraphManager;
 use crate::{
-    feed::events::{MarketEvent, MarketEventHandler},
+    feed::events::{EventError, MarketEvent, MarketEventHandler},
     graph::GraphError,
     types::ComponentId,
 };
@@ -143,14 +142,22 @@ impl PetgraphGraphManager {
 
     /// Adds components to the graph.
     ///
-    /// If a component has no tokens, it is skipped.
+    /// # Errors
+    ///
+    /// Returns an error if any components have no tokens (components must have at least 1 token).
+    /// All components not included in the error were successfully added.
     ///
     /// Arguments:
     /// - components: A map of component IDs to their tokens.
-    fn add_components(&mut self, components: &HashMap<ComponentId, Vec<Address>>) {
+    fn add_components(
+        &mut self,
+        components: &HashMap<ComponentId, Vec<Address>>,
+    ) -> Result<(), GraphError> {
+        let mut tokenless_components = Vec::new();
+
         for (comp_id, tokens) in components {
             if tokens.is_empty() {
-                warn!("Skipping component {} with no tokens (need at least 1)", comp_id);
+                tokenless_components.push(comp_id.clone());
                 continue;
             }
             // Ensure all tokens are added as nodes (or get existing ones) and collect their indices
@@ -161,24 +168,58 @@ impl PetgraphGraphManager {
             // Add edges for all token pairs in this component
             self.add_component_edges(comp_id, &node_indices);
         }
+
+        // Return error if any components had no tokens
+        if !tokenless_components.is_empty() {
+            return Err(GraphError::ComponentsWithoutTokens(tokenless_components));
+        }
+
+        Ok(())
     }
 
+    /// Removes components from the graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any components are not found in the graph. All components not included
+    /// in the error were successfully removed.
+    ///
+    /// Arguments:
+    /// - components: A vector of component IDs to remove.
     fn remove_components(&mut self, components: &[ComponentId]) -> Result<(), GraphError> {
-        // Use the edge_map for O(1) lookup instead of iterating all edges
+        let mut missing_components = Vec::new();
+
         for comp_id in components {
+            // Use the edge_map for O(1) lookup instead of iterating all edges
             if let Some(edge_indices) = self.edge_map.remove(comp_id) {
                 for edge_idx in edge_indices {
                     self.graph.remove_edge(edge_idx);
                 }
             } else {
-                return Err(GraphError::ComponentNotFound(comp_id.clone()));
+                // Component not found in edge_map
+                missing_components.push(comp_id.clone());
             }
         }
+
+        // Return error if any components were not found
+        if !missing_components.is_empty() {
+            return Err(GraphError::ComponentsNotFound(missing_components));
+        }
+
         Ok(())
     }
 
     /// Sets the weight for edges between the specified tokens with the given component ID.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the component is not found in the graph for the given token pair.
+    ///
+    /// Arguments:
+    /// - component_id: The ID of the component to update.
+    /// - token_in: The input token.
+    /// - token_out: The output token.
+    /// - weight: The weight to set.
     /// - If `bidirectional` is `true`, updates edges in both directions (token_in -> token_out and
     ///   token_out -> token_in).
     /// - If `bidirectional` is `false`, updates only the forward direction (token_in -> token_out).
@@ -197,7 +238,7 @@ impl PetgraphGraphManager {
         let edge_indices = self
             .edge_map
             .get(component_id)
-            .ok_or_else(|| GraphError::ComponentNotFound(component_id.clone()))?;
+            .ok_or_else(|| GraphError::ComponentsNotFound(vec![component_id.clone()]))?;
 
         let mut updated = false;
         for &edge_idx in edge_indices {
@@ -222,7 +263,7 @@ impl PetgraphGraphManager {
                 let edge_data = self
                     .graph
                     .edge_weight_mut(edge_idx)
-                    .ok_or_else(|| GraphError::ComponentNotFound(component_id.clone()))?;
+                    .ok_or_else(|| GraphError::ComponentsNotFound(vec![component_id.clone()]))?;
                 // Verify the component ID matches
                 if edge_data.component_id == *component_id {
                     edge_data.weight = Some(weight.clone());
@@ -232,7 +273,7 @@ impl PetgraphGraphManager {
         }
 
         if !updated {
-            return Err(GraphError::ComponentTokensNotFound(
+            return Err(GraphError::MissingComponentBetweenTokens(
                 token_in.clone(),
                 token_out.clone(),
                 component_id.clone(),
@@ -250,7 +291,6 @@ impl Default for PetgraphGraphManager {
 }
 
 impl GraphManager<DiGraph<Address, EdgeData>> for PetgraphGraphManager {
-    // TODO: make a type alias for the component topology
     fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
         self.graph = DiGraph::new();
@@ -285,17 +325,31 @@ impl GraphManager<DiGraph<Address, EdgeData>> for PetgraphGraphManager {
 }
 
 impl MarketEventHandler for PetgraphGraphManager {
-    fn handle_event(&mut self, event: &MarketEvent) {
+    fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
         match event {
             MarketEvent::MarketUpdated { added_components, removed_components, .. } => {
-                self.add_components(added_components);
+                // Process both operations and collect all errors
+                let mut errors = Vec::new();
+
+                // Try to add components, collect error if it fails
+                if let Err(e) = self.add_components(added_components) {
+                    errors.push(e);
+                }
+
+                // Try to remove components, collect error if it fails
                 if let Err(e) = self.remove_components(removed_components) {
-                    error!("Error removing components from graph: {:?}", e);
+                    errors.push(e);
+                }
+
+                // Return errors if any occurred
+                match errors.len() {
+                    0 => Ok(()),
+                    _ => Err(EventError::GraphErrors(errors)),
                 }
             }
-            MarketEvent::GasPriceUpdated { .. } => {
-                // ignore gas price updates
-            }
+            MarketEvent::GasPriceUpdated { .. } => Err(EventError::InvalidEvent(
+                "Gas price updates cannot be applied to the graph".to_string(),
+            )),
         }
     }
 }
@@ -583,7 +637,9 @@ mod tests {
 
         // Add first component with token A and B
         components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        manager.add_components(&components);
+        manager
+            .add_components(&components)
+            .unwrap();
 
         let initial_node_count = manager.graph().node_count();
         assert_eq!(initial_node_count, 2);
@@ -591,9 +647,207 @@ mod tests {
         // Add second component with overlapping token A
         components.clear();
         components.insert("pool2".to_string(), vec![token_a.clone()]);
-        manager.add_components(&components);
+        manager
+            .add_components(&components)
+            .unwrap();
 
         // Should still have only 2 nodes, not 3
         assert_eq!(manager.graph().node_count(), 2, "Should not create duplicate nodes");
+    }
+
+    #[test]
+    fn test_add_tokenless_components_error() {
+        let mut manager = PetgraphGraphManager::new();
+        let mut components = HashMap::new();
+        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
+        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+
+        // Mix valid and invalid components
+        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("pool2".to_string(), vec![]);
+        components.insert("pool3".to_string(), vec![]);
+        let result = manager.add_components(&components);
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphError::ComponentsWithoutTokens(ids) => {
+                assert_eq!(ids.len(), 2);
+                assert!(ids.contains(&"pool2".to_string()));
+                assert!(ids.contains(&"pool3".to_string()));
+            }
+            _ => panic!("Expected ComponentsWithoutTokens error"),
+        }
+
+        // Verify valid component was still added
+        assert_eq!(manager.graph().node_count(), 2);
+        assert_eq!(manager.graph().edge_count(), 2); // A-B and B-A
+    }
+
+    #[test]
+    fn test_remove_components_not_found_error() {
+        let mut manager = PetgraphGraphManager::new();
+        let mut components = HashMap::new();
+        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
+        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+
+        // Add components first
+        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("pool2".to_string(), vec![token_a.clone()]);
+        manager
+            .add_components(&components)
+            .unwrap();
+
+        // Try to remove mix of existing and non-existing components
+        let result = manager.remove_components(&[
+            "pool1".to_string(),
+            "pool3".to_string(),
+            "pool4".to_string(),
+        ]);
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphError::ComponentsNotFound(ids) => {
+                assert_eq!(ids.len(), 2, "Expected 2 missing components");
+                assert!(ids.contains(&"pool3".to_string()));
+                assert!(ids.contains(&"pool4".to_string()));
+            }
+            _ => panic!("Expected ComponentsNotFound error"),
+        }
+
+        dbg!(manager.graph());
+        dbg!(&manager.graph().edge_indices());
+        dbg!(&manager.edge_map);
+
+        // Verify pool1 was removed but pool2 is still there
+        // pool2 has a single token, so it creates 1 self-loop edge (A->A)
+        let final_edge_count = manager.graph().edge_count();
+        assert_eq!(
+            final_edge_count, 1,
+            "Expected 1 edge after removing pool1, got {}",
+            final_edge_count
+        );
+        assert_eq!(manager.edge_map.len(), 1);
+    }
+
+    #[test]
+    fn test_set_edge_weight_errors() {
+        let mut manager = PetgraphGraphManager::new();
+        let mut topology = HashMap::new();
+        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
+        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+        let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
+
+        // Initialize with pool1 connecting A-B, and pool2 connecting B-C
+        topology.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("pool2".to_string(), vec![token_b.clone(), token_c.clone()]);
+        manager.initialize_graph(&topology);
+
+        // Test 1: Component not found
+        let result = manager.set_edge_weight(
+            &"pool3".to_string(),
+            &token_a,
+            &token_b,
+            EdgeWeight::SpotPrice(42.5),
+            true,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphError::ComponentsNotFound(ids) => {
+                assert_eq!(ids, vec!["pool3".to_string()]);
+            }
+            _ => panic!("Expected ComponentsNotFound error"),
+        }
+
+        // Test 2: Token not found
+        let non_existent_token = addr("0x0000000000000000000000000000000000000000");
+        let result = manager.set_edge_weight(
+            &"pool1".to_string(),
+            &token_a,
+            &non_existent_token, // Non-existent token
+            EdgeWeight::SpotPrice(42.5),
+            true,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphError::TokenNotFound(found_addr) => {
+                assert_eq!(found_addr, non_existent_token);
+            }
+            _ => panic!("Expected TokenNotFound error"),
+        }
+
+        // Test 3: Component doesn't connect the specified tokens
+        let result = manager.set_edge_weight(
+            &"pool1".to_string(),
+            &token_a,
+            &token_c, // pool1 doesn't connect A-C, only A-B
+            EdgeWeight::SpotPrice(42.5),
+            true,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphError::MissingComponentBetweenTokens(in_token, out_token, comp_id) => {
+                assert_eq!(in_token, token_a);
+                assert_eq!(out_token, token_c);
+                assert_eq!(comp_id, "pool1".to_string());
+            }
+            _ => panic!("Expected MissingComponentBetweenTokens error"),
+        }
+    }
+
+    #[test]
+    fn test_handle_event_error_invalid_gas_price() {
+        let mut manager = PetgraphGraphManager::new();
+        use crate::{
+            feed::events::{EventError, MarketEvent},
+            types::GasPrice,
+        };
+
+        // Try to handle a gas price update event
+        let event = MarketEvent::GasPriceUpdated { gas_price: GasPrice::default() };
+
+        let result = manager.handle_event(&event);
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EventError::InvalidEvent(msg) => {
+                assert!(msg.contains("Gas price updates cannot be applied"));
+            }
+            _ => panic!("Expected InvalidEvent error"),
+        }
+    }
+
+    #[test]
+    fn test_handle_event_propagates_errors() {
+        let mut manager = PetgraphGraphManager::new();
+        use std::collections::HashMap;
+
+        use crate::feed::events::{EventError, MarketEvent};
+
+        // Create an event with both add and remove operations that will fail
+        let event = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([("pool1".to_string(), vec![])]),
+            removed_components: vec!["pool2".to_string()],
+            updated_components: vec![],
+        };
+
+        let result = manager.handle_event(&event);
+
+        // Should return multiple errors
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EventError::GraphErrors(errors) => {
+                assert_eq!(errors.len(), 2);
+                // Check that we have both error types
+                let has_add_error = errors
+                    .iter()
+                    .any(|e| matches!(e, GraphError::ComponentsWithoutTokens(_)));
+                let has_remove_error = errors
+                    .iter()
+                    .any(|e| matches!(e, GraphError::ComponentsNotFound(_)));
+                assert!(has_add_error, "Should have ComponentsWithoutTokens error");
+                assert!(has_remove_error, "Should have ComponentsNotFound error");
+            }
+            _ => panic!("Expected GraphErrors with multiple errors"),
+        }
     }
 }

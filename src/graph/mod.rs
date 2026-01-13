@@ -58,10 +58,12 @@ impl Path {
 pub enum GraphError {
     #[error("Token not found in graph: {0:?}")]
     TokenNotFound(Address),
-    #[error("Component not found in graph: {0}")]
-    ComponentNotFound(ComponentId),
-    #[error("Component not found between tokens {0:?} and {1:?} for component {2}")]
-    ComponentTokensNotFound(Address, Address, ComponentId),
+    #[error("Components not found in graph: {0:?}")]
+    ComponentsNotFound(Vec<ComponentId>),
+    #[error("Components without tokens cannot be added: {0:?}")]
+    ComponentsWithoutTokens(Vec<ComponentId>),
+    #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
+    MissingComponentBetweenTokens(Address, Address, ComponentId),
 }
 
 /// Trait for managing graph representations.
@@ -74,7 +76,8 @@ where
 {
     /// Initializes the graph from the market topology.
     ///
-    /// The `components` parameter maps component IDs to the tokens they contain.
+    /// Arguments:
+    /// - components: A map of component IDs to their tokens addresses.
     fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
 
     /// Returns a reference to the managed graph.
