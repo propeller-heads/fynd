@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use tycho_simulation::tycho_core::models::Chain;
+
 pub mod events;
 pub mod market_data;
 pub mod tycho_feed;
@@ -10,6 +12,8 @@ pub mod tycho_feed;
 pub struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
+    /// Blockchain to connect to.
+    pub(crate) chain: Chain,
     /// Tycho API key.
     pub(crate) tycho_api_key: String,
     /// Names of the protocols to index.
@@ -39,6 +43,7 @@ pub struct TychoFeedConfig {
 impl TychoFeedConfig {
     pub fn new(
         tycho_url: String,
+        chain: Chain,
         tycho_api_key: String,
         protocols: Vec<String>,
         min_tvl: f64,
@@ -46,6 +51,7 @@ impl TychoFeedConfig {
     ) -> Self {
         Self {
             tycho_url,
+            chain,
             tycho_api_key,
             protocols,
             min_tvl,
@@ -75,14 +81,6 @@ impl TychoFeedConfig {
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
 pub enum TychoFeedError {
-    /// Connection error.
-    #[error("connection error: {0}")]
-    Connection(String),
-
-    /// Protocol error.
-    #[error("protocol error: {0}")]
-    Protocol(String),
-
     /// Market data lock error.
     #[error("failed to acquire market data lock")]
     LockError,
@@ -90,4 +88,12 @@ pub enum TychoFeedError {
     /// Configuration error.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Update error.
+    #[error("stream error: {0}")]
+    StreamError(String),
+
+    /// Event send error.
+    #[error("event send error: {0}")]
+    EventChannelError(String),
 }

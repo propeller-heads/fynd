@@ -11,6 +11,7 @@ use actix_web::{App, HttpServer};
 use tokio::sync::RwLock;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use tycho_simulation::tycho_core::models::Chain;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
     feed::market_data::SharedMarketData,
@@ -24,6 +25,7 @@ use tycho_solver::{
 ///
 /// TODO: Load from environment variables or config file.
 struct Config {
+    chain: Chain,
     http_host: String,
     http_port: u16,
     num_workers: usize,
@@ -36,6 +38,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            chain: Chain::Ethereum,
             http_host: "0.0.0.0".to_string(),
             http_port: 3000,
             num_workers: num_cpus::get(),
@@ -78,6 +81,7 @@ async fn main() -> std::io::Result<()> {
 
     let tycho_feed_config = TychoFeedConfig::new(
         config.tycho_url,
+        config.chain,
         config.tycho_api_key,
         vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
         10.0,

@@ -19,9 +19,7 @@ use crate::{
         market_data::SharedMarketDataRef,
     },
     graph::GraphManager,
-    types::{
-        solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
-    },
+    types::{solution::SolutionRequest, OrderSolution, Solution, SolutionStatus, SolveError},
 };
 
 /// Configuration for a Solver instance.
@@ -138,12 +136,11 @@ where
         let market = self.market_data.read().await;
 
         // Get block info for the solution
-        let last_block = market.last_updated();
-        let block_info = BlockInfo {
-            number: last_block.number,
-            hash: format!("{:?}", last_block.hash),
-            timestamp: last_block.ts.and_utc().timestamp() as u64,
-        };
+        let block_info = market
+            .last_updated()
+            .ok_or(SolveError::Internal(
+                "No block info available, this means no block has been processed yet".to_string(),
+            ))?;
 
         // Solve each order
         let mut order_solutions = Vec::with_capacity(request.orders.len());

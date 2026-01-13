@@ -91,7 +91,6 @@ impl MostLiquidAlgorithm {
             let protocol_system = market
                 .get_component(&edge.component_id)
                 .unwrap()
-                .component
                 .protocol_system
                 .as_str()
                 .try_into()
