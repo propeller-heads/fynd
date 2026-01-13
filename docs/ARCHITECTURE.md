@@ -167,7 +167,7 @@ The `component_topology` field stores a simple mapping from component IDs to the
 
 - **GraphManager trait**: Defines interface for building and updating graphs from component topology
 - **Edge & Path types**: Shared types for representing graph edges and paths
-- **PetgraphGraphManager**: Implementation for petgraph::UnGraph
+- **PetgraphStableDiGraphManager**: Implementation for petgraph::stable_graph::StableDiGraph
 
 ```rust
 pub trait GraphManager<G>: Send + Sync {
@@ -275,7 +275,7 @@ pub trait Algorithm: Send + Sync {
 ```rust
 impl Algorithm for MostLiquidAlgorithm {
     type GraphType = UnGraph<Address, Edge>;
-    type GraphManager = PetgraphGraphManager;
+    type GraphManager = PetgraphStableDiGraphManager;
 
     fn find_best_route(
         &self,
@@ -427,7 +427,7 @@ src/
 │
 ├── graph/                    # Graph management
 │   ├── mod.rs                # GraphManager trait, Edge, Path
-│   └── petgraph.rs           # PetgraphGraphManager
+│   └── petgraph.rs           # PetgraphStableDiGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
 ├── worker_pool.rs            # WorkerPool

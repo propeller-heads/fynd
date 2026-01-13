@@ -1,11 +1,19 @@
-//! Petgraph's UnGraph implementation of GraphManager.
+//! Petgraph's StableDiGraph implementation of GraphManager.
 //!
-//! This module provides PetgraphUnGraphManager, which implements GraphManager for
-//! petgraph::graph::UnGraph, providing a reusable implementation for algorithms that use petgraph.
+//! This module provides PetgraphStableDiGraphManager, which implements GraphManager for
+//! petgraph::stable_graph::StableDiGraph, providing a reusable implementation for algorithms that
+//! use petgraph.
+//!
+//! A stable graph is a graph that maintains the indices of its edges even after removals. This is
+//! useful for optimising the graph manager's performance by allowing for O(1) edge and node
+//! lookups.
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
+use petgraph::{
+    graph::{EdgeIndex, NodeIndex},
+    stable_graph::StableDiGraph,
+};
 use tycho_simulation::tycho_core::models::Address;
 
 use super::GraphManager;
@@ -61,19 +69,23 @@ impl EdgeData {
 
 /// Petgraph implementation of GraphManager.
 ///
-/// This struct implements GraphManager for petgraph::graph::UnGraph.
+/// This struct implements GraphManager for petgraph::stable_graph::StableDiGraph.
 ///
 /// The graph manager maintains the graph internally and updates it based on market events.
-pub struct PetgraphGraphManager {
-    // Directed graph with token addresses as nodes and edge data (component id + weight) as edges.
-    graph: DiGraph<Address, EdgeData>,
-    // Map from ComponentId to edge indices for fast removal and weight updates
+/// Using StableDiGraph ensures edge indices remain valid after removals, making edge_map viable.
+pub struct PetgraphStableDiGraphManager {
+    // Stable directed graph with token addresses as nodes and edge data (component id + weight) as
+    // edges. Using StableDiGraph ensures edge indices remain valid after removals, making
+    // edge_map viable.
+    graph: StableDiGraph<Address, EdgeData>,
+    // Map from ComponentId to edge indices for fast removal and weight updates.
+    // This is safe to use with StableDiGraph since indices don't shift when edges are removed.
     edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
 }
 
-impl PetgraphGraphManager {
+impl PetgraphStableDiGraphManager {
     pub fn new() -> Self {
-        Self { graph: DiGraph::new(), edge_map: HashMap::new() }
+        Self { graph: StableDiGraph::default(), edge_map: HashMap::new() }
     }
 
     /// Helper function to find a node index by address
@@ -284,16 +296,16 @@ impl PetgraphGraphManager {
     }
 }
 
-impl Default for PetgraphGraphManager {
+impl Default for PetgraphStableDiGraphManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl GraphManager<DiGraph<Address, EdgeData>> for PetgraphGraphManager {
+impl GraphManager<StableDiGraph<Address, EdgeData>> for PetgraphStableDiGraphManager {
     fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
-        self.graph = DiGraph::new();
+        self.graph = StableDiGraph::default();
         self.edge_map.clear();
 
         let unique_tokens: HashSet<Address> = component_topology
@@ -319,12 +331,12 @@ impl GraphManager<DiGraph<Address, EdgeData>> for PetgraphGraphManager {
         }
     }
 
-    fn graph(&self) -> &DiGraph<Address, EdgeData> {
+    fn graph(&self) -> &StableDiGraph<Address, EdgeData> {
         &self.graph
     }
 }
 
-impl MarketEventHandler for PetgraphGraphManager {
+impl MarketEventHandler for PetgraphStableDiGraphManager {
     fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
         match event {
             MarketEvent::MarketUpdated { added_components, removed_components, .. } => {
@@ -367,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_empty() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let topology = HashMap::new();
 
         manager.initialize_graph(&topology);
@@ -379,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_comprehensive() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -471,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_multiple_edges_same_pair() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -511,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_set_edge_weight() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -630,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_add_components_no_duplicate_nodes() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -657,7 +669,7 @@ mod tests {
 
     #[test]
     fn test_add_tokenless_components_error() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -685,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_remove_components_not_found_error() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -731,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_set_edge_weight_errors() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -796,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_error_invalid_gas_price() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         use crate::{
             feed::events::{EventError, MarketEvent},
             types::GasPrice,
@@ -818,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propagates_errors() {
-        let mut manager = PetgraphGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::new();
         use std::collections::HashMap;
 
         use crate::feed::events::{EventError, MarketEvent};

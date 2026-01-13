@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
-use petgraph::graph::DiGraph;
+use petgraph::stable_graph::StableDiGraph;
 use tycho_simulation::tycho_core::models::Address;
 
 use super::{Algorithm, AlgorithmError};
@@ -121,15 +121,15 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = DiGraph<Address, EdgeData>;
-    type GraphManager = crate::graph::PetgraphGraphManager;
+    type GraphType = StableDiGraph<Address, EdgeData>;
+    type GraphManager = crate::graph::PetgraphStableDiGraphManager;
     fn name(&self) -> &str {
         "most_liquid"
     }
 
     fn find_best_route(
         &self,
-        graph: &DiGraph<Address, EdgeData>,
+        graph: &StableDiGraph<Address, EdgeData>,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
@@ -219,7 +219,7 @@ impl MostLiquidAlgorithm {
     /// Finds all paths between two tokens using BFS on a petgraph.
     fn find_paths(
         &self,
-        graph: &DiGraph<Address, EdgeData>,
+        graph: &StableDiGraph<Address, EdgeData>,
         from: &Address,
         to: &Address,
     ) -> Vec<Path> {
