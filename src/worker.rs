@@ -1,7 +1,7 @@
-//! Solver component that processes solve requests.
+//! A Solver Worker that processes solve requests.
 //!
-//! Each worker thread owns a Solver instance. The solver:
-//! - Initializes graph from market topology (HashMap<ComponentId, Vec<Address>>)
+//! The Solver Worker:
+//! - Initializes graph from market topology (via a GraphManager)
 //! - Holds a reference to SharedMarketData (for state lookups)
 //! - Subscribes to MarketEvents to keep local topology in sync
 //! - Uses an Algorithm to find routes
@@ -22,34 +22,24 @@ use crate::{
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
-pub struct SolverConfig {
-    /// Name of the algorithm to use.
-    pub algorithm_name: String,
+pub struct WorkerConfig {
     /// Maximum hops to search.
     pub max_hops: usize,
     /// Timeout for solving.
     pub timeout: Duration,
 }
 
-impl Default for SolverConfig {
+impl Default for WorkerConfig {
     fn default() -> Self {
-        Self {
-            algorithm_name: "most_liquid".to_string(),
-            max_hops: 3,
-            timeout: Duration::from_millis(100),
-        }
+        Self { max_hops: 3, timeout: Duration::from_millis(100) }
     }
 }
 
-/// A solver instance that processes solve requests.
+/// A solver worker instance that processes solve requests.
 ///
-/// Each worker thread owns one Solver. The solver initializes the graph on startup
-/// from SharedMarketData, and the graph manager maintains the graph and updates it
-/// based on market events.
-///
-/// The solver is generic over the algorithm type `A`, and automatically infers
-/// the graph type `G` and graph manager type from the algorithm.
-pub struct Solver<A>
+/// The solver worker initializes the graph on startup from SharedMarketData, and the graph
+/// manager maintains the graph and updates it based on market events.
+pub struct SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
@@ -64,12 +54,12 @@ where
     /// Receiver for market events.
     event_rx: broadcast::Receiver<MarketEvent>,
     /// Configuration.
-    config: SolverConfig,
+    config: WorkerConfig,
     /// Whether the graph has been initialized.
     initialized: bool,
 }
 
-impl<A> Solver<A>
+impl<A> SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
@@ -89,7 +79,7 @@ where
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
         algorithm: A,
-        config: SolverConfig,
+        config: WorkerConfig,
     ) -> Self {
         Self {
             algorithm,
@@ -273,7 +263,7 @@ where
     }
 
     /// Returns the config.
-    pub fn config(&self) -> &SolverConfig {
+    pub fn config(&self) -> &WorkerConfig {
         &self.config
     }
 }

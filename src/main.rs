@@ -14,8 +14,8 @@ use tracing_subscriber::FmtSubscriber;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
     feed::market_data::SharedMarketData,
-    solver::SolverConfig,
     task_queue::{TaskQueue, TaskQueueConfig},
+    worker::WorkerConfig,
     worker_pool::{WorkerPoolBuilder, WorkerPoolConfig},
     TychoFeed, TychoFeedConfig,
 };
@@ -88,12 +88,12 @@ async fn main() -> std::io::Result<()> {
         TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
 
     // Create worker pool
-    let solver_config = SolverConfig::default();
-    let worker_pool_config = WorkerPoolConfig { num_workers: config.num_workers, solver_config };
+    let worker_config = WorkerConfig::default();
+    let worker_pool_config = WorkerPoolConfig { num_workers: config.num_workers, worker_config };
 
     let worker_pool = WorkerPoolBuilder::new()
         .num_workers(worker_pool_config.num_workers)
-        .solver_config(worker_pool_config.solver_config)
+        .worker_config(worker_pool_config.worker_config)
         .build(task_rx, Arc::clone(&market_data), event_rx);
 
     info!(num_workers = worker_pool.num_workers(), "worker pool started");

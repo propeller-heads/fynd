@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 use crate::{
     algorithm::MostLiquidAlgorithm,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
-    solver::{Solver, SolverConfig},
     types::SolveTask,
+    worker::{SolverWorker, WorkerConfig},
 };
 
 /// Configuration for the worker pool.
@@ -24,12 +24,12 @@ pub struct WorkerPoolConfig {
     /// Number of worker threads.
     pub num_workers: usize,
     /// Configuration for each solver.
-    pub solver_config: SolverConfig,
+    pub worker_config: WorkerConfig,
 }
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
-        Self { num_workers: num_cpus::get(), solver_config: SolverConfig::default() }
+        Self { num_workers: num_cpus::get(), worker_config: WorkerConfig::default() }
     }
 }
 
@@ -67,7 +67,7 @@ impl WorkerPool {
             let task_rx = Arc::clone(&task_rx);
             let market_data = Arc::clone(&market_data);
             let event_rx = event_rx.resubscribe();
-            let solver_config = config.solver_config.clone();
+            let worker_config = config.worker_config.clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
 
             let handle = thread::Builder::new()
@@ -82,17 +82,17 @@ impl WorkerPool {
                     rt.block_on(async move {
                         // Create algorithm
                         let algorithm = MostLiquidAlgorithm::with_config(
-                            solver_config.max_hops,
-                            solver_config.timeout.as_millis() as u64,
+                            worker_config.max_hops,
+                            worker_config.timeout.as_millis() as u64,
                         );
 
                         // Create solver (graph type and manager are automatically inferred from
                         // algorithm)
-                        let mut solver =
-                            Solver::new(market_data, event_rx, algorithm, solver_config);
+                        let mut worker =
+                            SolverWorker::new(market_data, event_rx, algorithm, worker_config);
 
                         // Initialize solver graph
-                        solver.initialize_graph().await;
+                        worker.initialize_graph().await;
 
                         info!(worker_id, "worker started");
 
@@ -115,7 +115,7 @@ impl WorkerPool {
                                             let _wait_time = task.wait_time();
 
                                             // Process the task
-                                            let result = solver.solve(&task.request).await;
+                                            let result = worker.solve(&task.request).await;
 
                                             if let Err(ref e) = result {
                                                 warn!(
@@ -186,8 +186,8 @@ impl WorkerPoolBuilder {
         self
     }
 
-    pub fn solver_config(mut self, config: SolverConfig) -> Self {
-        self.config.solver_config = config;
+    pub fn worker_config(mut self, config: WorkerConfig) -> Self {
+        self.config.worker_config = config;
         self
     }
 

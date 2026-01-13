@@ -44,7 +44,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 │                       CPU-bound route computation                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
 │  │  Worker 1   │  │  Worker 2   │  │  Worker 3   │  │  Worker N   │        │
-│  │  (Solver)   │  │  (Solver)   │  │  (Solver)   │  │  (Solver)   │        │
+│  │(SolverWorker)│ │(SolverWorker)│ │(SolverWorker)│ │(SolverWorker)│        │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │ Reads shared data
@@ -77,7 +77,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
                     ┌──────────────┼──────────────┐
                     ▼              ▼              ▼
               ┌──────────┐   ┌──────────┐   ┌──────────┐
-              │ Solver 1 │   │ Solver 2 │   │ Solver N │
+              │SolverWorker│ │SolverWorker│ │SolverWorker│
               │ GraphMgr │   │ GraphMgr │   │ GraphMgr │
               │ updates  │   │ updates  │   │ updates  │
               │ graph    │   │ graph    │   │ graph    │
@@ -125,7 +125,7 @@ impl TaskQueueHandle {
 
 **File:** `src/worker_pool.rs`
 
-**Responsibility:** Manage dedicated compute threads, each owning a Solver instance.
+**Responsibility:** Manage dedicated compute threads, each owning a SolverWorker instance.
 
 ```rust
 pub struct WorkerPool {
@@ -138,7 +138,7 @@ pub struct WorkerPool {
 
 ### 4. SharedMarketData
 
-**File:** `src/market_data.rs`
+**File:** `src/feed/market_data.rs`
 
 **Responsibility:** Single source of truth for all market data. Updated by TychoFeed only.
 
@@ -189,7 +189,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ### 6. TychoFeed
 
-**File:** `src/tycho_feed.rs`
+**File:** `src/feed/tycho_feed.rs`
 
 **Responsibility:** Connect to Tycho Stream, update SharedMarketData, broadcast events.
 
@@ -197,9 +197,9 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ### 7. MarketEvent (Event Bus)
 
-**File:** `src/events.rs`
+**File:** `src/feed/events.rs`
 
-**Responsibility:** Define events broadcast from Indexer to Solvers.
+**Responsibility:** Define events broadcast from TychoFeed to SolverWorkers.
 
 ```rust
 pub enum MarketEvent {
@@ -213,16 +213,16 @@ pub enum MarketEvent {
 
 ---
 
-### 8. Solver
+### 8. SolverWorker
 
-**File:** `src/solver.rs`
+**File:** `src/worker.rs`
 
 **Responsibility:** Initialize graph on startup, subscribe to events, execute algorithm.
 
-The solver is generic over the algorithm type and automatically infers the graph type and graph manager from the algorithm's associated types.
+The solver worker is generic over the algorithm type and automatically infers the graph type and graph manager from the algorithm's associated types.
 
 ```rust
-pub struct Solver<A>
+pub struct SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
@@ -232,12 +232,12 @@ where
     graph_manager: A::GraphManager,  // Maintains the graph internally
     market_data: SharedMarketDataRef,
     event_rx: broadcast::Receiver<MarketEvent>,
-    config: SolverConfig,
+    config: WorkerConfig,
     initialized: bool,
 }
 ```
 
-The solver initializes the graph on startup by reading the component topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver gets the graph from the graph manager via `graph_manager.graph()`.
+The solver worker initializes the graph on startup by reading the component topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver worker gets the graph from the graph manager via `graph_manager.graph()`.
 
 ---
 
@@ -293,7 +293,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
 - Algorithms are **stateless** - they receive graphs as parameters
 - Each algorithm specifies its preferred graph type and graph manager via associated types
-- The solver automatically creates the graph manager using `Default::default()`
+- The solver worker automatically creates the graph manager using `Default::default()`
 - Graph managers handle converting `HashMap<ComponentId, Vec<Address>>` to the algorithm's graph type
 - This allows algorithms to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms
 
@@ -319,13 +319,8 @@ impl Algorithm for MostLiquidAlgorithm {
                               └─────┬─────┘     └─────▲─────┘
                                     │                 │
                               ┌─────▼─────┐           │
-                              │  Worker   │───────────┘
-                              │  (picks)  │  response
-                              └─────┬─────┘
-                                    │
-                              ┌─────▼─────┐
-                              │  Solver   │
-                              │  .solve() │
+                              │SolverWorker│──────────┘
+                              │  .solve()  │  response
                               └─────┬─────┘
                                     │
               ┌─────────────────────┼─────────────────────┐
@@ -365,7 +360,7 @@ impl Algorithm for MostLiquidAlgorithm {
                                     ┌──────────┼──────────┐
                                     ▼          ▼          ▼
                               ┌──────────┐┌──────────┐┌──────────┐
-                              │ Solver 1 ││ Solver 2 ││ Solver N │
+                              │SolverWorker││SolverWorker││SolverWorker│
                               │ GraphMgr ││ GraphMgr ││ GraphMgr │
                               │ updates  ││ updates  ││ updates  │
                               │ graph    ││ graph    ││ graph    │
@@ -382,7 +377,7 @@ impl Algorithm for MostLiquidAlgorithm {
 │                     Actix Runtime (async, I/O bound)                    │
 │                                                                         │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐               │
-│  │  HTTP Server  │  │   Indexer     │  │   Response    │               │
+│  │  HTTP Server  │  │   TychoFeed   │  │   Response    │               │
 │  │   Handlers    │  │   Task        │  │   Collector   │               │
 │  └───────────────┘  └───────────────┘  └───────────────┘               │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -393,7 +388,7 @@ impl Algorithm for MostLiquidAlgorithm {
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
 │  │   Thread 1      │  │   Thread 2      │  │   Thread N      │         │
 │  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
-│  │   │ Solver  │   │  │   │ Solver  │   │  │   │ Solver  │   │         │
+│  │   │SolverWorker│ │  │   │SolverWorker│ │  │   │SolverWorker│ │         │
 │  │   │ (graph  │   │  │   │ (graph  │   │  │   │ (graph  │   │         │
 │  │   │ manager │   │  │   │ manager │   │  │   │ manager │   │         │
 │  │   │ maintains│   │  │   │ maintains│   │  │   │ maintains│   │         │
@@ -405,7 +400,7 @@ impl Algorithm for MostLiquidAlgorithm {
 Communication:
   - HTTP → Workers: mpsc channel (SolveTask)
   - Workers → HTTP: oneshot channel (SolveResult)
-  - Indexer → Workers: broadcast channel (MarketEvent)
+  - TychoFeed → Workers: broadcast channel (MarketEvent)
   - All → SharedMarketData: Arc<RwLock<>> (read-heavy)
 ```
 
@@ -430,18 +425,19 @@ src/
 │   ├── internal.rs           # SolveTask, SolveError
 │   └── primitives.rs         # ComponentId, Address, etc.
 │
-├── market_data.rs            # SharedMarketData
-├── events.rs                 # MarketEvent enum
-│
 ├── graph/                    # Graph management
 │   ├── mod.rs                # GraphManager trait, Edge, Path
 │   └── petgraph.rs           # PetgraphGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
 ├── worker_pool.rs            # WorkerPool
-├── solver.rs                 # Solver
+├── worker.rs                 # SolverWorker
 │
-├── tycho_feed.rs             # TychoFeed
+├── feed/                     # Market data feed
+│   ├── mod.rs
+│   ├── market_data.rs        # SharedMarketData
+│   ├── events.rs             # MarketEvent enum
+│   └── tycho_feed.rs         # TychoFeed
 │
 └── algorithm/                # Algorithm implementations
     ├── mod.rs                # Algorithm trait

@@ -75,9 +75,9 @@ pub mod algorithm;
 pub mod api;
 pub mod feed;
 pub mod graph;
-pub mod solver;
 pub mod task_queue;
 pub mod types;
+pub mod worker;
 pub mod worker_pool;
 
 // Re-export commonly used types at crate root
@@ -90,11 +90,11 @@ pub use feed::{
     TychoFeedConfig, TychoFeedError,
 };
 pub use graph::{GraphManager, Path};
-pub use solver::{Solver, SolverConfig};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, GasPrice, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution,
     SolutionStatus, SolveError, SolveResult, SolveTask, Swap, TaskId,
 };
+pub use worker::{SolverWorker, WorkerConfig};
 pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};
