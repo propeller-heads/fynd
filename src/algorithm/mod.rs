@@ -13,7 +13,11 @@ use std::{collections::HashMap, time::Duration};
 
 pub use most_liquid::MostLiquidAlgorithm;
 use num_bigint::BigUint;
-use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
+use tycho_simulation::{
+    evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
+    tycho_common::models::ComponentId,
+    tycho_core::simulation::protocol_sim::ProtocolSim,
+};
 
 use crate::{
     feed::market_data::SharedMarketData,
@@ -136,16 +140,18 @@ fn simulate_path(
     let mut total_gas = BigUint::ZERO;
 
     // Track state overrides for pools we've already swapped through.
-    let mut state_overrides: HashMap<&str, Box<dyn ProtocolSim>> = HashMap::new();
+    let mut native_state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+    let mut vm_state_override: Option<Box<dyn ProtocolSim>> = None;
 
     for edge in path {
         let (in_node, out_node) = graph
             .edge_endpoints(edge)
             .ok_or_else(|| AlgorithmError::Other(format!("invalid edge: {:?}", edge)))?;
 
-        let edge_data = &graph[edge];
         let address_in = &graph[in_node];
         let address_out = &graph[out_node];
+
+        let edge_data = &graph[edge];
 
         // Get token and component data for the simulation call
         let token_in = market
@@ -154,19 +160,29 @@ fn simulate_path(
         let token_out = market
             .get_token(address_out)
             .ok_or_else(|| AlgorithmError::Other(format!("token not found: {:?}", address_out)))?;
-        let component_id = &edge_data.component_id;
 
+        let component_id = &edge_data.component_id;
         let component_data = market
             .get_component(component_id)
             .ok_or_else(|| {
                 AlgorithmError::Other(format!("component not found: {}", component_id))
             })?;
 
-        // Select the correct state for simulation, using override if we've swapped through this
-        // pool, and otherwise the original state stored in market data
-        // TODO - is this stable for the VM states?
-        let state = state_overrides
-            .get(component_id.as_str())
+        let is_component_vm = component_data
+            .state
+            .as_any()
+            .downcast_ref::<EVMPoolState<PreCachedDB>>()
+            .is_some();
+
+        // If the component is a VM, use the shared VM state override
+        // Otherwise, use the per-component native state overrides
+        let state_override = if is_component_vm {
+            vm_state_override.as_ref()
+        } else {
+            native_state_overrides.get(component_id)
+        };
+
+        let state = state_override
             .map(Box::as_ref)
             .unwrap_or(component_data.state.as_ref());
 
@@ -199,8 +215,12 @@ fn simulate_path(
             gas_estimate: result.gas.clone(),
         });
 
-        // Store new state for the following hops and update running totals
-        state_overrides.insert(component_id.as_str(), result.new_state);
+        // Store new state as override for next hops
+        if is_component_vm {
+            vm_state_override = Some(result.new_state);
+        } else {
+            native_state_overrides.insert(component_id, result.new_state);
+        }
         total_gas += result.gas;
         current_amount = result.amount;
     }
