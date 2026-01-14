@@ -9,6 +9,9 @@
 pub mod most_liquid;
 pub mod stats;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use std::{collections::HashMap, time::Duration};
 
 pub use most_liquid::MostLiquidAlgorithm;
@@ -213,182 +216,31 @@ fn simulate_path(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::collections::HashMap;
 
-    use chrono::NaiveDateTime;
     use num_bigint::BigUint;
-    use tycho_simulation::tycho_core::{
-        dto::ProtocolStateDelta,
-        models::{protocol::ProtocolComponent, token::Token, Address, Chain},
-        simulation::{
-            errors::{SimulationError, TransitionError},
-            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
-        },
-        Bytes,
-    };
 
     use super::*;
     use crate::{
-        feed::market_data::ComponentData,
+        algorithm::test_utils::{setup_market, token},
         graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     };
 
-    // ==================== Mock ProtocolSim ====================
-
-    /// Mock that multiplies input by a factor and tracks call count.
-    /// Each call increments the multiplier, simulating state changes.
-    #[derive(Debug, Clone)]
-    struct MockProtocolSim {
-        /// Output = input * multiplier
-        multiplier: u32,
-        /// Shared counter to track calls across clones
-        call_count: std::sync::Arc<AtomicU32>,
-    }
-
-    impl MockProtocolSim {
-        fn new(multiplier: u32) -> Self {
-            Self { multiplier, call_count: std::sync::Arc::new(AtomicU32::new(0)) }
-        }
-
-        fn with_shared_counter(multiplier: u32, counter: std::sync::Arc<AtomicU32>) -> Self {
-            Self { multiplier, call_count: counter }
-        }
-    }
-
-    impl ProtocolSim for MockProtocolSim {
-        fn fee(&self) -> f64 {
-            0.003 // 0.3%
-        }
-
-        fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
-            Ok(self.multiplier as f64)
-        }
-
-        fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            _token_in: &Token,
-            _token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError> {
-            self.call_count
-                .fetch_add(1, Ordering::SeqCst);
-
-            // Return amount * multiplier, and a new state with incremented multiplier
-            let amount_out = &amount_in * self.multiplier;
-            let new_state = Box::new(MockProtocolSim::with_shared_counter(
-                self.multiplier + 1, // State changes: next call would use multiplier+1
-                self.call_count.clone(),
-            ));
-
-            Ok(GetAmountOutResult::new(amount_out, BigUint::from(100_000u64), new_state))
-        }
-
-        fn get_limits(
-            &self,
-            _sell_token: Bytes,
-            _buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError> {
-            Ok((BigUint::from(u64::MAX), BigUint::from(u64::MAX)))
-        }
-
-        fn delta_transition(
-            &mut self,
-            _delta: ProtocolStateDelta,
-            _tokens: &HashMap<Bytes, Token>,
-            _balances: &Balances,
-        ) -> Result<(), TransitionError<String>> {
-            Ok(())
-        }
-
-        fn clone_box(&self) -> Box<dyn ProtocolSim> {
-            Box::new(self.clone())
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
-
-        fn eq(&self, other: &dyn ProtocolSim) -> bool {
-            other
-                .as_any()
-                .downcast_ref::<Self>()
-                .map(|o| o.multiplier == self.multiplier)
-                .unwrap_or(false)
-        }
-    }
-
-    // ==================== Test Fixtures ====================
-
-    fn token(addr: u8, symbol: &str) -> Token {
-        Token {
-            address: Address::from([addr; 20]),
-            symbol: symbol.to_string(),
-            decimals: 18,
-            tax: Default::default(),
-            gas: vec![],
-            chain: Chain::Ethereum,
-            quality: 100,
-        }
-    }
-
-    fn component(id: &str, tokens: &[Token]) -> ProtocolComponent {
-        ProtocolComponent::new(
-            id,
-            "uniswap_v2",
-            "swap",
-            Chain::Ethereum,
-            tokens
-                .iter()
-                .map(|t| t.address.clone())
-                .collect(),
-            vec![],
-            HashMap::new(),
-            Default::default(),
-            Default::default(),
-            NaiveDateTime::default(),
-        )
-    }
-
-    /// Sets up market with components and a graph. Returns (market, graph_manager).
-    fn setup_market(
-        pools: Vec<(&str, Vec<Token>, u32)>, // (pool_id, tokens, multiplier)
-    ) -> (SharedMarketData, PetgraphStableDiGraphManager) {
-        let mut market = SharedMarketData::new();
-        let mut topology = HashMap::new();
-
-        for (pool_id, tokens, multiplier) in pools {
-            let comp = component(pool_id, &tokens);
-            let state = Box::new(MockProtocolSim::new(multiplier));
-            let data = ComponentData { component: comp, state, tokens: tokens.clone() };
-
-            topology.insert(
-                pool_id.to_string(),
-                tokens
-                    .iter()
-                    .map(|t| t.address.clone())
-                    .collect(),
-            );
-            market.insert_component(data);
-        }
-
-        let mut graph_manager = PetgraphStableDiGraphManager::default();
-        graph_manager.initialize_graph(&topology);
-
-        (market, graph_manager)
-    }
-
     // ==================== simulate_path Tests ====================
+    //
+    // Note: These tests use MockProtocolSim which is detected as a "native" pool.
+    // Ideally we should also test VM pool state override behavior (vm_state_override),
+    // which shares state across all VM components. This would require a mock that
+    // downcasts to EVMPoolState<PreCachedDB>, or integration tests with real VM pools.
 
     #[test]
     fn simulate_path_single_hop() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let (market, manager) =
-            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+        let (market, manager) = setup_market(HashMap::from([(
+            "pool1".to_string(),
+            (vec![token_a.clone(), token_b.clone()], 2),
+        )]));
 
         let graph = manager.graph();
         let path = manager
@@ -412,10 +264,10 @@ mod tests {
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
 
-        let (market, manager) = setup_market(vec![
-            ("pool1", vec![token_a.clone(), token_b.clone()], 2), // A->B: *2
-            ("pool2", vec![token_b.clone(), token_c.clone()], 3), // B->C: *3
-        ]);
+        let (market, manager) = setup_market(HashMap::from([
+            ("pool1".to_string(), (vec![token_a.clone(), token_b.clone()], 2)), // A->B: *2
+            ("pool2".to_string(), (vec![token_b.clone(), token_c.clone()], 3)), // B->C: *3
+        ]));
 
         let graph = manager.graph();
         let paths = manager
@@ -440,8 +292,10 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) =
-            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+        let (market, manager) = setup_market(HashMap::from([(
+            "pool1".to_string(),
+            (vec![token_a.clone(), token_b.clone()], 2),
+        )]));
 
         let graph = manager.graph();
 
@@ -477,7 +331,10 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
-        let (market, _) = setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+        let (market, _) = setup_market(HashMap::from([(
+            "pool1".to_string(),
+            (vec![token_a.clone(), token_b.clone()], 2),
+        )]));
 
         // Add token C to graph but not to market (A->B->C)
         let mut topology = market.component_topology();
@@ -504,8 +361,10 @@ mod tests {
     fn simulate_path_missing_component_returns_error() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let (mut market, manager) =
-            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+        let (mut market, manager) = setup_market(HashMap::from([(
+            "pool1".to_string(),
+            (vec![token_a.clone(), token_b.clone()], 2),
+        )]));
 
         // Remove the component but keep tokens and graph
         market.remove_component(&"pool1".to_string());

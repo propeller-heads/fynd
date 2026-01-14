@@ -116,7 +116,8 @@ impl Order {
 pub enum OrderSide {
     /// Sell exactly the specified amount of the input token.
     Sell,
-    // TODO: Add Buy variant for exact output orders
+    /// Buy exactly the specified amount of the output token.
+    Buy,
 }
 
 /// Errors that can occur when validating an [`Order`].

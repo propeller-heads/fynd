@@ -125,6 +125,13 @@ impl Algorithm for MostLiquidAlgorithm {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        if scored_paths.is_empty() {
+            return Err(AlgorithmError::NoPath {
+                from: format!("{:?}", order.token_in),
+                to: format!("{:?}", order.token_out),
+            });
+        }
+
         // Step 3: Simulate all paths in score order
         let mut best: Option<(Route, BigUint)> = None;
 
@@ -321,5 +328,259 @@ mod tests {
         // price = 2.0 * (1 - 0.0), depth = 1000.0 -> score = 2000.0
         let score = MostLiquidAlgorithm::score_path(&path, &graph).unwrap();
         assert_eq!(score, 2000.0);
+    }
+
+    // ==================== find_best_route Tests ====================
+
+    use num_bigint::BigUint;
+
+    use crate::algorithm::test_utils::{
+        add_component_to_market, sell_order, setup_market_with_weights, token, ONE_ETH,
+    };
+
+    #[test]
+    fn find_best_route_single_path() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,      // multiplier (also used as spot_price)
+            1000.0, // depth
+        )]);
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_b, ONE_ETH);
+        let route = algorithm
+            .find_best_route(&manager, &market, &order)
+            .unwrap();
+
+        assert_eq!(route.swaps.len(), 1);
+        assert_eq!(route.swaps[0].amount_in, BigUint::from(ONE_ETH));
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+    }
+
+    #[test]
+    fn find_best_route_selects_higher_output() {
+        // Two parallel pools A->B: pool1 (multiplier=2) and pool2 (multiplier=3)
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (mut market, mut manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000.0,
+        )]);
+
+        // Add second pool with higher multiplier
+        add_component_to_market(&mut market, "pool2", vec![token_a.clone(), token_b.clone()], 3);
+        manager.initialize_graph(&market.component_topology());
+
+        // Set edge weights for both pools
+        manager
+            .set_edge_weight(
+                &"pool1".to_string(),
+                &token_a.address,
+                &token_b.address,
+                EdgeWeight::new(2.0, 1000.0, 0.003),
+                false,
+            )
+            .unwrap();
+        manager
+            .set_edge_weight(
+                &"pool2".to_string(),
+                &token_a.address,
+                &token_b.address,
+                EdgeWeight::new(3.0, 1000.0, 0.003),
+                false,
+            )
+            .unwrap();
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_b, ONE_ETH);
+        let route = algorithm
+            .find_best_route(&manager, &market, &order)
+            .unwrap();
+
+        // Should select pool2 for higher output (3x vs 2x)
+        assert_eq!(route.swaps.len(), 1);
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 3));
+        assert_eq!(route.swaps[0].component_id, "pool2");
+    }
+
+    #[test]
+    fn find_best_route_no_path_returns_error() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C"); // Disconnected
+
+        let (market, manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000.0,
+        )]);
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_c, ONE_ETH);
+
+        let result = algorithm.find_best_route(&manager, &market, &order);
+        assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
+    }
+
+    #[test]
+    fn find_best_route_multi_hop() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_with_weights(vec![
+            ("pool1", vec![token_a.clone(), token_b.clone()], 2, 1000.0),
+            ("pool2", vec![token_b.clone(), token_c.clone()], 3, 1000.0),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(2, 100);
+        let order = sell_order(&token_a, &token_c, ONE_ETH);
+        let route = algorithm
+            .find_best_route(&manager, &market, &order)
+            .unwrap();
+
+        // A->B: ONE_ETH*2, B->C: (ONE_ETH*2)*3
+        assert_eq!(route.swaps.len(), 2);
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(route.swaps[1].amount_out, BigUint::from(ONE_ETH * 2 * 3));
+    }
+
+    #[test]
+    fn find_best_route_skips_paths_without_edge_weights() {
+        // Pool1 has edge weights (scoreable), Pool2 doesn't (filtered out)
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (mut market, mut manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000.0,
+        )]);
+
+        // Add pool2 with higher multiplier but NO edge weight
+        add_component_to_market(&mut market, "pool2", vec![token_a.clone(), token_b.clone()], 10);
+        manager.initialize_graph(&market.component_topology());
+
+        // Re-set pool1 weight after reinitializing graph
+        manager
+            .set_edge_weight(
+                &"pool1".to_string(),
+                &token_a.address,
+                &token_b.address,
+                EdgeWeight::new(2.0, 1000.0, 0.003),
+                false,
+            )
+            .unwrap();
+        // pool2 intentionally has no edge weight
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_b, ONE_ETH);
+        let route = algorithm
+            .find_best_route(&manager, &market, &order)
+            .unwrap();
+
+        // Should use pool1 (only scoreable path), despite pool2 having better multiplier
+        assert_eq!(route.swaps[0].component_id, "pool1");
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+    }
+
+    // ==================== Error Handling Tests ====================
+
+    #[test]
+    fn find_best_route_exact_out_not_supported() {
+        use crate::algorithm::test_utils::buy_order;
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000.0,
+        )]);
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = buy_order(&token_a, &token_b, ONE_ETH);
+
+        let result = algorithm.find_best_route(&manager, &market, &order);
+        assert!(matches!(result, Err(AlgorithmError::ExactOutNotSupported)));
+    }
+
+    #[test]
+    fn find_best_route_gas_exceeds_output() {
+        use crate::types::GasPrice;
+
+        // Use a tiny amount (1 wei) so output (2 wei) is less than gas cost
+        // MockProtocolSim uses gas=100_000, so gas_cost = 100_000 * gas_price
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (mut market, manager) = setup_market_with_weights(vec![(
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000.0,
+        )]);
+
+        // Set a non-zero gas price so gas cost exceeds tiny output
+        // gas_cost = 100_000 * (1_000_000 + 1_000_000) = 200_000_000_000 >> 2 wei output
+        market.update_gas_price(GasPrice::new(
+            BigUint::from(1_000_000u64),
+            BigUint::from(1_000_000u64),
+        ));
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_b, 1); // 1 wei input -> 2 wei output
+
+        let result = algorithm.find_best_route(&manager, &market, &order);
+        assert!(matches!(result, Err(AlgorithmError::GasExceedsOutput)));
+    }
+
+    #[test]
+    fn find_best_route_insufficient_liquidity() {
+        use crate::algorithm::test_utils::add_component_with_liquidity;
+
+        // Pool has limited liquidity (1000 wei) but we try to swap ONE_ETH
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let mut market = SharedMarketData::new();
+        add_component_with_liquidity(
+            &mut market,
+            "pool1",
+            vec![token_a.clone(), token_b.clone()],
+            2,
+            1000, // Only 1000 wei liquidity
+        );
+
+        let mut manager = PetgraphStableDiGraphManager::default();
+        manager.initialize_graph(&market.component_topology());
+
+        // Set edge weights so path is scoreable
+        manager
+            .set_edge_weight(
+                &"pool1".to_string(),
+                &token_a.address,
+                &token_b.address,
+                EdgeWeight::new(2.0, 1000.0, 0.003),
+                false,
+            )
+            .unwrap();
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = sell_order(&token_a, &token_b, ONE_ETH); // Way more than 1000 wei liquidity
+
+        let result = algorithm.find_best_route(&manager, &market, &order);
+        assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
 }
