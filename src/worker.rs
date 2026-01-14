@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{info, warn};
 
 use crate::{
-    algorithm::{Algorithm, AlgorithmError},
+    algorithm::Algorithm,
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::SharedMarketDataRef,
@@ -205,50 +205,20 @@ where
                         algorithm: self.algorithm.name().to_string(),
                     }
                 }
-                Err(AlgorithmError::NoPath { .. }) => OrderSolution {
-                    order_id: order.id.clone(),
-                    status: SolutionStatus::NoRouteFound,
-                    route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info.clone(),
-                    algorithm: self.algorithm.name().to_string(),
-                },
-                Err(AlgorithmError::InsufficientLiquidity) => OrderSolution {
-                    order_id: order.id.clone(),
-                    status: SolutionStatus::InsufficientLiquidity,
-                    route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info.clone(),
-                    algorithm: self.algorithm.name().to_string(),
-                },
-                Err(AlgorithmError::Timeout { .. }) => OrderSolution {
-                    order_id: order.id.clone(),
-                    status: SolutionStatus::Timeout,
-                    route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info.clone(),
-                    algorithm: self.algorithm.name().to_string(),
-                },
-                Err(_) => OrderSolution {
-                    order_id: order.id.clone(),
-                    status: SolutionStatus::NoRouteFound,
-                    route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info.clone(),
-                    algorithm: self.algorithm.name().to_string(),
-                },
+                Err(err) => {
+                    let status = SolutionStatus::from(err);
+                    OrderSolution {
+                        order_id: order.id.clone(),
+                        status,
+                        route: None,
+                        amount_in: order.amount.clone(),
+                        amount_out: BigUint::ZERO,
+                        gas_estimate: BigUint::ZERO,
+                        price_impact_bps: None,
+                        block: block_info.clone(),
+                        algorithm: self.algorithm.name().to_string(),
+                    }
+                }
             };
 
             order_solutions.push(order_solution);

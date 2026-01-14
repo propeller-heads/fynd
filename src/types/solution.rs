@@ -23,6 +23,7 @@ use super::{
     primitives::{ComponentId, ProtocolSystem},
     serde_helpers::biguint_as_string,
 };
+use crate::AlgorithmError;
 
 // ============================================================================
 // REQUEST TYPES
@@ -191,6 +192,18 @@ pub enum SolutionStatus {
     InsufficientLiquidity,
     /// The solver timed out before finding a route.
     Timeout,
+}
+
+impl From<AlgorithmError> for SolutionStatus {
+    fn from(err: crate::algorithm::AlgorithmError) -> Self {
+        match err {
+            AlgorithmError::NoPath { .. } => SolutionStatus::NoRouteFound,
+            AlgorithmError::InsufficientLiquidity => SolutionStatus::InsufficientLiquidity,
+            AlgorithmError::Timeout { .. } => SolutionStatus::Timeout,
+            AlgorithmError::ExactOutNotSupported => SolutionStatus::NoRouteFound,
+            AlgorithmError::Other(_) => SolutionStatus::NoRouteFound,
+        }
+    }
 }
 
 /// Block information at which a quote was computed.
