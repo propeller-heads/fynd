@@ -23,10 +23,8 @@ use crate::{
         market_data::SharedMarketDataRef,
     },
     graph::GraphManager,
-    types::{
-        solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
-        SolveTask,
-    },
+    types::{BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError, SolveTask},
+    Order,
 };
 
 /// Configuration for a Solver instance.
@@ -129,10 +127,18 @@ where
         }
     }
 
-    /// Solves a request and returns the solution.
-    ///
-    /// This is the main entry point called by worker threads.
-    pub async fn solve(&mut self, request: &SolutionRequest) -> Result<Solution, SolveError> {
+    /// Gets block info from market data.
+    fn get_block_info(market: &crate::feed::market_data::SharedMarketData) -> BlockInfo {
+        let last_block = market.last_updated();
+        BlockInfo {
+            number: last_block.number,
+            hash: format!("{:?}", last_block.hash),
+            timestamp: last_block.ts.and_utc().timestamp() as u64,
+        }
+    }
+
+    /// Solves an order and returns the solution.
+    pub async fn solve(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
         let start_time = Instant::now();
 
         // Ensure we're initialized
@@ -140,24 +146,16 @@ where
             self.initialize_graph().await;
         }
 
-        // Get a read lock on market data
-        let market = self.market_data.read().await;
-
-        // Get block info for the solution
-        let last_block = market.last_updated();
-        let block_info = BlockInfo {
-            number: last_block.number,
-            hash: format!("{:?}", last_block.hash),
-            timestamp: last_block.ts.and_utc().timestamp() as u64,
-        };
-
-        // Solve each order
-        let mut order_solutions = Vec::with_capacity(request.orders.len());
-
-        for order in &request.orders {
-            // Validate order
-            if let Err(_e) = order.validate() {
-                order_solutions.push(OrderSolution {
+        // Validate order - return early if invalid (no lock needed)
+        if let Err(_e) = order.validate() {
+            // Need block info for error response, acquire lock briefly
+            let block_info = {
+                let market = self.market_data.read().await;
+                Self::get_block_info(&market)
+            };
+            let solve_time_ms = start_time.elapsed().as_millis() as u64;
+            return Ok(SingleOrderSolution {
+                order: OrderSolution {
                     order_id: order.id.clone(),
                     status: SolutionStatus::NoRouteFound,
                     route: None,
@@ -165,74 +163,71 @@ where
                     amount_out: BigUint::ZERO,
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
-                    block: block_info.clone(),
+                    block: block_info,
                     algorithm: String::new(),
-                });
-                continue;
-            }
+                },
+                solve_time_ms,
+            });
+        }
 
-            // Get the graph from the graph manager
-            let graph = self.graph_manager.graph();
+        // Get the graph from the graph manager (no lock needed)
+        let graph = self.graph_manager.graph();
 
-            // Find route using algorithm
+        // Keep market data lock scope small
+        let (block_info, result) = {
+            let market = self.market_data.read().await;
+            let block_info = Self::get_block_info(&market);
             let result = self
                 .algorithm
                 .find_best_route(graph, &market, order);
+            (block_info, result)
+        };
 
-            let order_solution = match result {
-                Ok(route) => {
-                    let gas_estimate = route.total_gas();
-                    let amount_in = route
-                        .swaps
-                        .first()
-                        .map(|s| s.amount_in.clone())
-                        .unwrap_or_else(|| BigUint::ZERO);
-                    let amount_out = route
-                        .swaps
-                        .last()
-                        .map(|s| s.amount_out.clone())
-                        .unwrap_or_else(|| BigUint::ZERO);
+        let order_solution = match result {
+            Ok(route) => {
+                let gas_estimate = route.total_gas();
+                let amount_in = route
+                    .swaps
+                    .first()
+                    .map(|s| s.amount_in.clone())
+                    .unwrap_or_else(|| BigUint::ZERO);
+                let amount_out = route
+                    .swaps
+                    .last()
+                    .map(|s| s.amount_out.clone())
+                    .unwrap_or_else(|| BigUint::ZERO);
 
-                    OrderSolution {
-                        order_id: order.id.clone(),
-                        status: SolutionStatus::Success,
-                        route: Some(route),
-                        amount_in,
-                        amount_out,
-                        gas_estimate,
-                        price_impact_bps: None, // TODO: Calculate price impact
-                        block: block_info.clone(),
-                        algorithm: self.algorithm.name().to_string(),
-                    }
+                OrderSolution {
+                    order_id: order.id.clone(),
+                    status: SolutionStatus::Success,
+                    route: Some(route),
+                    amount_in,
+                    amount_out,
+                    gas_estimate,
+                    price_impact_bps: None, // TODO: Calculate price impact
+                    block: block_info.clone(),
+                    algorithm: self.algorithm.name().to_string(),
                 }
-                Err(err) => {
-                    let status = SolutionStatus::from(err);
-                    OrderSolution {
-                        order_id: order.id.clone(),
-                        status,
-                        route: None,
-                        amount_in: order.amount.clone(),
-                        amount_out: BigUint::ZERO,
-                        gas_estimate: BigUint::ZERO,
-                        price_impact_bps: None,
-                        block: block_info.clone(),
-                        algorithm: self.algorithm.name().to_string(),
-                    }
+            }
+            Err(err) => {
+                let status = SolutionStatus::from(err);
+                OrderSolution {
+                    order_id: order.id.clone(),
+                    status,
+                    route: None,
+                    amount_in: order.amount.clone(),
+                    amount_out: BigUint::ZERO,
+                    gas_estimate: BigUint::ZERO,
+                    price_impact_bps: None,
+                    block: block_info,
+                    algorithm: String::new(),
                 }
-            };
-
-            order_solutions.push(order_solution);
-        }
-
-        // Calculate totals
-        let total_gas_estimate = order_solutions
-            .iter()
-            .map(|o| &o.gas_estimate)
-            .fold(BigUint::ZERO, |acc, g| acc + g);
+            }
+        };
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
-        Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
+        Ok(SingleOrderSolution { order: order_solution, solve_time_ms })
     }
 
     /// Runs the worker's main loop, processing market events and solve tasks.
@@ -301,7 +296,7 @@ where
                             }
 
                             // Process the task
-                            let result = self.solve(&task.request).await;
+                            let result = self.solve(&task.order).await;
 
                             if let Err(ref e) = result {
                                 warn!(

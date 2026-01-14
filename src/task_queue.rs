@@ -7,7 +7,10 @@
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::types::{solution::SolutionRequest, Solution, SolveError, SolveTask};
+use crate::{
+    types::{SingleOrderSolution, SolveError, SolveTask},
+    Order,
+};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -34,7 +37,7 @@ impl TaskQueueHandle {
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.
-    pub async fn enqueue(&self, request: SolutionRequest) -> Result<Solution, SolveError> {
+    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderSolution, SolveError> {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -42,7 +45,7 @@ impl TaskQueueHandle {
         let task_id = Uuid::new_v4();
 
         // Create task
-        let task = SolveTask::new(task_id, request, response_tx);
+        let task = SolveTask::new(task_id, order, response_tx);
 
         // Try to send
         self.sender

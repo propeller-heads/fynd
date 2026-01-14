@@ -9,6 +9,7 @@
 //!
 //! ## Response Types
 //! - [`Solution`] - Top-level response with solutions for all orders
+//! - [`SingleOrderSolution`] - Solution for a single order with timing information
 //! - [`OrderSolution`] - Solution for a single order including route
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
@@ -144,6 +145,19 @@ pub struct Solution {
     /// Total estimated gas for executing all swaps (as decimal string).
     #[serde(with = "biguint_as_string")]
     pub total_gas_estimate: BigUint,
+    /// Time taken to compute this solution, in milliseconds.
+    pub solve_time_ms: u64,
+}
+
+/// Solution for a single [`Order`] with timing information.
+///
+/// Contains the order solution along with the time taken to compute it.
+/// This is useful when solving a single order and you need both the solution
+/// details and the solve time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SingleOrderSolution {
+    /// The solution for the order.
+    pub order: OrderSolution,
     /// Time taken to compute this solution, in milliseconds.
     pub solve_time_ms: u64,
 }
