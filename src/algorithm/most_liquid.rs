@@ -2,16 +2,17 @@
 //!
 //! This algorithm finds routes by:
 //! 1. Finding all edge paths up to max_hops using BFS (shorter paths first, all parallel edges)
-//! 2. Scoring and sorting paths by spot price and liquidity depth
+//! 2. Scoring and sorting paths by spot price, fees, and liquidity depth
 //! 3. Simulating paths with actual ProtocolSim to get accurate output (best paths first)
 //! 4. Ranking by net output (output - gas cost in output token terms)
-//! 5. Returning the best route with comprehensive logging
+//! 5. Returning the best route with comprehensive stats reporting
 
 use std::time::Duration;
 
 use num_bigint::BigUint;
+use num_traits::CheckedSub;
 
-use super::{simulate_path, stats::SolveStats, Algorithm, AlgorithmError, SimulationResult};
+use super::{simulate_path, stats::SolveStats, Algorithm, AlgorithmError};
 use crate::{
     feed::market_data::SharedMarketData,
     graph::{petgraph::StableDiGraph, GraphManager, Path, PetgraphStableDiGraphManager},
@@ -19,8 +20,6 @@ use crate::{
 };
 
 /// Algorithm that selects routes based on expected output after gas.
-// TODO: Consider adding a `max_paths_to_simulate` parameter to limit simulation overhead
-// when there are many candidate paths. Currently all paths are scored and simulated.
 pub struct MostLiquidAlgorithm {
     max_hops: usize,
     timeout: Duration,
@@ -39,17 +38,18 @@ impl MostLiquidAlgorithm {
 
     /// Scores a path based on spot prices, fees, and minimum liquidity depth (inertia).
     ///
-    /// Uses the formula: `weight = (product of spot_prices) × (product of (1 - fee)) × min(depths)`
+    /// Formula: `weight = (product of all [spot_price × (1 - fee)]) × min(depths)`
     ///
-    /// This captures:
-    /// - Spot price: the theoretical exchange rate along the path
+    /// This accounts:
+    /// - Spot price: the theoretical exchange rate along the path not accounting for slippage
     /// - Fees: deducted per hop as `price *= (1 - fee)`
     /// - Depth (inertia): minimum depth acts as a liquidity bottleneck indicator
     ///
     /// Returns `None` if edge weights are missing required data (spot_price, depth).
     /// Higher score = better path candidate. Paths through deeper, lower-fee pools rank higher.
-    fn score_path(&self, path: &Path, graph: &StableDiGraph) -> Option<f64> {
+    fn score_path(path: &Path, graph: &StableDiGraph) -> Option<f64> {
         let mut price = 1.0;
+        // If path is empty, return max score
         let mut min_depth = f64::MAX;
 
         for edge in path {
@@ -86,7 +86,7 @@ impl Algorithm for MostLiquidAlgorithm {
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
-        // Check for exact-out (not supported yet)
+        // Exact-out not supported yet
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -94,7 +94,7 @@ impl Algorithm for MostLiquidAlgorithm {
         let amount_in = order.amount.clone();
         let graph = graph_manager.graph();
 
-        // Phase 1: Find all edge paths using BFS (shorter paths first)
+        // Step 1: Find all edge paths using BFS (shorter paths first)
         let all_paths = graph_manager
             .find_paths(&order.token_in, &order.token_out, 0, self.max_hops)
             .map_err(|e| AlgorithmError::Other(format!("Graph error: {}", e)))?;
@@ -109,26 +109,24 @@ impl Algorithm for MostLiquidAlgorithm {
         // Initialize stats tracking
         let mut stats = SolveStats::new(market.last_updated().number, all_paths.len());
 
-        // Phase 2: Score and sort all paths by estimated output (higher score = better)
+        // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path, f64)> = all_paths
             .into_iter()
             .filter_map(|path| {
-                let score = self.score_path(&path, graph)?;
+                let score = Self::score_path(&path, graph)?;
                 Some((path, score))
             })
             .collect();
 
         scored_paths.sort_by(|(_, a_score), (_, b_score)| {
+            // Invert the comparison to get descending order
             b_score
                 .partial_cmp(a_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Get gas price for ranking
-        let gas_price = market.gas_price().effective_gas_price();
-
-        // Phase 3: Simulate all paths in score order
-        let mut best: Option<(SimulationResult, BigUint)> = None;
+        // Step 3: Simulate all paths in score order
+        let mut best: Option<(Route, BigUint)> = None;
 
         for (edge_path, _) in scored_paths {
             // Check timeout
@@ -139,9 +137,15 @@ impl Algorithm for MostLiquidAlgorithm {
             // Track pools and protocols for this path
             stats.record_path(&edge_path, graph, market);
 
-            let sim_result = match simulate_path(edge_path, graph, market, amount_in.clone()) {
+            let route = match simulate_path(edge_path, graph, market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(_) => continue, // Skip paths that fail simulation
+            };
+
+            let output_amount = if let Some(swap) = route.swaps.last() {
+                swap.amount_out.clone()
+            } else {
+                Err(AlgorithmError::Other("route has no swaps".to_string()))?
             };
 
             // Calculate net output (output - gas cost in wei)
@@ -151,37 +155,36 @@ impl Algorithm for MostLiquidAlgorithm {
             // 1. Store ETH price per token (token/ETH rate) - likely in SharedMarketData
             // 2. Look up ETH price for the output token of this path
             // 3. Convert: gas_cost_in_token_out = gas_cost_wei * eth_price_in_token_out
-            let gas_cost_wei = &sim_result.total_gas * &gas_price;
-            let net_output = if sim_result.amount_out > gas_cost_wei {
-                &sim_result.amount_out - &gas_cost_wei
-            } else {
-                BigUint::ZERO
-            };
+            let gas_price = market.gas_price().effective_gas_price();
+            let gas_cost_wei = route.total_gas() * gas_price;
+            let gas_cost_out = gas_cost_wei * 1u32; // Placeholder until conversion is implemented
+            let net_output = output_amount
+                .checked_sub(&gas_cost_out)
+                .ok_or(AlgorithmError::GasExceedsOutput)?;
 
-            // Update best if this is better
+            // Check if this is the best result so far
             let is_better = best
                 .as_ref()
                 .map(|(_, best_net)| net_output > *best_net)
                 .unwrap_or(true);
 
             if is_better {
-                best = Some((sim_result, net_output));
+                best = Some((route, net_output));
             }
         }
 
         // Log solve result
-        stats.log_result(self.name(), best.as_ref().map(|(r, _)| r), market, &amount_in);
+        stats.log_result(self.name(), best.as_ref(), market, &amount_in);
 
         let elapsed = stats.elapsed_ms();
 
-        best.map(|(sim_result, _)| sim_result.route)
-            .ok_or({
-                if elapsed > self.timeout.as_millis() as u64 {
-                    AlgorithmError::Timeout { elapsed_ms: elapsed }
-                } else {
-                    AlgorithmError::InsufficientLiquidity
-                }
-            })
+        best.map(|(route, _)| route).ok_or({
+            if elapsed > self.timeout.as_millis() as u64 {
+                AlgorithmError::Timeout { elapsed_ms: elapsed }
+            } else {
+                AlgorithmError::InsufficientLiquidity
+            }
+        })
     }
 
     fn supports_exact_out(&self) -> bool {
@@ -280,40 +283,32 @@ mod tests {
 
         // price = 2.0 * 0.997 * 0.5 * 0.999, min_depth = 500.0
         let expected = 2.0 * 0.997 * 0.5 * 0.999 * 500.0;
-        let score = MostLiquidAlgorithm::new()
-            .score_path(&path, graph)
-            .unwrap();
+        let score = MostLiquidAlgorithm::score_path(&path, graph).unwrap();
         assert!((score - expected).abs() < 0.0001, "expected {expected}, got {score}");
     }
 
     #[test]
     fn score_path_empty_returns_max() {
         let graph = StableDiGraph::default();
-        assert_eq!(MostLiquidAlgorithm::new().score_path(&vec![], &graph), Some(f64::MAX));
+        assert_eq!(MostLiquidAlgorithm::score_path(&vec![], &graph), Some(f64::MAX));
     }
 
     #[test]
     fn score_path_missing_weight_returns_none() {
         let (graph, path) = single_edge_setup(None);
-        assert!(MostLiquidAlgorithm::new()
-            .score_path(&path, &graph)
-            .is_none());
+        assert!(MostLiquidAlgorithm::score_path(&path, &graph).is_none());
     }
 
     #[test]
     fn score_path_missing_spot_price_returns_none() {
         let (graph, path) = single_edge_setup(Some(EdgeWeight::default().with_depth(1000.0)));
-        assert!(MostLiquidAlgorithm::new()
-            .score_path(&path, &graph)
-            .is_none());
+        assert!(MostLiquidAlgorithm::score_path(&path, &graph).is_none());
     }
 
     #[test]
     fn score_path_missing_depth_returns_none() {
         let (graph, path) = single_edge_setup(Some(EdgeWeight::default().with_spot_price(2.0)));
-        assert!(MostLiquidAlgorithm::new()
-            .score_path(&path, &graph)
-            .is_none());
+        assert!(MostLiquidAlgorithm::score_path(&path, &graph).is_none());
     }
 
     #[test]
@@ -324,9 +319,7 @@ mod tests {
                 .with_depth(1000.0),
         ));
         // price = 2.0 * (1 - 0.0), depth = 1000.0 -> score = 2000.0
-        let score = MostLiquidAlgorithm::new()
-            .score_path(&path, &graph)
-            .unwrap();
+        let score = MostLiquidAlgorithm::score_path(&path, &graph).unwrap();
         assert_eq!(score, 2000.0);
     }
 }

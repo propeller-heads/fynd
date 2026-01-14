@@ -9,9 +9,8 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
 
-use super::SimulationResult;
 use crate::{
-    feed::market_data::SharedMarketData, graph::petgraph::StableDiGraph, types::ComponentId,
+    feed::market_data::SharedMarketData, graph::petgraph::StableDiGraph, types::ComponentId, Route,
 };
 
 /// Tracks statistics during a solve operation.
@@ -100,14 +99,14 @@ impl SolveStats {
     pub fn log_result(
         &self,
         algorithm_name: &str,
-        best: Option<&SimulationResult>,
+        best: Option<&(Route, BigUint)>,
         market: &SharedMarketData,
         amount_in: &BigUint,
     ) {
         let solve_time_ms = self.elapsed_ms();
 
-        if let Some(sim_result) = best {
-            let symbols = Self::build_path_symbols(&sim_result.route, market);
+        if let Some((route, amount_out)) = best {
+            let symbols = Self::build_path_symbols(route, market);
             let path_description = symbols.join(" -> ");
             let token_in_symbol = symbols
                 .first()
@@ -118,10 +117,9 @@ impl SolveStats {
                 .cloned()
                 .unwrap_or_default();
 
-            let price = Self::calculate_price(amount_in, &sim_result.amount_out);
+            let price = Self::calculate_price(amount_in, amount_out);
 
-            let protocols: HashSet<String> = sim_result
-                .route
+            let protocols: HashSet<String> = route
                 .swaps
                 .iter()
                 .map(|swap| swap.protocol.to_string())
@@ -137,11 +135,11 @@ impl SolveStats {
                 block_number = self.block_number,
                 path = %path_description,
                 amount_in = %amount_in,
-                amount_out = %sim_result.amount_out,
+                amount_out = %amount_out,
                 price_out_per_in = price.unwrap_or(f64::NAN),
                 token_in = %token_in_symbol,
                 token_out = %token_out_symbol,
-                hop_count = sim_result.route.swaps.len(),
+                hop_count = route.swaps.len(),
                 protocols = ?protocols,
                 "best route found"
             );
@@ -160,7 +158,7 @@ impl SolveStats {
     }
 
     /// Builds token symbol path from route swaps.
-    fn build_path_symbols(route: &crate::types::Route, market: &SharedMarketData) -> Vec<String> {
+    fn build_path_symbols(route: &Route, market: &SharedMarketData) -> Vec<String> {
         let mut symbols = Vec::with_capacity(route.swaps.len() + 1);
 
         for (i, swap) in route.swaps.iter().enumerate() {

@@ -95,6 +95,10 @@ pub enum AlgorithmError {
     #[error("insufficient liquidity on all paths")]
     InsufficientLiquidity,
 
+    /// Gas cost exceeds output amount.
+    #[error("gas cost exceeds output amount")]
+    GasExceedsOutput,
+
     /// Route finding timed out.
     #[error("timeout after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64 },
@@ -108,19 +112,6 @@ pub enum AlgorithmError {
     Other(String),
 }
 
-/// Result of simulating a path.
-#[derive(Debug, Clone)]
-pub struct SimulationResult {
-    /// The execution-ready route with real amounts and gas
-    pub route: Route,
-    /// Input amount provided initially
-    pub amount_in: BigUint,
-    /// Output amount after all swaps
-    pub amount_out: BigUint,
-    /// Total gas estimate for the entire route
-    pub total_gas: BigUint,
-}
-
 /// Simulates swaps along a path using each pool's `ProtocolSim::get_amount_out`.
 /// Tracks intermediate state changes to handle routes that revisit the same pool.
 fn simulate_path(
@@ -128,10 +119,9 @@ fn simulate_path(
     graph: &StableDiGraph,
     market: &SharedMarketData,
     amount_in: BigUint,
-) -> Result<SimulationResult, AlgorithmError> {
+) -> Result<Route, AlgorithmError> {
     let mut current_amount = amount_in.clone();
     let mut swaps = Vec::with_capacity(path.len());
-    let mut total_gas = BigUint::ZERO;
 
     // Track state overrides for pools we've already swapped through.
     let mut native_state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
@@ -206,7 +196,7 @@ fn simulate_path(
             token_out: token_out.address.clone(),
             amount_in: current_amount.clone(),
             amount_out: result.amount.clone(),
-            gas_estimate: result.gas.clone(),
+            gas_estimate: result.gas,
         });
 
         // Store new state as override for next hops
@@ -215,14 +205,8 @@ fn simulate_path(
         } else {
             native_state_overrides.insert(component_id, result.new_state);
         }
-        total_gas += result.gas;
         current_amount = result.amount;
     }
 
-    Ok(SimulationResult {
-        route: Route::new(swaps),
-        amount_in,
-        amount_out: current_amount,
-        total_gas,
-    })
+    Ok(Route::new(swaps))
 }
