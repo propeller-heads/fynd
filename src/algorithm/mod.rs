@@ -210,3 +210,317 @@ fn simulate_path(
 
     Ok(Route::new(swaps))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use chrono::NaiveDateTime;
+    use num_bigint::BigUint;
+    use tycho_simulation::tycho_core::{
+        dto::ProtocolStateDelta,
+        models::{protocol::ProtocolComponent, token::Token, Address, Chain},
+        simulation::{
+            errors::{SimulationError, TransitionError},
+            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        },
+        Bytes,
+    };
+
+    use super::*;
+    use crate::{
+        feed::market_data::ComponentData,
+        graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
+    };
+
+    // ==================== Mock ProtocolSim ====================
+
+    /// Mock that multiplies input by a factor and tracks call count.
+    /// Each call increments the multiplier, simulating state changes.
+    #[derive(Debug, Clone)]
+    struct MockProtocolSim {
+        /// Output = input * multiplier
+        multiplier: u32,
+        /// Shared counter to track calls across clones
+        call_count: std::sync::Arc<AtomicU32>,
+    }
+
+    impl MockProtocolSim {
+        fn new(multiplier: u32) -> Self {
+            Self { multiplier, call_count: std::sync::Arc::new(AtomicU32::new(0)) }
+        }
+
+        fn with_shared_counter(multiplier: u32, counter: std::sync::Arc<AtomicU32>) -> Self {
+            Self { multiplier, call_count: counter }
+        }
+    }
+
+    impl ProtocolSim for MockProtocolSim {
+        fn fee(&self) -> f64 {
+            0.003 // 0.3%
+        }
+
+        fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
+            Ok(self.multiplier as f64)
+        }
+
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            _token_in: &Token,
+            _token_out: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            self.call_count
+                .fetch_add(1, Ordering::SeqCst);
+
+            // Return amount * multiplier, and a new state with incremented multiplier
+            let amount_out = &amount_in * self.multiplier;
+            let new_state = Box::new(MockProtocolSim::with_shared_counter(
+                self.multiplier + 1, // State changes: next call would use multiplier+1
+                self.call_count.clone(),
+            ));
+
+            Ok(GetAmountOutResult::new(amount_out, BigUint::from(100_000u64), new_state))
+        }
+
+        fn get_limits(
+            &self,
+            _sell_token: Bytes,
+            _buy_token: Bytes,
+        ) -> Result<(BigUint, BigUint), SimulationError> {
+            Ok((BigUint::from(u64::MAX), BigUint::from(u64::MAX)))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _delta: ProtocolStateDelta,
+            _tokens: &HashMap<Bytes, Token>,
+            _balances: &Balances,
+        ) -> Result<(), TransitionError<String>> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn eq(&self, other: &dyn ProtocolSim) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .map(|o| o.multiplier == self.multiplier)
+                .unwrap_or(false)
+        }
+    }
+
+    // ==================== Test Fixtures ====================
+
+    fn token(addr: u8, symbol: &str) -> Token {
+        Token {
+            address: Address::from([addr; 20]),
+            symbol: symbol.to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        }
+    }
+
+    fn component(id: &str, tokens: &[Token]) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            "uniswap_v2",
+            "swap",
+            Chain::Ethereum,
+            tokens
+                .iter()
+                .map(|t| t.address.clone())
+                .collect(),
+            vec![],
+            HashMap::new(),
+            Default::default(),
+            Default::default(),
+            NaiveDateTime::default(),
+        )
+    }
+
+    /// Sets up market with components and a graph. Returns (market, graph_manager).
+    fn setup_market(
+        pools: Vec<(&str, Vec<Token>, u32)>, // (pool_id, tokens, multiplier)
+    ) -> (SharedMarketData, PetgraphStableDiGraphManager) {
+        let mut market = SharedMarketData::new();
+        let mut topology = HashMap::new();
+
+        for (pool_id, tokens, multiplier) in pools {
+            let comp = component(pool_id, &tokens);
+            let state = Box::new(MockProtocolSim::new(multiplier));
+            let data = ComponentData { component: comp, state, tokens: tokens.clone() };
+
+            topology.insert(
+                pool_id.to_string(),
+                tokens
+                    .iter()
+                    .map(|t| t.address.clone())
+                    .collect(),
+            );
+            market.insert_component(data);
+        }
+
+        let mut graph_manager = PetgraphStableDiGraphManager::default();
+        graph_manager.initialize_graph(&topology);
+
+        (market, graph_manager)
+    }
+
+    // ==================== simulate_path Tests ====================
+
+    #[test]
+    fn simulate_path_single_hop() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) =
+            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+
+        let graph = manager.graph();
+        let path = manager
+            .find_paths(&token_a.address, &token_b.address, 0, 1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let route = simulate_path(path, graph, &market, BigUint::from(100u64)).unwrap();
+
+        assert_eq!(route.swaps.len(), 1);
+        assert_eq!(route.swaps[0].amount_in, BigUint::from(100u64));
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(200u64)); // 100 * 2
+        assert_eq!(route.swaps[0].component_id, "pool1");
+    }
+
+    #[test]
+    fn simulate_path_multi_hop_chains_amounts() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market(vec![
+            ("pool1", vec![token_a.clone(), token_b.clone()], 2), // A->B: *2
+            ("pool2", vec![token_b.clone(), token_c.clone()], 3), // B->C: *3
+        ]);
+
+        let graph = manager.graph();
+        let paths = manager
+            .find_paths(&token_a.address, &token_c.address, 0, 2)
+            .unwrap();
+        let path = paths.into_iter().next().unwrap();
+
+        let route = simulate_path(path, graph, &market, BigUint::from(10u64)).unwrap();
+
+        assert_eq!(route.swaps.len(), 2);
+        // First hop: 10 * 2 = 20
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(20u64));
+        // Second hop: 20 * 3 = 60
+        assert_eq!(route.swaps[1].amount_in, BigUint::from(20u64));
+        assert_eq!(route.swaps[1].amount_out, BigUint::from(60u64));
+    }
+
+    #[test]
+    fn simulate_path_same_pool_twice_uses_updated_state() {
+        // Route: A -> B -> A through the same pool
+        // First swap uses multiplier=2, second should use multiplier=3 (updated state)
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) =
+            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+
+        let graph = manager.graph();
+
+        // Manually construct path: A->B, B->A (same pool, both directions)
+        let edge_ab = graph
+            .edge_indices()
+            .find(|&e| {
+                let (src, dst) = graph.edge_endpoints(e).unwrap();
+                graph[src] == token_a.address && graph[dst] == token_b.address
+            })
+            .unwrap();
+
+        let edge_ba = graph
+            .edge_indices()
+            .find(|&e| {
+                let (src, dst) = graph.edge_endpoints(e).unwrap();
+                graph[src] == token_b.address && graph[dst] == token_a.address
+            })
+            .unwrap();
+
+        let path = vec![edge_ab, edge_ba];
+        let route = simulate_path(path, graph, &market, BigUint::from(10u64)).unwrap();
+
+        assert_eq!(route.swaps.len(), 2);
+        // First: 10 * 2 = 20
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(20u64));
+        // Second: 20 * 3 = 60 (state updated, multiplier incremented)
+        assert_eq!(route.swaps[1].amount_out, BigUint::from(60u64));
+    }
+
+    #[test]
+    fn simulate_path_missing_token_returns_error() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, _) = setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+
+        // Add token C to graph but not to market (A->B->C)
+        let mut topology = market.component_topology();
+        topology
+            .insert("pool2".to_string(), vec![token_b.address.clone(), token_c.address.clone()]);
+        let mut manager = PetgraphStableDiGraphManager::default();
+        manager.initialize_graph(&topology);
+
+        let graph = manager.graph();
+        let path = manager
+            .find_paths(&token_a.address, &token_c.address, 0, 2)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let result = simulate_path(path, graph, &market, BigUint::from(100u64));
+        assert!(
+            matches!(result, Err(AlgorithmError::Other(msg)) if msg.contains("token not found"))
+        );
+    }
+
+    #[test]
+    fn simulate_path_missing_component_returns_error() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (mut market, manager) =
+            setup_market(vec![("pool1", vec![token_a.clone(), token_b.clone()], 2)]);
+
+        // Remove the component but keep tokens and graph
+        market.remove_component(&"pool1".to_string());
+
+        let graph = manager.graph();
+        let path = manager
+            .find_paths(&token_a.address, &token_b.address, 0, 1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let result = simulate_path(path, graph, &market, BigUint::from(100u64));
+        assert!(
+            matches!(result, Err(AlgorithmError::Other(msg)) if msg.contains("component not found"))
+        );
+    }
+}
