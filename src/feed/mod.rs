@@ -8,7 +8,6 @@ pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] //TODO: remove this once we use all the fields
 pub struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
@@ -31,6 +30,7 @@ pub struct TychoFeedConfig {
     pub(crate) tvl_buffer_multiplier: f64,
     /// RPC URL for the target chain.
     /// Used to fetch gas prices.
+    #[allow(dead_code)] //TODO: remove this once we use it (for gas fetching)
     pub(crate) rpc_url: String,
     /// Gas price refresh interval.
     /// Default is 30 seconds.

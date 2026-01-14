@@ -118,7 +118,7 @@ impl TychoFeed {
             None,
         )
         .await
-        .map_err(|e| TychoFeedError::Config(e.to_string()))?; //TODO: handle this error better
+        .map_err(|e| TychoFeedError::StreamError(e.to_string()))?;
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
@@ -380,4 +380,589 @@ fn register_exchanges(
     Ok(builder)
 }
 
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, env};
+
+    use num_bigint::BigUint;
+    use tycho_simulation::{
+        protocol::models::{ProtocolComponent, Update},
+        tycho_common::{
+            models::{token::Token, Chain},
+            Bytes,
+        },
+        tycho_core::simulation::{
+            errors::{SimulationError, TransitionError},
+            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        },
+    };
+
+    use super::*;
+    use crate::{
+        api::HealthTracker,
+        feed::{market_data::new_shared_market_data, TychoFeedConfig},
+    };
+
+    #[derive(Debug, Clone)]
+    struct MockProtocolSim {}
+
+    impl MockProtocolSim {
+        fn new() -> Self {
+            Self {}
+        }
+    }
+
+    impl ProtocolSim for MockProtocolSim {
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            _token_in: &Token,
+            _token_out: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            Ok(GetAmountOutResult {
+                amount: amount_in,
+                gas: BigUint::ZERO,
+                new_state: Box::new(self.clone()),
+            })
+        }
+
+        fn fee(&self) -> f64 {
+            0.0
+        }
+
+        fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
+            Ok(0.0)
+        }
+
+        fn get_limits(
+            &self,
+            _sell_token: Bytes,
+            _buy_token: Bytes,
+        ) -> Result<(BigUint, BigUint), SimulationError> {
+            Ok((BigUint::ZERO, BigUint::ZERO))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _delta: tycho_simulation::tycho_core::dto::ProtocolStateDelta,
+            _tokens: &std::collections::HashMap<Bytes, Token>,
+            _balances: &Balances,
+        ) -> Result<(), TransitionError<String>> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn eq(&self, _other: &dyn ProtocolSim) -> bool {
+            true
+        }
+    }
+
+    // Helper function to create a test config
+    fn create_test_config() -> TychoFeedConfig {
+        TychoFeedConfig::new(
+            "ws://test.tycho.io".to_string(),
+            Chain::Ethereum,
+            "test_api_key".to_string(),
+            vec!["uniswap_v2".to_string()],
+            10.0,
+            "http://test.rpc".to_string(),
+        )
+    }
+
+    // Helper to create a test token
+    fn create_test_token(address: &str, symbol: &str) -> Token {
+        Token {
+            address: Bytes::from(address),
+            symbol: symbol.to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        }
+    }
+
+    // Helper to create a test component
+    fn create_test_component(id: &str, tokens: Vec<Token>) -> ProtocolComponent {
+        let id_bytes = Bytes::from(id);
+
+        ProtocolComponent::new(
+            id_bytes.clone(),
+            "uniswap_v2".to_string(),
+            "uniswap_v2_pool".to_string(),
+            Chain::Ethereum,
+            tokens,
+            vec![],
+            HashMap::new(),
+            Bytes::from(vec![0x12, 0x34]),
+            chrono::DateTime::from_timestamp(1234567890, 0)
+                .unwrap()
+                .naive_utc(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_event_resubscription() {
+        let config = create_test_config();
+        let market_data = new_shared_market_data();
+        let health_tracker = HealthTracker::new();
+
+        let (feed, _initial_rx) = TychoFeed::new(config, market_data, health_tracker);
+
+        // Subscribe multiple times to verify multiple subscribers can be created
+        let mut sub1 = feed.subscribe();
+        let mut sub2 = feed.subscribe();
+
+        // Get event sender
+        let sender = feed.event_sender_clone();
+
+        sender
+            .send(MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            })
+            .expect("Failed to send event");
+
+        let event_1 = sub1.recv().await.unwrap();
+        let event_2 = sub2.recv().await.unwrap();
+        assert_eq!(event_1, event_2);
+        assert_eq!(
+            event_1,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_adds_new_components() {
+        let market_data = new_shared_market_data();
+        let (feed, mut event_rx) =
+            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+
+        // Create a new component
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let test_component =
+            create_test_component(component_id, vec![token1.clone(), token2.clone()]);
+
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(component_id.to_string(), test_component.clone());
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+
+        // Handle the message
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+
+        // Verify component was added to market data
+        let data = market_data.read().await;
+
+        let component = data
+            .get_component(component_id)
+            .expect("Component should be in market data");
+        assert_eq!(
+            component.clone(),
+            tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+                id: component_id.to_string(),
+                protocol_system: "uniswap_v2".to_string(),
+                protocol_type_name: "uniswap_v2_pool".to_string(),
+                chain: Chain::Ethereum,
+                tokens: vec![token1.address.clone(), token2.address.clone()],
+                static_attributes: HashMap::new(),
+                contract_addresses: vec![],
+                change: Default::default(),
+                creation_tx: Bytes::from(vec![0x12, 0x34]),
+                created_at: chrono::DateTime::from_timestamp(1234567890, 0)
+                    .unwrap()
+                    .naive_utc(),
+            }
+        );
+        drop(data);
+
+        // Verify event was broadcast
+        let event = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        assert_eq!(
+            event,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    component_id.to_string(),
+                    vec![token1.address, token2.address]
+                )]),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_removes_components() {
+        let market_data = new_shared_market_data();
+
+        let (feed, mut event_rx) =
+            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // First, add a component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+
+        // Verify it was added
+        {
+            let data = market_data.read().await;
+            assert!(
+                data.get_component(component_id)
+                    .is_some(),
+                "Component should exist before removal"
+            );
+        }
+
+        let mut removed_pairs = HashMap::new();
+        removed_pairs.insert(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update =
+            Update::new(12345, HashMap::new(), HashMap::new()).set_removed_pairs(removed_pairs);
+
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle removal");
+
+        // Verify component was removed
+        let data = market_data.read().await;
+        assert!(
+            data.get_component(component_id)
+                .is_none(),
+            "Component should be removed from market data"
+        );
+        drop(data);
+
+        // Verify both events were broadcast
+        let event_1 = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        let event_2 = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        assert_eq!(
+            event_1,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    component_id.to_string(),
+                    vec![token1.address, token2.address]
+                )]),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            }
+        );
+        assert_eq!(
+            event_2,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: vec![component_id.to_string()],
+                updated_components: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_updates_states() {
+        let market_data = new_shared_market_data();
+        let (feed, mut event_rx) =
+            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // First, add a component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        // Create an update with state information
+        let mut states = HashMap::new();
+        states.insert(
+            component_id.to_string(),
+            Box::new(MockProtocolSim::new()) as Box<dyn ProtocolSim>,
+        );
+
+        let update = Update::new(12345, states.clone(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+
+        // Verify state was updated
+        {
+            let data = market_data.read().await;
+            assert!(
+                data.get_simulation_state(component_id)
+                    .is_some(),
+                "Component state should be updated"
+            );
+            assert!(data
+                .get_simulation_state(component_id)
+                .is_some());
+        }
+
+        // Now update its state
+
+        // Create an update with state information
+        let update = Update::new(12345, states, HashMap::new());
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+
+        // Verify state was updated
+        {
+            let data = market_data.read().await;
+            assert!(
+                data.get_simulation_state(component_id)
+                    .is_some(),
+                "Component state should be updated"
+            );
+            assert!(data
+                .get_simulation_state(component_id)
+                .is_some());
+        }
+
+        // Verify event was broadcast
+        let event_1 = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        let event_2 = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        assert_eq!(
+            event_1,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    component_id.to_string(),
+                    vec![token1.address, token2.address]
+                )]),
+                removed_components: Vec::new(),
+                updated_components: vec![],
+            }
+        );
+        assert_eq!(
+            event_2,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: Vec::new(),
+                updated_components: vec![component_id.to_string()],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_multiple_operations() {
+        let market_data = new_shared_market_data();
+
+        let (feed, mut event_rx) =
+            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+
+        let old_component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_component_id = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let old_token1 = create_test_token("0x0000000000000000000000000000000000000001", "OLD1");
+        let old_token2 = create_test_token("0x0000000000000000000000000000000000000002", "OLD2");
+        let new_token1 = create_test_token("0x1111111111111111111111111111111111111111", "NEW1");
+        let new_token2 = create_test_token("0x2222222222222222222222222222222222222222", "NEW2");
+
+        // First, add an old component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            old_component_id.to_string(),
+            create_test_component(old_component_id, vec![old_token1.clone(), old_token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add old component");
+
+        // Verify the old component was added
+        {
+            let data = market_data.read().await;
+            assert!(
+                data.get_component(old_component_id)
+                    .is_some(),
+                "Old component should exist before removal"
+            );
+        }
+
+        // Now add a new one and remove the old one in the same message
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            new_component_id.to_string(),
+            create_test_component(new_component_id, vec![new_token1.clone(), new_token2.clone()]),
+        );
+
+        let mut removed_pairs = HashMap::new();
+        removed_pairs.insert(
+            old_component_id.to_string(),
+            create_test_component(old_component_id, vec![old_token1.clone(), old_token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs).set_removed_pairs(removed_pairs);
+
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle complex update");
+
+        // Verify both operations succeeded
+        {
+            let data = market_data.read().await;
+            assert!(
+                data.get_component(new_component_id)
+                    .is_some(),
+                "New component should be added"
+            );
+            assert!(
+                data.get_component(old_component_id)
+                    .is_none(),
+                "Old component should be removed"
+            );
+        }
+
+        // Verify we receive both events in the correct order
+        let event_1 = event_rx
+            .try_recv()
+            .expect("Should receive first event");
+        let event_2 = event_rx
+            .try_recv()
+            .expect("Should receive second event");
+
+        // First event: old component added
+        assert_eq!(
+            event_1,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    old_component_id.to_string(),
+                    vec![old_token1.address.clone(), old_token2.address.clone()]
+                )]),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            }
+        );
+
+        // Second event: new component added AND old component removed
+        assert_eq!(
+            event_2,
+            MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    new_component_id.to_string(),
+                    vec![new_token1.address, new_token2.address]
+                )]),
+                removed_components: vec![old_component_id.to_string()],
+                updated_components: Vec::new(),
+            }
+        );
+
+        // Verify no more events
+        match event_rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // Expected - no more events
+            }
+            Ok(event) => panic!("Unexpected extra event: {:?}", event),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_empty_update() {
+        let config = create_test_config();
+        let market_data = new_shared_market_data();
+        let health_tracker = HealthTracker::new();
+
+        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+
+        // Send an empty update
+        let update = Update::new(12345, HashMap::new(), HashMap::new());
+
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle empty update");
+
+        // Verify no event was broadcast (empty updates should not trigger events)
+        match event_rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // Expected - no event should be broadcast for empty updates
+            }
+            Ok(_) => panic!("Should not broadcast event for empty update"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
+    #[ignore]
+    async fn test_real_feed() {
+        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
+        let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
+        let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
+        let config = TychoFeedConfig::new(
+            tycho_url,
+            Chain::Ethereum,
+            tycho_api_key,
+            vec!["uniswap_v2".to_string()],
+            100.0,
+            rpc_url,
+        );
+
+        let mut message_count = 5;
+
+        let market_data = new_shared_market_data();
+        let health_tracker = HealthTracker::new();
+
+        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+
+        // Start Tycho feed in background
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = feed.run().await {
+                panic!("Failed to run feed: {:?}", e);
+            }
+        });
+
+        while let Ok(event) = event_rx.recv().await {
+            message_count -= 1;
+            if message_count == 0 {
+                break;
+            }
+            dbg!(&event);
+        }
+
+        feed_handle.abort();
+    }
 }

@@ -6827,6 +6827,7 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "anyhow",
+ "chrono",
  "criterion",
  "crossbeam-channel",
  "lazy_static",
