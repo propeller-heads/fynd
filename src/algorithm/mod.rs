@@ -121,14 +121,8 @@ pub struct SimulationResult {
     pub total_gas: BigUint,
 }
 
-/// Simulates a path and converts it to a Route with real amounts and gas.
-///
-/// Takes ownership of the Path and produces an execution-ready Route by simulating
-/// each hop using ProtocolSim. Returns both the Route and metadata needed for ranking.
-///
-/// For each hop:
-/// 1. Calls `get_amount_out` on the component's state
-/// 2. Stores the new_state for subsequent hops (handles same-pool-twice scenarios)
+/// Simulates swaps along a path using each pool's `ProtocolSim::get_amount_out`.
+/// Tracks intermediate state changes to handle routes that revisit the same pool.
 fn simulate_path(
     path: Path,
     graph: &StableDiGraph,
@@ -174,7 +168,7 @@ fn simulate_path(
             .downcast_ref::<EVMPoolState<PreCachedDB>>()
             .is_some();
 
-        // If the component is a VM, use the shared VM state override
+        // If the component is a VM, use the VM state override shared across all VM components
         // Otherwise, use the per-component native state overrides
         let state_override = if is_component_vm {
             vm_state_override.as_ref()
