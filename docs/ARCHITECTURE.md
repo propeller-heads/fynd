@@ -68,7 +68,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 │                              TychoFeed                                   │
 │                     Background task (single instance)                       │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  Tycho WebSocket ──► Update SharedMarketData ──► Broadcast Event   │    │
+│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                   │                                         │
 │                                   ▼ broadcast::Sender<MarketEvent>          │
@@ -144,16 +144,23 @@ pub struct WorkerPool {
 
 ```rust
 pub struct SharedMarketData {
-    components: HashMap<ComponentId, ComponentData>,
+    /// All components indexed by their ID.
+    components: HashMap<ComponentId, ProtocolComponent>,
+    /// All states indexed by their component ID.
+    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
-    component_topology: HashMap<ComponentId, Vec<Address>>,  // Simple market graph representation
+    /// Current gas price.
     gas_price: GasPrice,
-    gas_constants: HashMap<ProtocolSystem, u64>,
-    last_updated: Block,
+    /// Protocol sync status indexed by their protocol system name.
+    protocol_sync_status: HashMap<String, SynchronizerState>,
+    /// Block info for the last update (only updated when protocols reported "Ready" status).
+    /// None if no block has been processed yet.
+    last_updated: Option<BlockInfo>,
 }
 ```
 
-The `component_topology` field stores a simple mapping from component IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
+The `SharedMarketData::component_topology()` function returns a simple mapping from component IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
 
 ---
 
@@ -203,11 +210,15 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ```rust
 pub enum MarketEvent {
-    ComponentAdded { component_id, tokens, protocol_system },
-    ComponentRemoved { component_id },
-    StateUpdated { component_id },
-    GasPriceUpdated { gas_price },
-    Snapshot { components, gas_price },
+    /// Market was updated.
+    MarketUpdated {
+        added_components: HashMap<ComponentId, Vec<Address>>,
+        removed_components: Vec<ComponentId>,
+        updated_components: Vec<ComponentId>,
+    },
+
+    /// Gas price was updated.
+    GasPriceUpdated { gas_price: GasPrice },
 }
 ```
 
@@ -341,7 +352,7 @@ impl Algorithm for MostLiquidAlgorithm {
 ```
 ┌───────────┐
 │   Tycho   │
-│ WebSocket │
+│   Stream  │
 └─────┬─────┘
       │ Update
       ▼
@@ -434,7 +445,7 @@ src/
 ├── worker.rs                 # SolverWorker
 │
 ├── feed/                     # Market data feed
-│   ├── mod.rs
+│   ├── mod.rs                # TychoFeedConfig and TychoFeedError
 │   ├── market_data.rs        # SharedMarketData
 │   ├── events.rs             # MarketEvent enum
 │   └── tycho_feed.rs         # TychoFeed
