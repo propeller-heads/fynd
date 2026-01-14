@@ -338,11 +338,6 @@ impl PetgraphStableDiGraphManager {
 
         let mut paths = Vec::new();
 
-        // Handle edge case: if from == to and min_hops == 0, include empty path
-        if from_idx == to_idx && min_hops == 0 {
-            paths.push(Vec::new());
-        }
-
         // BFS queue: (current_node, path_so_far)
         let mut queue: VecDeque<(NodeIndex, Path)> = VecDeque::new();
         queue.push_back((from_idx, Path::default()));
@@ -1101,7 +1096,6 @@ mod tests {
         assert_eq!(
             all_ids(&p, &m.graph),
             HashSet::from([
-                vec![],
                 vec!["ab1", "ab1"],
                 vec!["ab1", "ab2"],
                 vec!["ab1", "ab3"],
