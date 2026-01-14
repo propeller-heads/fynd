@@ -133,7 +133,7 @@ impl SharedMarketData {
         for token in tokens {
             self.tokens
                 .entry(token.address.clone())
-                .or_insert_with(|| token.clone());
+                .or_insert_with(|| token);
         }
     }
 
@@ -144,15 +144,15 @@ impl SharedMarketData {
     ) {
         for (protocol_system, status) in sync_states {
             self.protocol_sync_status
-                .insert(protocol_system.clone(), status);
+                .insert(protocol_system, status);
         }
     }
 
     /// Removes a component.
-    pub fn remove_components(&mut self, ids: impl IntoIterator<Item = String>) {
+    pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
-            self.components.remove(&id);
-            self.simulation_states.remove(&id);
+            self.components.remove(id);
+            self.simulation_states.remove(id);
         }
     }
 
@@ -162,8 +162,7 @@ impl SharedMarketData {
         states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
     ) {
         for (id, state) in states {
-            self.simulation_states
-                .insert(id.clone(), state);
+            self.simulation_states.insert(id, state);
         }
     }
 

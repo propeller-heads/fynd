@@ -154,24 +154,26 @@ impl TychoFeed {
     #[instrument(skip(self, msg))]
     async fn handle_tycho_message(&self, msg: Update) -> Result<(), TychoFeedError> {
         // Collect variables for market shared data update
-        let added_components = msg.new_pairs.clone();
-        let removed_components = msg.removed_pairs.clone();
-        let updated_or_new_states = msg.states.clone();
+        let Update {
+            new_pairs: added_components,
+            removed_pairs: removed_components,
+            states: updated_or_new_states,
+            sync_states,
+            ..
+        } = msg;
+
         let updated_components_ids: HashSet<_> = updated_or_new_states
             .keys()
             .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
             .cloned()
             .collect();
 
-        let maybe_new_tokens = msg
-            .new_pairs
+        let maybe_new_tokens = added_components
             .values()
             .flat_map(|component| component.tokens.iter().cloned());
         // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
         // this?
-        let sync_states = msg.sync_states.clone();
-        let latest_block_info = msg
-            .sync_states
+        let latest_block_info = sync_states
             .values()
             .filter_map(|status| {
                 if let SynchronizerState::Ready(header) = status {
@@ -221,7 +223,7 @@ impl TychoFeed {
                         }
                     }),
             );
-            market_data.remove_components(removed_components.keys().cloned());
+            market_data.remove_components(removed_components.keys());
             market_data.upsert_tokens(maybe_new_tokens);
             market_data.update_states(updated_or_new_states);
             market_data.update_protocol_sync_status(sync_states);
@@ -246,8 +248,8 @@ impl TychoFeed {
                             id,
                             component
                                 .tokens
-                                .iter()
-                                .map(|token| token.address.clone())
+                                .into_iter()
+                                .map(|token| token.address)
                                 .collect(),
                         )
                     })
