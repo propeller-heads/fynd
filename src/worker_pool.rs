@@ -1,7 +1,7 @@
 //! Worker pool for processing solve tasks.
 //!
 //! The worker pool manages dedicated OS threads for CPU-bound route finding.
-//! Each worker owns a Solver instance and processes tasks from the queue.
+//! Each worker has its own tokio runtime and processes tasks from the queue.
 
 use std::{
     sync::Arc,
@@ -9,7 +9,7 @@ use std::{
 };
 
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::{
     algorithm::MostLiquidAlgorithm,
@@ -68,7 +68,7 @@ impl WorkerPool {
             let market_data = Arc::clone(&market_data);
             let event_rx = event_rx.resubscribe();
             let worker_config = config.worker_config.clone();
-            let mut shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_rx = shutdown_tx.subscribe();
 
             let handle = thread::Builder::new()
                 .name(format!("solver-worker-{}", worker_id))
@@ -86,58 +86,17 @@ impl WorkerPool {
                             worker_config.timeout.as_millis() as u64,
                         );
 
-                        // Create solver (graph type and manager are automatically inferred from
-                        // algorithm)
+                        // Create solver
                         let mut worker =
-                            SolverWorker::new(market_data, event_rx, algorithm, worker_config);
+                            SolverWorker::new(market_data, algorithm, worker_config, worker_id);
 
                         // Initialize solver graph
                         worker.initialize_graph().await;
 
-                        info!(worker_id, "worker started");
-
-                        loop {
-                            tokio::select! {
-                                // Check for shutdown
-                                _ = shutdown_rx.recv() => {
-                                    info!(worker_id, "worker shutting down");
-                                    break;
-                                }
-
-                                // Get next task
-                                task = async {
-                                    let mut rx = task_rx.lock().await;
-                                    rx.recv().await
-                                } => {
-                                    match task {
-                                        Some(task) => {
-                                            let task_id = task.id;
-                                            let _wait_time = task.wait_time();
-
-                                            // Process the task
-                                            let result = worker.solve(&task.request).await;
-
-                                            if let Err(ref e) = result {
-                                                warn!(
-                                                    worker_id,
-                                                    task_id = %task_id,
-                                                    error = %e,
-                                                    "solve failed"
-                                                );
-                                            }
-
-                                            // Send response
-                                            task.respond(result);
-                                        }
-                                        None => {
-                                            // Channel closed, exit
-                                            info!(worker_id, "task channel closed, exiting");
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // Run the worker's main loop
+                        worker
+                            .run(event_rx, task_rx, shutdown_rx)
+                            .await;
                     });
                 })
                 .expect("failed to spawn worker thread");

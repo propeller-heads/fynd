@@ -1,16 +1,20 @@
-//! A Solver Worker that processes solve requests.
+//! A Solver Worker that processes solve requests and maintains market graph state.
 //!
 //! The Solver Worker:
 //! - Initializes graph from market topology (via a GraphManager)
-//! - Holds a reference to SharedMarketData (for state lookups)
-//! - Subscribes to MarketEvents to keep local topology in sync
-//! - Uses an Algorithm to find routes
+//! - Consumess MarketEvents to keep local topology in sync
+//! - Processes solve requests
+//! - Uses an Algorithm to find routes through the market graph
+//! - Coordinates market event and solve task processing
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use num_bigint::BigUint;
-use tokio::sync::broadcast;
-use tracing::warn;
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tracing::{info, warn};
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
@@ -21,6 +25,7 @@ use crate::{
     graph::GraphManager,
     types::{
         solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
+        SolveTask,
     },
 };
 
@@ -39,10 +44,7 @@ impl Default for WorkerConfig {
     }
 }
 
-/// A solver worker instance that processes solve requests.
-///
-/// The solver worker initializes the graph on startup from SharedMarketData, and the graph
-/// manager maintains the graph and updates it based on market events.
+/// A solver worker instance that maintains a market graph and processes solve requests.
 pub struct SolverWorker<A>
 where
     A: Algorithm,
@@ -55,12 +57,12 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
-    /// Receiver for market events.
-    event_rx: broadcast::Receiver<MarketEvent>,
     /// Configuration.
     config: WorkerConfig,
     /// Whether the graph has been initialized.
     initialized: bool,
+    /// Worker identifier (for logging).
+    worker_id: usize,
 }
 
 impl<A> SolverWorker<A>
@@ -76,46 +78,53 @@ where
     /// # Arguments
     ///
     /// * `market_data` - Shared reference to market data
-    /// * `event_rx` - Receiver for market events from the indexer
     /// * `algorithm` - The algorithm to use for route finding
     /// * `config` - Solver configuration
+    /// * `worker_id` - Identifier for this worker (for logging)
     pub fn new(
         market_data: SharedMarketDataRef,
-        event_rx: broadcast::Receiver<MarketEvent>,
         algorithm: A,
         config: WorkerConfig,
+        worker_id: usize,
     ) -> Self {
         Self {
             algorithm,
             graph_manager: A::GraphManager::default(),
             market_data,
-            event_rx,
             config,
             initialized: false,
+            worker_id,
         }
     }
 
     /// Initializes the graph from SharedMarketData.
     ///
-    /// Call this on startup or when recovering from missed events.
+    /// Call this on startup or to recreate the graph from the latest market topology.
     /// Gets the market topology from SharedMarketData and uses it to build the graph.
     pub async fn initialize_graph(&mut self) {
-        let market = self.market_data.read().await;
-        let topology = market.component_topology();
+        let topology = {
+            // read lock on market data
+            let market = self.market_data.read().await;
+            market.component_topology().clone() // clone to avoid holding the lock
+        };
+
         self.graph_manager
             .initialize_graph(&topology);
         self.initialized = true;
     }
 
-    /// Processes pending market events.
-    ///
-    /// Call this periodically or before each solve to stay in sync.
-    ///
-    /// Errors are logged but do not stop processing of subsequent events.
-    pub fn process_events(&mut self) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            if let Err(e) = self.graph_manager.handle_event(&event) {
-                warn!("Warning: Error handling market event: {:?}", e);
+    /// Processes a single market event.
+    pub fn process_event(&mut self, event: MarketEvent) {
+        match event {
+            MarketEvent::MarketUpdated { .. } => {
+                if let Err(e) = self.graph_manager.handle_event(&event) {
+                    // Graph errors currently returned by handle_event are non-fatal, so we just log
+                    // them.
+                    warn!("Error handling market event: {:?}", e);
+                }
+            }
+            MarketEvent::GasPriceUpdated { .. } => {
+                unimplemented!("Gas price updates are not supported yet");
             }
         }
     }
@@ -125,9 +134,6 @@ where
     /// This is the main entry point called by worker threads.
     pub async fn solve(&mut self, request: &SolutionRequest) -> Result<Solution, SolveError> {
         let start_time = Instant::now();
-
-        // Process any pending events first
-        self.process_events();
 
         // Ensure we're initialized
         if !self.initialized {
@@ -257,6 +263,97 @@ where
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
         Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
+    }
+
+    /// Runs the worker's main loop, processing market events and solve tasks.
+    ///
+    /// This method coordinates between market events and solve requests, ensuring the graph
+    /// stays up-to-date while processing solve tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_rx` - Receiver for market events
+    /// * `task_rx` - Shared receiver for solve tasks
+    /// * `shutdown_rx` - Receiver for shutdown signals
+    pub async fn run(
+        &mut self,
+        mut event_rx: broadcast::Receiver<MarketEvent>,
+        task_rx: Arc<Mutex<mpsc::Receiver<SolveTask>>>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) {
+        info!(self.worker_id, "worker started");
+
+        loop {
+            tokio::select! {
+                // Check for shutdown
+                _ = shutdown_rx.recv() => {
+                    info!(self.worker_id, "worker shutting down");
+                    break;
+                }
+
+                // Process market events
+                event_result = event_rx.recv() => {
+                    match event_result {
+                        Ok(event) => {
+                            self.process_event(event);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!(self.worker_id, "event receiver closed, shutting down");
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                self.worker_id,
+                                skipped = skipped,
+                                "event receiver lagged, skipped {} events. Reinitializing graph from current market state",
+                                skipped
+                            );
+                            // Reinitialize the graph from the current market state to recover from the missed events.
+                            self.initialize_graph().await;
+                        }
+                    }
+                }
+
+                // Get next solve task
+                task = async {
+                    let mut rx = task_rx.lock().await;
+                    rx.recv().await
+                } => {
+                    match task {
+                        Some(task) => {
+                            let task_id = task.id;
+                            let _wait_time = task.wait_time();
+                            let task_response_tx = task.response_tx;
+
+                            // Process any pending events first to guarantee graph is up-to-date (alleviate race condition)
+                            while let Ok(event) = event_rx.try_recv() {
+                                self.process_event(event);
+                            }
+
+                            // Process the task
+                            let result = self.solve(&task.request).await;
+
+                            if let Err(ref e) = result {
+                                warn!(
+                                    self.worker_id,
+                                    task_id = %task_id,
+                                    error = %e,
+                                    "solve failed"
+                                );
+                            }
+
+                            // Send response
+                            let _ = task_response_tx.send(result);
+                        }
+                        None => {
+                            // Channel closed, exit
+                            info!(self.worker_id, "task channel closed, exiting");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the algorithm name.
