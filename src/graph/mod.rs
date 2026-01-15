@@ -60,8 +60,8 @@ pub enum GraphError {
     TokenNotFound(Address),
     #[error("Components not found in graph: {0:?}")]
     ComponentsNotFound(Vec<ComponentId>),
-    #[error("Components without tokens cannot be added: {0:?}")]
-    ComponentsWithoutTokens(Vec<ComponentId>),
+    #[error("Components with less then 2 tokens cannot be added: {0:?}")]
+    InvalidComponents(Vec<ComponentId>),
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }
