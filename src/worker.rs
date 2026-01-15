@@ -159,16 +159,24 @@ where
         let order_solution = match result {
             Ok(route) => {
                 let gas_estimate = route.total_gas();
-                let amount_in = route
-                    .swaps
-                    .first()
-                    .map(|s| s.amount_in.clone())
-                    .unwrap_or_else(|| BigUint::ZERO);
-                let amount_out = route
-                    .swaps
-                    .last()
-                    .map(|s| s.amount_out.clone())
-                    .unwrap_or_else(|| BigUint::ZERO);
+                let amount_in = if order.is_sell() {
+                    order.amount.clone()
+                } else {
+                    route
+                        .swaps
+                        .first()
+                        .map(|s| s.amount_in.clone())
+                        .unwrap_or_else(|| BigUint::ZERO)
+                };
+                let amount_out = if order.is_sell() {
+                    route
+                        .swaps
+                        .last()
+                        .map(|s| s.amount_out.clone())
+                        .unwrap_or_else(|| BigUint::ZERO)
+                } else {
+                    order.amount.clone()
+                };
 
                 OrderSolution {
                     order_id: order.id.clone(),
@@ -188,8 +196,8 @@ where
                     order_id: order.id.clone(),
                     status,
                     route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
+                    amount_in: if order.is_sell() { order.amount.clone() } else { BigUint::ZERO },
+                    amount_out: if order.is_sell() { BigUint::ZERO } else { order.amount.clone() },
                     gas_estimate: BigUint::ZERO,
                     price_impact_bps: None,
                     block: block_info,
