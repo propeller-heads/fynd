@@ -4,7 +4,7 @@
 //! It provides backpressure and allows the HTTP layer to remain
 //! responsive even when workers are busy.
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
@@ -30,7 +30,7 @@ impl Default for TaskQueueConfig {
 /// This is cloned and shared with HTTP handlers.
 #[derive(Clone)]
 pub struct TaskQueueHandle {
-    sender: mpsc::Sender<SolveTask>,
+    sender: async_channel::Sender<SolveTask>,
 }
 
 impl TaskQueueHandle {
@@ -63,12 +63,12 @@ impl TaskQueueHandle {
     ///
     /// Note: This is not exact due to the async nature of the queue.
     pub fn approximate_depth(&self) -> usize {
-        self.sender.max_capacity() - self.sender.capacity()
+        self.sender.len()
     }
 
     /// Returns true if the queue is likely full.
     pub fn is_full(&self) -> bool {
-        self.sender.capacity() == 0
+        self.sender.is_full()
     }
 }
 
@@ -76,14 +76,14 @@ impl TaskQueueHandle {
 ///
 /// This is consumed when creating the worker pool.
 pub struct TaskQueue {
-    receiver: mpsc::Receiver<SolveTask>,
+    receiver: async_channel::Receiver<SolveTask>,
     handle: TaskQueueHandle,
 }
 
 impl TaskQueue {
     /// Creates a new task queue with the given configuration.
     pub fn new(config: TaskQueueConfig) -> Self {
-        let (sender, receiver) = mpsc::channel(config.capacity);
+        let (sender, receiver) = async_channel::bounded(config.capacity);
         let handle = TaskQueueHandle { sender };
 
         Self { receiver, handle }
@@ -97,12 +97,12 @@ impl TaskQueue {
     /// Consumes the queue and returns the receiver.
     ///
     /// This is called when setting up the worker pool.
-    pub fn into_receiver(self) -> mpsc::Receiver<SolveTask> {
+    pub fn into_receiver(self) -> async_channel::Receiver<SolveTask> {
         self.receiver
     }
 
     /// Splits the queue into handle and receiver.
-    pub fn split(self) -> (TaskQueueHandle, mpsc::Receiver<SolveTask>) {
+    pub fn split(self) -> (TaskQueueHandle, async_channel::Receiver<SolveTask>) {
         (self.handle, self.receiver)
     }
 }

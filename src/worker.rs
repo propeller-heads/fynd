@@ -7,13 +7,10 @@
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::{
@@ -146,30 +143,6 @@ where
             self.initialize_graph().await;
         }
 
-        // Validate order - return early if invalid (no lock needed)
-        if let Err(_e) = order.validate() {
-            // Need block info for error response, acquire lock briefly
-            let block_info = {
-                let market = self.market_data.read().await;
-                Self::get_block_info(&market)
-            };
-            let solve_time_ms = start_time.elapsed().as_millis() as u64;
-            return Ok(SingleOrderSolution {
-                order: OrderSolution {
-                    order_id: order.id.clone(),
-                    status: SolutionStatus::NoRouteFound,
-                    route: None,
-                    amount_in: order.amount.clone(),
-                    amount_out: BigUint::ZERO,
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info,
-                    algorithm: String::new(),
-                },
-                solve_time_ms,
-            });
-        }
-
         // Get the graph from the graph manager (no lock needed)
         let graph = self.graph_manager.graph();
 
@@ -243,13 +216,15 @@ where
     pub async fn run(
         &mut self,
         mut event_rx: broadcast::Receiver<MarketEvent>,
-        task_rx: Arc<Mutex<mpsc::Receiver<SolveTask>>>,
+        task_rx: async_channel::Receiver<SolveTask>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
         info!(self.worker_id, "worker started");
 
         loop {
             tokio::select! {
+                biased; // prioritize events in this order: shutdown, market update, solve task
+
                 // Check for shutdown
                 _ = shutdown_rx.recv() => {
                     info!(self.worker_id, "worker shutting down");
@@ -280,20 +255,12 @@ where
                 }
 
                 // Get next solve task
-                task = async {
-                    let mut rx = task_rx.lock().await;
-                    rx.recv().await
-                } => {
-                    match task {
+                task = task_rx.recv() => {
+                    match task.ok() {
                         Some(task) => {
                             let task_id = task.id;
                             let _wait_time = task.wait_time();
                             let task_response_tx = task.response_tx;
-
-                            // Process any pending events first to guarantee graph is up-to-date (alleviate race condition)
-                            while let Ok(event) = event_rx.try_recv() {
-                                self.process_event(event);
-                            }
 
                             // Process the task
                             let result = self.solve(&task.order).await;

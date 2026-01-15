@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::{
@@ -52,19 +52,16 @@ impl WorkerPool {
     /// * `event_tx` - Broadcast sender for market events (workers subscribe to this)
     pub fn spawn(
         config: WorkerPoolConfig,
-        task_rx: mpsc::Receiver<SolveTask>,
+        task_rx: async_channel::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        // Wrap task_rx in Arc<Mutex> so workers can share it
-        let task_rx = Arc::new(Mutex::new(task_rx));
-
         let mut workers = Vec::with_capacity(config.num_workers);
 
         for worker_id in 0..config.num_workers {
-            let task_rx = Arc::clone(&task_rx);
+            let task_rx = task_rx.clone();
             let market_data = Arc::clone(&market_data);
             let event_rx = event_rx.resubscribe();
             let worker_config = config.worker_config.clone();
@@ -152,7 +149,7 @@ impl WorkerPoolBuilder {
 
     pub fn build(
         self,
-        task_rx: mpsc::Receiver<SolveTask>,
+        task_rx: async_channel::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
     ) -> WorkerPool {
