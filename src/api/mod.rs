@@ -82,10 +82,7 @@ pub struct AppState {
 impl AppState {
     /// Creates new application state.
     pub fn new(order_manager: OrderManager, health_tracker: HealthTracker) -> Self {
-        Self {
-            order_manager: Arc::new(order_manager),
-            health_tracker,
-        }
+        Self { order_manager: Arc::new(order_manager), health_tracker }
     }
 }
 

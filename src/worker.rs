@@ -2,7 +2,7 @@
 //!
 //! The Solver Worker:
 //! - Initializes graph from market topology (via a GraphManager)
-//! - Consumess MarketEvents to keep local topology in sync
+//! - Consumes MarketEvents to keep local topology in sync
 //! - Processes solve requests
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing

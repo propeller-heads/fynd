@@ -121,8 +121,10 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::types::solution::{BlockInfo, Order, OrderSide, OrderSolution, SolutionStatus};
-    use crate::types::SingleOrderSolution;
+    use crate::types::{
+        solution::{BlockInfo, Order, OrderSide, OrderSolution, SolutionStatus},
+        SingleOrderSolution,
+    };
 
     // -------------------------------------------------------------------------
     // Test Helpers
@@ -238,7 +240,10 @@ mod tests {
 
         // Spawn a "worker" that responds to the task
         let worker = tokio::spawn(async move {
-            let task = receiver.recv().await.expect("should receive task");
+            let task = receiver
+                .recv()
+                .await
+                .expect("should receive task");
             assert_eq!(task.order.id, "test-order");
             task.respond(Ok(make_single_solution()));
         });
@@ -246,7 +251,9 @@ mod tests {
         // Enqueue an order
         let result = handle.enqueue(make_order()).await;
 
-        worker.await.expect("worker should complete");
+        worker
+            .await
+            .expect("worker should complete");
         let solution = result.expect("should get solution");
         assert_eq!(solution.solve_time_ms, 5);
     }
@@ -258,13 +265,18 @@ mod tests {
         let receiver = queue.into_receiver();
 
         let worker = tokio::spawn(async move {
-            let task = receiver.recv().await.expect("should receive task");
+            let task = receiver
+                .recv()
+                .await
+                .expect("should receive task");
             task.respond(Err(SolveError::NoRouteFound { order_id: "test".to_string() }));
         });
 
         let result = handle.enqueue(make_order()).await;
 
-        worker.await.expect("worker should complete");
+        worker
+            .await
+            .expect("worker should complete");
         assert!(matches!(result, Err(SolveError::NoRouteFound { .. })));
     }
 
@@ -276,13 +288,18 @@ mod tests {
 
         // Worker receives task but drops it without responding
         let worker = tokio::spawn(async move {
-            let task = receiver.recv().await.expect("should receive task");
+            let task = receiver
+                .recv()
+                .await
+                .expect("should receive task");
             drop(task); // Drop without responding
         });
 
         let result = handle.enqueue(make_order()).await;
 
-        worker.await.expect("worker should complete");
+        worker
+            .await
+            .expect("worker should complete");
         assert!(matches!(result, Err(SolveError::Internal(_))));
     }
 
@@ -313,14 +330,22 @@ mod tests {
         let (response_tx, _response_rx) = oneshot::channel();
         let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
 
-        handle.sender.send(task).await.expect("should send");
+        handle
+            .sender
+            .send(task)
+            .await
+            .expect("should send");
 
         assert_eq!(handle.approximate_depth(), 1);
 
         // Send another
         let (response_tx2, _response_rx2) = oneshot::channel();
         let task2 = SolveTask::new(Uuid::new_v4(), make_order(), response_tx2);
-        handle.sender.send(task2).await.expect("should send");
+        handle
+            .sender
+            .send(task2)
+            .await
+            .expect("should send");
 
         assert_eq!(handle.approximate_depth(), 2);
     }
@@ -339,7 +364,11 @@ mod tests {
         for _ in 0..capacity {
             let (response_tx, _response_rx) = oneshot::channel();
             let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
-            handle.sender.send(task).await.expect("should send");
+            handle
+                .sender
+                .send(task)
+                .await
+                .expect("should send");
         }
 
         assert!(handle.is_full());
@@ -390,7 +419,10 @@ mod tests {
         // Spawn worker that processes multiple tasks
         let worker = tokio::spawn(async move {
             for _ in 0..2 {
-                let task = receiver.recv().await.expect("should receive task");
+                let task = receiver
+                    .recv()
+                    .await
+                    .expect("should receive task");
                 task.respond(Ok(make_single_solution()));
             }
         });
@@ -399,7 +431,9 @@ mod tests {
         let (result1, result2) =
             tokio::join!(handle1.enqueue(make_order()), handle2.enqueue(make_order()),);
 
-        worker.await.expect("worker should complete");
+        worker
+            .await
+            .expect("worker should complete");
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
@@ -428,7 +462,9 @@ mod tests {
         let _ = handle.enqueue(make_order()).await;
         let _ = handle.enqueue(make_order()).await;
 
-        let (id1, id2) = collector.await.expect("collector should complete");
+        let (id1, id2) = collector
+            .await
+            .expect("collector should complete");
         assert_ne!(id1, id2, "Task IDs should be unique");
     }
 
@@ -455,7 +491,9 @@ mod tests {
 
         task.respond(Ok(make_single_solution()));
 
-        let result = response_rx.await.expect("should receive response");
+        let result = response_rx
+            .await
+            .expect("should receive response");
         assert!(result.is_ok());
     }
 
@@ -466,7 +504,9 @@ mod tests {
 
         task.respond(Err(SolveError::Timeout { elapsed_ms: 100 }));
 
-        let result = response_rx.await.expect("should receive response");
+        let result = response_rx
+            .await
+            .expect("should receive response");
         assert!(matches!(result, Err(SolveError::Timeout { elapsed_ms: 100 })));
     }
 }

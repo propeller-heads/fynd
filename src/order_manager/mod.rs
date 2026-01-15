@@ -14,14 +14,15 @@
 
 mod config;
 
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
+pub use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use num_bigint::BigUint;
 use tracing::{info, warn};
-
-pub use config::OrderManagerConfig;
 
 use crate::{
     task_queue::TaskQueueHandle,
@@ -343,10 +344,10 @@ impl OrderManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rstest::rstest;
     use tycho_simulation::tycho_core::models::Address;
 
+    use super::*;
     use crate::types::{solution::OrderSide, SingleOrderSolution, SolveTask};
 
     fn make_address(byte: u8) -> Address {

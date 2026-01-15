@@ -27,21 +27,16 @@ use crate::{
 /// Each pool is dedicated to a single algorithm type. The OrderManager
 /// can fan out orders to multiple pools with different algorithms and
 /// select the best solution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlgorithmType {
     /// Most liquid path algorithm - finds paths through highest liquidity pools.
+    #[default]
     MostLiquid,
     // Future algorithm types can be added here:
     // FastHeuristic,
     // SplitRoute,
     // etc.
-}
-
-impl Default for AlgorithmType {
-    fn default() -> Self {
-        Self::MostLiquid
-    }
 }
 
 impl fmt::Display for AlgorithmType {
@@ -112,6 +107,7 @@ impl WorkerPool {
         let pool_name = config.name.clone();
         let algorithm_type = config.algorithm_type;
 
+        // Spawn workers
         for worker_id in 0..config.num_workers {
             let task_rx = task_rx.clone();
             let market_data = Arc::clone(&market_data);
@@ -145,7 +141,9 @@ impl WorkerPool {
                         worker.initialize_graph().await;
 
                         // Run the worker's main loop
-                        worker.run(event_rx, task_rx, shutdown_rx).await;
+                        worker
+                            .run(event_rx, task_rx, shutdown_rx)
+                            .await;
                     });
                 })
                 .expect("failed to spawn worker thread");
@@ -160,12 +158,7 @@ impl WorkerPool {
             "solver pool spawned"
         );
 
-        Self {
-            name: pool_name,
-            algorithm_type,
-            workers,
-            shutdown_tx,
-        }
+        Self { name: pool_name, algorithm_type, workers, shutdown_tx }
     }
 
     /// Returns the pool name.
@@ -202,7 +195,7 @@ impl WorkerPool {
             }
         }
 
-        info!(pool = %self.name, "solver pool shut down");
+        info!(pool = %self.name, "worker pool shut down");
     }
 }
 

@@ -136,10 +136,7 @@ async fn main() -> std::io::Result<()> {
     let order_manager_config = OrderManagerConfig::default();
     let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
 
-    info!(
-        num_pools = order_manager.num_pools(),
-        "order manager created"
-    );
+    info!(num_pools = order_manager.num_pools(), "order manager created");
 
     // Start Tycho feed in background
     let feed_handle = tokio::spawn(async move {
