@@ -132,8 +132,7 @@ impl SharedMarketData {
     pub fn upsert_tokens(&mut self, tokens: impl IntoIterator<Item = Token>) {
         for token in tokens {
             self.tokens
-                .entry(token.address.clone())
-                .or_insert_with(|| token);
+                .insert(token.address.clone(), token);
         }
     }
 

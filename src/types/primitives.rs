@@ -70,7 +70,8 @@ impl fmt::Display for ProtocolSystem {
 }
 
 /// Gas price information for transaction cost estimation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559)
     #[serde(with = "biguint_as_string")]

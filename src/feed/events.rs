@@ -14,7 +14,8 @@ use crate::{
 };
 
 /// Events broadcast by the indexer when market data changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {

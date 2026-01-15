@@ -92,7 +92,8 @@ impl TychoFeed {
         self.event_tx.subscribe()
     }
 
-    /// Returns an additional event sender.
+    /// Returns an additional event sender. Currently only used for testing.
+    #[cfg(test)]
     pub fn event_sender_clone(&self) -> Sender<MarketEvent> {
         self.event_tx.clone()
     }
@@ -406,11 +407,13 @@ mod tests {
     };
 
     #[derive(Debug, Clone)]
-    struct MockProtocolSim {}
+    struct MockProtocolSim {
+        id: f64,
+    }
 
     impl MockProtocolSim {
-        fn new() -> Self {
-            Self {}
+        fn new(id: f64) -> Self {
+            Self { id }
         }
     }
 
@@ -429,7 +432,8 @@ mod tests {
         }
 
         fn fee(&self) -> f64 {
-            0.0
+            // We use .fee() to get the id of the MockProtocolSim in the tests for our assertions.
+            self.id
         }
 
         fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
@@ -719,7 +723,7 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             component_id.to_string(),
-            Box::new(MockProtocolSim::new()) as Box<dyn ProtocolSim>,
+            Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
         );
 
         let update = Update::new(12345, states.clone(), new_pairs);
@@ -730,20 +734,44 @@ mod tests {
         // Verify state was updated
         {
             let data = market_data.read().await;
-            assert!(
-                data.get_simulation_state(component_id)
-                    .is_some(),
-                "Component state should be updated"
+            assert_eq!(
+                data.get_component(component_id)
+                    .expect("Component should be in market data")
+                    .clone(),
+                tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+                    id: component_id.to_string(),
+                    protocol_system: "uniswap_v2".to_string(),
+                    protocol_type_name: "uniswap_v2_pool".to_string(),
+                    chain: Chain::Ethereum,
+                    tokens: vec![token1.address.clone(), token2.address.clone()],
+                    static_attributes: HashMap::new(),
+                    contract_addresses: vec![],
+                    change: Default::default(),
+                    creation_tx: Bytes::from(vec![0x12, 0x34]),
+                    created_at: chrono::DateTime::from_timestamp(1234567890, 0)
+                        .unwrap()
+                        .naive_utc(),
+                },
+                "Component should be in market data"
             );
-            assert!(data
-                .get_simulation_state(component_id)
-                .is_some());
+            assert_eq!(
+                data.get_simulation_state(component_id)
+                    .expect("Component should be in market data")
+                    .fee(),
+                1.0,
+                "Component state fee should be 1.0"
+            );
         }
 
         // Now update its state
 
         // Create an update with state information
-        let update = Update::new(12345, states, HashMap::new());
+        let new_state = Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>;
+        let update = Update::new(
+            12345,
+            HashMap::from([(component_id.to_string(), new_state)]),
+            HashMap::new(),
+        );
         feed.handle_tycho_message(update)
             .await
             .expect("Failed to add component");
@@ -751,14 +779,13 @@ mod tests {
         // Verify state was updated
         {
             let data = market_data.read().await;
-            assert!(
+            assert_eq!(
                 data.get_simulation_state(component_id)
-                    .is_some(),
-                "Component state should be updated"
+                    .expect("Component should be in market data")
+                    .fee(),
+                2.0,
+                "Component state fee should be 2.0"
             );
-            assert!(data
-                .get_simulation_state(component_id)
-                .is_some());
         }
 
         // Verify event was broadcast
