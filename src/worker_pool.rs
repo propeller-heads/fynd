@@ -1,13 +1,17 @@
 //! Worker pool for processing solve tasks.
 //!
 //! The worker pool manages dedicated OS threads for CPU-bound route finding.
-//! Each worker has its own tokio runtime and processes tasks from the queue.
+//! Each worker owns a SolverWorker instance and processes tasks from the queue.
+//! A pool is configured with a specific algorithm type, allowing multiple
+//! pools with different algorithms to compete via the OrderManager.
 
 use std::{
+    fmt,
     sync::Arc,
     thread::{self, JoinHandle},
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
@@ -18,9 +22,43 @@ use crate::{
     worker::{SolverWorker, WorkerConfig},
 };
 
+/// Algorithm type for the worker pool.
+///
+/// Each pool is dedicated to a single algorithm type. The OrderManager
+/// can fan out orders to multiple pools with different algorithms and
+/// select the best solution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlgorithmType {
+    /// Most liquid path algorithm - finds paths through highest liquidity pools.
+    MostLiquid,
+    // Future algorithm types can be added here:
+    // FastHeuristic,
+    // SplitRoute,
+    // etc.
+}
+
+impl Default for AlgorithmType {
+    fn default() -> Self {
+        Self::MostLiquid
+    }
+}
+
+impl fmt::Display for AlgorithmType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AlgorithmType::MostLiquid => write!(f, "most_liquid"),
+        }
+    }
+}
+
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
 pub struct WorkerPoolConfig {
+    /// Human-readable name for this pool (used in logging/metrics).
+    pub name: String,
+    /// Algorithm type for this pool.
+    pub algorithm_type: AlgorithmType,
     /// Number of worker threads.
     pub num_workers: usize,
     /// Configuration for each solver.
@@ -29,12 +67,24 @@ pub struct WorkerPoolConfig {
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
-        Self { num_workers: num_cpus::get(), worker_config: WorkerConfig::default() }
+        Self {
+            name: "default".to_string(),
+            algorithm_type: AlgorithmType::default(),
+            num_workers: num_cpus::get(),
+            worker_config: WorkerConfig::default(),
+        }
     }
 }
 
 /// A pool of worker threads for processing solve tasks.
+///
+/// Each pool is dedicated to a specific algorithm type. Workers in the pool
+/// compete for tasks from the shared queue.
 pub struct WorkerPool {
+    /// Pool name for identification.
+    name: String,
+    /// Algorithm type for this pool.
+    algorithm_type: AlgorithmType,
     /// Handles to worker threads.
     workers: Vec<JoinHandle<()>>,
     /// Shutdown signal sender.
@@ -49,7 +99,7 @@ impl WorkerPool {
     /// * `config` - Worker pool configuration
     /// * `task_rx` - Receiver for tasks from the queue
     /// * `market_data` - Shared market data reference
-    /// * `event_tx` - Broadcast sender for market events (workers subscribe to this)
+    /// * `event_rx` - Broadcast sender for market events (workers subscribe to this)
     pub fn spawn(
         config: WorkerPoolConfig,
         task_rx: async_channel::Receiver<SolveTask>,
@@ -59,6 +109,8 @@ impl WorkerPool {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let mut workers = Vec::with_capacity(config.num_workers);
+        let pool_name = config.name.clone();
+        let algorithm_type = config.algorithm_type;
 
         for worker_id in 0..config.num_workers {
             let task_rx = task_rx.clone();
@@ -68,7 +120,7 @@ impl WorkerPool {
             let shutdown_rx = shutdown_tx.subscribe();
 
             let handle = thread::Builder::new()
-                .name(format!("solver-worker-{}", worker_id))
+                .name(format!("{}-worker-{}", pool_name, worker_id))
                 .spawn(move || {
                     // Create a tokio runtime for this thread
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -85,7 +137,7 @@ impl WorkerPool {
                         )
                         .expect("invalid algorithm configuration");
 
-                        // Create solver
+                        // Create solver worker
                         let mut worker =
                             SolverWorker::new(market_data, algorithm, worker_config, worker_id);
 
@@ -93,9 +145,7 @@ impl WorkerPool {
                         worker.initialize_graph().await;
 
                         // Run the worker's main loop
-                        worker
-                            .run(event_rx, task_rx, shutdown_rx)
-                            .await;
+                        worker.run(event_rx, task_rx, shutdown_rx).await;
                     });
                 })
                 .expect("failed to spawn worker thread");
@@ -103,7 +153,29 @@ impl WorkerPool {
             workers.push(handle);
         }
 
-        Self { workers, shutdown_tx }
+        info!(
+            pool = %pool_name,
+            algorithm = %algorithm_type,
+            num_workers = config.num_workers,
+            "solver pool spawned"
+        );
+
+        Self {
+            name: pool_name,
+            algorithm_type,
+            workers,
+            shutdown_tx,
+        }
+    }
+
+    /// Returns the pool name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the algorithm type for this pool.
+    pub fn algorithm_type(&self) -> AlgorithmType {
+        self.algorithm_type
     }
 
     /// Returns the number of workers.
@@ -113,7 +185,7 @@ impl WorkerPool {
 
     /// Shuts down all workers and waits for them to finish.
     pub fn shutdown(self) {
-        info!("shutting down worker pool");
+        info!(pool = %self.name, "shutting down solver pool");
 
         // Send shutdown signal
         let _ = self.shutdown_tx.send(());
@@ -121,11 +193,16 @@ impl WorkerPool {
         // Wait for all workers to finish
         for (i, handle) in self.workers.into_iter().enumerate() {
             if let Err(e) = handle.join() {
-                error!(worker_id = i, "worker thread panicked: {:?}", e);
+                error!(
+                    pool = %self.name,
+                    worker_id = i,
+                    "worker thread panicked: {:?}",
+                    e
+                );
             }
         }
 
-        info!("worker pool shut down");
+        info!(pool = %self.name, "solver pool shut down");
     }
 }
 
@@ -139,16 +216,31 @@ impl WorkerPoolBuilder {
         Self { config: WorkerPoolConfig::default() }
     }
 
+    /// Sets the pool name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.config.name = name.into();
+        self
+    }
+
+    /// Sets the algorithm type.
+    pub fn algorithm_type(mut self, algorithm_type: AlgorithmType) -> Self {
+        self.config.algorithm_type = algorithm_type;
+        self
+    }
+
+    /// Sets the number of worker threads.
     pub fn num_workers(mut self, n: usize) -> Self {
         self.config.num_workers = n;
         self
     }
 
+    /// Sets the worker configuration.
     pub fn worker_config(mut self, config: WorkerConfig) -> Self {
         self.config.worker_config = config;
         self
     }
 
+    /// Builds and spawns the solver pool.
     pub fn build(
         self,
         task_rx: async_channel::Receiver<SolveTask>,

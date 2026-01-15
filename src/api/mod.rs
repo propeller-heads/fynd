@@ -19,7 +19,7 @@ use actix_web::web;
 pub use error::ApiError;
 pub use handlers::configure_routes;
 
-use crate::task_queue::TaskQueueHandle;
+use crate::order_manager::OrderManager;
 
 /// Simple tracker for service health metrics.
 ///
@@ -73,16 +73,19 @@ impl Default for HealthTracker {
 /// Shared application state for HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// Handle to submit tasks to the worker pool.
-    pub task_queue: TaskQueueHandle,
+    /// OrderManager for solving requests across multiple solver pools.
+    pub order_manager: Arc<OrderManager>,
     /// Health tracker for monitoring data freshness.
     pub health_tracker: HealthTracker,
 }
 
 impl AppState {
     /// Creates new application state.
-    pub fn new(task_queue: TaskQueueHandle, health_tracker: HealthTracker) -> Self {
-        Self { task_queue, health_tracker }
+    pub fn new(order_manager: OrderManager, health_tracker: HealthTracker) -> Self {
+        Self {
+            order_manager: Arc::new(order_manager),
+            health_tracker,
+        }
     }
 }
 

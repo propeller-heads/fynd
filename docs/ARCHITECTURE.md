@@ -12,7 +12,8 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 - **Scope**: Production-ready (tracing, metrics, proper error types, token filtering)
 - **Multi-Solver**: Shared data model with stateless algorithms
 - **Output Format**: Structured Solution (not calldata) - encoding is separate concern
-- **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime)
+- **Order Manager**: Orchestration layer that fans out orders to multiple solver pools, manages timeouts, and selects the best solution
+- **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime), each pool dedicated to one algorithm type
 - **Event Bus**: Broadcast channel for market updates to Solvers
 - **Market Topology**: Simple HashMap<ComponentId, Vec<Address>> representation, algorithms build their preferred graph structure
 
@@ -33,20 +34,32 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
                                    │ SolutionRequest
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            Task Queue (mpsc)                                │
-│                     Bounded queue with backpressure                         │
+│                            OrderManager                                     │
+│           Orchestrates multiple solver pools, selects best solution         │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  • Fan-out: Send each order to ALL solver pools in parallel           │  │
+│  │  • Timeout: Configurable deadline per request                         │  │
+│  │  • Early return: Optional min_responses for fast path                 │  │
+│  │  • Selection: Choose best solution by amount_out_net_gas              │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │
-                    ┌──────────────┼──────────────┐
-                    ▼              ▼              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Worker Pool (Dedicated Threads)                      │
-│                       CPU-bound route computation                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │  Worker 1   │  │  Worker 2   │  │  Worker 3   │  │  Worker N   │        │
-│  │(SolverWorker)│ │(SolverWorker)│ │(SolverWorker)│ │(SolverWorker)│        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
-└──────────────────────────────────┬──────────────────────────────────────────┘
+                    ┌──────────────┴──────────────┐
+                    │                             │
+                    ▼                             ▼
+┌─────────────────────────────────┐ ┌─────────────────────────────────┐
+│  Worker Pool A (MostLiquid)     │ │  Worker Pool B (Future Algo)    │
+│  ┌───────────┐                  │ │  ┌───────────┐                  │
+│  │ TaskQueue │ (per-pool)       │ │  │ TaskQueue │ (per-pool)       │
+│  └─────┬─────┘                  │ │  └─────┬─────┘                  │
+│        │                        │ │        │                        │
+│  ┌─────┴─────┐  ┌───────────┐   │ │  ┌─────┴─────┐  ┌───────────┐   │
+│  │  Worker 1 │  │  Worker N │   │ │  │  Worker 1 │  │  Worker N │   │
+│  │(SolverWkr)│  │(SolverWkr)│   │ │  │(SolverWkr)│  │(SolverWkr)│   │
+│  └───────────┘  └───────────┘   │ │  └───────────┘  └───────────┘   │
+└─────────────────────────────────┘ └─────────────────────────────────┘
+                    │                             │
+                    └──────────────┬──────────────┘
                                    │ Reads shared data
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────────────────┐
@@ -65,7 +78,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
                                    │ WRITE lock
                                    │
 ┌──────────────────────────────────┴──────────────────────────────────────────┐
-│                              TychoFeed                                   │
+│                              TychoFeed                                      │
 │                     Background task (single instance)                       │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │    │
@@ -93,7 +106,7 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 
 **File:** `src/api/`
 
-**Responsibility:** Accept HTTP requests, validate input, enqueue tasks, return responses.
+**Responsibility:** Accept HTTP requests, validate input, delegate to OrderManager, return responses.
 
 **Endpoints:**
 
@@ -103,11 +116,60 @@ Tycho Solver is a high-performance solver built on Tycho for finding optimal swa
 
 ---
 
-### 2. TaskQueue
+### 2. OrderManager
+
+**File:** `src/order_manager/`
+
+**Responsibility:** Orchestrate multiple solver pools to find the best solution for each order.
+
+```rust
+pub struct OrderManager {
+    solver_pools: Vec<SolverPoolHandle>,
+    config: OrderManagerConfig,
+}
+
+pub struct OrderManagerConfig {
+    pub default_timeout: Duration,  // Default: 100ms
+    pub min_responses: usize,       // Default: 0 (wait for all)
+}
+
+pub struct SolverPoolHandle {
+    pub name: String,
+    pub algorithm: String,
+    pub queue: TaskQueueHandle,
+}
+```
+
+**Key Features:**
+
+1. **Fan-out**: Sends each order to ALL solver pools in parallel
+2. **Timeout**: Configurable deadline per request (can be overridden via `SolutionOptions`)
+3. **Early Return**: If `min_responses > 0`, returns as soon as N solvers respond
+4. **Best Selection**: Chooses solution with highest `amount_out_net_gas`
+5. **Error Tracking**: Captures all solver failures with error types (timeout, no route, etc.)
+
+**Selection Criteria:**
+
+```rust
+// Solutions are ranked by amount_out_net_gas (amount_out minus gas cost)
+// Constraints like max_gas can filter out expensive solutions
+fn select_best(&self, responses: &OrderResponses, options: &SolutionOptions) -> OrderSolution {
+    responses.solutions.iter()
+        .filter(|(_, sol)| sol.status == SolutionStatus::Success)
+        .filter(|(_, sol)| options.max_gas.map(|max| sol.gas_estimate <= max).unwrap_or(true))
+        .max_by_key(|(_, sol)| &sol.amount_out_net_gas)
+}
+```
+
+---
+
+### 3. TaskQueue
 
 **File:** `src/task_queue.rs`
 
-**Responsibility:** Buffer solve requests, provide backpressure, distribute to workers.
+**Responsibility:** Buffer solve requests, provide backpressure, distribute to workers within a pool.
+
+Each WorkerPool has its own TaskQueue, providing independent backpressure per algorithm.
 
 ```rust
 pub struct TaskQueueHandle {
@@ -121,22 +183,38 @@ impl TaskQueueHandle {
 
 ---
 
-### 3. WorkerPool
+### 4. WorkerPool
 
 **File:** `src/worker_pool.rs`
 
-**Responsibility:** Manage dedicated compute threads, each owning a SolverWorker instance.
+**Responsibility:** Manage dedicated compute threads for a single algorithm type, each owning a SolverWorker instance. Each pool has its own TaskQueue and workers.
 
 ```rust
 pub struct WorkerPool {
+    name: String,
+    algorithm_type: AlgorithmType,
     workers: Vec<JoinHandle<()>>,
     shutdown_tx: broadcast::Sender<()>,
 }
+
+pub enum AlgorithmType {
+    MostLiquid,
+    // Future: FastHeuristic, SplitRoute, etc.
+}
 ```
+
+**Design Rationale (Queue per Pool):**
+
+| Aspect | Benefit |
+|--------|---------|
+| Independent backpressure | Slow algorithm doesn't block fast ones |
+| Independent scaling | Can have 8 workers for expensive algo, 2 for fast algo |
+| Clean isolation | Algorithm bugs don't affect other pools |
+| Easy extensibility | Add new algorithm = add new pool |
 
 ---
 
-### 4. SharedMarketData
+### 6. SharedMarketData
 
 **File:** `src/feed/market_data.rs`
 
@@ -164,7 +242,7 @@ The `SharedMarketData::component_topology()` function returns a simple mapping f
 
 ---
 
-### 5. Graph Module
+### 7. Graph Module
 
 **File:** `src/graph/`
 
@@ -194,7 +272,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ---
 
-### 6. TychoFeed
+### 8. TychoFeed
 
 **File:** `src/feed/tycho_feed.rs`
 
@@ -202,7 +280,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 ---
 
-### 7. MarketEvent (Event Bus)
+### 9. MarketEvent (Event Bus)
 
 **File:** `src/feed/events.rs`
 
@@ -224,7 +302,7 @@ pub enum MarketEvent {
 
 ---
 
-### 8. SolverWorker
+### 5. SolverWorker
 
 **File:** `src/worker.rs`
 
@@ -252,7 +330,7 @@ The solver worker initializes the graph on startup by reading the component topo
 
 ---
 
-### 9. Algorithm (Trait)
+### 11. Algorithm (Trait)
 
 **File:** `src/algorithm/`
 
@@ -324,27 +402,67 @@ impl Algorithm for MostLiquidAlgorithm {
                               │ Request   │
                               └─────┬─────┘
                                     │
-                              ┌─────▼─────┐     ┌───────────┐
-                              │ TaskQueue │────▶│  oneshot  │
-                              │ .enqueue()│     │  channel  │
-                              └─────┬─────┘     └─────▲─────┘
-                                    │                 │
-                              ┌─────▼─────┐           │
-                              │SolverWorker│──────────┘
-                              │  .solve()  │  response
+                              ┌─────▼─────┐
+                              │  Order    │
+                              │  Manager  │
                               └─────┬─────┘
                                     │
               ┌─────────────────────┼─────────────────────┐
-              │                     │                     │
+              │ Fan-out to all      │                     │
+              │ solver pools        │                     │
               ▼                     ▼                     ▼
      ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-     │ 1. Get graph   │   │ 2. Find paths  │   │ 3. Rank by     │
-     │    from        │   │    in graph,   │   │    net output  │
-     │    GraphManager│   │    read states │   │    (minus gas) │
-     │    (maintained │   │    from        │   │                │
-     │    internally) │   │    SharedData  │   │                │
-     │                │   │    & simulate  │   │                │
-     └────────────────┘   └────────────────┘   └────────────────┘
+     │  Pool A Queue  │   │  Pool B Queue  │   │  Pool N Queue  │
+     │  (MostLiquid)  │   │  (Future Algo) │   │  (Future Algo) │
+     └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
+             │                    │                    │
+             ▼                    ▼                    ▼
+     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+     │    Workers     │   │    Workers     │   │    Workers     │
+     │    (Solvers)   │   │    (Solvers)   │   │    (Solvers)   │
+     └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
+             │                    │                    │
+             └─────────────┬──────┴────────────────────┘
+                           │ Collect responses
+                           ▼
+                    ┌──────────────┐
+                    │ OrderManager │
+                    │ select_best()│
+                    │ by net_gas   │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   Solution   │
+                    │   Response   │
+                    └──────────────┘
+```
+
+### Single Solver Flow (within a pool)
+
+```
+┌────────────────┐
+│  SolveTask     │
+│  from Queue    │
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│    Solver      │
+│    .solve()    │
+└───────┬────────┘
+        │
+        ├─────────────────────┬─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+│ 1. Get graph   │   │ 2. Find paths  │   │ 3. Rank by     │
+│    from        │   │    in graph,   │   │    net output  │
+│    GraphManager│   │    read states │   │    (minus gas) │
+│    (maintained │   │    from        │   │                │
+│    internally) │   │    SharedData  │   │                │
+│                │   │    & simulate  │   │                │
+└────────────────┘   └────────────────┘   └────────────────┘
 ```
 
 ### Market Update Flow
@@ -388,29 +506,39 @@ impl Algorithm for MostLiquidAlgorithm {
 │                     Actix Runtime (async, I/O bound)                    │
 │                                                                         │
 │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐               │
-│  │  HTTP Server  │  │   TychoFeed   │  │   Response    │               │
-│  │   Handlers    │  │   Task        │  │   Collector   │               │
+│  │  HTTP Server  │  │   TychoFeed   │  │ OrderManager  │               │
+│  │   Handlers    │  │   Task        │  │ (async fanout)│               │
 │  └───────────────┘  └───────────────┘  └───────────────┘               │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                  Worker Pool (dedicated OS threads, CPU bound)          │
-│                                                                         │
+│              Worker Pool A (dedicated OS threads, MostLiquid)           │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
 │  │   Thread 1      │  │   Thread 2      │  │   Thread N      │         │
 │  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
-│  │   │SolverWorker│ │  │   │SolverWorker│ │  │   │SolverWorker│ │         │
-│  │   │ (graph  │   │  │   │ (graph  │   │  │   │ (graph  │   │         │
+│  │   │SolverWkr│   │  │   │SolverWkr│   │  │   │SolverWkr│   │         │
+│  │   │(graph   │   │  │   │(graph   │   │  │   │(graph   │   │         │
 │  │   │ manager │   │  │   │ manager │   │  │   │ manager │   │         │
-│  │   │ maintains│   │  │   │ maintains│   │  │   │ maintains│   │         │
+│  │   │maintains│   │  │   │maintains│   │  │   │maintains│   │         │
 │  │   │ graph)  │   │  │   │ graph)  │   │  │   │ graph)  │   │         │
 │  │   └─────────┘   │  │   └─────────┘   │  │   └─────────┘   │         │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
 └─────────────────────────────────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────────────────────────────────┐
+│              Worker Pool B (dedicated OS threads, Future Algo)          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
+│  │   Thread 1      │  │   Thread 2      │  │   Thread M      │         │
+│  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
+│  │   │SolverWkr│   │  │   │SolverWkr│   │  │   │SolverWkr│   │         │
+│  │   └─────────┘   │  │   └─────────┘   │  │   └─────────┘   │         │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
+└─────────────────────────────────────────────────────────────────────────┘
+
 Communication:
-  - HTTP → Workers: mpsc channel (SolveTask)
-  - Workers → HTTP: oneshot channel (SolveResult)
+  - HTTP → OrderManager: direct call (same async runtime)
+  - OrderManager → Workers: async_channel per pool (SolveTask)
+  - Workers → OrderManager: oneshot channel (SolveResult)
   - TychoFeed → Workers: broadcast channel (MarketEvent)
   - All → SharedMarketData: Arc<RwLock<>> (read-heavy)
 ```
@@ -429,18 +557,32 @@ src/
 │   ├── handlers.rs           # Actix handlers
 │   └── error.rs              # API error types
 │
+├── order_manager/            # Multi-solver orchestration
+│   ├── mod.rs                # OrderManager, SolverPoolHandle
+│   └── config.rs             # OrderManagerConfig
+│
 ├── types/                    # Shared type definitions
 │   ├── mod.rs
 │   ├── api.rs                # Request/Response types
-│   ├── solution.rs           # Solution, Route, Swap
+│   ├── solution.rs           # Solution, Route, Swap, Order
 │   ├── internal.rs           # SolveTask, SolveError
 │   └── primitives.rs         # ComponentId, Address, etc.
 │
+<<<<<<< HEAD
+=======
+├── feed/                     # Market data feed
+│   ├── mod.rs
+│   ├── market_data.rs        # SharedMarketData
+│   ├── events.rs             # MarketEvent enum
+│   └── tycho_feed.rs         # TychoFeed (WebSocket client)
+│
+>>>>>>> a8eb622 (feat: Implement OrderManager)
 ├── graph/                    # Graph management
 │   ├── mod.rs                # GraphManager trait, Edge, Path
 │   └── petgraph.rs           # PetgraphStableDiGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
+<<<<<<< HEAD
 ├── worker_pool.rs            # WorkerPool
 ├── worker.rs                 # SolverWorker
 │
@@ -450,6 +592,11 @@ src/
 │   ├── events.rs             # MarketEvent enum
 │   └── tycho_feed.rs         # TychoFeed
 │
+=======
+├── worker_pool.rs            # WorkerPool, AlgorithmType
+├── solver.rs                 # Solver
+│
+>>>>>>> a8eb622 (feat: Implement OrderManager)
 └── algorithm/                # Algorithm implementations
     ├── mod.rs                # Algorithm trait
     └── most_liquid.rs        # MostLiquidAlgorithm

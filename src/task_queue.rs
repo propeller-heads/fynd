@@ -34,6 +34,13 @@ pub struct TaskQueueHandle {
 }
 
 impl TaskQueueHandle {
+    /// Creates a TaskQueueHandle from an existing sender.
+    ///
+    /// This is primarily useful for testing or custom queue implementations.
+    pub fn from_sender(sender: async_channel::Sender<SolveTask>) -> Self {
+        Self { sender }
+    }
+
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.

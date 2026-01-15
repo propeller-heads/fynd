@@ -197,6 +197,10 @@ where
                     order.amount.clone()
                 };
 
+                // TODO: Calculate amount_out_net_gas properly using gas price and token price
+                // For now, use amount_out as a placeholder
+                let amount_out_net_gas = amount_out.clone();
+
                 OrderSolution {
                     order_id: order.id.clone(),
                     status: SolutionStatus::Success,
@@ -205,6 +209,7 @@ where
                     amount_out,
                     gas_estimate,
                     price_impact_bps: None, // TODO: Calculate price impact
+                    amount_out_net_gas,
                     block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 }

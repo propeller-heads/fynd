@@ -8,6 +8,6 @@ pub struct HealthStatus {
     pub healthy: bool,
     /// Time since last market update in milliseconds.
     pub last_update_ms: u64,
-    /// Number of pending tasks in queue.
-    pub queue_depth: usize,
+    /// Number of active solver pools.
+    pub num_solver_pools: usize,
 }
