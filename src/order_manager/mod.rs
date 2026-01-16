@@ -21,8 +21,9 @@ use std::{
 
 pub use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
+use metrics::{counter, histogram};
 use num_bigint::BigUint;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     task_queue::TaskQueueHandle,
@@ -77,12 +78,6 @@ pub struct OrderManager {
 impl OrderManager {
     /// Creates a new OrderManager with the given solver pools and config.
     pub fn new(solver_pools: Vec<SolverPoolHandle>, config: OrderManagerConfig) -> Self {
-        info!(
-            num_pools = solver_pools.len(),
-            timeout_ms = config.default_timeout.as_millis(),
-            min_responses = config.min_responses,
-            "OrderManager created"
-        );
         Self { solver_pools, config }
     }
 
@@ -142,6 +137,7 @@ impl OrderManager {
         deadline: Instant,
         min_responses: usize,
     ) -> OrderResponses {
+        let start_time = Instant::now();
         let order_id = order.id.clone();
 
         // Fan-out: send order to all solver pools
@@ -204,13 +200,13 @@ impl OrderManager {
 
                             // Early return if min_responses reached
                             if min_responses > 0 && solutions.len() >= min_responses {
-                                info!(
+                                debug!(
                                     order_id = %order_id,
                                     responses = solutions.len(),
                                     min_responses,
                                     "early return: min_responses reached"
                                 );
-                                // Mark remaining as not waited for (not timed out)
+                                counter!("order_manager_early_returns_total").increment(1);
                                 break;
                             }
                         }
@@ -231,6 +227,23 @@ impl OrderManager {
                     }
                 }
             }
+        }
+
+        // Record metrics
+        let duration = start_time.elapsed().as_secs_f64();
+        histogram!("order_manager_solve_duration_seconds").record(duration);
+        histogram!("order_manager_solver_responses").record(solutions.len() as f64);
+
+        // Record failures by pool and error type
+        for (pool_name, error) in &failed_solvers {
+            let error_type = match error {
+                SolveError::Timeout { .. } => "timeout",
+                SolveError::NoRouteFound { .. } => "no_route",
+                SolveError::QueueFull => "queue_full",
+                SolveError::Internal(_) => "internal",
+                _ => "other",
+            };
+            counter!("order_manager_solver_failures_total", "pool" => pool_name.clone(), "error_type" => error_type).increment(1);
         }
 
         if !failed_solvers.is_empty() {
@@ -276,7 +289,11 @@ impl OrderManager {
             .into_iter()
             .max_by_key(|(_, sol)| &sol.amount_out_net_gas)
         {
-            info!(
+            // Record metrics for successful selection
+            counter!("order_manager_orders_total", "status" => "success").increment(1);
+            counter!("order_manager_best_solution_pool", "pool" => pool_name.clone()).increment(1);
+
+            debug!(
                 order_id = %best.order_id,
                 pool = %pool_name,
                 amount_out_net_gas = %best.amount_out_net_gas,
@@ -288,6 +305,7 @@ impl OrderManager {
         // No valid solution found - return a NoRouteFound response
         // Try to get any response to extract block info, or create a placeholder
         if let Some((_, any_sol)) = responses.solutions.first() {
+            counter!("order_manager_orders_total", "status" => "no_route").increment(1);
             OrderSolution {
                 order_id: responses.order_id.clone(),
                 status: SolutionStatus::NoRouteFound,
@@ -317,6 +335,13 @@ impl OrderManager {
                     SolutionStatus::NoRouteFound
                 }
             };
+
+            // Record status metric
+            let status_label = match status {
+                SolutionStatus::Timeout => "timeout",
+                _ => "no_route",
+            };
+            counter!("order_manager_orders_total", "status" => status_label).increment(1);
 
             OrderSolution {
                 order_id: responses.order_id.clone(),
