@@ -17,7 +17,7 @@ use tycho_simulation::tycho_core::{
 
 use crate::{
     algorithm::most_liquid::DepthAndPrice,
-    feed::market_data::{ComponentData, SharedMarketData},
+    feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     types::{solution::OrderSide, Order},
 };
@@ -245,10 +245,13 @@ pub fn setup_market(
         let comp = component(pool_id, &tokens);
         let weight_to = DepthAndPrice::from_protocol_sim(&state, token_in, token_out).unwrap();
         let weight_from = DepthAndPrice::from_protocol_sim(&state, token_out, token_in).unwrap();
-        let data = ComponentData { component: comp, state: Box::new(state), tokens };
+
+        // Insert component, state, and tokens separately using new API
+        market.upsert_components(std::iter::once(comp));
+        market.update_states(std::iter::once((pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)));
+        market.upsert_tokens(tokens);
 
         component_weights.insert(pool_id, (token_in, token_out, weight_to, weight_from));
-        market.insert_component(data);
     }
 
     let mut graph_manager = PetgraphStableDiGraphManager::default();
