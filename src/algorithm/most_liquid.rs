@@ -161,9 +161,9 @@ impl MostLiquidAlgorithm {
         paths
     }
 
-    /// Scores a path based on spot prices, fees, and minimum liquidity depth (inertia).
+    /// Scores a path based on spot prices and minimum liquidity depth (inertia).
     ///
-    /// Formula: `weight = (product of all [spot_price × (1 - fee)]) × min(depths)`
+    /// Formula: `score = (product of all spot_price) × min(depths)`
     ///
     /// This accounts:
     /// - Spot price: the theoretical exchange rate along the path not accounting for slippage
