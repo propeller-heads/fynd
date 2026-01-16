@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use tokio::sync::broadcast;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
@@ -144,6 +144,16 @@ where
         let mut order_solutions = Vec::with_capacity(request.orders.len());
 
         for order in &request.orders {
+            // Log order details once at entry
+            debug!(
+                order_id = %order.id,
+                token_in = ?order.token_in,
+                token_out = ?order.token_out,
+                amount = %order.amount,
+                side = ?order.side,
+                "processing order"
+            );
+
             // Validate order
             if let Err(_e) = order.validate() {
                 order_solutions.push(OrderSolution {
