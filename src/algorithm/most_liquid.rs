@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
 use tracing::{debug, instrument};
@@ -28,10 +29,6 @@ use crate::{
     types::{ComponentId, Order, Route},
     ProtocolSystem, Swap,
 };
-
-// TODO: Consider adding metrics crate integration for:
-// - `algorithm.simulation_coverage_pct` histogram
-// - `algorithm.simulation_failures` counter
 
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
@@ -448,6 +445,10 @@ impl Algorithm for MostLiquidAlgorithm {
         } else {
             (paths_simulated as f64 / paths_to_simulate as f64) * 100.0
         };
+
+        // Record metrics
+        counter!("algorithm.simulation_failures").increment(simulation_failures as u64);
+        histogram!("algorithm.simulation_coverage_pct").record(coverage_pct);
 
         match &best {
             Some(route) => {
