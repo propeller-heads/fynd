@@ -24,3 +24,27 @@ pub mod biguint_as_string {
             .map_err(serde::de::Error::custom)
     }
 }
+
+/// Serialize BigInt as a decimal string.
+///
+/// Same as biguint_as_string but for signed integers. Supports negative values.
+pub mod bigint_as_string {
+    use num_bigint::BigInt;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &BigInt, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BigInt, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<BigInt>()
+            .map_err(serde::de::Error::custom)
+    }
+}

@@ -44,8 +44,7 @@ impl Default for WorkerConfig {
 pub struct SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
+    A::GraphManager: MarketEventHandler,
 {
     /// Algorithm used for route finding.
     algorithm: A,
@@ -64,8 +63,7 @@ where
 impl<A> SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
+    A::GraphManager: MarketEventHandler,
 {
     /// Creates a new Solver.
     ///
@@ -163,9 +161,10 @@ where
             }
 
             // Find route using algorithm
+            let graph = self.graph_manager.graph();
             let result = self
                 .algorithm
-                .find_best_route(&self.graph_manager, &market, order);
+                .find_best_route(graph, &market, order);
 
             let order_solution = match result {
                 Ok(route) => {

@@ -13,7 +13,7 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::models::Address;
@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     primitives::{ComponentId, ProtocolSystem},
-    serde_helpers::biguint_as_string,
+    serde_helpers::{bigint_as_string, biguint_as_string},
 };
 
 // ============================================================================
@@ -116,8 +116,6 @@ impl Order {
 pub enum OrderSide {
     /// Sell exactly the specified amount of the input token.
     Sell,
-    /// Buy exactly the specified amount of the output token.
-    Buy,
 }
 
 /// Errors that can occur when validating an [`Order`].
@@ -220,14 +218,50 @@ pub struct BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     pub swaps: Vec<Swap>,
+    /// Net amount out after accounting for gas costs in output token terms.
+    ///
+    /// This is NOT equal to the last swap's `amount_out` - it subtracts the gas cost
+    /// converted to output token units. Used for comparing routes.
+    ///
+    /// Can be negative if gas cost exceeds output (e.g., due to inaccurate gas estimation
+    /// or pricing). Routes with negative net_amount_out will rank lower but are still valid.
+    #[serde(with = "bigint_as_string")]
+    pub net_amount_out: BigInt,
 }
 
 impl Route {
-    /// Creates a new route from a list of swaps.
-    pub fn new(swaps: Vec<Swap>) -> Self {
-        Self { swaps }
+    /// Creates a new route from swaps and pre-calculated net amount out.
+    ///
+    /// Use this when you've already calculated the net output accounting for gas.
+    pub fn new(swaps: Vec<Swap>, net_amount_out: BigInt) -> Self {
+        Self { swaps, net_amount_out }
     }
+}
 
+// Implement ordering based on net_amount_out for route comparison
+impl PartialEq for Route {
+    fn eq(&self, other: &Self) -> bool {
+        self.net_amount_out == other.net_amount_out
+    }
+}
+
+impl Eq for Route {}
+
+impl PartialOrd for Route {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Route {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Higher net_amount_out is better
+        self.net_amount_out
+            .cmp(&other.net_amount_out)
+    }
+}
+
+impl Route {
     /// Returns the number of hops (swaps) in this route.
     pub fn hop_count(&self) -> usize {
         self.swaps.len()
@@ -438,18 +472,26 @@ mod tests {
     // Route Tests
     // -------------------------------------------------------------------------
 
+    fn make_route(swaps: Vec<(u8, u8)>) -> Route {
+        let swaps: Vec<Swap> = swaps
+            .into_iter()
+            .map(|(a, b)| make_swap(a, b, 1000, 990))
+            .collect();
+        // Use last swap's amount_out as net_amount_out for test purposes
+        let net: BigInt = swaps
+            .last()
+            .map(|s| BigInt::from(s.amount_out.clone()))
+            .unwrap_or_default();
+        Route::new(swaps, net)
+    }
+
     #[rstest]
     #[case::empty(vec![], 0)]
     #[case::single(vec![(0x01, 0x02)], 1)]
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], 2)]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], 3)]
     fn test_route_hop_count(#[case] swaps: Vec<(u8, u8)>, #[case] expected: usize) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.hop_count(), expected);
     }
 
@@ -458,12 +500,7 @@ mod tests {
     #[case::single(vec![(0x01, 0x02)], Some(0x01))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x01))]
     fn test_route_input_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.input_token(), expected.map(make_address));
     }
 
@@ -472,12 +509,7 @@ mod tests {
     #[case::single(vec![(0x01, 0x02)], Some(0x02))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x03))]
     fn test_route_output_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.output_token(), expected.map(make_address));
     }
 
@@ -487,12 +519,7 @@ mod tests {
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], vec![0x02])]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], vec![0x02, 0x03])]
     fn test_route_intermediate_tokens(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Vec<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         let intermediates = route.intermediate_tokens();
         assert_eq!(
             intermediates,
@@ -512,7 +539,11 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route::new(swaps);
+        let net: BigInt = swaps
+            .last()
+            .map(|s| BigInt::from(s.amount_out.clone()))
+            .unwrap_or_default();
+        let route = Route::new(swaps, net);
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 
@@ -526,12 +557,7 @@ mod tests {
         #[case] should_pass: bool,
         #[case] error_type: Option<&str>,
     ) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         let result = route.validate();
 
         assert_eq!(result.is_ok(), should_pass);
@@ -545,6 +571,35 @@ mod tests {
                 _ => panic!("Unknown error type"),
             }
         }
+    }
+
+    #[test]
+    fn test_route_ordering() {
+        let route_very_negative = Route::new(vec![], BigInt::from(-1000));
+        let route_slightly_negative = Route::new(vec![], BigInt::from(-100));
+        let route_zero = Route::new(vec![], BigInt::from(0));
+        let route_positive = Route::new(vec![], BigInt::from(100));
+        let route_very_positive = Route::new(vec![], BigInt::from(1000));
+
+        // Sorting should order: very_negative < slightly_negative < zero < positive < very_positive
+        let mut routes = [
+            route_positive.clone(),
+            route_very_negative.clone(),
+            route_zero.clone(),
+            route_very_positive.clone(),
+            route_slightly_negative.clone(),
+        ];
+        routes.sort();
+
+        assert_eq!(routes[0].net_amount_out, BigInt::from(-1000));
+        assert_eq!(routes[1].net_amount_out, BigInt::from(-100));
+        assert_eq!(routes[2].net_amount_out, BigInt::from(0));
+        assert_eq!(routes[3].net_amount_out, BigInt::from(100));
+        assert_eq!(routes[4].net_amount_out, BigInt::from(1000));
+
+        // Max should be the most positive (best route)
+        let best = routes.iter().max().unwrap();
+        assert_eq!(best.net_amount_out, BigInt::from(1000));
     }
 
     // -------------------------------------------------------------------------

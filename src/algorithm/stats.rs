@@ -5,13 +5,11 @@
 
 use std::{collections::HashSet, time::Instant};
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
 use tracing::info;
 
-use crate::{
-    feed::market_data::SharedMarketData, graph::petgraph::StableDiGraph, types::ComponentId, Route,
-};
+use crate::{feed::market_data::SharedMarketData, types::ComponentId, Path, Route};
 
 /// Tracks statistics during a solve operation.
 ///
@@ -52,16 +50,9 @@ impl SolveStats {
     /// Records a path being checked, tracking its components and protocol systems.
     ///
     /// Also increments the routes_checked counter.
-    pub fn record_path(
-        &mut self,
-        path: &[petgraph::stable_graph::EdgeIndex],
-        graph: &StableDiGraph,
-        market: &SharedMarketData,
-    ) {
-        for edge in path {
-            let component_id = graph[*edge].component_id.clone();
-
-            if let Some(component) = market.get_component(&component_id) {
+    pub fn record_path<D>(&mut self, path: &Path<D>, market: &SharedMarketData) {
+        for edge in path.edge_iter() {
+            if let Some(component) = market.get_component(&edge.component_id) {
                 self.protocol_systems_seen.insert(
                     component
                         .component
@@ -70,7 +61,7 @@ impl SolveStats {
                 );
             }
             self.components_seen
-                .insert(component_id);
+                .insert(edge.component_id.clone());
         }
         self.routes_checked += 1;
     }
@@ -99,13 +90,13 @@ impl SolveStats {
     pub fn log_result(
         &self,
         algorithm_name: &str,
-        best: Option<&(Route, BigUint)>,
+        best: Option<&Route>,
         market: &SharedMarketData,
         amount_in: &BigUint,
     ) {
         let solve_time_ms = self.elapsed_ms();
 
-        if let Some((route, amount_out)) = best {
+        if let Some(route) = best {
             let symbols = Self::build_path_symbols(route, market);
             let path_description = symbols.join(" -> ");
             let token_in_symbol = symbols
@@ -117,7 +108,7 @@ impl SolveStats {
                 .cloned()
                 .unwrap_or_default();
 
-            let price = Self::calculate_price(amount_in, amount_out);
+            let price = Self::calculate_price(amount_in, &route.net_amount_out);
 
             let protocols: HashSet<String> = route
                 .swaps
@@ -135,7 +126,7 @@ impl SolveStats {
                 block_number = self.block_number,
                 path = %path_description,
                 amount_in = %amount_in,
-                amount_out = %amount_out,
+                net_amount_out = %route.net_amount_out,
                 price_out_per_in = price.unwrap_or(f64::NAN),
                 token_in = %token_in_symbol,
                 token_out = %token_out_symbol,
@@ -181,7 +172,7 @@ impl SolveStats {
 
     /// Calculates price (amount_out / amount_in) if both values are valid.
     /// Returns None if conversion fails or would result in division by zero.
-    fn calculate_price(amount_in: &BigUint, amount_out: &BigUint) -> Option<f64> {
+    fn calculate_price(amount_in: &BigUint, amount_out: &BigInt) -> Option<f64> {
         let amount_in_f64 = amount_in.to_f64()?;
         let amount_out_f64 = amount_out.to_f64()?;
 
@@ -197,43 +188,71 @@ impl SolveStats {
 mod tests {
     use std::collections::HashMap;
 
+    use num_bigint::BigInt;
+    use petgraph::visit::EdgeRef;
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::graph::{petgraph::PetgraphStableDiGraphManager, GraphManager};
+    use crate::{
+        algorithm::{
+            most_liquid::DepthAndPrice,
+            test_utils::{setup_market, token},
+        },
+        graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, Path},
+    };
+
+    /// Helper to add a hop to a path by finding the edge with the given component_id.
+    ///
+    /// Panics if no matching edge is found.
+    fn add_hop<'a, D>(
+        path: &mut Path<'a, D>,
+        graph: &'a crate::graph::petgraph::StableDiGraph<D>,
+        from: &'a Address,
+        to: &'a Address,
+        component_id: &str,
+    ) {
+        let from_idx = graph
+            .node_indices()
+            .find(|&n| &graph[n] == from)
+            .expect("from node not found");
+
+        for edge in graph.edges(from_idx) {
+            if graph[edge.id()].component_id == component_id && &graph[edge.target()] == to {
+                path.add_hop(from, edge.weight(), to);
+                return;
+            }
+        }
+        panic!("edge not found: {from} -> {to} via {component_id}",);
+    }
+
+    // ==================== calculate_price Tests ====================
 
     #[test]
     fn calculate_price_valid() {
-        let price = SolveStats::calculate_price(&BigUint::from(100u64), &BigUint::from(200u64));
+        let price = SolveStats::calculate_price(&BigUint::from(100u64), &BigInt::from(200));
         assert_eq!(price, Some(2.0));
     }
 
     #[test]
     fn calculate_price_zero_input_returns_none() {
-        let price = SolveStats::calculate_price(&BigUint::ZERO, &BigUint::from(100u64));
+        let price = SolveStats::calculate_price(&BigUint::ZERO, &BigInt::from(100));
         assert_eq!(price, None);
     }
 
     #[test]
     fn calculate_price_zero_output() {
-        let price = SolveStats::calculate_price(&BigUint::from(100u64), &BigUint::ZERO);
+        let price = SolveStats::calculate_price(&BigUint::from(100u64), &BigInt::ZERO);
         assert_eq!(price, Some(0.0));
     }
 
-    fn find_edge(
-        graph: &StableDiGraph,
-        component_id: &str,
-        from: &Address,
-        to: &Address,
-    ) -> petgraph::stable_graph::EdgeIndex {
-        graph
-            .edge_indices()
-            .find(|&e| {
-                let (src, dst) = graph.edge_endpoints(e).unwrap();
-                graph[e].component_id == component_id && &graph[src] == from && &graph[dst] == to
-            })
-            .expect("edge not found")
+    #[test]
+    fn calculate_price_negative_output() {
+        // Negative net_amount_out when gas exceeds output
+        let price = SolveStats::calculate_price(&BigUint::from(100u64), &BigInt::from(-50));
+        assert_eq!(price, Some(-0.5));
     }
+
+    // ==================== record_path Tests ====================
 
     #[test]
     fn record_path_tracks_and_deduplicates() {
@@ -241,7 +260,7 @@ mod tests {
         // - pool1: A <-> B
         // - pool2: A <-> B (parallel pool)
         // - pool3: B <-> C
-        let mut manager = PetgraphStableDiGraphManager::default();
+        let mut manager = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
 
         let token_a = Address::default();
         let token_b = Address::from([1u8; 20]);
@@ -258,29 +277,143 @@ mod tests {
         let market = SharedMarketData::default();
         let mut stats = SolveStats::new(123, 5);
 
-        // Path 1: A -> B via pool1, B -> C via pool3
-        let path1 = vec![
-            find_edge(graph, "pool1", &token_a, &token_b),
-            find_edge(graph, "pool3", &token_b, &token_c),
-        ];
-        stats.record_path(&path1, graph, &market);
+        // Build Path 1: A -> B via pool1, B -> C via pool3
+        let mut path1 = Path::new();
+        add_hop(&mut path1, graph, &token_a, &token_b, "pool1");
+        add_hop(&mut path1, graph, &token_b, &token_c, "pool3");
+        stats.record_path(&path1, &market);
 
         assert_eq!(stats.routes_checked(), 1);
         assert_eq!(stats.components_seen(), 2); // pool1, pool3
 
-        // Path 2: A -> B via pool2, B -> C via pool3 (pool3 is duplicate)
-        let path2 = vec![
-            find_edge(graph, "pool2", &token_a, &token_b),
-            find_edge(graph, "pool3", &token_b, &token_c),
-        ];
-        stats.record_path(&path2, graph, &market);
+        // Build Path 2: A -> B via pool2, B -> C via pool3 (pool3 is duplicate)
+        let mut path2 = Path::new();
+        add_hop(&mut path2, graph, &token_a, &token_b, "pool2");
+        add_hop(&mut path2, graph, &token_b, &token_c, "pool3");
+        stats.record_path(&path2, &market);
 
         assert_eq!(stats.routes_checked(), 2);
         assert_eq!(stats.components_seen(), 3); // pool1, pool2, pool3 (pool3 deduplicated)
 
-        // TODO: test protocol_systems deduplication once we can add mock ComponentData to
-        // SharedMarketData assert_eq!(stats.protocol_systems_seen(), 2); // e.g.,
-        // "uniswap_v2", "uniswap_v3"
+        // Protocol systems not tracked without market data
         assert_eq!(stats.protocol_systems_seen(), 0);
+    }
+
+    // ==================== build_path_symbols Tests ====================
+
+    /// Creates a swap for testing with specific component_id and token addresses.
+    fn swap(component_id: &str, token_in: &Address, token_out: &Address) -> crate::Swap {
+        crate::Swap {
+            component_id: component_id.to_string(),
+            protocol: crate::ProtocolSystem::UniswapV2,
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(200u64),
+            gas_estimate: BigUint::from(50000u64),
+        }
+    }
+
+    #[test]
+    fn build_path_symbols_single_hop() {
+        use crate::algorithm::test_utils::MockProtocolSim;
+
+        let token_a = token(0x01, "WETH");
+        let token_b = token(0x02, "USDC");
+
+        let (market, _) =
+            setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
+
+        // Create a route with one swap using actual token addresses
+        let route =
+            Route::new(vec![swap("pool1", &token_a.address, &token_b.address)], BigInt::from(200));
+
+        let symbols = SolveStats::build_path_symbols(&route, &market);
+        assert_eq!(symbols, vec!["WETH", "USDC"]);
+    }
+
+    #[test]
+    fn build_path_symbols_multi_hop() {
+        use crate::algorithm::test_utils::MockProtocolSim;
+
+        let token_a = token(0x01, "WETH");
+        let token_b = token(0x02, "USDC");
+        let token_c = token(0x03, "DAI");
+
+        let (market, _) = setup_market(vec![
+            ("pool1", &token_a, &token_b, MockProtocolSim::new(2)),
+            ("pool2", &token_b, &token_c, MockProtocolSim::new(2)),
+        ]);
+
+        // Create a route with two swaps using actual token addresses
+        let route = Route::new(
+            vec![
+                swap("pool1", &token_a.address, &token_b.address),
+                swap("pool2", &token_b.address, &token_c.address),
+            ],
+            BigInt::from(200),
+        );
+
+        let symbols = SolveStats::build_path_symbols(&route, &market);
+        assert_eq!(symbols, vec!["WETH", "USDC", "DAI"]);
+    }
+
+    #[test]
+    fn build_path_symbols_empty_route() {
+        let market = SharedMarketData::new();
+        let route = Route::new(vec![], BigInt::from(0));
+
+        let symbols = SolveStats::build_path_symbols(&route, &market);
+        assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn build_path_symbols_mixed_known_unknown_tokens() {
+        use crate::algorithm::test_utils::MockProtocolSim;
+
+        // token_a is known, token_unknown is not in market
+        let token_a = token(0x01, "WETH");
+        let token_b = token(0x02, "USDC");
+        let token_unknown = token(0x99, "UNKNOWN");
+
+        let (market, _) =
+            setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
+
+        // Route goes A -> unknown (unknown token not in market)
+        let route = Route::new(
+            vec![swap("pool1", &token_a.address, &token_unknown.address)],
+            BigInt::from(200),
+        );
+
+        let symbols = SolveStats::build_path_symbols(&route, &market);
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0], "WETH"); // Known token
+        assert_eq!(symbols[1], format!("{:?}", token_unknown.address)); // Unknown token shows
+                                                                        // address
+    }
+
+    #[test]
+    fn build_path_symbols_cyclic_path() {
+        use crate::algorithm::test_utils::MockProtocolSim;
+
+        // Cyclic route: WETH -> USDC -> WETH (arbitrage-like path)
+        let token_a = token(0x01, "WETH");
+        let token_b = token(0x02, "USDC");
+
+        let (market, _) =
+            setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
+
+        // Create a cyclic route A -> B -> A
+        let route = Route::new(
+            vec![
+                swap("pool1", &token_a.address, &token_b.address),
+                swap("pool1", &token_b.address, &token_a.address),
+            ],
+            BigInt::from(200),
+        );
+
+        let symbols = SolveStats::build_path_symbols(&route, &market);
+        // Should show: WETH -> USDC -> WETH
+        assert_eq!(symbols, vec!["WETH", "USDC", "WETH"]);
     }
 }

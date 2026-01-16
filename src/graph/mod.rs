@@ -18,7 +18,67 @@ use crate::types::ComponentId;
 ///
 /// Each edge index points to an edge in the graph containing the component ID and weight.
 /// This representation allows O(1) access to edge data during scoring and simulation.
-pub type Path = Vec<EdgeIndex>;
+#[derive(Clone, Default)]
+pub struct Path<'a, D> {
+    /// Sequence of token addresses in the path.
+    pub tokens: Vec<&'a Address>,
+    /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
+    pub edge_data: Vec<&'a EdgeData<D>>,
+}
+
+impl<'a, D> Path<'a, D> {
+    /// Creates a new empty Path.
+    pub fn new() -> Self {
+        Self { tokens: Vec::new(), edge_data: Vec::new() }
+    }
+
+    /// Adds a hop to the path.
+    ///
+    /// Arguments:
+    /// - from: The starting token address of the hop.
+    /// - edge_data: The edge data for the hop.
+    /// - to: The ending token address of the hop.
+    pub fn add_hop(&mut self, from: &'a Address, edge_data: &'a EdgeData<D>, to: &'a Address) {
+        if self.tokens.is_empty() {
+            self.tokens.push(from);
+        }
+        self.tokens.push(to);
+        self.edge_data.push(edge_data);
+    }
+
+    /// Returns the number of hops in the path.
+    pub fn len(&self) -> usize {
+        self.edge_data.len()
+    }
+
+    /// Returns true if the path has no hops.
+    pub fn is_empty(&self) -> bool {
+        self.edge_data.is_empty()
+    }
+
+    /// Returns an iterator over the edges in the path.
+    pub fn edge_iter(&self) -> &[&'a EdgeData<D>] {
+        &self.edge_data
+    }
+
+    /// Returns an iterator over hops in the path (from_token, edge_data, to_token).
+    pub fn iter(&self) -> impl Iterator<Item = (&'a Address, &'a EdgeData<D>, &'a Address)> + '_ {
+        self.tokens
+            .windows(2)
+            .zip(self.edge_data.iter())
+            .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
+    }
+
+    /// Returns the starting token.
+    pub fn start_token(&self) -> Option<&Address> {
+        self.tokens.first().copied()
+    }
+
+    /// Returns the ending token.
+    pub fn end_token(&self) -> Option<&Address> {
+        self.tokens.last().copied()
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum GraphError {
@@ -30,8 +90,6 @@ pub enum GraphError {
     InvalidComponents(Vec<ComponentId>),
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
-    #[error("Invalid hop range: min_hops ({0}) > max_hops ({1})")]
-    InvalidHopRange(usize, usize),
 }
 
 /// Trait for managing graph representations.

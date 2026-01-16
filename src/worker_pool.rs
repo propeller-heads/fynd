@@ -82,6 +82,7 @@ impl WorkerPool {
                     rt.block_on(async move {
                         // Create algorithm
                         let algorithm = MostLiquidAlgorithm::with_config(
+                            1,
                             worker_config.max_hops,
                             worker_config.timeout.as_millis() as u64,
                         );
