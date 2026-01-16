@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use thiserror::Error;
-use tycho_simulation::tycho_core::models::Address;
+use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
     graph::GraphError,
@@ -15,6 +15,7 @@ use crate::{
 
 /// Events broadcast by the indexer when market data changes.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {

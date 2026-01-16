@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager};
 use thiserror::Error;
-use tycho_simulation::tycho_core::models::Address;
+use tycho_simulation::tycho_common::models::Address;
 
 use crate::types::ComponentId;
 

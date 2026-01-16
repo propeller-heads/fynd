@@ -41,10 +41,12 @@ num-traits = "0.2"
 num_cpus = "1.16"
 lazy_static = { version = "1.5.0", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
+tokio-stream = "0.1.18"
 
 [dev-dependencies]
 criterion = "0.5"
 rstest = "0.18"
+chrono = "0.4"
 
 # Benchmarks (uncomment when ready)
 # [[bench]]

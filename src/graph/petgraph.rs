@@ -14,7 +14,7 @@ use petgraph::{
     graph::{EdgeIndex, NodeIndex},
     stable_graph,
 };
-use tycho_simulation::tycho_core::models::Address;
+use tycho_simulation::tycho_common::models::Address;
 
 use super::GraphManager;
 use crate::{
