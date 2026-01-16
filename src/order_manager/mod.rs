@@ -6,8 +6,8 @@
 
 //! # Responsibilities
 //!
-//! 1. **Fan-out**: Distribute each order to solver pools.
-//! Its distribution algorithm can be customized, but initially it's set to relay to all solvers.
+//! 1. **Fan-out**: Distribute each order to solver pools. Its distribution algorithm can be
+//!    customized, but initially it's set to relay to all solvers.
 //! 2. **Timeout**: Cancel if solver response takes too long
 //! 3. **Collection**: Wait for N responses OR timeout per order
 //! 4. **Selection**: Choose best solution (max `amount_out_net_gas`)
