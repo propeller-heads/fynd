@@ -248,7 +248,7 @@ pub fn setup_market(
 
         // Insert component, state, and tokens separately using new API
         market.upsert_components(std::iter::once(comp));
-        market.update_states(std::iter::once((pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)));
+        market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
         market.upsert_tokens(tokens);
 
         component_weights.insert(pool_id, (token_in, token_out, weight_to, weight_from));
