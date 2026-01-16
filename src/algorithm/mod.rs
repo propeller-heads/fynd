@@ -17,7 +17,7 @@ pub mod most_liquid;
 #[cfg(test)]
 pub mod test_utils;
 
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;

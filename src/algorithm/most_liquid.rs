@@ -8,7 +8,7 @@
 //! 5. Returning the best route with stats recorded to the tracing span
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -451,10 +451,26 @@ impl Algorithm for MostLiquidAlgorithm {
             });
         }
 
+        // Step 3: Extract component IDs from all paths we'll simulate
+        let component_ids: HashSet<ComponentId> = scored_paths
+            .iter()
+            .flat_map(|(path, _)| {
+                path.edge_iter()
+                    .iter()
+                    .map(|e| e.component_id.clone())
+            })
+            .collect();
+
+        // Step 4: Extract market subset and drop our Rc clone to potentially release the lock
+        // (lock is released when the last Rc clone is dropped, typically after all orders
+        // processed)
+        let market = market_guard.extract_subset(&component_ids);
+        drop(market_guard);
+
         let mut paths_simulated = 0usize;
         let mut simulation_failures = 0usize;
 
-        // Step 3: Simulate all paths in score order
+        // Step 5: Simulate all paths in score order using the local market subset
         let mut best: Option<Route> = None;
         let timeout_ms = self.timeout.as_millis() as u64;
 
@@ -523,8 +539,6 @@ impl Algorithm for MostLiquidAlgorithm {
                     })
                     .unwrap_or(f64::NAN);
 
-                // TODO: consider if we must also record tokens and protocol components visited
-                // We avoid doing this for now due to added complexity and time overheads
                 debug!(
                     solve_time_ms,
                     block_number,
@@ -533,6 +547,8 @@ impl Algorithm for MostLiquidAlgorithm {
                     paths_simulated,
                     simulation_failures,
                     simulation_coverage_pct = coverage_pct,
+                    components_considered = component_ids.len(),
+                    tokens_considered = market.token_registry_ref().len(),
                     path = %path_desc,
                     amount_in = %amount_in,
                     net_amount_out = %route.net_amount_out,
@@ -551,6 +567,8 @@ impl Algorithm for MostLiquidAlgorithm {
                     paths_simulated,
                     simulation_failures,
                     simulation_coverage_pct = coverage_pct,
+                    components_considered = component_ids.len(),
+                    tokens_considered = market.token_registry_ref().len(),
                     "no viable route"
                 );
             }
@@ -590,7 +608,7 @@ mod tests {
         algorithm::test_utils::{
             addr, component,
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
-            order, setup_market, token, MockProtocolSim, ONE_ETH,
+            market_guard, market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
         types::OrderSide,
         GraphManager,
@@ -900,7 +918,8 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64)).unwrap();
+            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64))
+                .unwrap();
 
         assert_eq!(route.swaps.len(), 1);
         assert_eq!(route.swaps[0].amount_in, BigUint::from(100u64));
@@ -930,7 +949,8 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(10u64)).unwrap();
+            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+                .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
         // First hop: 10 * 2 = 20
@@ -966,7 +986,8 @@ mod tests {
         let path = paths[0].clone();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(10u64)).unwrap();
+            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+                .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
         // First: 10 * 2 = 20
@@ -983,6 +1004,7 @@ mod tests {
 
         let (market, _) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
+        let market = market_read(&market);
 
         // Add token C to graph but not to market (A->B->C)
         let mut topology = market.component_topology();
@@ -1005,11 +1027,13 @@ mod tests {
     fn simulate_path_missing_component_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let (mut market, manager) =
+        let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         // Remove the component but keep tokens and graph
-        market.remove_components([&"pool1".to_string()]);
+        let mut market_write = market.try_write().unwrap();
+        market_write.remove_components([&"pool1".to_string()]);
+        drop(market_write);
 
         let graph = manager.graph();
         let paths =
@@ -1017,7 +1041,8 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result = MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64));
+        let result =
+            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 
@@ -1239,12 +1264,13 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (mut market, manager) =
+        let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
+        let mut market_write = market.try_write().unwrap();
 
         // Set a non-zero gas price so gas cost exceeds tiny output
         // gas_cost = 50_000 * (1_000_000 + 1_000_000) = 100_000_000_000 >> 2 wei output
-        market.update_gas_price(BlockGasPrice {
+        market_write.update_gas_price(BlockGasPrice {
             block_number: 1,
             block_hash: Default::default(),
             block_timestamp: 0,
@@ -1253,6 +1279,7 @@ mod tests {
                 max_priority_fee_per_gas: BigUint::from(1_000_000u64),
             },
         });
+        drop(market_write); // Release write lock
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output

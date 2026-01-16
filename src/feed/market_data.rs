@@ -7,7 +7,10 @@
 //!
 //! We use tokio RwLock (which is write-preferring) to avoid writer starvation.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::sync::RwLock;
 use tycho_simulation::{
@@ -174,5 +177,54 @@ impl SharedMarketData {
     /// Updates the last updated block info.
     pub fn update_last_updated(&mut self, block_info: BlockInfo) {
         self.last_updated = Some(block_info);
+    }
+
+    /// Creates a filtered subset containing only data needed for the given components.
+    ///
+    /// This is used to create a local snapshot of market data that can be used for
+    /// simulation without holding the main lock. The subset includes:
+    /// - Components matching the provided IDs
+    /// - Simulation states for those components (cloned via `clone_box`)
+    /// - Tokens referenced by those components
+    /// - Gas price and block info
+    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> SharedMarketData {
+        // Filter components
+        let components: HashMap<ComponentId, ProtocolComponent> = self
+            .components
+            .iter()
+            .filter(|(id, _)| component_ids.contains(*id))
+            .map(|(id, component)| (id.clone(), component.clone()))
+            .collect();
+
+        // Collect all token addresses from the filtered components
+        let token_addresses: HashSet<&Address> = components
+            .values()
+            .flat_map(|c| &c.tokens)
+            .collect();
+
+        // Filter tokens
+        let tokens: HashMap<Address, Token> = self
+            .tokens
+            .iter()
+            .filter(|(addr, _)| token_addresses.contains(addr))
+            .map(|(addr, token)| (addr.clone(), token.clone()))
+            .collect();
+
+        // Clone simulation states using clone_box
+        let simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = self
+            .simulation_states
+            .iter()
+            .filter(|(id, _)| component_ids.contains(*id))
+            .map(|(id, state)| (id.clone(), state.clone_box()))
+            .collect();
+
+        SharedMarketData {
+            components,
+            simulation_states,
+            tokens,
+            gas_price: self.gas_price.clone(),
+            protocol_sync_status: HashMap::new(), // Not needed for simulation
+            last_updated: self.last_updated.clone(),
+        }
     }
 }
