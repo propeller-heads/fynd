@@ -9,15 +9,13 @@
 use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
-use petgraph::graph::UnGraph;
 use tycho_simulation::tycho_core::models::Address;
 
 use super::{Algorithm, AlgorithmError};
 use crate::{
     feed::market_data::SharedMarketData,
-    graph::Path,
+    graph::{petgraph::StableDiGraph, Path},
     types::{solution::Order, Route, Swap},
-    ComponentId,
 };
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -122,15 +120,15 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = UnGraph<Address, ComponentId>;
-    type GraphManager = crate::graph::PetgraphUnGraphManager;
+    type GraphType = StableDiGraph;
+    type GraphManager = crate::graph::PetgraphStableDiGraphManager;
     fn name(&self) -> &str {
         "most_liquid"
     }
 
     fn find_best_route(
         &self,
-        graph: &UnGraph<Address, ComponentId>,
+        graph: &StableDiGraph,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
@@ -218,12 +216,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
 impl MostLiquidAlgorithm {
     /// Finds all paths between two tokens using BFS on a petgraph.
-    fn find_paths(
-        &self,
-        graph: &UnGraph<Address, ComponentId>,
-        from: &Address,
-        to: &Address,
-    ) -> Vec<Path> {
+    fn find_paths(&self, graph: &StableDiGraph, from: &Address, to: &Address) -> Vec<Path> {
         // Find node indices for from and to tokens
         let from_idx = graph
             .node_indices()

@@ -10,10 +10,14 @@ use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use tokio::sync::broadcast;
+use tracing::warn;
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
-    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    feed::{
+        events::{MarketEvent, MarketEventHandler},
+        market_data::SharedMarketDataRef,
+    },
     graph::GraphManager,
     types::{
         solution::SolutionRequest, BlockInfo, OrderSolution, Solution, SolutionStatus, SolveError,
@@ -43,7 +47,7 @@ pub struct SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType>,
+    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
 {
     /// Algorithm used for route finding.
     algorithm: A,
@@ -63,7 +67,7 @@ impl<A> SolverWorker<A>
 where
     A: Algorithm,
     A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType>,
+    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
 {
     /// Creates a new Solver.
     ///
@@ -106,16 +110,14 @@ where
     /// Processes pending market events.
     ///
     /// Call this periodically or before each solve to stay in sync.
+    ///
+    /// Errors are logged but do not stop processing of subsequent events.
     pub fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(&event);
+            if let Err(e) = self.graph_manager.handle_event(&event) {
+                warn!("Warning: Error handling market event: {:?}", e);
+            }
         }
-    }
-
-    /// Handles a market event by updating the graph via the graph manager.
-    fn handle_event(&mut self, event: &MarketEvent) {
-        // Graph manager updates its internal graph based on the event
-        self.graph_manager.handle_event(event);
     }
 
     /// Solves a request and returns the solution.

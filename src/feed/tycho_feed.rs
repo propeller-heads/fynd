@@ -9,16 +9,11 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info};
-use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     api::HealthTracker,
-    feed::{
-        events::{ComponentSummary, MarketEvent},
-        market_data::SharedMarketData,
-        TychoFeedConfig, TychoFeedError,
-    },
-    types::{ComponentId, GasPrice, ProtocolSystem},
+    feed::{events::MarketEvent, market_data::SharedMarketData, TychoFeedConfig, TychoFeedError},
+    types::GasPrice,
     SharedMarketDataRef,
 };
 
@@ -120,9 +115,6 @@ impl TychoFeed {
 
         info!("connected to tycho (placeholder)");
 
-        // Placeholder: send initial snapshot
-        self.send_initial_snapshot().await?;
-
         // Placeholder: simulate staying connected
         // In real implementation, this would be the message processing loop
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -130,107 +122,72 @@ impl TychoFeed {
         Ok(())
     }
 
-    /// Sends an initial snapshot to subscribers.
-    async fn send_initial_snapshot(&self) -> Result<(), TychoFeedError> {
-        let market = self.market_data.read().await;
+    // TODO: Handle market update message from Tycho
 
-        let components: Vec<ComponentSummary> = market
-            .components()
-            .filter_map(|(id, data)| {
-                match data
-                    .component
-                    .protocol_system
-                    .as_str()
-                    .try_into()
-                {
-                    Ok(protocol_system) => Some(ComponentSummary {
-                        id: id.clone(),
-                        tokens: data.component.tokens.clone(),
-                        protocol_system,
-                    }),
-                    Err(e) => {
-                        tracing::warn!("Skipping component {} with unknown protocol: {}", id, e);
-                        None
-                    }
-                }
-            })
-            .collect();
+    // #[allow(dead_code)]
+    // /// Handles a component added event from Tycho.
+    // async fn handle_component_added(
+    //     &self,
+    //     id: ComponentId,
+    //     tokens: Vec<Address>,
+    //     protocol_system: ProtocolSystem,
+    // ) -> Result<(), TychoFeedError> {
+    //     // Update shared market data
+    //     {
+    //         let mut market = self.market_data.write().await;
+    //         market.add_component_topology(id.clone(), tokens.clone());
+    //     }
 
-        let gas_price = market.gas_price().clone();
+    //     // Update health tracker
+    //     self.health_tracker.update();
 
-        drop(market);
+    //     // Broadcast event
+    //     let _ = self
+    //         .event_tx
+    //         .send(MarketEvent::ComponentAdded { component_id: id, tokens, protocol_system });
 
-        let _ = self
-            .event_tx
-            .send(MarketEvent::Snapshot { components, gas_price });
+    //     Ok(())
+    // }
 
-        Ok(())
-    }
+    // #[allow(dead_code)]
+    // /// Handles a component removed event from Tycho.
+    // async fn handle_component_removed(
+    //     &self,
+    //     component_id: ComponentId,
+    // ) -> Result<(), TychoFeedError> {
+    //     // Update shared market data
+    //     {
+    //         let mut market = self.market_data.write().await;
+    //         market.remove_component(&component_id);
+    //     }
 
-    #[allow(dead_code)]
-    /// Handles a component added event from Tycho.
-    async fn handle_component_added(
-        &self,
-        id: ComponentId,
-        tokens: Vec<Address>,
-        protocol_system: ProtocolSystem,
-    ) -> Result<(), TychoFeedError> {
-        // Update shared market data
-        {
-            let mut market = self.market_data.write().await;
-            market.add_component_topology(id.clone(), tokens.clone());
-        }
+    //     // Update health tracker
+    //     self.health_tracker.update();
 
-        // Update health tracker
-        self.health_tracker.update();
+    //     // Broadcast event
+    //     let _ = self
+    //         .event_tx
+    //         .send(MarketEvent::ComponentRemoved { component_id });
 
-        // Broadcast event
-        let _ = self
-            .event_tx
-            .send(MarketEvent::ComponentAdded { component_id: id, tokens, protocol_system });
+    //     Ok(())
+    // }
 
-        Ok(())
-    }
+    // #[allow(dead_code)]
+    // /// Handles a state update event from Tycho.
+    // async fn handle_state_updated(&self, component_id: ComponentId) -> Result<(), TychoFeedError>
+    // {     // TODO: Update component state in market_data
+    //     // The actual state (reserves, etc.) would come from Tycho
 
-    #[allow(dead_code)]
-    /// Handles a component removed event from Tycho.
-    async fn handle_component_removed(
-        &self,
-        component_id: ComponentId,
-    ) -> Result<(), TychoFeedError> {
-        // Update shared market data
-        {
-            let mut market = self.market_data.write().await;
-            market.remove_component(&component_id);
-        }
+    //     // Update health tracker
+    //     self.health_tracker.update();
 
-        // Update health tracker
-        self.health_tracker.update();
+    //     // Broadcast event
+    //     let _ = self
+    //         .event_tx
+    //         .send(MarketEvent::StateUpdated { component_id });
 
-        // Broadcast event
-        let _ = self
-            .event_tx
-            .send(MarketEvent::ComponentRemoved { component_id });
-
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    /// Handles a state update event from Tycho.
-    async fn handle_state_updated(&self, component_id: ComponentId) -> Result<(), TychoFeedError> {
-        // TODO: Update component state in market_data
-        // The actual state (reserves, etc.) would come from Tycho
-
-        // Update health tracker
-        self.health_tracker.update();
-
-        // Broadcast event
-        let _ = self
-            .event_tx
-            .send(MarketEvent::StateUpdated { component_id });
-
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[allow(dead_code)]
     /// Updates gas price from RPC.
