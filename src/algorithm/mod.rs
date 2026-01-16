@@ -7,7 +7,6 @@
 //! different graph crates (petgraph, custom, etc.) and leverage built-in algorithms.
 
 pub mod most_liquid;
-pub mod stats;
 
 #[cfg(test)]
 pub mod test_utils;

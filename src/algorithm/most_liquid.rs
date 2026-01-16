@@ -5,25 +5,33 @@
 //! 2. Scoring and sorting paths by spot price, fees, and liquidity depth
 //! 3. Simulating paths with actual ProtocolSim to get accurate output (best paths first)
 //! 4. Ranking by net output (output - gas cost in output token terms)
-//! 5. Returning the best route with comprehensive stats reporting
+//! 5. Returning the best route with stats recorded to the tracing span
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
+use tracing::{debug, instrument};
 use tycho_simulation::{
     evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
-    tycho_common::{models::ComponentId, simulation::protocol_sim::ProtocolSim},
+    tycho_common::simulation::protocol_sim::ProtocolSim,
     tycho_core::models::{token::Token, Address},
 };
 
-use super::{stats::SolveStats, Algorithm, AlgorithmError};
+use super::{Algorithm, AlgorithmError};
 use crate::{
     feed::market_data::SharedMarketData,
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
-    types::{Order, Route},
+    types::{ComponentId, Order, Route},
     ProtocolSystem, Swap,
 };
+
+// TODO: Consider adding metrics crate integration for:
+// - `algorithm.simulation_coverage_pct` histogram
+// - `algorithm.simulation_failures` counter
 
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
@@ -105,6 +113,7 @@ impl MostLiquidAlgorithm {
     /// It performs BFS traversal to find all paths within the hop budget.
     ///
     /// Returns an empty vec if `min_hops > max_hops` (invalid range).
+    #[instrument(level = "debug", skip(graph))]
     fn find_paths<'a>(
         graph: &'a StableDiGraph<DepthAndPrice>,
         from: &Address,
@@ -204,6 +213,7 @@ impl MostLiquidAlgorithm {
     /// * `graph` - The graph containing edge and node data
     /// * `market` - Market data for token/component lookups and gas price
     /// * `amount_in` - The input amount to simulate
+    #[instrument(level = "trace", skip(path, market), fields(hop_count = path.len()))]
     fn simulate_path<D>(
         path: Path<D>,
         market: &SharedMarketData,
@@ -231,14 +241,18 @@ impl MostLiquidAlgorithm {
                 })?;
 
             let component_id = &edge_data.component_id;
-            let component_data = market
+            let component = market
                 .get_component(component_id)
                 .ok_or_else(|| {
                     AlgorithmError::Other(format!("component not found: {}", component_id))
                 })?;
+            let component_state = market
+                .get_simulation_state(component_id)
+                .ok_or_else(|| {
+                    AlgorithmError::Other(format!("simulation state not found: {}", component_id))
+                })?;
 
-            let is_component_vm = component_data
-                .state
+            let is_component_vm = component_state
                 .as_any()
                 .downcast_ref::<EVMPoolState<PreCachedDB>>()
                 .is_some();
@@ -253,7 +267,7 @@ impl MostLiquidAlgorithm {
 
             let state = state_override
                 .map(Box::as_ref)
-                .unwrap_or(component_data.state.as_ref());
+                .unwrap_or(component_state);
 
             // Simulate the swap
             let result = state
@@ -261,15 +275,14 @@ impl MostLiquidAlgorithm {
                 .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
 
             // Get protocol for the swap
-            let protocol: ProtocolSystem = component_data
-                .component
+            let protocol: ProtocolSystem = component
                 .protocol_system
                 .as_str()
                 .try_into()
                 .map_err(|e| {
                     AlgorithmError::Other(format!(
                         "invalid protocol system: {} ({})",
-                        component_data.component.protocol_system, e
+                        component.protocol_system, e
                     ))
                 })?;
 
@@ -334,12 +347,16 @@ impl Algorithm for MostLiquidAlgorithm {
         "most_liquid"
     }
 
+    // TODO: Consider adding token pair symbols to the span for easier interpretation
+    #[instrument(level = "debug", skip_all, fields(order_id = %order.id))]
     fn find_best_route(
         &self,
         graph: &Self::GraphType,
         market: &SharedMarketData,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
+        let start = Instant::now();
+
         // Exact-out not supported yet
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
@@ -348,8 +365,6 @@ impl Algorithm for MostLiquidAlgorithm {
         let amount_in = order.amount.clone();
 
         // Step 1: Find all edge paths using BFS (shorter paths first)
-        // Note: find_paths is a method on PetgraphStableDiGraphManager, not on the graph.
-        // The caller is responsible for providing paths or the solver layer handles path finding.
         let all_paths = Self::find_paths(
             graph,
             &order.token_in,
@@ -358,15 +373,13 @@ impl Algorithm for MostLiquidAlgorithm {
             self.max_hops,
         );
 
-        if all_paths.is_empty() {
+        let paths_candidates = all_paths.len();
+        if paths_candidates == 0 {
             return Err(AlgorithmError::NoPath {
                 from: format!("{:?}", order.token_in),
                 to: format!("{:?}", order.token_out),
             });
         }
-
-        // Initialize stats tracking
-        let mut stats = SolveStats::new(market.last_updated().number, all_paths.len());
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
@@ -378,34 +391,40 @@ impl Algorithm for MostLiquidAlgorithm {
             .collect();
 
         scored_paths.sort_by(|(_, a_score), (_, b_score)| {
-            // Invert the comparison to get descending order
+            // Flip the comparison to get descending order
             b_score
                 .partial_cmp(a_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if scored_paths.is_empty() {
+        let paths_to_simulate = scored_paths.len();
+        if paths_to_simulate == 0 {
             return Err(AlgorithmError::NoPath {
                 from: format!("{:?}", order.token_in),
                 to: format!("{:?}", order.token_out),
             });
         }
 
+        let mut paths_simulated = 0usize;
+        let mut simulation_failures = 0usize;
+
         // Step 3: Simulate all paths in score order
         let mut best: Option<Route> = None;
+        let timeout_ms = self.timeout.as_millis() as u64;
 
         for (edge_path, _) in scored_paths {
             // Check timeout
-            if stats.elapsed_ms() > self.timeout.as_millis() as u64 {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            if elapsed_ms > timeout_ms {
                 break;
             }
 
-            // Track pools and protocols for this path
-            stats.record_path(&edge_path, market);
-
             let route = match Self::simulate_path(edge_path, market, amount_in.clone()) {
                 Ok(r) => r,
-                Err(_) => continue, // Skip paths that fail simulation
+                Err(_) => {
+                    simulation_failures += 1;
+                    continue;
+                }
             };
 
             // Check if this is the best result so far
@@ -416,16 +435,78 @@ impl Algorithm for MostLiquidAlgorithm {
             {
                 best = Some(route);
             }
+
+            paths_simulated += 1;
         }
 
         // Log solve result
-        stats.log_result(self.name(), best.as_ref(), market, &amount_in);
+        let solve_time_ms = start.elapsed().as_millis() as u64;
+        let block_number = market.last_updated().map(|b| b.number);
+        // The proportion of paths simulated to total paths that we filtered to simulate
+        let coverage_pct = if paths_to_simulate == 0 {
+            100.0
+        } else {
+            (paths_simulated as f64 / paths_to_simulate as f64) * 100.0
+        };
 
-        let elapsed = stats.elapsed_ms();
+        match &best {
+            Some(route) => {
+                let tokens = market.token_registry_ref();
+                let path_desc = route.path_description(tokens);
+                let protocols = route
+                    .swaps
+                    .as_slice()
+                    .iter()
+                    .map(|s| s.protocol)
+                    .collect::<Vec<_>>();
+
+                let price = amount_in
+                    .to_f64()
+                    .filter(|&v| v > 0.0)
+                    .and_then(|amt_in| {
+                        route
+                            .net_amount_out
+                            .to_f64()
+                            .map(|amt_out| amt_out / amt_in)
+                    })
+                    .unwrap_or(f64::NAN);
+
+                // TODO: consider if we must also record tokens and protocol components visited
+                // We avoid doing this for now due to added complexity and time overheads
+                debug!(
+                    solve_time_ms,
+                    block_number,
+                    paths_candidates,
+                    paths_to_simulate,
+                    paths_simulated,
+                    simulation_failures,
+                    simulation_coverage_pct = coverage_pct,
+                    path = %path_desc,
+                    amount_in = %amount_in,
+                    net_amount_out = %route.net_amount_out,
+                    price_out_per_in = price,
+                    hop_count = route.swaps.len(),
+                    protocols = ?protocols,
+                    "route found"
+                );
+            }
+            None => {
+                debug!(
+                    solve_time_ms,
+                    block_number,
+                    paths_candidates,
+                    paths_to_simulate,
+                    paths_simulated,
+                    simulation_failures,
+                    simulation_coverage_pct = coverage_pct,
+                    "no viable route"
+                );
+            }
+        }
 
         best.ok_or({
-            if elapsed > self.timeout.as_millis() as u64 {
-                AlgorithmError::Timeout { elapsed_ms: elapsed }
+            if solve_time_ms > timeout_ms {
+                AlgorithmError::Timeout { elapsed_ms: solve_time_ms }
             } else {
                 AlgorithmError::InsufficientLiquidity
             }
@@ -456,7 +537,6 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
-        feed::market_data::ComponentData,
         types::OrderSide,
         GasPrice, GraphManager,
     };
@@ -829,7 +909,7 @@ mod tests {
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         // Remove the component but keep tokens and graph
-        market.remove_component(&"pool1".to_string());
+        market.remove_components([&"pool1".to_string()]);
 
         let graph = manager.graph();
         let paths =
@@ -934,7 +1014,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Set up market with both pools
+        // Set up market with both pools using new API
         let mut market = SharedMarketData::new();
         let pool1_state = MockProtocolSim::new(2);
         let pool2_state = MockProtocolSim::new(3); // Higher multiplier but no edge weight
@@ -942,16 +1022,17 @@ mod tests {
         let pool1_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
         let pool2_comp = component("pool2", &[token_a.clone(), token_b.clone()]);
 
-        market.insert_component(ComponentData {
-            component: pool1_comp,
-            state: Box::new(pool1_state.clone()),
-            tokens: vec![token_a.clone(), token_b.clone()],
-        });
-        market.insert_component(ComponentData {
-            component: pool2_comp,
-            state: Box::new(pool2_state),
-            tokens: vec![token_a.clone(), token_b.clone()],
-        });
+        // Insert components
+        market.upsert_components(vec![pool1_comp, pool2_comp]);
+
+        // Insert states
+        market.update_states(vec![
+            ("pool1".to_string(), Box::new(pool1_state.clone()) as Box<dyn ProtocolSim>),
+            ("pool2".to_string(), Box::new(pool2_state) as Box<dyn ProtocolSim>),
+        ]);
+
+        // Insert tokens
+        market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
         // Initialize graph with both pools
         let mut manager = PetgraphStableDiGraphManager::default();
