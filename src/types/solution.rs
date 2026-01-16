@@ -13,10 +13,12 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
+use std::collections::HashMap;
+
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use uuid::Uuid;
 
 use super::{
@@ -265,6 +267,30 @@ impl Route {
     /// Returns the number of hops (swaps) in this route.
     pub fn hop_count(&self) -> usize {
         self.swaps.len()
+    }
+
+    /// Returns a human-readable path description (e.g., "WETH -> USDC -> DAI").
+    ///
+    /// Falls back to token address if token not found in the provided map.
+    pub fn path_description(&self, tokens: &HashMap<Address, Token>) -> String {
+        let mut symbols = Vec::with_capacity(self.swaps.len() + 1);
+
+        for (i, swap) in self.swaps.iter().enumerate() {
+            if i == 0 {
+                let symbol = tokens
+                    .get(&swap.token_in)
+                    .map(|t| t.symbol.clone())
+                    .unwrap_or_else(|| format!("{:?}", swap.token_in));
+                symbols.push(symbol);
+            }
+            let symbol = tokens
+                .get(&swap.token_out)
+                .map(|t| t.symbol.clone())
+                .unwrap_or_else(|| format!("{:?}", swap.token_out));
+            symbols.push(symbol);
+        }
+
+        symbols.join(" -> ")
     }
 
     /// Returns the input token of the route (first swap's input).
@@ -696,5 +722,56 @@ mod tests {
 
         let json = serde_json::to_string(&solution).unwrap();
         assert!(json.contains(r#""total_gas_estimate":"500000""#));
+    }
+    // -------------------------------------------------------------------------
+    // path_description Tests
+    // -------------------------------------------------------------------------
+
+    fn make_token(byte: u8, symbol: &str) -> Token {
+        use tycho_simulation::evm::tycho_models::Chain;
+        Token {
+            address: make_address(byte),
+            symbol: symbol.to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        }
+    }
+
+    #[rstest]
+    #[case::empty(vec![], vec![], "")]
+    #[case::single_hop(vec![(0x01, 0x02)], vec![(0x01, "WETH"), (0x02, "USDC")], "WETH -> USDC")]
+    #[case::multi_hop(
+        vec![(0x01, 0x02), (0x02, 0x03)],
+        vec![(0x01, "WETH"), (0x02, "USDC"), (0x03, "DAI")],
+        "WETH -> USDC -> DAI"
+    )]
+    #[case::cyclic(
+        vec![(0x01, 0x02), (0x02, 0x01)],
+        vec![(0x01, "WETH"), (0x02, "USDC")],
+        "WETH -> USDC -> WETH"
+    )]
+    #[case::unknown_tokens(
+        vec![(0x01, 0x02)],
+        vec![],
+        "Bytes(0x0101010101010101010101010101010101010101) -> Bytes(0x0202020202020202020202020202020202020202)"
+    )]
+    fn test_path_description(
+        #[case] swaps: Vec<(u8, u8)>,
+        #[case] token_data: Vec<(u8, &str)>,
+        #[case] expected: &str,
+    ) {
+        let route = make_route(swaps);
+        let tokens: HashMap<Address, Token> = token_data
+            .into_iter()
+            .map(|(byte, symbol)| {
+                let t = make_token(byte, symbol);
+                (t.address.clone(), t)
+            })
+            .collect();
+
+        assert_eq!(route.path_description(&tokens), expected);
     }
 }
