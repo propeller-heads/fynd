@@ -35,21 +35,20 @@ pub struct MostLiquidAlgorithm {
 /// Algorithm-specific edge data for liquidity-based routing.
 ///
 /// Used by the MostLiquid algorithm to score paths based on expected output.
-/// Contains the spot price, liquidity depth, and fee for scoring.
+/// Contains the spot price and liquidity depth.
+/// Note that the fee is included in the spot price already.
 #[derive(Debug, Clone, Default)]
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
     /// Liquidity depth in USD (or native token terms).
     pub depth: f64,
-    /// Fee as a decimal (e.g., 0.003 for 0.3%).
-    pub fee: f64,
 }
 
 impl DepthAndPrice {
     /// Creates a new DepthAndPrice with all fields set.
-    pub fn new(spot_price: f64, depth: f64, fee: f64) -> Self {
-        Self { spot_price, depth, fee }
+    pub fn new(spot_price: f64, depth: f64) -> Self {
+        Self { spot_price, depth }
     }
 
     /// Builder method to set spot price.
@@ -61,12 +60,6 @@ impl DepthAndPrice {
     /// Builder method to set depth.
     pub fn with_depth(mut self, depth: f64) -> Self {
         self.depth = depth;
-        self
-    }
-
-    /// Builder method to set fee.
-    pub fn with_fee(mut self, fee: f64) -> Self {
-        self.fee = fee;
         self
     }
 
@@ -91,8 +84,6 @@ impl DepthAndPrice {
                 .ok_or_else(|| {
                     AlgorithmError::Other("depth conversion to f64 failed".to_string())
                 })?,
-            // TODO - several protocols panic currently when querying fees; handle gracefully
-            fee: sim.fee(),
         })
     }
 }
@@ -196,7 +187,6 @@ impl MostLiquidAlgorithm {
             let data = edge.data.as_ref()?;
 
             price *= data.spot_price;
-            price *= 1.0 - data.fee;
             min_depth = min_depth.min(data.depth);
         }
 
@@ -479,9 +469,9 @@ mod tests {
         let mut m = linear_graph();
 
         // A->B: spot=2.0, depth=1000, fee=0.3%; B->C: spot=0.5, depth=500, fee=0.1%
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0, 0.003), false)
+        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
             .unwrap();
-        m.set_edge_weight(&"bc".to_string(), &b, &c, DepthAndPrice::new(0.5, 500.0, 0.001), false)
+        m.set_edge_weight(&"bc".to_string(), &b, &c, DepthAndPrice::new(0.5, 500.0), false)
             .unwrap();
 
         // Use find_paths to get the 2-hop path A->B->C
@@ -491,7 +481,7 @@ mod tests {
         let path = &paths[0];
 
         // price = 2.0 * 0.997 * 0.5 * 0.999, min_depth = 500.0
-        let expected = 2.0 * 0.997 * 0.5 * 0.999 * 500.0;
+        let expected = 2.0 * 0.5 * 500.0;
         let score = MostLiquidAlgorithm::score_path(path).unwrap();
         assert_eq!(score, expected, "expected {expected}, got {score}");
     }
@@ -513,23 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn score_path_no_fee_works() {
-        let (a, b, _, _) = addrs();
-        let mut m = linear_graph();
-
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0, 0.0), false)
-            .unwrap();
-
-        let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &b, 1, 1);
-        assert_eq!(paths.len(), 1);
-
-        // 0% fee: score = 2.0 * 1.0 * 1000 = 2000
-        let score = MostLiquidAlgorithm::score_path(&paths[0]).unwrap();
-        assert_eq!(score, 2000.0);
-    }
-
-    #[test]
     fn score_path_circular_route() {
         // Test scoring a circular path A -> B -> A
         let (a, b, _, _) = addrs();
@@ -538,9 +511,9 @@ mod tests {
         // Set weights for both directions of the ab pool
         // A->B: spot=2.0, depth=1000, fee=0.3%
         // B->A: spot=0.6, depth=800, fee=0.3%
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0, 0.003), false)
+        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
             .unwrap();
-        m.set_edge_weight(&"ab".to_string(), &b, &a, DepthAndPrice::new(0.6, 800.0, 0.003), false)
+        m.set_edge_weight(&"ab".to_string(), &b, &a, DepthAndPrice::new(0.6, 800.0), false)
             .unwrap();
 
         let graph = m.graph();
@@ -555,7 +528,7 @@ mod tests {
         // min_depth = min(1000, 800) = 800
         // score = 1.1928 * 800 ≈ 954.3
         let score = MostLiquidAlgorithm::score_path(&paths[0]).unwrap();
-        let expected = 2.0 * 0.997 * 0.6 * 0.997 * 800.0;
+        let expected = 2.0 * 0.6 * 800.0;
         assert_eq!(score, expected, "expected {expected}, got {score}");
     }
 
