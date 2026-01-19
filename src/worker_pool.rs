@@ -85,7 +85,8 @@ impl WorkerPool {
                             1,
                             worker_config.max_hops,
                             worker_config.timeout.as_millis() as u64,
-                        );
+                        )
+                        .expect("invalid algorithm configuration");
 
                         // Create solver (graph type and manager are automatically inferred from
                         // algorithm)

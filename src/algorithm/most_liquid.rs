@@ -8,28 +8,28 @@
 //! 5. Returning the best route with stats recorded to the tracing span
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
-use tracing::{debug, instrument};
+use petgraph::prelude::EdgeRef;
+use tracing::{debug, instrument, trace};
 use tycho_simulation::{
     evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
     tycho_common::simulation::protocol_sim::ProtocolSim,
     tycho_core::models::{token::Token, Address},
 };
 
-use super::{Algorithm, AlgorithmError};
+use super::{Algorithm, NoPathReason};
 use crate::{
     feed::market_data::SharedMarketData,
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route},
-    ProtocolSystem, Swap,
+    AlgorithmError, ProtocolSystem, Swap,
 };
-
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
     min_hops: usize,
@@ -100,8 +100,28 @@ impl MostLiquidAlgorithm {
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
-    pub fn with_config(min_hops: usize, max_hops: usize, timeout_ms: u64) -> Self {
-        Self { min_hops, max_hops, timeout: Duration::from_millis(timeout_ms) }
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` if:
+    /// - `min_hops == 0` (at least one hop is required)
+    /// - `min_hops > max_hops`
+    pub fn with_config(
+        min_hops: usize,
+        max_hops: usize,
+        timeout_ms: u64,
+    ) -> Result<Self, AlgorithmError> {
+        if min_hops == 0 {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: "min_hops must be at least 1".to_string(),
+            });
+        }
+        if min_hops > max_hops {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: format!("min_hops ({min_hops}) cannot exceed max_hops ({max_hops})"),
+            });
+        }
+        Ok(Self { min_hops, max_hops, timeout: Duration::from_millis(timeout_ms) })
     }
 
     /// Finds all paths between two tokens using BFS directly on the graph.
@@ -109,7 +129,11 @@ impl MostLiquidAlgorithm {
     /// This is a helper method that operates on the graph without needing the graph manager.
     /// It performs BFS traversal to find all paths within the hop budget.
     ///
-    /// Returns an empty vec if `min_hops > max_hops` (invalid range).
+    /// # Errors
+    ///
+    /// Returns `AlgorithmError` if:
+    /// - Source token is not in the graph
+    /// - Destination token is not in the graph
     #[instrument(level = "debug", skip(graph))]
     fn find_paths<'a>(
         graph: &'a StableDiGraph<DepthAndPrice>,
@@ -117,29 +141,33 @@ impl MostLiquidAlgorithm {
         to: &Address,
         min_hops: usize,
         max_hops: usize,
-    ) -> Vec<Path<'a, DepthAndPrice>> {
-        use std::collections::VecDeque;
-
-        use petgraph::visit::EdgeRef;
-
-        // Early return for invalid hop range
-        if min_hops > max_hops {
-            return vec![];
+    ) -> Result<Vec<Path<'a, DepthAndPrice>>, AlgorithmError> {
+        if min_hops == 0 || min_hops > max_hops {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: format!(
+                    "invalid hop configuration: min_hops={min_hops} max_hops={max_hops}",
+                ),
+            });
         }
 
         // Find source and destination nodes by address
         // TODO: this could be optimized by using a node index map in the graph manager
         let from_idx = graph
             .node_indices()
-            .find(|&n| &graph[n] == from);
+            .find(|&n| &graph[n] == from)
+            .ok_or(AlgorithmError::NoPath {
+                from: from.clone(),
+                to: to.clone(),
+                reason: NoPathReason::SourceTokenNotInGraph,
+            })?;
         let to_idx = graph
             .node_indices()
-            .find(|&n| &graph[n] == to);
-
-        let (from_idx, to_idx) = match (from_idx, to_idx) {
-            (Some(f), Some(t)) => (f, t),
-            _ => return vec![],
-        };
+            .find(|&n| &graph[n] == to)
+            .ok_or(AlgorithmError::NoPath {
+                from: from.clone(),
+                to: to.clone(),
+                reason: NoPathReason::DestinationTokenNotInGraph,
+            })?;
 
         let mut paths = Vec::new();
         let mut queue = VecDeque::new();
@@ -164,25 +192,25 @@ impl MostLiquidAlgorithm {
             }
         }
 
-        paths
+        Ok(paths)
     }
 
-    /// Scores a path based on spot prices and minimum liquidity depth (inertia).
+    /// Attempts to score a path based on spot prices and minimum liquidity depth.
     ///
     /// Formula: `score = (product of all spot_price) × min(depths)`
     ///
-    /// This accounts:
+    /// This accounts for:
     /// - Spot price: the theoretical exchange rate along the path not accounting for slippage
-    /// - Fees: deducted per hop as `price *= (1 - fee)`
+    /// - Fees: included in spot_price already
     /// - Depth (inertia): minimum depth acts as a liquidity bottleneck indicator
     ///
-    /// Returns `None` if:
-    /// - Path is empty (no hops to score)
-    /// - Edge weights are missing required data (spot_price, depth)
+    /// Returns `None` if the path cannot be scored (empty path or missing edge weights).
+    /// Paths that return `None` are filtered out of simulation.
     ///
-    /// Higher score = better path candidate. Paths through deeper, lower-fee pools rank higher.
-    fn score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
+    /// Higher score = better path candidate. Paths through deeper pools rank higher.
+    fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
         if path.is_empty() {
+            trace!("cannot score empty path");
             return None;
         }
 
@@ -190,7 +218,10 @@ impl MostLiquidAlgorithm {
         let mut min_depth = f64::MAX;
 
         for edge in path.edge_iter() {
-            let data = edge.data.as_ref()?;
+            let Some(data) = edge.data.as_ref() else {
+                trace!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
+                return None;
+            };
 
             price *= data.spot_price;
             min_depth = min_depth.min(data.depth);
@@ -228,25 +259,29 @@ impl MostLiquidAlgorithm {
             // Get token and component data for the simulation call
             let token_in = market
                 .get_token(address_in)
-                .ok_or_else(|| {
-                    AlgorithmError::Other(format!("token not found: {:?}", address_in))
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "token",
+                    id: format!("{:?}", address_in),
                 })?;
             let token_out = market
                 .get_token(address_out)
-                .ok_or_else(|| {
-                    AlgorithmError::Other(format!("token not found: {:?}", address_out))
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "token",
+                    id: format!("{:?}", address_out),
                 })?;
 
             let component_id = &edge_data.component_id;
             let component = market
                 .get_component(component_id)
-                .ok_or_else(|| {
-                    AlgorithmError::Other(format!("component not found: {}", component_id))
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "component",
+                    id: component_id.clone(),
                 })?;
             let component_state = market
                 .get_simulation_state(component_id)
-                .ok_or_else(|| {
-                    AlgorithmError::Other(format!("simulation state not found: {}", component_id))
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "simulation state",
+                    id: component_id.clone(),
                 })?;
 
             let is_component_vm = component_state
@@ -354,7 +389,7 @@ impl Algorithm for MostLiquidAlgorithm {
     ) -> Result<Route, AlgorithmError> {
         let start = Instant::now();
 
-        // Exact-out not supported yet
+        // Exact-out isn't supported yet
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -368,13 +403,14 @@ impl Algorithm for MostLiquidAlgorithm {
             &order.token_out,
             self.min_hops,
             self.max_hops,
-        );
+        )?;
 
         let paths_candidates = all_paths.len();
         if paths_candidates == 0 {
             return Err(AlgorithmError::NoPath {
-                from: format!("{:?}", order.token_in),
-                to: format!("{:?}", order.token_out),
+                from: order.token_in.clone(),
+                to: order.token_out.clone(),
+                reason: NoPathReason::NoGraphPath,
             });
         }
 
@@ -382,7 +418,7 @@ impl Algorithm for MostLiquidAlgorithm {
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
             .filter_map(|path| {
-                let score = Self::score_path(&path)?;
+                let score = Self::try_score_path(&path)?;
                 Some((path, score))
             })
             .collect();
@@ -395,10 +431,12 @@ impl Algorithm for MostLiquidAlgorithm {
         });
 
         let paths_to_simulate = scored_paths.len();
+        let scoring_failures = paths_candidates - paths_to_simulate;
         if paths_to_simulate == 0 {
             return Err(AlgorithmError::NoPath {
-                from: format!("{:?}", order.token_in),
-                to: format!("{:?}", order.token_out),
+                from: order.token_in.clone(),
+                to: order.token_out.clone(),
+                reason: NoPathReason::NoScorablePaths,
             });
         }
 
@@ -418,7 +456,8 @@ impl Algorithm for MostLiquidAlgorithm {
 
             let route = match Self::simulate_path(edge_path, market, amount_in.clone()) {
                 Ok(r) => r,
-                Err(_) => {
+                Err(e) => {
+                    trace!(error = %e, "simulation failed for path");
                     simulation_failures += 1;
                     continue;
                 }
@@ -447,6 +486,7 @@ impl Algorithm for MostLiquidAlgorithm {
         };
 
         // Record metrics
+        counter!("algorithm.scoring_failures").increment(scoring_failures as u64);
         counter!("algorithm.simulation_failures").increment(simulation_failures as u64);
         histogram!("algorithm.simulation_coverage_pct").record(coverage_pct);
 
@@ -542,10 +582,10 @@ mod tests {
         GasPrice, GraphManager,
     };
 
-    // ==================== score_path Tests ====================
+    // ==================== try_score_path Tests ====================
 
     #[test]
-    fn score_path_calculates_correctly() {
+    fn try_score_path_calculates_correctly() {
         let (a, b, c, _) = addrs();
         let mut m = linear_graph();
 
@@ -557,34 +597,34 @@ mod tests {
 
         // Use find_paths to get the 2-hop path A->B->C
         let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &c, 2, 2);
+        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &c, 2, 2).unwrap();
         assert_eq!(paths.len(), 1);
         let path = &paths[0];
 
         // price = 2.0 * 0.997 * 0.5 * 0.999, min_depth = 500.0
         let expected = 2.0 * 0.5 * 500.0;
-        let score = MostLiquidAlgorithm::score_path(path).unwrap();
+        let score = MostLiquidAlgorithm::try_score_path(path).unwrap();
         assert_eq!(score, expected, "expected {expected}, got {score}");
     }
 
     #[test]
-    fn score_path_empty_returns_none() {
+    fn try_score_path_empty_returns_none() {
         let path: Path<DepthAndPrice> = Path::new();
-        assert_eq!(MostLiquidAlgorithm::score_path(&path), None);
+        assert_eq!(MostLiquidAlgorithm::try_score_path(&path), None);
     }
 
     #[test]
-    fn score_path_missing_weight_returns_none() {
+    fn try_score_path_missing_weight_returns_none() {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &b, 1, 1);
+        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &b, 1, 1).unwrap();
         assert_eq!(paths.len(), 1);
-        assert!(MostLiquidAlgorithm::score_path(&paths[0]).is_none());
+        assert!(MostLiquidAlgorithm::try_score_path(&paths[0]).is_none());
     }
 
     #[test]
-    fn score_path_circular_route() {
+    fn try_score_path_circular_route() {
         // Test scoring a circular path A -> B -> A
         let (a, b, _, _) = addrs();
         let mut m = linear_graph();
@@ -599,7 +639,7 @@ mod tests {
 
         let graph = m.graph();
         // Find A->B->A paths (circular, 2 hops)
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &a, 2, 2);
+        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &a, 2, 2).unwrap();
 
         // Should find at least one path
         assert_eq!(paths.len(), 1);
@@ -608,7 +648,7 @@ mod tests {
         // price = 2.0 * 0.997 * 0.6 * 0.997 = 1.1928...
         // min_depth = min(1000, 800) = 800
         // score = 1.1928 * 800 ≈ 954.3
-        let score = MostLiquidAlgorithm::score_path(&paths[0]).unwrap();
+        let score = MostLiquidAlgorithm::try_score_path(&paths[0]).unwrap();
         let expected = 2.0 * 0.6 * 800.0;
         assert_eq!(score, expected, "expected {expected}, got {score}");
     }
@@ -633,17 +673,17 @@ mod tests {
         let g = m.graph();
 
         // Forward: A->B (1 hop), A->C (2 hops), A->D (3 hops)
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
 
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc"]]));
 
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 3);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 3).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc", "cd"]]));
 
         // Reverse: D->A (bidirectional pools)
-        let p = MostLiquidAlgorithm::find_paths(g, &d, &a, 1, 3);
+        let p = MostLiquidAlgorithm::find_paths(g, &d, &a, 1, 3).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["cd", "bc", "ab"]]));
     }
 
@@ -654,10 +694,14 @@ mod tests {
         let g = m.graph();
 
         // A->D needs 3 hops, max_hops=2 finds nothing
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2).is_empty());
+        assert!(MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2)
+            .unwrap()
+            .is_empty());
 
         // A->C is 2 hops, min_hops=3 finds nothing
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &c, 3, 3).is_empty());
+        assert!(MostLiquidAlgorithm::find_paths(g, &a, &c, 3, 3)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -667,11 +711,11 @@ mod tests {
         let g = m.graph();
 
         // A->B: 3 parallel pools = 3 paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab1"], vec!["ab2"], vec!["ab3"]]));
 
         // A->C: 3 A->B pools × 2 B->C pools = 6 paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2).unwrap();
         assert_eq!(
             all_ids(p),
             HashSet::from([
@@ -692,7 +736,7 @@ mod tests {
         let g = m.graph();
 
         // A->D: two 2-hop paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bd"], vec!["ac", "cd"]]));
     }
 
@@ -703,7 +747,7 @@ mod tests {
         let g = m.graph();
 
         // A->B with max_hops=3: finds 1-hop path plus 3-hop revisit paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3).unwrap();
 
         // Check all expected paths are found (order-independent)
         assert_eq!(
@@ -724,7 +768,8 @@ mod tests {
         let g = m.graph();
 
         // A->A (cyclic path) with 2 hops: should find all 9 combinations (3 pools × 3 pools)
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &a, 0, 2);
+        // Note: min_hops=2 because cyclic paths require at least 2 hops
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &a, 2, 2).unwrap();
         assert_eq!(
             all_ids(p),
             HashSet::from([
@@ -751,14 +796,52 @@ mod tests {
         let non_existent = addr(0x99);
 
         // Empty graph
-        assert!(MostLiquidAlgorithm::find_paths(empty_graph, &a, &b, 1, 3).is_empty());
+        assert_eq!(
+            MostLiquidAlgorithm::find_paths(empty_graph, &a, &b, 1, 3)
+                .err()
+                .unwrap(),
+            AlgorithmError::NoPath {
+                from: a.clone(),
+                to: b.clone(),
+                reason: NoPathReason::SourceTokenNotInGraph,
+            }
+        );
 
         // Token not in graph
-        assert!(MostLiquidAlgorithm::find_paths(g, &non_existent, &b, 1, 3).is_empty());
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &non_existent, 1, 3).is_empty());
+        assert_eq!(
+            MostLiquidAlgorithm::find_paths(g, &non_existent, &b, 1, 3)
+                .err()
+                .unwrap(),
+            AlgorithmError::NoPath {
+                from: non_existent.clone(),
+                to: b.clone(),
+                reason: NoPathReason::SourceTokenNotInGraph,
+            }
+        );
+        assert_eq!(
+            MostLiquidAlgorithm::find_paths(g, &a, &non_existent, 1, 3)
+                .err()
+                .unwrap(),
+            AlgorithmError::NoPath {
+                from: a.clone(),
+                to: non_existent.clone(),
+                reason: NoPathReason::DestinationTokenNotInGraph,
+            }
+        );
 
-        // Invalid hop range (min_hops > max_hops)
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &b, 3, 1).is_empty());
+        // Invalid hop values
+        assert!(matches!(
+            MostLiquidAlgorithm::find_paths(g, &a, &b, 3, 1)
+                .err()
+                .unwrap(),
+            AlgorithmError::InvalidConfiguration { reason: _ }
+        ));
+        assert!(matches!(
+            MostLiquidAlgorithm::find_paths(g, &a, &b, 0, 1)
+                .err()
+                .unwrap(),
+            AlgorithmError::InvalidConfiguration { reason: _ }
+        ));
     }
 
     #[test]
@@ -768,7 +851,7 @@ mod tests {
         let g = m.graph();
 
         // BFS ensures shorter paths come first: 1-hop before 3-hop
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3);
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3).unwrap();
 
         // Verify BFS property: paths are ordered by hop count
         assert_eq!(p.len(), 3, "Expected 3 paths total");
@@ -798,7 +881,8 @@ mod tests {
             &token_b.address,
             1,
             1,
-        );
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let route =
@@ -827,7 +911,8 @@ mod tests {
             &token_c.address,
             2,
             2,
-        );
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let route =
@@ -859,7 +944,8 @@ mod tests {
             &token_a.address,
             2,
             2,
-        );
+        )
+        .unwrap();
 
         // Should only contain the A->B->A path
         assert_eq!(paths.len(), 1);
@@ -876,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn simulate_path_missing_token_returns_error() {
+    fn simulate_path_missing_token_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -893,17 +979,16 @@ mod tests {
 
         let graph = manager.graph();
         let paths =
-            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_c.address, 2, 2);
+            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_c.address, 2, 2)
+                .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result = MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64));
-        assert!(
-            matches!(result, Err(AlgorithmError::Other(msg)) if msg.contains("token not found"))
-        );
+        assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
     #[test]
-    fn simulate_path_missing_component_returns_error() {
+    fn simulate_path_missing_component_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let (mut market, manager) =
@@ -914,13 +999,12 @@ mod tests {
 
         let graph = manager.graph();
         let paths =
-            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_b.address, 1, 1);
+            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_b.address, 1, 1)
+                .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result = MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64));
-        assert!(
-            matches!(result, Err(AlgorithmError::Other(msg)) if msg.contains("component not found"))
-        );
+        assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 
     // ==================== find_best_route Tests ====================
@@ -933,7 +1017,7 @@ mod tests {
         let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), &market, &order)
@@ -963,7 +1047,7 @@ mod tests {
             ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(3000)),
         ]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), &market, &order)
@@ -1003,7 +1087,7 @@ mod tests {
             ("pool2", &token_b, &token_c, MockProtocolSim::new(3)),
         ]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 2, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 2, 100).unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), &market, &order)
@@ -1060,7 +1144,7 @@ mod tests {
             .unwrap();
 
         // Use max_hops=1 to focus only on direct 1-hop paths
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), &market, &order)
@@ -1070,6 +1154,37 @@ mod tests {
         assert_eq!(route.swaps.len(), 1);
         assert_eq!(route.swaps[0].component_id, "pool1");
         assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+    }
+
+    #[test]
+    fn find_best_route_no_scorable_paths() {
+        // All paths exist but none have edge weights (can't be scored)
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let mut market = SharedMarketData::new();
+        let pool_state = MockProtocolSim::new(2);
+        let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
+
+        market.upsert_components(vec![pool_comp]);
+        market.update_states(vec![(
+            "pool1".to_string(),
+            Box::new(pool_state) as Box<dyn ProtocolSim>,
+        )]);
+        market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
+
+        // Initialize graph but DO NOT set any edge weights
+        let mut manager = PetgraphStableDiGraphManager::default();
+        manager.initialize_graph(&market.component_topology());
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+
+        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoScorablePaths, .. })
+        ));
     }
 
     #[test]
@@ -1135,7 +1250,7 @@ mod tests {
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         // Use min_hops=2 to require at least 2 hops (circular)
-        let algorithm = MostLiquidAlgorithm::with_config(2, 2, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(2, 2, 100).unwrap();
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
@@ -1177,7 +1292,7 @@ mod tests {
         ]);
 
         // min_hops=2 should skip the 1-hop direct path
-        let algorithm = MostLiquidAlgorithm::with_config(2, 3, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(2, 3, 100).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let route = algorithm
@@ -1204,7 +1319,7 @@ mod tests {
         ]);
 
         // max_hops=1 cannot reach C from A (needs 2 hops)
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algorithm.find_best_route(manager.graph(), &market, &order);
@@ -1232,7 +1347,7 @@ mod tests {
         ]);
 
         // timeout=0ms should timeout after processing some paths
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 0);
+        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 0).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algorithm.find_best_route(manager.graph(), &market, &order);
@@ -1268,7 +1383,7 @@ mod tests {
     ) {
         use crate::algorithm::Algorithm;
 
-        let algorithm = MostLiquidAlgorithm::with_config(min_hops, max_hops, timeout_ms);
+        let algorithm = MostLiquidAlgorithm::with_config(min_hops, max_hops, timeout_ms).unwrap();
 
         assert_eq!(algorithm.max_hops(), max_hops);
         assert_eq!(algorithm.timeout(), Duration::from_millis(timeout_ms));
@@ -1286,5 +1401,25 @@ mod tests {
         assert_eq!(algorithm.timeout(), Duration::from_millis(50));
         assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
+    }
+
+    // ==================== Configuration Validation Tests ====================
+
+    #[test]
+    fn with_config_rejects_zero_min_hops() {
+        let result = MostLiquidAlgorithm::with_config(0, 3, 100);
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("min_hops must be at least 1")
+        ));
+    }
+
+    #[test]
+    fn with_config_rejects_min_greater_than_max() {
+        let result = MostLiquidAlgorithm::with_config(5, 3, 100);
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("cannot exceed")
+        ));
     }
 }
