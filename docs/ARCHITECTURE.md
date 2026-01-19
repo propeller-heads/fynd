@@ -142,24 +142,11 @@ pub struct SolverPoolHandle {
 
 **Key Features:**
 
-1. **Fan-out**: Sends each order to ALL solver pools in parallel
+1. **Fan-out**: Sends each order to ALL solver pools in parallel (V1 simplification; future versions may use smarter distribution)
 2. **Timeout**: Configurable deadline per request (can be overridden via `SolutionOptions`)
 3. **Early Return**: If `min_responses > 0`, returns as soon as N solvers respond
 4. **Best Selection**: Chooses solution with highest `amount_out_net_gas`
 5. **Error Tracking**: Captures all solver failures with error types (timeout, no route, etc.)
-
-**Selection Criteria:**
-
-```rust
-// Solutions are ranked by amount_out_net_gas (amount_out minus gas cost)
-// Constraints like max_gas can filter out expensive solutions
-fn select_best(&self, responses: &OrderResponses, options: &SolutionOptions) -> OrderSolution {
-    responses.solutions.iter()
-        .filter(|(_, sol)| sol.status == SolutionStatus::Success)
-        .filter(|(_, sol)| options.max_gas.map(|max| sol.gas_estimate <= max).unwrap_or(true))
-        .max_by_key(|(_, sol)| &sol.amount_out_net_gas)
-}
-```
 
 ---
 
@@ -187,7 +174,7 @@ impl TaskQueueHandle {
 
 **File:** `src/worker_pool.rs`
 
-**Responsibility:** Manage dedicated compute threads for a single algorithm type, each owning a SolverWorker instance. Each pool has its own TaskQueue and workers.
+**Responsibility:** Manage dedicated compute threads for a single algorithm type. Each pool has its own TaskQueue and SolverWorkers.
 
 ```rust
 pub struct WorkerPool {
@@ -568,35 +555,21 @@ src/
 │   ├── internal.rs           # SolveTask, SolveError
 │   └── primitives.rs         # ComponentId, Address, etc.
 │
-<<<<<<< HEAD
-=======
 ├── feed/                     # Market data feed
 │   ├── mod.rs
 │   ├── market_data.rs        # SharedMarketData
 │   ├── events.rs             # MarketEvent enum
 │   └── tycho_feed.rs         # TychoFeed (WebSocket client)
 │
->>>>>>> a8eb622 (feat: Implement OrderManager)
 ├── graph/                    # Graph management
 │   ├── mod.rs                # GraphManager trait, Edge, Path
 │   └── petgraph.rs           # PetgraphStableDiGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
 <<<<<<< HEAD
-├── worker_pool.rs            # WorkerPool
+├── worker_pool.rs            # WorkerPool, AlgorithmType
 ├── worker.rs                 # SolverWorker
 │
-├── feed/                     # Market data feed
-│   ├── mod.rs                # TychoFeedConfig and TychoFeedError
-│   ├── market_data.rs        # SharedMarketData
-│   ├── events.rs             # MarketEvent enum
-│   └── tycho_feed.rs         # TychoFeed
-│
-=======
-├── worker_pool.rs            # WorkerPool, AlgorithmType
-├── solver.rs                 # Solver
-│
->>>>>>> a8eb622 (feat: Implement OrderManager)
 └── algorithm/                # Algorithm implementations
     ├── mod.rs                # Algorithm trait
     └── most_liquid.rs        # MostLiquidAlgorithm

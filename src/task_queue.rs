@@ -36,7 +36,8 @@ pub struct TaskQueueHandle {
 impl TaskQueueHandle {
     /// Creates a TaskQueueHandle from an existing sender.
     ///
-    /// This is primarily useful for testing or custom queue implementations.
+    /// This is primarily useful for testing with mock channels.
+    #[cfg(test)]
     pub fn from_sender(sender: async_channel::Sender<SolveTask>) -> Self {
         Self { sender }
     }
@@ -281,7 +282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_enqueue_returns_internal_error_when_receiver_dropped() {
+    async fn test_enqueue_error_when_receiver_dropped() {
         let queue = TaskQueue::new(TaskQueueConfig { capacity: 10 });
         let handle = queue.handle();
         let receiver = queue.into_receiver();
@@ -304,7 +305,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_enqueue_returns_queue_full_when_channel_closed() {
+    async fn test_enqueue_queue_full_error() {
         let queue = TaskQueue::new(TaskQueueConfig { capacity: 10 });
         let handle = queue.handle();
         let receiver = queue.into_receiver();

@@ -7,8 +7,15 @@ use std::time::Duration;
 pub struct OrderManagerConfig {
     /// Default timeout per order (can be overridden per-request).
     pub default_timeout: Duration,
-    /// Minimum number of solver responses to wait for before returning.
-    /// If 0, waits for all solvers to respond (or timeout).
+    /// Minimum number of solver responses to wait for before returning early.
+    ///
+    /// **Behavior:**
+    /// - If `0`: Wait for ALL solvers to respond (or hit the timeout).
+    /// - If `> 0`: Return as soon as we have `min_responses` solutions, even if
+    ///   the timeout hasn't been reached. This enables fast-path responses when
+    ///   some solvers are slower than others.
+    ///
+    /// The best solution among received responses is still selected.
     pub min_responses: usize,
 }
 

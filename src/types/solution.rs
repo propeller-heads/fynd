@@ -48,6 +48,9 @@ pub struct SolutionOptions {
     pub timeout_ms: Option<u64>,
     /// Minimum number of solver responses to wait for before returning.
     /// If `None` or `0`, waits for all solvers to respond (or timeout).
+    ///
+    /// Use the `/health` endpoint to check `num_solver_pools` before setting this value.
+    /// Values exceeding the number of active solver pools are clamped internally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_responses: Option<usize>,
     /// Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.
@@ -159,16 +162,16 @@ pub struct Solution {
     pub solve_time_ms: u64,
 }
 
-/// Solution for a single [`Order`] with timing information.
+/// Internal wrapper used by workers when returning a solution.
 ///
-/// Contains the order solution along with the time taken to compute it.
-/// This is useful when solving a single order and you need both the solution
-/// details and the solve time.
+/// This wraps [`OrderSolution`] with per-worker timing information.
+/// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
+/// not the total OrderManager orchestration time (which is in [`Solution`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleOrderSolution {
     /// The solution for the order.
     pub order: OrderSolution,
-    /// Time taken to compute this solution, in milliseconds.
+    /// Time taken by this specific worker to compute the solution, in milliseconds.
     pub solve_time_ms: u64,
 }
 
