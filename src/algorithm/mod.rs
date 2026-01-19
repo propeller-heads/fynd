@@ -84,10 +84,6 @@ pub enum AlgorithmError {
     #[error("insufficient liquidity on all paths")]
     InsufficientLiquidity,
 
-    /// Gas cost exceeds output amount.
-    #[error("gas cost exceeds output amount")]
-    GasExceedsOutput,
-
     /// Route finding timed out.
     #[error("timeout after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64 },
