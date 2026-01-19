@@ -240,29 +240,6 @@ impl Route {
     }
 }
 
-// Implement ordering based on net_amount_out for route comparison
-impl PartialEq for Route {
-    fn eq(&self, other: &Self) -> bool {
-        self.net_amount_out == other.net_amount_out
-    }
-}
-
-impl Eq for Route {}
-
-impl PartialOrd for Route {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Route {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Higher net_amount_out is better
-        self.net_amount_out
-            .cmp(&other.net_amount_out)
-    }
-}
-
 impl Route {
     /// Returns the number of hops (swaps) in this route.
     pub fn hop_count(&self) -> usize {
@@ -597,35 +574,6 @@ mod tests {
                 _ => panic!("Unknown error type"),
             }
         }
-    }
-
-    #[test]
-    fn test_route_ordering() {
-        let route_very_negative = Route::new(vec![], BigInt::from(-1000));
-        let route_slightly_negative = Route::new(vec![], BigInt::from(-100));
-        let route_zero = Route::new(vec![], BigInt::from(0));
-        let route_positive = Route::new(vec![], BigInt::from(100));
-        let route_very_positive = Route::new(vec![], BigInt::from(1000));
-
-        // Sorting should order: very_negative < slightly_negative < zero < positive < very_positive
-        let mut routes = [
-            route_positive.clone(),
-            route_very_negative.clone(),
-            route_zero.clone(),
-            route_very_positive.clone(),
-            route_slightly_negative.clone(),
-        ];
-        routes.sort();
-
-        assert_eq!(routes[0].net_amount_out, BigInt::from(-1000));
-        assert_eq!(routes[1].net_amount_out, BigInt::from(-100));
-        assert_eq!(routes[2].net_amount_out, BigInt::from(0));
-        assert_eq!(routes[3].net_amount_out, BigInt::from(100));
-        assert_eq!(routes[4].net_amount_out, BigInt::from(1000));
-
-        // Max should be the most positive (best route)
-        let best = routes.iter().max().unwrap();
-        assert_eq!(best.net_amount_out, BigInt::from(1000));
     }
 
     // -------------------------------------------------------------------------

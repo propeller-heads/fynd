@@ -20,6 +20,7 @@ use crate::{
     feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     types::{solution::OrderSide, Order},
+    GasPrice,
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -239,6 +240,9 @@ pub fn setup_market(
 ) -> (SharedMarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = SharedMarketData::new();
     let mut component_weights = HashMap::new();
+
+    // Set gas_price = 1 wei/gas for simple calculations
+    market.update_gas_price(GasPrice::new(BigUint::from(1u64), BigUint::from(0u64)));
 
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];

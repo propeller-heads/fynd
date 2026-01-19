@@ -427,7 +427,7 @@ impl Algorithm for MostLiquidAlgorithm {
             // Check if this is the best result so far
             if best
                 .as_ref()
-                .map(|b| &route > b)
+                .map(|best| route.net_amount_out > best.net_amount_out)
                 .unwrap_or(true)
             {
                 best = Some(route);
@@ -945,27 +945,35 @@ mod tests {
     }
 
     #[test]
-    fn find_best_route_selects_higher_output() {
-        // Two parallel pools A->B: pool1 (multiplier=2) and pool2 (multiplier=3)
+    fn find_best_route_ranks_by_net_amount_out() {
+        // Tests that route selection is based on net_amount_out (output - gas cost),
+        // not just gross output. Four parallel pools with different spot_price/gas combos:
+        //
+        // | Pool      | spot_price | gas  | Output (1000 in) | Gas Cost | Net   |
+        // |-----------|------------|------|------------------|----------|-------|
+        // | best      | 3          | 1000 | 3000             | 1500     | 2000  |
+        // | low_out   | 2          | 500  | 2000             | 500      | 1500  |
+        // | high_gas  | 4          | 3000 | 4000             | 3000     | 1000  |
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(3)),
+            ("best", &token_a, &token_b, MockProtocolSim::new(3).with_gas(1000)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2).with_gas(500)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(3000)),
         ]);
 
-        // Use max_hops=1 to only consider 1-hop paths (avoids multi-hop A->B->A->B)
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100);
-        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), &market, &order)
             .unwrap();
 
-        // Should select pool2 for higher output (3x vs 2x)
+        // Should select "best" pool for highest net_amount_out (2000)
         assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 3));
-        assert_eq!(route.swaps[0].component_id, "pool2".to_string());
+        assert_eq!(route.swaps[0].component_id, "best");
+        assert_eq!(route.swaps[0].amount_out, BigUint::from(3000u64));
+        assert_eq!(route.net_amount_out, BigInt::from(2000)); // 3000 - 1000
     }
 
     #[test]
