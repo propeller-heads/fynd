@@ -13,7 +13,7 @@ use std::time::Duration;
 pub use most_liquid::MostLiquidAlgorithm;
 
 use crate::{
-    feed::market_data::SharedMarketData,
+    feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
     types::{solution::Order, Route},
 };
@@ -47,16 +47,17 @@ pub trait Algorithm: Send + Sync {
     /// # Arguments
     ///
     /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
-    /// * `market` - Reference to shared market data for state lookups
+    /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
+    ///   locks)
     /// * `order` - The order to solve
     ///
     /// # Returns
     ///
     /// The best route found, or an error if no route could be found.
-    fn find_best_route(
+    async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: &SharedMarketData,
+        market: SharedMarketDataRef,
         order: &Order,
     ) -> Result<Route, AlgorithmError>;
 

@@ -124,16 +124,6 @@ where
         }
     }
 
-    /// Gets block info from market data.
-    fn get_block_info(market: &crate::feed::market_data::SharedMarketData) -> BlockInfo {
-        let last_block = market.last_updated();
-        BlockInfo {
-            number: last_block.number,
-            hash: format!("{:?}", last_block.hash),
-            timestamp: last_block.ts.and_utc().timestamp() as u64,
-        }
-    }
-
     /// Solves an order and returns the solution.
     pub async fn solve(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
         let start_time = Instant::now();
@@ -146,15 +136,23 @@ where
         // Get the graph from the graph manager (no lock needed)
         let graph = self.graph_manager.graph();
 
-        // Keep market data lock scope small
-        let (block_info, result) = {
+        // Get block info
+        // maybe the algorithm should return the block info with the route? The block might update
+        // while solving and the route returned might be for the newer block.
+        let block_info = {
             let market = self.market_data.read().await;
-            let block_info = Self::get_block_info(&market);
-            let result = self
-                .algorithm
-                .find_best_route(graph, &market, order);
-            (block_info, result)
+            let last_block = market.last_updated();
+            BlockInfo {
+                number: last_block.number,
+                hash: format!("{:?}", last_block.hash),
+                timestamp: last_block.ts.and_utc().timestamp() as u64,
+            }
         };
+
+        let result = self
+            .algorithm
+            .find_best_route(graph, self.market_data.clone(), order)
+            .await;
 
         let order_solution = match result {
             Ok(route) => {

@@ -13,7 +13,7 @@ use tycho_simulation::tycho_core::models::Address;
 
 use super::{Algorithm, AlgorithmError};
 use crate::{
-    feed::market_data::SharedMarketData,
+    feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path},
     types::{solution::Order, Route, Swap},
 };
@@ -126,10 +126,10 @@ impl Algorithm for MostLiquidAlgorithm {
         "most_liquid"
     }
 
-    fn find_best_route(
+    async fn find_best_route(
         &self,
         graph: &StableDiGraph,
-        market: &SharedMarketData,
+        market: SharedMarketDataRef,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
         let start_time = Instant::now();
@@ -151,6 +151,9 @@ impl Algorithm for MostLiquidAlgorithm {
             });
         }
 
+        // Acquire lock to read market data
+        let market = market.read().await;
+
         // Get gas price for ranking
         let gas_price = market.gas_price().effective_gas_price();
 
@@ -169,7 +172,7 @@ impl Algorithm for MostLiquidAlgorithm {
             }
 
             // Simulate path
-            let sim_result = match self.simulate_path(path, market, amount_in.clone()) {
+            let sim_result = match self.simulate_path(path, &market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(_) => continue, // Skip paths that fail simulation
             };
@@ -190,7 +193,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 .unwrap_or(true);
 
             if is_better {
-                if let Ok(route) = self.path_to_route(path, market, amount_in.clone()) {
+                if let Ok(route) = self.path_to_route(path, &market, amount_in.clone()) {
                     best_route = Some((route, net_output));
                 }
             }
