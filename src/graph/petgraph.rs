@@ -23,7 +23,7 @@ use crate::{
 
 /// Data stored on each edge of the graph.
 ///
-/// Contains the component ID (which pool/protocol this edge represents) and
+/// Contains the component ID (which pool this edge represents) and
 /// optional algorithm-specific data. The type `D` is generic to allow
 /// different algorithms to store their own scoring data.
 ///
