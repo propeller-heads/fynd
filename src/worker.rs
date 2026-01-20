@@ -26,6 +26,8 @@ use crate::{
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
+    /// Minimum hops to search (must be >= 1).
+    pub min_hops: usize,
     /// Maximum hops to search.
     pub max_hops: usize,
     /// Timeout for solving.
@@ -34,7 +36,7 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { max_hops: 3, timeout: Duration::from_millis(100) }
+        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(100) }
     }
 }
 
@@ -144,8 +146,8 @@ where
         let graph = self.graph_manager.graph();
 
         // Get block info
-        // TODO: maybe the algorithm should return the block info with the route? The block might update
-        // while solving and the route returned might be for the newer block.
+        // TODO: maybe the algorithm should return the block info with the route? The block might
+        // update while solving and the route returned might be for the newer block.
         let block_info = {
             let market = self.market_data.read().await;
             let last_block = market

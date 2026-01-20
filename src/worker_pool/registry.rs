@@ -145,7 +145,12 @@ where
 /// Spawns workers for the MostLiquid algorithm.
 fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
     spawn_workers_generic(params, |config| {
-        MostLiquidAlgorithm::with_config(config.max_hops, config.timeout.as_millis() as u64)
+        MostLiquidAlgorithm::with_config(
+            config.min_hops,
+            config.max_hops,
+            config.timeout.as_millis() as u64,
+        )
+        .expect("invalid worker configuration for MostLiquidAlgorithm")
     })
 }
 
@@ -206,7 +211,11 @@ mod tests {
         let params = SpawnWorkersParams {
             algorithm: "most_liquid".to_string(),
             num_workers: 3,
-            worker_config: WorkerConfig { max_hops: 2, timeout: Duration::from_millis(50) },
+            worker_config: WorkerConfig {
+                min_hops: 1,
+                max_hops: 2,
+                timeout: Duration::from_millis(50),
+            },
             task_rx,
             market_data,
             event_rx,

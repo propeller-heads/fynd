@@ -263,6 +263,7 @@ pub struct BlockInfo {
 ///
 /// A route describes the path through liquidity pools to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     /// Ordered sequence of swaps to execute.
@@ -274,7 +275,7 @@ pub struct Route {
     ///
     /// Can be negative if gas cost exceeds output (e.g., due to inaccurate gas estimation
     /// or pricing). Routes with negative net_amount_out will rank lower but are still valid.
-    #[serde(with = "bigint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub net_amount_out: BigInt,
 }
 
