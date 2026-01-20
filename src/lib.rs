@@ -76,6 +76,7 @@ pub mod api;
 pub mod builder;
 pub mod cli;
 pub mod config;
+pub mod derived;
 pub mod feed;
 pub mod graph;
 pub mod order_manager;
@@ -86,6 +87,7 @@ pub mod worker_pool;
 
 // Re-export commonly used types at crate root
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
+pub use derived::{ComputationError, ComputationId, ComputationRequirements, DerivedComputation};
 pub use api::{ApiError, AppState};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
