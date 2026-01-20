@@ -9,9 +9,8 @@
 
 use std::time::{Duration, Instant};
 
-use num_bigint::BigUint;
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     algorithm::Algorithm,
@@ -174,14 +173,26 @@ where
                         .swaps
                         .first()
                         .map(|s| s.amount_in.clone())
-                        .unwrap_or_else(|| BigUint::ZERO)
+                        .ok_or_else(|| {
+                            error!(
+                                order_id = %order.id,
+                                "route missing first swap for buy order"
+                            );
+                            SolveError::NoRouteFound { order_id: order.id.clone() }
+                        })?
                 };
                 let amount_out = if order.is_sell() {
                     route
                         .swaps
                         .last()
                         .map(|s| s.amount_out.clone())
-                        .unwrap_or_else(|| BigUint::ZERO)
+                        .ok_or_else(|| {
+                            error!(
+                                order_id = %order.id,
+                                "route missing last swap for sell order"
+                            );
+                            SolveError::NoRouteFound { order_id: order.id.clone() }
+                        })?
                 } else {
                     order.amount.clone()
                 };
@@ -199,18 +210,33 @@ where
                 }
             }
             Err(err) => {
-                let status = SolutionStatus::from(err);
-                OrderSolution {
-                    order_id: order.id.clone(),
-                    status,
-                    route: None,
-                    amount_in: if order.is_sell() { order.amount.clone() } else { BigUint::ZERO },
-                    amount_out: if order.is_sell() { BigUint::ZERO } else { order.amount.clone() },
-                    gas_estimate: BigUint::ZERO,
-                    price_impact_bps: None,
-                    block: block_info,
-                    algorithm: String::new(),
-                }
+                let solve_error = match err {
+                    crate::AlgorithmError::NoPath { .. } => {
+                        error!(
+                            order_id = %order.id,
+                            error = %err,
+                            "no route found"
+                        );
+                        SolveError::NoRouteFound { order_id: order.id.clone() }
+                    }
+                    crate::AlgorithmError::Timeout { elapsed_ms } => {
+                        error!(
+                            order_id = %order.id,
+                            elapsed_ms,
+                            "solve timeout"
+                        );
+                        SolveError::Timeout { elapsed_ms }
+                    }
+                    _ => {
+                        error!(
+                            order_id = %order.id,
+                            error = %err,
+                            "algorithm error"
+                        );
+                        SolveError::AlgorithmError(err.to_string())
+                    }
+                };
+                return Err(solve_error);
             }
         };
 
