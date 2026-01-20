@@ -566,7 +566,6 @@ src/
 │   └── petgraph.rs           # PetgraphStableDiGraphManager
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
-<<<<<<< HEAD
 ├── worker_pool.rs            # WorkerPool, WorkerPoolBuilder
 ├── worker.rs                 # SolverWorker
 │
