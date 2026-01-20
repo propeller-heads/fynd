@@ -1,7 +1,7 @@
 //! HTTP request handlers for the router API.
 
 use actix_web::{web, HttpResponse};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
 use super::{ApiError, AppState};
 use crate::types::{solution::SolutionRequest, HealthStatus};
@@ -44,21 +44,15 @@ async fn solve(
         }
     }
 
-    // Check queue depth
-    if state.task_queue.is_full() {
-        warn!("task queue full, rejecting request");
-        return Err(ApiError::ServiceOverloaded);
-    }
-
-    // Enqueue and wait for result
     let solution = state
-        .task_queue
-        .enqueue(request)
+        .order_manager
+        .solve(request)
         .await?;
 
     info!(
         solve_time_ms = solution.solve_time_ms,
         num_orders = solution.orders.len(),
+        num_pools = state.order_manager.num_pools(),
         "solve completed"
     );
 
@@ -75,7 +69,7 @@ async fn health(state: web::Data<AppState>) -> HttpResponse {
     let status = HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
-        queue_depth: state.task_queue.approximate_depth(),
+        num_solver_pools: state.order_manager.num_pools(),
     };
 
     if is_healthy {

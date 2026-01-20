@@ -4,8 +4,7 @@ use std::fmt;
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-
-use super::serde_helpers::biguint_as_string;
+use serde_with::{serde_as, DisplayFromStr};
 
 /// Unique identifier for a liquidity component.
 pub type ComponentId = String;
@@ -70,14 +69,15 @@ impl fmt::Display for ProtocolSystem {
 }
 
 /// Gas price information for transaction cost estimation.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct GasPrice {
     /// Base fee per gas (EIP-1559)
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub base_fee: BigUint,
     /// Priority fee per gas (EIP-1559)
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub priority_fee: BigUint,
     /// Timestamp when this price was fetched
     pub timestamp_ms: u64,

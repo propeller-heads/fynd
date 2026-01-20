@@ -25,7 +25,7 @@ use tycho_simulation::{
 
 use super::{Algorithm, NoPathReason};
 use crate::{
-    feed::market_data::SharedMarketData,
+    feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route},
     AlgorithmError, ProtocolSystem, Swap,
@@ -381,10 +381,10 @@ impl Algorithm for MostLiquidAlgorithm {
 
     // TODO: Consider adding token pair symbols to the span for easier interpretation
     #[instrument(level = "debug", skip_all, fields(order_id = %order.id))]
-    fn find_best_route(
+    async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: &SharedMarketData,
+        market: SharedMarketDataRef,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
         let start = Instant::now();
@@ -413,6 +413,9 @@ impl Algorithm for MostLiquidAlgorithm {
                 reason: NoPathReason::NoGraphPath,
             });
         }
+
+        // Acquire lock to read market data
+        let market = market.read().await;
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
@@ -454,7 +457,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let route = match Self::simulate_path(edge_path, market, amount_in.clone()) {
+            let route = match Self::simulate_path(edge_path, &market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -569,7 +572,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, sync::Arc};
+
+    use tokio::sync::RwLock;
 
     use super::*;
     use crate::{
@@ -1009,8 +1014,8 @@ mod tests {
 
     // ==================== find_best_route Tests ====================
 
-    #[test]
-    fn find_best_route_single_path() {
+    #[tokio::test]
+    async fn find_best_route_single_path() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1019,8 +1024,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         assert_eq!(route.swaps.len(), 1);
@@ -1028,8 +1035,8 @@ mod tests {
         assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
     }
 
-    #[test]
-    fn find_best_route_ranks_by_net_amount_out() {
+    #[tokio::test]
+    async fn find_best_route_ranks_by_net_amount_out() {
         // Tests that route selection is based on net_amount_out (output - gas cost),
         // not just gross output. Four parallel pools with different spot_price/gas combos:
         //
@@ -1049,8 +1056,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         // Should select "best" pool for highest net_amount_out (2000)
@@ -1060,8 +1069,8 @@ mod tests {
         assert_eq!(route.net_amount_out, BigInt::from(2000)); // 3000 - 1000
     }
 
-    #[test]
-    fn find_best_route_no_path_returns_error() {
+    #[tokio::test]
+    async fn find_best_route_no_path_returns_error() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C"); // Disconnected
@@ -1071,13 +1080,16 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
-        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
 
-    #[test]
-    fn find_best_route_multi_hop() {
+    #[tokio::test]
+    async fn find_best_route_multi_hop() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1089,8 +1101,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 2, 100).unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         // A->B: ONE_ETH*2, B->C: (ONE_ETH*2)*3
@@ -1101,8 +1115,8 @@ mod tests {
         assert_eq!(route.swaps[1].component_id, "pool2".to_string());
     }
 
-    #[test]
-    fn find_best_route_skips_paths_without_edge_weights() {
+    #[tokio::test]
+    async fn find_best_route_skips_paths_without_edge_weights() {
         // Pool1 has edge weights (scoreable), Pool2 doesn't (filtered out during scoring)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1146,8 +1160,10 @@ mod tests {
         // Use max_hops=1 to focus only on direct 1-hop paths
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         // Should use pool1 (only scoreable path), despite pool2 having better multiplier
@@ -1156,8 +1172,8 @@ mod tests {
         assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
     }
 
-    #[test]
-    fn find_best_route_no_scorable_paths() {
+    #[tokio::test]
+    async fn find_best_route_no_scorable_paths() {
         // All paths exist but none have edge weights (can't be scored)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1179,16 +1195,19 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
-        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
         assert!(matches!(
             result,
             Err(AlgorithmError::NoPath { reason: NoPathReason::NoScorablePaths, .. })
         ));
     }
 
-    #[test]
-    fn find_best_route_gas_exceeds_output_returns_negative_net() {
+    #[tokio::test]
+    async fn find_best_route_gas_exceeds_output_returns_negative_net() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1204,10 +1223,12 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
+        let market_ref = Arc::new(RwLock::new(market));
 
         // Route should still be returned, but with negative net_amount_out
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .expect("should return route even with negative net_amount_out");
 
         // Verify the route has swaps
@@ -1219,8 +1240,8 @@ mod tests {
         assert_eq!(route.net_amount_out, expected_net);
     }
 
-    #[test]
-    fn find_best_route_insufficient_liquidity() {
+    #[tokio::test]
+    async fn find_best_route_insufficient_liquidity() {
         // Pool has limited liquidity (1000 wei) but we try to swap ONE_ETH
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1234,13 +1255,16 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
+        let market_ref = Arc::new(RwLock::new(market));
 
-        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
 
-    #[test]
-    fn find_best_route_circular_arbitrage() {
+    #[tokio::test]
+    async fn find_best_route_circular_arbitrage() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1254,9 +1278,11 @@ mod tests {
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         // Should have 2 swaps forming a circle
@@ -1276,8 +1302,8 @@ mod tests {
         assert_eq!(route.swaps[0].token_in, route.swaps[1].token_out);
     }
 
-    #[test]
-    fn find_best_route_respects_min_hops() {
+    #[tokio::test]
+    async fn find_best_route_respects_min_hops() {
         // Setup: A->B (1-hop) and A->C->B (2-hop)
         // With min_hops=2, should only return the 2-hop path
         let token_a = token(0x01, "A");
@@ -1294,9 +1320,11 @@ mod tests {
         // min_hops=2 should skip the 1-hop direct path
         let algorithm = MostLiquidAlgorithm::with_config(2, 3, 100).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
         let route = algorithm
-            .find_best_route(manager.graph(), &market, &order)
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await
             .unwrap();
 
         // Should use 2-hop path (A->C->B), not the direct 1-hop path
@@ -1305,8 +1333,8 @@ mod tests {
         assert_eq!(route.swaps[1].component_id, "pool_cb");
     }
 
-    #[test]
-    fn find_best_route_respects_max_hops() {
+    #[tokio::test]
+    async fn find_best_route_respects_max_hops() {
         // Setup: Only path is A->B->C (2 hops)
         // With max_hops=1, should return NoPath error
         let token_a = token(0x01, "A");
@@ -1321,16 +1349,19 @@ mod tests {
         // max_hops=1 cannot reach C from A (needs 2 hops)
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
-        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
             "Should return NoPath when max_hops is insufficient"
         );
     }
 
-    #[test]
-    fn find_best_route_timeout_returns_best_so_far() {
+    #[tokio::test]
+    async fn find_best_route_timeout_returns_best_so_far() {
         // Setup: Many parallel paths to process
         // With very short timeout, should return the best route found before timeout
         // or Timeout error if no route was completed
@@ -1349,8 +1380,11 @@ mod tests {
         // timeout=0ms should timeout after processing some paths
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 0).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
 
-        let result = algorithm.find_best_route(manager.graph(), &market, &order);
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
 
         // With 0ms timeout, we either get:
         // - A route (if at least one path completed before timeout check)

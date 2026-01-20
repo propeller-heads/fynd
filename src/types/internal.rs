@@ -6,21 +6,20 @@ use num_bigint::BigUint;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::Solution;
-use crate::types::solution::SolutionRequest;
+use super::{Order, SingleOrderSolution};
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;
 
 /// Result type for solve operations.
-pub type SolveResult = Result<Solution, SolveError>;
+pub type SolveResult = Result<SingleOrderSolution, SolveError>;
 
-/// A task representing a solve request in the queue.
+/// A task representing a order request in the queue.
 pub struct SolveTask {
     /// Unique identifier for this task.
     pub id: TaskId,
-    /// The solve request to process.
-    pub request: SolutionRequest,
+    /// The order request to process.
+    pub order: Order,
     /// Channel to send the result back.
     pub response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
@@ -29,12 +28,8 @@ pub struct SolveTask {
 
 impl SolveTask {
     /// Creates a new solve task.
-    pub fn new(
-        id: TaskId,
-        request: SolutionRequest,
-        response_tx: oneshot::Sender<SolveResult>,
-    ) -> Self {
-        Self { id, request, response_tx, created_at: Instant::now() }
+    pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
+        Self { id, order, response_tx, created_at: Instant::now() }
     }
 
     /// Returns how long this task has been waiting.
