@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use crate::feed::market_data::SharedMarketData;
 
 use super::error::ComputationError;
+use super::store::DerivedDataStore;
 
 /// Unique identifier for a computation type.
 ///
@@ -51,18 +52,6 @@ impl ComputationRequirements {
     }
 }
 
-/// Placeholder for `DerivedDataStore` - will be properly implemented later
-///
-/// This provides typed access to previously computed derived data.
-#[derive(Debug, Default)]
-pub struct DerivedDataStore {
-    // Fields will be added in Phase 2:
-    // token_prices: Option<TokenPrices>,
-    // pool_depths: Option<PoolDepths>,
-    // spot_prices: Option<SpotPrices>,
-    _placeholder: (),
-}
-
 /// Trait for derived data computations.
 ///
 /// Implement this trait to define a new type of derived data that can be
@@ -83,7 +72,7 @@ pub struct DerivedDataStore {
 ///
 /// impl DerivedComputation for TokenPriceComputation {
 ///     type Output = TokenPrices;
-///     const ID: ComputationId = ComputationId("token_prices");
+///     const ID: ComputationId = "token_prices";
 ///
 ///     fn compute(
 ///         &self,

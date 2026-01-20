@@ -17,7 +17,7 @@
 //! // Define a computation
 //! impl DerivedComputation for TokenPriceComputation {
 //!     type Output = TokenPrices;
-//!     const ID: ComputationId = ComputationId("token_prices");
+//!     const ID: ComputationId = "token_prices";
 //!
 //!     fn compute(&self, market: &SharedMarketData, store: &DerivedDataStore)
 //!         -> Result<Self::Output, ComputationError> {
@@ -31,8 +31,10 @@
 
 mod computation;
 mod error;
+mod store;
+mod types;
 
-pub use computation::{
-    ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
-};
+pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
 pub use error::ComputationError;
+pub use store::{DerivedDataStore, PoolDepths, SpotPrices, TokenPrices};
+pub use types::{PoolDepth, SpotPrice, TokenPrice};
