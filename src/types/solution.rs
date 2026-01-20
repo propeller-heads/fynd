@@ -13,15 +13,17 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use num_bigint::BigUint;
+use std::collections::HashMap;
+
+use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use uuid::Uuid;
 
 use super::{
     primitives::{ComponentId, ProtocolSystem},
-    serde_helpers::biguint_as_string,
+    serde_helpers::{bigint_as_string, biguint_as_string},
 };
 
 // ============================================================================
@@ -116,7 +118,6 @@ impl Order {
 pub enum OrderSide {
     /// Sell exactly the specified amount of the input token.
     Sell,
-    // TODO: Add Buy variant for exact output orders
 }
 
 /// Errors that can occur when validating an [`Order`].
@@ -219,17 +220,54 @@ pub struct BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     pub swaps: Vec<Swap>,
+    /// Net amount out after accounting for gas costs in output token terms.
+    ///
+    /// This is NOT equal to the last swap's `amount_out` - it subtracts the gas cost
+    /// converted to output token units. Used for comparing routes.
+    ///
+    /// Can be negative if gas cost exceeds output (e.g., due to inaccurate gas estimation
+    /// or pricing). Routes with negative net_amount_out will rank lower but are still valid.
+    #[serde(with = "bigint_as_string")]
+    pub net_amount_out: BigInt,
 }
 
 impl Route {
-    /// Creates a new route from a list of swaps.
-    pub fn new(swaps: Vec<Swap>) -> Self {
-        Self { swaps }
+    /// Creates a new route from swaps and pre-calculated net amount out.
+    ///
+    /// Use this when you've already calculated the net output accounting for gas.
+    pub fn new(swaps: Vec<Swap>, net_amount_out: BigInt) -> Self {
+        Self { swaps, net_amount_out }
     }
+}
 
+impl Route {
     /// Returns the number of hops (swaps) in this route.
     pub fn hop_count(&self) -> usize {
         self.swaps.len()
+    }
+
+    /// Returns a human-readable path description (e.g., "WETH -> USDC -> DAI").
+    ///
+    /// Falls back to token address if token not found in the provided map.
+    pub fn path_description(&self, tokens: &HashMap<Address, Token>) -> String {
+        let mut symbols = Vec::with_capacity(self.swaps.len() + 1);
+
+        for (i, swap) in self.swaps.iter().enumerate() {
+            if i == 0 {
+                let symbol = tokens
+                    .get(&swap.token_in)
+                    .map(|t| t.symbol.clone())
+                    .unwrap_or_else(|| format!("{:?}", swap.token_in));
+                symbols.push(symbol);
+            }
+            let symbol = tokens
+                .get(&swap.token_out)
+                .map(|t| t.symbol.clone())
+                .unwrap_or_else(|| format!("{:?}", swap.token_out));
+            symbols.push(symbol);
+        }
+
+        symbols.join(" -> ")
     }
 
     /// Returns the input token of the route (first swap's input).
@@ -437,18 +475,26 @@ mod tests {
     // Route Tests
     // -------------------------------------------------------------------------
 
+    fn make_route(swaps: Vec<(u8, u8)>) -> Route {
+        let swaps: Vec<Swap> = swaps
+            .into_iter()
+            .map(|(a, b)| make_swap(a, b, 1000, 990))
+            .collect();
+        // Use last swap's amount_out as net_amount_out for test purposes
+        let net: BigInt = swaps
+            .last()
+            .map(|s| BigInt::from(s.amount_out.clone()))
+            .unwrap_or_default();
+        Route::new(swaps, net)
+    }
+
     #[rstest]
     #[case::empty(vec![], 0)]
     #[case::single(vec![(0x01, 0x02)], 1)]
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], 2)]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], 3)]
     fn test_route_hop_count(#[case] swaps: Vec<(u8, u8)>, #[case] expected: usize) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.hop_count(), expected);
     }
 
@@ -457,12 +503,7 @@ mod tests {
     #[case::single(vec![(0x01, 0x02)], Some(0x01))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x01))]
     fn test_route_input_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.input_token(), expected.map(make_address));
     }
 
@@ -471,12 +512,7 @@ mod tests {
     #[case::single(vec![(0x01, 0x02)], Some(0x02))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x03))]
     fn test_route_output_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         assert_eq!(route.output_token(), expected.map(make_address));
     }
 
@@ -486,12 +522,7 @@ mod tests {
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], vec![0x02])]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], vec![0x02, 0x03])]
     fn test_route_intermediate_tokens(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Vec<u8>) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         let intermediates = route.intermediate_tokens();
         assert_eq!(
             intermediates,
@@ -511,7 +542,11 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route::new(swaps);
+        let net: BigInt = swaps
+            .last()
+            .map(|s| BigInt::from(s.amount_out.clone()))
+            .unwrap_or_default();
+        let route = Route::new(swaps, net);
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 
@@ -525,12 +560,7 @@ mod tests {
         #[case] should_pass: bool,
         #[case] error_type: Option<&str>,
     ) {
-        let route = Route::new(
-            swaps
-                .into_iter()
-                .map(|(a, b)| make_swap(a, b, 1000, 990))
-                .collect(),
-        );
+        let route = make_route(swaps);
         let result = route.validate();
 
         assert_eq!(result.is_ok(), should_pass);
@@ -640,5 +670,56 @@ mod tests {
 
         let json = serde_json::to_string(&solution).unwrap();
         assert!(json.contains(r#""total_gas_estimate":"500000""#));
+    }
+    // -------------------------------------------------------------------------
+    // path_description Tests
+    // -------------------------------------------------------------------------
+
+    fn make_token(byte: u8, symbol: &str) -> Token {
+        use tycho_simulation::evm::tycho_models::Chain;
+        Token {
+            address: make_address(byte),
+            symbol: symbol.to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        }
+    }
+
+    #[rstest]
+    #[case::empty(vec![], vec![], "")]
+    #[case::single_hop(vec![(0x01, 0x02)], vec![(0x01, "WETH"), (0x02, "USDC")], "WETH -> USDC")]
+    #[case::multi_hop(
+        vec![(0x01, 0x02), (0x02, 0x03)],
+        vec![(0x01, "WETH"), (0x02, "USDC"), (0x03, "DAI")],
+        "WETH -> USDC -> DAI"
+    )]
+    #[case::cyclic(
+        vec![(0x01, 0x02), (0x02, 0x01)],
+        vec![(0x01, "WETH"), (0x02, "USDC")],
+        "WETH -> USDC -> WETH"
+    )]
+    #[case::unknown_tokens(
+        vec![(0x01, 0x02)],
+        vec![],
+        "Bytes(0x0101010101010101010101010101010101010101) -> Bytes(0x0202020202020202020202020202020202020202)"
+    )]
+    fn test_path_description(
+        #[case] swaps: Vec<(u8, u8)>,
+        #[case] token_data: Vec<(u8, &str)>,
+        #[case] expected: &str,
+    ) {
+        let route = make_route(swaps);
+        let tokens: HashMap<Address, Token> = token_data
+            .into_iter()
+            .map(|(byte, symbol)| {
+                let t = make_token(byte, symbol);
+                (t.address.clone(), t)
+            })
+            .collect();
+
+        assert_eq!(route.path_description(&tokens), expected);
     }
 }
