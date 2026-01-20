@@ -18,7 +18,7 @@ use tycho_solver::{
     order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
     task_queue::{TaskQueue, TaskQueueConfig},
     worker::WorkerConfig,
-    worker_pool::{AlgorithmType, WorkerPoolBuilder},
+    worker_pool::WorkerPoolBuilder,
     TychoFeed, TychoFeedConfig,
 };
 
@@ -89,47 +89,52 @@ async fn main() -> std::io::Result<()> {
         TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
 
     // Create worker pools - each pool has its own task queue
-    // Currently we only have MostLiquid, but this is where you'd add more algorithms
+    // Currently we only have "most_liquid", but this is where you'd add more algorithms
     let mut solver_pool_handles = Vec::new();
     let mut worker_pools = Vec::new();
 
-    // Pool 1: MostLiquid algorithm
+    // Pool 1: most_liquid algorithm
     let worker_config = WorkerConfig::default();
     let task_queue = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
     let (task_handle, task_rx) = task_queue.split();
 
     let worker_pool = WorkerPoolBuilder::new()
         .name("most_liquid")
-        .algorithm_type(AlgorithmType::MostLiquid)
+        .algorithm("most_liquid")
         .num_workers(config.num_workers_per_pool)
         .worker_config(worker_config)
-        .build(task_rx, Arc::clone(&market_data), event_rx);
+        .build(task_rx, Arc::clone(&market_data), event_rx)
+        .expect("failed to create worker pool: algorithm not registered");
 
     info!(
         name = %worker_pool.name(),
-        algorithm = %worker_pool.algorithm_type(),
+        algorithm = %worker_pool.algorithm(),
         num_workers = worker_pool.num_workers(),
         "worker pool started"
     );
 
     solver_pool_handles.push(SolverPoolHandle::new(
         worker_pool.name(),
-        worker_pool.algorithm_type().to_string(),
+        worker_pool.algorithm(),
         task_handle,
     ));
     worker_pools.push(worker_pool);
 
-    // Future: Add more worker pools here with different algorithms
+    // Future: Add more worker pools here with different algorithms/configs
     // Example:
     // let task_queue2 = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
     // let (task_handle2, task_rx2) = task_queue2.split();
     // let worker_pool2 = WorkerPoolBuilder::new()
-    //     .name("fast_heuristic")
-    //     .algorithm_type(AlgorithmType::FastHeuristic)
-    //     .num_workers(2)
-    //     .solver_config(SolverConfig::default())
+    //     .name("most_liquid_thorough")
+    //     .algorithm("most_liquid")
+    //     .num_workers(8)
+    //     .worker_config(WorkerConfig { max_hops: 5, ..Default::default() })
     //     .build(task_rx2, Arc::clone(&market_data), event_rx.resubscribe());
-    // solver_pool_handles.push(SolverPoolHandle::new(...));
+    // solver_pool_handles.push(SolverPoolHandle::new(
+    //     worker_pool2.name(),
+    //     worker_pool2.algorithm(),
+    //     task_handle2,
+    // ));
     // worker_pools.push(worker_pool2);
 
     // Create OrderManager with all solver pool handles

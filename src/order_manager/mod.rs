@@ -36,9 +36,9 @@ use crate::{
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
 pub struct SolverPoolHandle {
-    /// Human-readable name for logging & metrics.
+    /// Human-readable name for this pool (used in logging & metrics).
     pub name: String,
-    /// Algorithm identifier.
+    /// Algorithm name.
     pub algorithm: String,
     /// Queue handle for this pool.
     pub queue: TaskQueueHandle,
@@ -508,7 +508,7 @@ mod tests {
     async fn test_order_manager_timeout() {
         // Pool that takes too long
         let (pool, worker) =
-            create_mock_pool("slow_pool", "algo", Ok(make_single_solution(900)), 500);
+            create_mock_pool("slow_pool", "slow_algo", Ok(make_single_solution(900)), 500);
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
         let manager = OrderManager::new(vec![pool], config);
@@ -534,10 +534,10 @@ mod tests {
     async fn test_order_manager_early_return_on_min_responses() {
         // Pool A: fast
         let (pool_a, worker_a) =
-            create_mock_pool("pool_a", "algo_a", Ok(make_single_solution(800)), 0);
+            create_mock_pool("fast_pool", "fast_algo", Ok(make_single_solution(800)), 0);
         // Pool B: slow (but we won't wait for it)
         let (pool_b, worker_b) =
-            create_mock_pool("pool_b", "algo_b", Ok(make_single_solution(950)), 500);
+            create_mock_pool("slow_pool", "slow_algo", Ok(make_single_solution(950)), 500);
 
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(1000))
@@ -616,7 +616,7 @@ mod tests {
         // Pool that returns an error
         let (pool, worker) = create_mock_pool(
             "error_pool",
-            "algo",
+            "error_algo",
             Err(SolveError::NoRouteFound { order_id: "test-order".to_string() }),
             0,
         );

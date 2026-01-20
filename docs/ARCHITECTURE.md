@@ -134,8 +134,8 @@ pub struct OrderManagerConfig {
 }
 
 pub struct SolverPoolHandle {
-    pub name: String,
-    pub algorithm: String,
+    pub name: String,       // Human-readable pool name (for logging/metrics)
+    pub algorithm: String,  // Algorithm name
     pub queue: TaskQueueHandle,
 }
 ```
@@ -178,17 +178,17 @@ impl TaskQueueHandle {
 
 ```rust
 pub struct WorkerPool {
-    name: String,
-    algorithm_type: AlgorithmType,
+    name: String,       // Human-readable pool name (for logging/metrics)
+    algorithm: String,  // Algorithm name (e.g., "most_liquid")
     workers: Vec<JoinHandle<()>>,
     shutdown_tx: broadcast::Sender<()>,
 }
-
-pub enum AlgorithmType {
-    MostLiquid,
-    // Future: FastHeuristic, SplitRoute, etc.
-}
 ```
+
+Algorithms are registered in `src/algorithm/registry.rs`. To add a new algorithm:
+1. Implement the `Algorithm` trait
+2. Add a match arm in `spawn_workers()`
+3. Add the name to `AVAILABLE_ALGORITHMS`
 
 **Design Rationale (Queue per Pool):**
 
@@ -567,11 +567,12 @@ src/
 │
 ├── task_queue.rs             # TaskQueue, TaskQueueHandle
 <<<<<<< HEAD
-├── worker_pool.rs            # WorkerPool, AlgorithmType
+├── worker_pool.rs            # WorkerPool, WorkerPoolBuilder
 ├── worker.rs                 # SolverWorker
 │
 └── algorithm/                # Algorithm implementations
     ├── mod.rs                # Algorithm trait
+    ├── registry.rs           # Algorithm registry for dynamic selection
     └── most_liquid.rs        # MostLiquidAlgorithm
 ```
 

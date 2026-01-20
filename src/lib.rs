@@ -99,4 +99,4 @@ pub use types::{
     SolutionStatus, SolveError, SolveResult, SolveTask, Swap, TaskId,
 };
 pub use worker::{SolverWorker, WorkerConfig};
-pub use worker_pool::{AlgorithmType, WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};
+pub use worker_pool::{UnknownAlgorithmError, WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

@@ -5,6 +5,12 @@
 //!
 //! Algorithms are generic over their preferred graph type, allowing them to use
 //! different graph crates (petgraph, custom, etc.) and leverage built-in algorithms.
+//!
+//! # Adding a New Algorithm
+//!
+//! 1. Create a new module with your algorithm implementation
+//! 2. Implement the `Algorithm` trait
+//! 3. Register the algorithm in `registry.rs`
 
 pub mod most_liquid;
 
