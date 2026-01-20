@@ -12,6 +12,7 @@ actix-rt = "2"
 
 # Async
 tokio = { version = "1", features = ["full", "sync"] }
+async-trait = "0.1"
 
 # Channels
 crossbeam-channel = "0.5"

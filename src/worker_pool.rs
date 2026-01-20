@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
 use crate::{
-    algorithm::MostLiquidAlgorithm,
+    algorithm::{MostLiquidAlgorithm, MostLiquidScorer},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::SolveTask,
     worker::{SolverWorker, WorkerConfig},
@@ -80,21 +80,21 @@ impl WorkerPool {
                         .expect("failed to create tokio runtime");
 
                     rt.block_on(async move {
-                        // Create algorithm
+                        // Create algorithm with scorer
                         let algorithm = MostLiquidAlgorithm::with_config(
+                            MostLiquidScorer::new(),
                             1,
                             worker_config.max_hops,
                             worker_config.timeout.as_millis() as u64,
                         )
                         .expect("invalid algorithm configuration");
 
-                        // Create solver (graph type and manager are automatically inferred from
-                        // algorithm)
+                        // Create solver
                         let mut worker =
                             SolverWorker::new(market_data, event_rx, algorithm, worker_config);
 
-                        // Initialize solver graph
-                        worker.initialize_graph().await;
+                        // Initialize algorithm's internal state
+                        worker.initialize().await;
 
                         info!(worker_id, "worker started");
 

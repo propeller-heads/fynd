@@ -1,10 +1,11 @@
 //! Shared test utilities for algorithm tests.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+use tokio::sync::RwLock;
 use tycho_simulation::tycho_core::{
     dto::ProtocolStateDelta,
     models::{protocol::ProtocolComponent, token::Token, Address, Chain},
@@ -16,9 +17,8 @@ use tycho_simulation::tycho_core::{
 };
 
 use crate::{
-    algorithm::most_liquid::DepthAndPrice,
-    feed::market_data::SharedMarketData,
-    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
+    algorithm::brute_force::{BruteForceAlgorithm, PathScorer},
+    feed::market_data::{SharedMarketData, SharedMarketDataRef},
     types::{solution::OrderSide, Order},
     GasPrice,
 };
@@ -33,7 +33,6 @@ pub const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 /// Each call to `get_amount_out` returns a new state with an incremented spot_price,
 /// simulating liquidity changes after a swap. This allows testing state override logic
 /// when the same pool is used multiple times in a path.
-// TODO: Consider moving MockProtocolSim to the tycho-common
 #[derive(Debug, Clone)]
 pub struct MockProtocolSim {
     /// Sport price is a pre-fee ration of token with larger address to smaller address
@@ -232,14 +231,11 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
     }
 }
 
-/// Sets up market with components and a graph. Returns (market, graph_manager).
+/// Sets up market with components. Returns market data.
 ///
 /// Pools map ComponentId to (tokens, spot_price).
-pub fn setup_market(
-    pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-) -> (SharedMarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+pub fn setup_market(pools: Vec<(&str, &Token, &Token, MockProtocolSim)>) -> SharedMarketDataRef {
     let mut market = SharedMarketData::new();
-    let mut component_weights = HashMap::new();
 
     // Set gas_price = 1 wei/gas for simple calculations
     market.update_gas_price(GasPrice::new(BigUint::from(1u64), BigUint::from(0u64)));
@@ -247,42 +243,19 @@ pub fn setup_market(
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];
         let comp = component(pool_id, &tokens);
-        let weight_to = DepthAndPrice::from_protocol_sim(&state, token_in, token_out).unwrap();
-        let weight_from = DepthAndPrice::from_protocol_sim(&state, token_out, token_in).unwrap();
 
         // Insert component, state, and tokens separately using new API
         market.upsert_components(std::iter::once(comp));
         market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
         market.upsert_tokens(tokens);
-
-        component_weights.insert(pool_id, (token_in, token_out, weight_to, weight_from));
     }
 
-    let mut graph_manager = PetgraphStableDiGraphManager::default();
-    graph_manager.initialize_graph(&market.component_topology());
+    Arc::new(RwLock::new(market))
+}
 
-    for (pool_id, (token_in, token_out, weight_to, weight_from)) in component_weights {
-        graph_manager
-            .set_edge_weight(
-                &pool_id.to_string(),
-                &token_in.address,
-                &token_out.address,
-                weight_to,
-                false,
-            )
-            .unwrap();
-        graph_manager
-            .set_edge_weight(
-                &pool_id.to_string(),
-                &token_out.address,
-                &token_in.address,
-                weight_from,
-                false,
-            )
-            .unwrap();
-    }
-
-    (market, graph_manager)
+/// Wraps an existing SharedMarketData in Arc<RwLock<>>.
+pub fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
+    Arc::new(RwLock::new(market))
 }
 
 /// Common fixtures for tests.
@@ -294,43 +267,21 @@ pub mod fixtures {
         (addr(0x0A), addr(0x0B), addr(0x0C), addr(0x0D))
     }
 
-    /// A <-> B <-> C <-> D linear chain (bidirectional).
-    pub fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
-        let (a, b, c, d) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("bc".into(), vec![b.clone(), c.clone()]);
-        t.insert("cd".into(), vec![c, d]);
-        m.initialize_graph(&t);
-        m
-    }
-
-    /// 3 parallel pools A<->B, 2 pools B<->C.
-    pub fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
-        let (a, b, c, _) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
-        t.insert("ab1".into(), vec![a.clone(), b.clone()]);
-        t.insert("ab2".into(), vec![a.clone(), b.clone()]);
-        t.insert("ab3".into(), vec![a, b.clone()]);
-        t.insert("bc1".into(), vec![b.clone(), c.clone()]);
-        t.insert("bc2".into(), vec![b, c]);
-        m.initialize_graph(&t);
-        m
-    }
-
-    /// Diamond: A->B->D, A->C->D (two 2-hop paths).
-    pub fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
-        let (a, b, c, d) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("ac".into(), vec![a, c.clone()]);
-        t.insert("bd".into(), vec![b, d.clone()]);
-        t.insert("cd".into(), vec![c, d]);
-        m.initialize_graph(&t);
-        m
+    /// Helper to build a graph directly in a BruteForceAlgorithm for testing.
+    ///
+    /// Takes a slice of (component_id, tokens) tuples and adds them to the algorithm's
+    /// internal graph.
+    pub fn make_algo_graph<S: PathScorer>(
+        algo: &mut BruteForceAlgorithm<S>,
+        components: &[(&str, &[&Address])],
+    ) {
+        for (comp_id, tokens) in components {
+            let token_vec: Vec<Address> = tokens
+                .iter()
+                .map(|&a| a.clone())
+                .collect();
+            algo.add_component(&comp_id.to_string(), &token_vec);
+        }
     }
 }
 

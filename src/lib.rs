@@ -13,10 +13,9 @@
 //! - **API Layer** (`api`): Actix Web HTTP handlers for `/solve`, `/health`, `/metrics`
 //! - **Task Queue** (`task_queue`): Bounded queue with backpressure for solve requests
 //! - **Worker Pool** (`worker_pool`): Dedicated OS threads for CPU-bound route finding
-//! - **Solver** (`solver`): Route finding logic, owns local market topology copy
-//! - **Algorithm** (`algorithm`): Pluggable route-finding algorithms
+//! - **Solver** (`solver`): Route finding logic using stateful algorithms
+//! - **Algorithm** (`algorithm`): Pluggable route-finding algorithms that own their state
 //! - **Market Data** (`market_data`): Shared state (components, tokens, gas prices)
-//! - **Graph** (`graph`): Graph management for algorithms
 //! - **Indexer** (`indexer`): Tycho WebSocket connection, updates market data
 //! - **Events** (`events`): Market events broadcast from indexer to solvers
 //!
@@ -74,14 +73,16 @@
 pub mod algorithm;
 pub mod api;
 pub mod feed;
-pub mod graph;
 pub mod task_queue;
 pub mod types;
 pub mod worker;
 pub mod worker_pool;
 
 // Re-export commonly used types at crate root
-pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
+pub use algorithm::{
+    brute_force::{BruteForceAlgorithm, PathScorer},
+    AlgorithmError, MostLiquidAlgorithm,
+};
 pub use api::{ApiError, AppState};
 pub use feed::{
     events::MarketEvent,
@@ -89,7 +90,6 @@ pub use feed::{
     tycho_feed::TychoFeed,
     TychoFeedConfig, TychoFeedError,
 };
-pub use graph::{GraphManager, Path};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},

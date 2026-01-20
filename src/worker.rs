@@ -1,10 +1,9 @@
 //! A Solver Worker that processes solve requests.
 //!
 //! The Solver Worker:
-//! - Initializes graph from market topology (via a GraphManager)
 //! - Holds a reference to SharedMarketData (for state lookups)
-//! - Subscribes to MarketEvents to keep local topology in sync
-//! - Uses an Algorithm to find routes
+//! - Subscribes to MarketEvents to update the algorithm's internal state
+//! - Uses a stateful Algorithm that owns its internal data structures (graph, etc.)
 
 use std::time::{Duration, Instant};
 
@@ -14,11 +13,7 @@ use tracing::{debug, warn};
 
 use crate::{
     algorithm::{Algorithm, AlgorithmError},
-    feed::{
-        events::{MarketEvent, MarketEventHandler},
-        market_data::SharedMarketDataRef,
-    },
-    graph::GraphManager,
+    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::{solution::SolutionRequest, OrderSolution, Solution, SolutionStatus, SolveError},
 };
 
@@ -39,35 +34,30 @@ impl Default for WorkerConfig {
 
 /// A solver worker instance that processes solve requests.
 ///
-/// The solver worker initializes the graph on startup from SharedMarketData, and the graph
-/// manager maintains the graph and updates it based on market events.
+/// The worker initializes the algorithm on startup from SharedMarketData.
+/// The algorithm maintains its own internal state (graph, indices, etc.) and
+/// updates it based on market events.
 pub struct SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphManager: MarketEventHandler,
 {
-    /// Algorithm used for route finding.
+    /// Algorithm used for route finding (owns its internal state).
     algorithm: A,
-    /// Graph manager that maintains the graph.
-    graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
     /// Receiver for market events.
     event_rx: broadcast::Receiver<MarketEvent>,
     /// Configuration.
     config: WorkerConfig,
-    /// Whether the graph has been initialized.
+    /// Whether the algorithm has been initialized.
     initialized: bool,
 }
 
 impl<A> SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphManager: MarketEventHandler,
 {
     /// Creates a new Solver.
-    ///
-    /// The graph manager is automatically created from the algorithm's associated type.
     ///
     /// # Arguments
     ///
@@ -81,39 +71,27 @@ where
         algorithm: A,
         config: WorkerConfig,
     ) -> Self {
-        Self {
-            algorithm,
-            graph_manager: A::GraphManager::default(),
-            market_data,
-            event_rx,
-            config,
-            initialized: false,
-        }
+        Self { algorithm, market_data, event_rx, config, initialized: false }
     }
 
-    /// Initializes the graph from SharedMarketData.
+    /// Initializes the algorithm from SharedMarketData.
     ///
     /// Call this on startup or when recovering from missed events.
-    /// Gets the market topology from SharedMarketData and uses it to build the graph.
-    pub async fn initialize_graph(&mut self) {
-        let market = self.market_data.read().await;
-        let topology = market.component_topology();
-        self.graph_manager
-            .initialize_graph(&topology);
+    /// The algorithm acquires locks internally.
+    pub async fn initialize(&mut self) {
+        self.algorithm
+            .initialize(self.market_data.clone())
+            .await;
         self.initialized = true;
     }
 
-    /// Processes pending market events.
-    ///
-    /// Call this periodically or before each solve to stay in sync.
-    ///
-    /// Errors are logged but do not stop processing of subsequent events.
-    pub fn process_events(&mut self) {
+    /// Drains pending events from the channel.
+    fn drain_events(&mut self) -> Vec<MarketEvent> {
+        let mut events = Vec::new();
         while let Ok(event) = self.event_rx.try_recv() {
-            if let Err(e) = self.graph_manager.handle_event(&event) {
-                warn!("Warning: Error handling market event: {:?}", e);
-            }
+            events.push(event);
         }
+        events
     }
 
     /// Solves a request and returns the solution.
@@ -122,23 +100,41 @@ where
     pub async fn solve(&mut self, request: &SolutionRequest) -> Result<Solution, SolveError> {
         let start_time = Instant::now();
 
-        // Process any pending events first
-        self.process_events();
+        // Drain events first (no locks needed)
+        let pending_events = self.drain_events();
 
-        // Ensure we're initialized
+        // Ensure we're initialized FIRST (before handling events)
+        // Events are incremental updates that only make sense on an initialized graph
         if !self.initialized {
-            self.initialize_graph().await;
+            self.algorithm
+                .initialize(self.market_data.clone())
+                .await;
+            self.initialized = true;
         }
 
-        // Get a read lock on market data
-        let market = self.market_data.read().await;
+        // Process pending events as a batch (algorithm handles locking internally)
+        if !pending_events.is_empty() {
+            if let Err(e) = self
+                .algorithm
+                .handle_events(&pending_events, self.market_data.clone())
+                .await
+            {
+                warn!("Warning: Error handling market events: {:?}", e);
+            }
+        }
 
         // Get block info for the solution
-        let block_info = market
-            .last_updated()
-            .ok_or(SolveError::Internal(
-                "No block info available, this means no block has been processed yet".to_string(),
-            ))?;
+        // TODO: Make BlockInfo access atomic so we don't need to acquire a lock here
+        let block_info = {
+            let market = self.market_data.read().await;
+            market
+                .last_updated()
+                .cloned()
+                .ok_or(SolveError::Internal(
+                    "No block info available, this means no block has been processed yet"
+                        .to_string(),
+                ))?
+        };
 
         // Solve each order
         let mut order_solutions = Vec::with_capacity(request.orders.len());
@@ -170,11 +166,11 @@ where
                 continue;
             }
 
-            // Find route using algorithm
-            let graph = self.graph_manager.graph();
+            // Find route using algorithm (algorithm handles locking internally)
             let result = self
                 .algorithm
-                .find_best_route(graph, &market, order);
+                .find_best_route(self.market_data.clone(), order)
+                .await;
 
             let order_solution = match result {
                 Ok(route) => {
