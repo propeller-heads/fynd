@@ -2,7 +2,7 @@
 //!
 //! The Solver Worker:
 //! - Initializes graph from market topology (via a GraphManager)
-//! - Consumess MarketEvents to keep local topology in sync
+//! - Consumes MarketEvents to keep local topology in sync
 //! - Processes solve requests
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
@@ -26,6 +26,8 @@ use crate::{
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
+    /// Minimum hops to search (must be >= 1).
+    pub min_hops: usize,
     /// Maximum hops to search.
     pub max_hops: usize,
     /// Timeout for solving.
@@ -34,7 +36,7 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { max_hops: 3, timeout: Duration::from_millis(100) }
+        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(100) }
     }
 }
 
@@ -144,8 +146,8 @@ where
         let graph = self.graph_manager.graph();
 
         // Get block info
-        // TODO: maybe the algorithm should return the block info with the route? The block might update
-        // while solving and the route returned might be for the newer block.
+        // TODO: maybe the algorithm should return the block info with the route? The block might
+        // update while solving and the route returned might be for the newer block.
         let block_info = {
             let market = self.market_data.read().await;
             let last_block = market
@@ -197,6 +199,10 @@ where
                     order.amount.clone()
                 };
 
+                // TODO: Calculate amount_out_net_gas properly using gas price and token price
+                // For now, use amount_out as a placeholder
+                let amount_out_net_gas = amount_out.clone();
+
                 OrderSolution {
                     order_id: order.id.clone(),
                     status: SolutionStatus::Success,
@@ -205,6 +211,7 @@ where
                     amount_out,
                     gas_estimate,
                     price_impact_bps: None, // TODO: Calculate price impact
+                    amount_out_net_gas,
                     block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
                 }

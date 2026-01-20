@@ -19,13 +19,11 @@ use std::collections::HashMap;
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use uuid::Uuid;
 
-use super::{
-    primitives::{ComponentId, ProtocolSystem},
-    serde_helpers::{bigint_as_string, biguint_as_string},
-};
+use super::primitives::{ComponentId, ProtocolSystem};
 use crate::AlgorithmError;
 
 // ============================================================================
@@ -43,15 +41,28 @@ pub struct SolutionRequest {
 }
 
 /// Options to customize the solving behavior.
+#[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SolutionOptions {
     /// Timeout in milliseconds. If `None`, uses server default.
     pub timeout_ms: Option<u64>,
+    /// Minimum number of solver responses to wait for before returning.
+    /// If `None` or `0`, waits for all solvers to respond (or timeout).
+    ///
+    /// Use the `/health` endpoint to check `num_solver_pools` before setting this value.
+    /// Values exceeding the number of active solver pools are clamped internally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_responses: Option<usize>,
+    /// Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gas: Option<BigUint>,
 }
 
 /// A single swap order to be solved.
 ///
 /// An order specifies an intent to swap one token for another.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     /// Unique identifier for this order.
@@ -64,7 +75,7 @@ pub struct Order {
     /// Output token address (the token being bought).
     pub token_out: Address,
     /// Amount to swap, interpreted according to `side` (in token units, as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub amount: BigUint,
     /// Whether this is a sell (exact input) or buy (exact output) order.
     pub side: OrderSide,
@@ -139,27 +150,28 @@ pub enum OrderValidationError {
 ///
 /// Contains a solution for each order in the request, along with aggregate
 /// gas estimates and timing information.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Solution {
     /// Solutions for each order, in the same order as the request.
     pub orders: Vec<OrderSolution>,
     /// Total estimated gas for executing all swaps (as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub total_gas_estimate: BigUint,
     /// Time taken to compute this solution, in milliseconds.
     pub solve_time_ms: u64,
 }
 
-/// Solution for a single [`Order`] with timing information.
+/// Internal wrapper used by workers when returning a solution.
 ///
-/// Contains the order solution along with the time taken to compute it.
-/// This is useful when solving a single order and you need both the solution
-/// details and the solve time.
+/// This wraps [`OrderSolution`] with per-worker timing information.
+/// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
+/// not the total OrderManager orchestration time (which is in [`Solution`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleOrderSolution {
     /// The solution for the order.
     pub order: OrderSolution,
-    /// Time taken to compute this solution, in milliseconds.
+    /// Time taken by this specific worker to compute the solution, in milliseconds.
     pub solve_time_ms: u64,
 }
 
@@ -167,6 +179,7 @@ pub struct SingleOrderSolution {
 ///
 /// Contains the route to execute (if found), along with expected amounts,
 /// gas estimates, and status information.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderSolution {
     /// ID of the order this solution corresponds to.
@@ -177,17 +190,21 @@ pub struct OrderSolution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<Route>,
     /// Amount of input token (in token units, as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub amount_in: BigUint,
     /// Amount of output token (in token units, as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub amount_out: BigUint,
     /// Estimated gas cost for executing this route (as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
     /// Price impact in basis points (1 bip = 0.01%).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_impact_bps: Option<i32>,
+    /// Amount out minus gas cost in output token terms.
+    /// Used by OrderManager to compare solutions from different solvers.
+    #[serde_as(as = "DisplayFromStr")]
+    pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
     /// Algorithm that found this solution (internal use only).
@@ -246,6 +263,7 @@ pub struct BlockInfo {
 ///
 /// A route describes the path through liquidity pools to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     /// Ordered sequence of swaps to execute.
@@ -257,7 +275,7 @@ pub struct Route {
     ///
     /// Can be negative if gas cost exceeds output (e.g., due to inaccurate gas estimation
     /// or pricing). Routes with negative net_amount_out will rank lower but are still valid.
-    #[serde(with = "bigint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub net_amount_out: BigInt,
 }
 
@@ -371,6 +389,7 @@ pub enum RouteValidationError {
 /// A single swap within a route.
 ///
 /// Represents an atomic swap on a specific liquidity pool (component).
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
     /// Identifier of the liquidity pool component.
@@ -382,13 +401,13 @@ pub struct Swap {
     /// Output token address.
     pub token_out: Address,
     /// Amount of input token (in token units, as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub amount_in: BigUint,
     /// Amount of output token (in token units, as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub amount_out: BigUint,
     /// Estimated gas cost for this swap (as decimal string).
-    #[serde(with = "biguint_as_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
 }
 

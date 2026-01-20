@@ -1,7 +1,7 @@
 //! HTTP request handlers for the router API.
 
 use actix_web::{web, HttpResponse};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
 use super::{ApiError, AppState};
 use crate::types::{solution::SolutionRequest, HealthStatus};
@@ -44,30 +44,19 @@ async fn solve(
         }
     }
 
-    // Check queue depth
-    if state.task_queue.is_full() {
-        warn!("task queue full, rejecting request");
-        return Err(ApiError::ServiceOverloaded);
-    }
+    let solution = state
+        .order_manager
+        .solve(request)
+        .await?;
 
-    // TODO: Fix this - enqueue expects Order but we have SolutionRequest
-    // Temporarily disabled to allow CI to pass
-    // Enqueue and wait for result
-    // let solution = state
-    //     .task_queue
-    //     .enqueue(request)
-    //     .await?;
-    //
-    // info!(
-    //     solve_time_ms = solution.solve_time_ms,
-    //     num_orders = solution.orders.len(),
-    //     "solve completed"
-    // );
-    //
-    // Ok(HttpResponse::Ok().json(solution))
+    info!(
+        solve_time_ms = solution.solve_time_ms,
+        num_orders = solution.orders.len(),
+        num_pools = state.order_manager.num_pools(),
+        "solve completed"
+    );
 
-    // Temporary stub to make CI pass
-    return Err(ApiError::BadRequest("solve endpoint temporarily disabled - see PR".to_string()));
+    Ok(HttpResponse::Ok().json(solution))
 }
 
 /// GET /v1/health - Health check endpoint.
@@ -80,7 +69,7 @@ async fn health(state: web::Data<AppState>) -> HttpResponse {
     let status = HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
-        queue_depth: state.task_queue.approximate_depth(),
+        num_solver_pools: state.order_manager.num_pools(),
     };
 
     if is_healthy {

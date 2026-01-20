@@ -5,6 +5,12 @@
 //!
 //! Algorithms are generic over their preferred graph type, allowing them to use
 //! different graph crates (petgraph, custom, etc.) and leverage built-in algorithms.
+//!
+//! # Adding a New Algorithm
+//!
+//! 1. Create a new module with your algorithm implementation
+//! 2. Implement the `Algorithm` trait
+//! 3. Register the algorithm in `registry.rs`
 
 pub mod most_liquid;
 
@@ -35,6 +41,7 @@ use crate::{
 /// - They should use `graph` for path finding (BFS/etc)
 /// - They should use `market` to read component states for simulation
 /// - They should NOT modify the graph or market data
+#[allow(async_fn_in_trait)] // Trait is internal; auto-trait bounds are not needed
 pub trait Algorithm: Send + Sync {
     /// The graph type this algorithm uses.
     type GraphType: Send + Sync;

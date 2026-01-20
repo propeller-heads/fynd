@@ -10,7 +10,6 @@ pub mod api;
 pub mod constants;
 pub mod internal;
 pub mod primitives;
-pub mod serde_helpers;
 pub mod solution;
 
 // Re-export API types

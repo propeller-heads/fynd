@@ -1,40 +1,62 @@
 //! Worker pool for processing solve tasks.
 //!
-//! The worker pool manages dedicated OS threads for CPU-bound route finding.
-//! Each worker has its own tokio runtime and processes tasks from the queue.
+//! The worker pool manages multiple dedicated OS threads for CPU-bound route finding.
+//! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
+//! A pool is configured with a specific algorithm (by name), allowing multiple pools
+//! with different algorithms to compete via the OrderManager.
 
-use std::{
-    sync::Arc,
-    thread::{self, JoinHandle},
+mod registry;
+
+use std::thread::JoinHandle;
+
+pub use registry::{
+    list_algorithms, spawn_workers, SpawnWorkersParams, UnknownAlgorithmError,
+    AVAILABLE_ALGORITHMS, DEFAULT_ALGORITHM,
 };
-
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::{
-    algorithm::MostLiquidAlgorithm,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::SolveTask,
-    worker::{SolverWorker, WorkerConfig},
+    worker::WorkerConfig,
 };
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
 pub struct WorkerPoolConfig {
+    /// Human-readable name for this pool (used in logging/metrics).
+    /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
+    pub name: String,
+    /// Algorithm name for this pool (e.g., "most_liquid").
+    /// Use `worker_pool::list_algorithms()` to see available options.
+    pub algorithm: String,
     /// Number of worker threads.
     pub num_workers: usize,
-    /// Configuration for each solver.
+    /// Configuration for each worker.
     pub worker_config: WorkerConfig,
 }
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
-        Self { num_workers: num_cpus::get(), worker_config: WorkerConfig::default() }
+        Self {
+            name: DEFAULT_ALGORITHM.to_string(),
+            algorithm: DEFAULT_ALGORITHM.to_string(),
+            num_workers: num_cpus::get(),
+            worker_config: WorkerConfig::default(),
+        }
     }
 }
 
 /// A pool of worker threads for processing solve tasks.
+///
+/// Each pool is dedicated to a specific algorithm. Workers in the pool
+/// compete for tasks from the shared queue.
 pub struct WorkerPool {
+    /// Human-readable name for this pool.
+    name: String,
+    /// Algorithm name for this pool.
+    algorithm: String,
     /// Handles to worker threads.
     workers: Vec<JoinHandle<()>>,
     /// Shutdown signal sender.
@@ -49,61 +71,51 @@ impl WorkerPool {
     /// * `config` - Worker pool configuration
     /// * `task_rx` - Receiver for tasks from the queue
     /// * `market_data` - Shared market data reference
-    /// * `event_tx` - Broadcast sender for market events (workers subscribe to this)
+    /// * `event_rx` - Broadcast receiver for market events (workers subscribe to this)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm name in config is not registered.
     pub fn spawn(
         config: WorkerPoolConfig,
         task_rx: async_channel::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
-    ) -> Self {
+    ) -> Result<Self, UnknownAlgorithmError> {
         let (shutdown_tx, _) = broadcast::channel(1);
+        let name = config.name.clone();
+        let algorithm = config.algorithm.clone();
 
-        let mut workers = Vec::with_capacity(config.num_workers);
+        // Spawn workers via the algorithm registry
+        let params = SpawnWorkersParams {
+            algorithm: config.algorithm,
+            num_workers: config.num_workers,
+            worker_config: config.worker_config,
+            task_rx,
+            market_data,
+            event_rx,
+            shutdown_tx: shutdown_tx.clone(),
+        };
+        let workers = spawn_workers(params)?;
 
-        for worker_id in 0..config.num_workers {
-            let task_rx = task_rx.clone();
-            let market_data = Arc::clone(&market_data);
-            let event_rx = event_rx.resubscribe();
-            let worker_config = config.worker_config.clone();
-            let shutdown_rx = shutdown_tx.subscribe();
+        info!(
+            name = %name,
+            algorithm = %algorithm,
+            num_workers = workers.len(),
+            "worker pool spawned"
+        );
 
-            let handle = thread::Builder::new()
-                .name(format!("solver-worker-{}", worker_id))
-                .spawn(move || {
-                    // Create a tokio runtime for this thread
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("failed to create tokio runtime");
+        Ok(Self { name, algorithm, workers, shutdown_tx })
+    }
 
-                    rt.block_on(async move {
-                        // Create algorithm
-                        let algorithm = MostLiquidAlgorithm::with_config(
-                            1,
-                            worker_config.max_hops,
-                            worker_config.timeout.as_millis() as u64,
-                        )
-                        .expect("invalid algorithm configuration");
+    /// Returns the pool name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 
-                        // Create solver
-                        let mut worker =
-                            SolverWorker::new(market_data, algorithm, worker_config, worker_id);
-
-                        // Initialize solver graph
-                        worker.initialize_graph().await;
-
-                        // Run the worker's main loop
-                        worker
-                            .run(event_rx, task_rx, shutdown_rx)
-                            .await;
-                    });
-                })
-                .expect("failed to spawn worker thread");
-
-            workers.push(handle);
-        }
-
-        Self { workers, shutdown_tx }
+    /// Returns the algorithm name for this pool.
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
     }
 
     /// Returns the number of workers.
@@ -113,7 +125,7 @@ impl WorkerPool {
 
     /// Shuts down all workers and waits for them to finish.
     pub fn shutdown(self) {
-        info!("shutting down worker pool");
+        info!(name = %self.name, "shutting down worker pool");
 
         // Send shutdown signal
         let _ = self.shutdown_tx.send(());
@@ -121,11 +133,16 @@ impl WorkerPool {
         // Wait for all workers to finish
         for (i, handle) in self.workers.into_iter().enumerate() {
             if let Err(e) = handle.join() {
-                error!(worker_id = i, "worker thread panicked: {:?}", e);
+                error!(
+                    name = %self.name,
+                    worker_id = i,
+                    "worker thread panicked: {:?}",
+                    e
+                );
             }
         }
 
-        info!("worker pool shut down");
+        info!(name = %self.name, "worker pool shut down");
     }
 }
 
@@ -139,22 +156,43 @@ impl WorkerPoolBuilder {
         Self { config: WorkerPoolConfig::default() }
     }
 
+    /// Sets the pool name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.config.name = name.into();
+        self
+    }
+
+    /// Sets the algorithm by name.
+    ///
+    /// Use `worker_pool::list_algorithms()` to see available options.
+    pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
+        self.config.algorithm = algorithm.into();
+        self
+    }
+
+    /// Sets the number of worker threads.
     pub fn num_workers(mut self, n: usize) -> Self {
         self.config.num_workers = n;
         self
     }
 
+    /// Sets the worker configuration.
     pub fn worker_config(mut self, config: WorkerConfig) -> Self {
         self.config.worker_config = config;
         self
     }
 
+    /// Builds and spawns the worker pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm name is not registered.
     pub fn build(
         self,
         task_rx: async_channel::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
-    ) -> WorkerPool {
+    ) -> Result<WorkerPool, UnknownAlgorithmError> {
         WorkerPool::spawn(self.config, task_rx, market_data, event_rx)
     }
 }

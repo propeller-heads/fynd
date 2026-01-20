@@ -2,7 +2,7 @@
 //!
 //! This binary starts the Tycho Router service with:
 //! - HTTP API server (Actix Web)
-//! - Worker pool for solving
+//! - OrderManager with multiple solver pools
 //! - Tycho indexer for market data
 
 use std::sync::Arc;
@@ -15,9 +15,10 @@ use tycho_simulation::tycho_common::models::Chain;
 use tycho_solver::{
     api::{configure_app, AppState, HealthTracker},
     feed::market_data::SharedMarketData,
+    order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
     task_queue::{TaskQueue, TaskQueueConfig},
     worker::WorkerConfig,
-    worker_pool::{WorkerPoolBuilder, WorkerPoolConfig},
+    worker_pool::WorkerPoolBuilder,
     TychoFeed, TychoFeedConfig,
 };
 
@@ -28,7 +29,7 @@ struct Config {
     chain: Chain,
     http_host: String,
     http_port: u16,
-    num_workers: usize,
+    num_workers_per_pool: usize,
     task_queue_capacity: usize,
     tycho_url: String,
     tycho_api_key: String,
@@ -41,7 +42,7 @@ impl Default for Config {
             chain: Chain::Ethereum,
             http_host: "0.0.0.0".to_string(),
             http_port: 3000,
-            num_workers: num_cpus::get(),
+            num_workers_per_pool: num_cpus::get(),
             task_queue_capacity: 1000,
             tycho_url: "wss://tycho.propellerheads.xyz".to_string(),
             tycho_api_key: String::new(),
@@ -65,16 +66,12 @@ async fn main() -> std::io::Result<()> {
     info!(
         host = %config.http_host,
         port = config.http_port,
-        workers = config.num_workers,
+        workers_per_pool = config.num_workers_per_pool,
         "starting tycho router"
     );
 
     // Create shared market data
     let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
-
-    // Create task queue
-    let task_queue = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
-    let (task_handle, task_rx) = task_queue.split();
 
     // Create health tracker (shared between TychoFeed and API)
     let health_tracker = HealthTracker::new();
@@ -91,16 +88,60 @@ async fn main() -> std::io::Result<()> {
     let (tycho_feed, event_rx) =
         TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
 
-    // Create worker pool
+    // Create worker pools - each pool has its own task queue
+    // Currently we only have "most_liquid", but this is where you'd add more algorithms
+    let mut solver_pool_handles = Vec::new();
+    let mut worker_pools = Vec::new();
+
+    // Pool 1: most_liquid algorithm
     let worker_config = WorkerConfig::default();
-    let worker_pool_config = WorkerPoolConfig { num_workers: config.num_workers, worker_config };
+    let task_queue = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
+    let (task_handle, task_rx) = task_queue.split();
 
     let worker_pool = WorkerPoolBuilder::new()
-        .num_workers(worker_pool_config.num_workers)
-        .worker_config(worker_pool_config.worker_config)
-        .build(task_rx, Arc::clone(&market_data), event_rx);
+        .name("most_liquid")
+        .algorithm("most_liquid")
+        .num_workers(config.num_workers_per_pool)
+        .worker_config(worker_config)
+        .build(task_rx, Arc::clone(&market_data), event_rx)
+        .expect("failed to create worker pool: algorithm not registered");
 
-    info!(num_workers = worker_pool.num_workers(), "worker pool started");
+    info!(
+        name = %worker_pool.name(),
+        algorithm = %worker_pool.algorithm(),
+        num_workers = worker_pool.num_workers(),
+        "worker pool started"
+    );
+
+    solver_pool_handles.push(SolverPoolHandle::new(
+        worker_pool.name(),
+        worker_pool.algorithm(),
+        task_handle,
+    ));
+    worker_pools.push(worker_pool);
+
+    // Future: Add more worker pools here with different algorithms/configs
+    // Example:
+    // let task_queue2 = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
+    // let (task_handle2, task_rx2) = task_queue2.split();
+    // let worker_pool2 = WorkerPoolBuilder::new()
+    //     .name("most_liquid_thorough")
+    //     .algorithm("most_liquid")
+    //     .num_workers(8)
+    //     .worker_config(WorkerConfig { max_hops: 5, ..Default::default() })
+    //     .build(task_rx2, Arc::clone(&market_data), event_rx.resubscribe());
+    // solver_pool_handles.push(SolverPoolHandle::new(
+    //     worker_pool2.name(),
+    //     worker_pool2.algorithm(),
+    //     task_handle2,
+    // ));
+    // worker_pools.push(worker_pool2);
+
+    // Create OrderManager with all solver pool handles
+    let order_manager_config = OrderManagerConfig::default();
+    let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
+
+    info!(num_pools = order_manager.num_pools(), "order manager created");
 
     // Start Tycho feed in background
     let feed_handle = tokio::spawn(async move {
@@ -109,8 +150,8 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    // Create app state
-    let app_state = AppState::new(task_handle, health_tracker);
+    // Create app state with OrderManager
+    let app_state = AppState::new(order_manager, health_tracker);
 
     // Start HTTP server
     let server = HttpServer::new(move || {
@@ -138,7 +179,9 @@ async fn main() -> std::io::Result<()> {
     // Cleanup
     info!("shutting down...");
     feed_handle.abort();
-    worker_pool.shutdown();
+    for pool in worker_pools {
+        pool.shutdown();
+    }
 
     info!("shutdown complete");
     Ok(())
