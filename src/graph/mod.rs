@@ -8,49 +8,75 @@ pub mod petgraph;
 
 use std::collections::HashMap;
 
-pub use petgraph::{EdgeData, PetgraphStableDiGraphManager};
+pub use petgraph::{EdgeData, EdgeIndex, PetgraphStableDiGraphManager};
 use thiserror::Error;
-use tycho_simulation::tycho_core::models::Address;
+use tycho_simulation::tycho_common::models::Address;
 
 use crate::types::ComponentId;
 
-/// An edge in the market graph representing a possible hop.
+/// A path through the graph as a sequence of edge indices.
 ///
-/// This is used as the edge weight type in petgraph graphs. It stores the component information
-/// needed for route construction.
-#[derive(Debug, Clone)]
-pub struct Hop {
-    /// The component that enables this swap.
-    pub component_id: ComponentId,
-    /// The output token of this swap.
-    pub token_out: Address,
+/// Each edge index points to an edge in the graph containing the component ID and weight.
+/// This representation allows O(1) access to edge data during scoring and simulation.
+#[derive(Clone, Default)]
+pub struct Path<'a, D> {
+    /// Sequence of token addresses in the path.
+    pub tokens: Vec<&'a Address>,
+    /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
+    pub edge_data: Vec<&'a EdgeData<D>>,
 }
 
-/// A path through the graph (sequence of hops).
-///
-/// This is a shared type that can be used to represent a sequence of swaps.
-#[derive(Debug, Clone)]
-pub struct Path {
-    /// The hops in this path, in order.
-    pub hops: Vec<Hop>,
-    /// The tokens in this path, including start and end.
-    pub tokens: Vec<Address>,
-}
+impl<'a, D> Path<'a, D> {
+    /// Creates a new empty Path.
+    pub fn new() -> Self {
+        Self { tokens: Vec::new(), edge_data: Vec::new() }
+    }
 
-impl Path {
-    /// Returns the number of hops (swaps) in this path.
-    pub fn hop_count(&self) -> usize {
-        self.hops.len()
+    /// Adds a hop to the path.
+    ///
+    /// Arguments:
+    /// - from: The starting token address of the hop.
+    /// - edge_data: The edge data for the hop.
+    /// - to: The ending token address of the hop.
+    pub fn add_hop(&mut self, from: &'a Address, edge_data: &'a EdgeData<D>, to: &'a Address) {
+        if self.tokens.is_empty() {
+            self.tokens.push(from);
+        }
+        self.tokens.push(to);
+        self.edge_data.push(edge_data);
+    }
+
+    /// Returns the number of hops in the path.
+    pub fn len(&self) -> usize {
+        self.edge_data.len()
+    }
+
+    /// Returns true if the path has no hops.
+    pub fn is_empty(&self) -> bool {
+        self.edge_data.is_empty()
+    }
+
+    /// Returns an iterator over the edges in the path.
+    pub fn edge_iter(&self) -> &[&'a EdgeData<D>] {
+        &self.edge_data
+    }
+
+    /// Returns an iterator over hops in the path (from_token, edge_data, to_token).
+    pub fn iter(&self) -> impl Iterator<Item = (&'a Address, &'a EdgeData<D>, &'a Address)> + '_ {
+        self.tokens
+            .windows(2)
+            .zip(self.edge_data.iter())
+            .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
     }
 
     /// Returns the starting token.
-    pub fn start_token(&self) -> Option<Address> {
-        self.tokens.first().cloned()
+    pub fn start_token(&self) -> Option<&Address> {
+        self.tokens.first().copied()
     }
 
     /// Returns the ending token.
-    pub fn end_token(&self) -> Option<Address> {
-        self.tokens.last().cloned()
+    pub fn end_token(&self) -> Option<&Address> {
+        self.tokens.last().copied()
     }
 }
 
@@ -60,8 +86,8 @@ pub enum GraphError {
     TokenNotFound(Address),
     #[error("Components not found in graph: {0:?}")]
     ComponentsNotFound(Vec<ComponentId>),
-    #[error("Components without tokens cannot be added: {0:?}")]
-    ComponentsWithoutTokens(Vec<ComponentId>),
+    #[error("Components with less then 2 tokens cannot be added: {0:?}")]
+    InvalidComponents(Vec<ComponentId>),
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }

@@ -8,9 +8,13 @@
 
 pub mod most_liquid;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use std::time::Duration;
 
 pub use most_liquid::MostLiquidAlgorithm;
+use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     feed::market_data::SharedMarketDataRef,
@@ -62,27 +66,25 @@ pub trait Algorithm: Send + Sync {
     ) -> Result<Route, AlgorithmError>;
 
     /// Returns whether this algorithm supports exact-out orders.
-    fn supports_exact_out(&self) -> bool {
-        false
-    }
+    fn supports_exact_out(&self) -> bool;
 
     /// Returns the maximum number of hops to search.
-    fn max_hops(&self) -> usize {
-        3
-    }
+    fn max_hops(&self) -> usize;
 
     /// Returns the timeout for route finding.
-    fn timeout(&self) -> Duration {
-        Duration::from_millis(50)
-    }
+    fn timeout(&self) -> Duration;
 }
 
 /// Errors that can occur during route finding.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum AlgorithmError {
+    /// Invalid algorithm configuration (programmer error).
+    #[error("invalid configuration: {reason}")]
+    InvalidConfiguration { reason: String },
+
     /// No path exists between the tokens.
-    #[error("no path found between {from} and {to}")]
-    NoPath { from: String, to: String },
+    #[error("no path from {from:?} to {to:?}: {reason}")]
+    NoPath { from: Address, to: Address, reason: NoPathReason },
 
     /// Paths exist but none have sufficient liquidity.
     #[error("insufficient liquidity on all paths")]
@@ -96,7 +98,39 @@ pub enum AlgorithmError {
     #[error("exact-out orders not supported")]
     ExactOutNotSupported,
 
+    /// Simulation failed for a specific component.
+    #[error("simulation failed for {component_id}: {error}")]
+    SimulationFailed { component_id: String, error: String },
+
+    /// Required data not found in market.
+    #[error("{kind} not found: {id}")]
+    DataNotFound { kind: &'static str, id: String },
+
     /// Other algorithm-specific error.
     #[error("{0}")]
     Other(String),
+}
+
+/// Reason why no path was found between tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoPathReason {
+    /// Source token not present in the routing graph.
+    SourceTokenNotInGraph,
+    /// Destination token not present in the routing graph.
+    DestinationTokenNotInGraph,
+    /// Both tokens exist but no edges connect them within hop limits.
+    NoGraphPath,
+    /// Paths exist but none could be scored (e.g., missing edge weights).
+    NoScorablePaths,
+}
+
+impl std::fmt::Display for NoPathReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceTokenNotInGraph => write!(f, "source token not in graph"),
+            Self::DestinationTokenNotInGraph => write!(f, "destination token not in graph"),
+            Self::NoGraphPath => write!(f, "no connecting path in graph"),
+            Self::NoScorablePaths => write!(f, "no paths with valid scores"),
+        }
+    }
 }

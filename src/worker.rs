@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     algorithm::Algorithm,
@@ -43,8 +43,7 @@ impl Default for WorkerConfig {
 pub struct SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
+    A::GraphManager: MarketEventHandler,
 {
     /// Algorithm used for route finding.
     algorithm: A,
@@ -63,8 +62,7 @@ where
 impl<A> SolverWorker<A>
 where
     A: Algorithm,
-    A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType> + MarketEventHandler,
+    A::GraphManager: MarketEventHandler,
 {
     /// Creates a new Solver.
     ///
@@ -128,24 +126,36 @@ where
     pub async fn solve(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
         let start_time = Instant::now();
 
+        // Log order details once at entry
+        debug!(
+            order_id = %order.id,
+            token_in = ?order.token_in,
+            token_out = ?order.token_out,
+            amount = %order.amount,
+            side = ?order.side,
+            "processing order"
+        );
+
         // Ensure we're initialized
         if !self.initialized {
             self.initialize_graph().await;
         }
 
-        // Get the graph from the graph manager (no lock needed)
+        // Get the graph from the graph manager
         let graph = self.graph_manager.graph();
 
         // Get block info
-        // maybe the algorithm should return the block info with the route? The block might update
+        // TODO: maybe the algorithm should return the block info with the route? The block might update
         // while solving and the route returned might be for the newer block.
         let block_info = {
             let market = self.market_data.read().await;
-            let last_block = market.last_updated();
+            let last_block = market
+                .last_updated()
+                .ok_or(SolveError::Internal("No block info".to_string()))?;
             BlockInfo {
                 number: last_block.number,
                 hash: format!("{:?}", last_block.hash),
-                timestamp: last_block.ts.and_utc().timestamp() as u64,
+                timestamp: last_block.timestamp,
             }
         };
 

@@ -4,17 +4,21 @@
 //! It's protected by a RwLock and shared across all components:
 //! - TychoIndexer: WRITE access to update data
 //! - Solvers: READ access to query states during solving
+//!
+//! We use tokio RwLock (which is write-preferring) to avoid writer starvation.
 
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::RwLock;
-use tycho_simulation::tycho_core::{
-    dto::Block,
-    models::{protocol::ProtocolComponent, token::Token, Address},
-    simulation::protocol_sim::ProtocolSim,
+use tycho_simulation::{
+    tycho_client::feed::SynchronizerState,
+    tycho_common::{
+        models::{protocol::ProtocolComponent, token::Token, Address},
+        simulation::protocol_sim::ProtocolSim,
+    },
 };
 
-use crate::types::{constants::GAS_COST_PER_SWAP, ComponentId, GasPrice, ProtocolSystem};
+use crate::types::{BlockInfo, ComponentId, GasPrice};
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -31,29 +35,18 @@ pub fn new_shared_market_data() -> SharedMarketDataRef {
 #[derive(Debug, Default)]
 pub struct SharedMarketData {
     /// All components indexed by their ID.
-    components: HashMap<ComponentId, ComponentData>,
+    components: HashMap<ComponentId, ProtocolComponent>,
+    /// All states indexed by their component ID.
+    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
-    /// Market topology: component_id -> tokens in that component.
-    /// This is the source of truth for graph construction.
-    component_topology: HashMap<ComponentId, Vec<Address>>,
     /// Current gas price.
     gas_price: GasPrice,
-    /// Average gas cost per swap on protocol system.
-    gas_constants: HashMap<ProtocolSystem, u64>,
-    /// When the data was last updated.
-    last_updated: Block,
-}
-
-/// Data for a single component.
-#[derive(Debug)]
-pub struct ComponentData {
-    /// Protocol component information.
-    pub component: ProtocolComponent,
-    /// Protocol simulation object.
-    pub state: Box<dyn ProtocolSim>,
-    /// Tokens in this component.
-    pub tokens: Vec<Token>,
+    /// Protocol sync status indexed by their protocol system name.
+    protocol_sync_status: HashMap<String, SynchronizerState>,
+    /// Block info for the last update (only updated when protocols reported "Ready" status).
+    /// None if no block has been processed yet.
+    last_updated: Option<BlockInfo>,
 }
 
 impl SharedMarketData {
@@ -61,21 +54,44 @@ impl SharedMarketData {
     pub fn new() -> Self {
         Self {
             components: HashMap::new(),
+            simulation_states: HashMap::new(),
             tokens: HashMap::new(),
-            component_topology: HashMap::new(),
             gas_price: GasPrice::default(),
-            gas_constants: GAS_COST_PER_SWAP.clone(), /* TODO: maybe we want a way to override
-                                                       * this? if not we can use the constants
-                                                       * directly in the algorithm. */
-            last_updated: Block::default(),
+            protocol_sync_status: HashMap::new(),
+            last_updated: None,
         }
     }
 
-    // ==================== Read Methods (for Solvers) ====================
+    /// Returns the block info for the last update.
+    pub fn last_updated(&self) -> Option<&BlockInfo> {
+        self.last_updated.as_ref()
+    }
+
+    /// Returns the protocol sync status indexed by their protocol system name.
+    pub fn get_protocol_sync_status(&self, protocol_system: &String) -> Option<&SynchronizerState> {
+        self.protocol_sync_status
+            .get(protocol_system)
+    }
+
+    /// Returns the component topology.
+    /// This is a simple mapping from component ID to their token addresses.
+    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+        self.components
+            .iter()
+            .map(|(id, component)| (id.clone(), component.tokens.clone()))
+            .collect()
+    }
 
     /// Gets a component by ID.
-    pub fn get_component(&self, id: &ComponentId) -> Option<&ComponentData> {
+    pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
         self.components.get(id)
+    }
+
+    /// Gets a simulation state by ID.
+    pub fn get_simulation_state(&self, id: &str) -> Option<&dyn ProtocolSim> {
+        self.simulation_states
+            .get(id)
+            .map(|b| b.as_ref())
     }
 
     /// Gets a token by address.
@@ -88,115 +104,74 @@ impl SharedMarketData {
         &self.gas_price
     }
 
-    /// Returns the gas cost for a protocol system.
-    pub fn gas_cost(&self, protocol: ProtocolSystem) -> u64 {
-        self.gas_constants
-            .get(&protocol)
-            .copied()
-            .unwrap_or(150_000)
+    /// Returns a reference to the component registry.
+    pub fn component_registry_ref(&self) -> &HashMap<ComponentId, ProtocolComponent> {
+        &self.components
     }
 
-    /// Returns a clone of the component topology.
-    ///
-    /// Solvers can use this to build their algorithm-specific graphs.
-    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
-        self.component_topology.clone()
+    /// Returns a reference to the simulation state registry.
+    pub fn simulation_state_registry_ref(&self) -> &HashMap<ComponentId, Box<dyn ProtocolSim>> {
+        &self.simulation_states
     }
 
-    /// Returns a reference to the component topology.
-    pub fn component_topology_ref(&self) -> &HashMap<ComponentId, Vec<Address>> {
-        &self.component_topology
-    }
-
-    /// Returns the number of components.
-    pub fn component_count(&self) -> usize {
-        self.components.len()
-    }
-
-    /// Returns the number of tokens.
-    pub fn token_count(&self) -> usize {
-        self.tokens.len()
-    }
-
-    /// Returns when the data was last updated.
-    pub fn last_updated(&self) -> Block {
-        self.last_updated.clone()
-    }
-
-    /// Returns the age of the data in milliseconds.
-    pub fn age_ms(&self) -> u64 {
-        self.last_updated
-            .ts
-            .and_utc()
-            .timestamp() as u64
-    }
-
-    /// Returns an iterator over all components.
-    pub fn components(&self) -> impl Iterator<Item = (&ComponentId, &ComponentData)> {
-        self.components.iter()
-    }
-
-    // ==================== Write Methods (for Indexer only) ====================
-
-    /// Adds a component to the topology without full component data.
-    /// Used when we receive component info from Tycho but don't have full state yet.
-    pub fn add_component_topology(&mut self, component_id: ComponentId, tokens: Vec<Address>) {
-        self.component_topology
-            .insert(component_id, tokens);
-        self.last_updated = Block::default();
+    /// Returns a reference to the token registry.
+    pub fn token_registry_ref(&self) -> &HashMap<Address, Token> {
+        &self.tokens
     }
 
     /// Inserts or updates a component.
-    pub fn insert_component(&mut self, component_data: ComponentData) {
-        let component_id = component_data.component.id.clone();
-        let tokens: Vec<Address> = component_data
-            .tokens
-            .iter()
-            .map(|t| t.address.clone())
-            .collect();
-
-        // Update tokens map
-        for token in &component_data.tokens {
-            self.tokens
-                .entry(token.address.clone())
-                .or_insert_with(|| token.clone());
+    pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
+        // Store component data in components map
+        for component in components {
+            self.components
+                .insert(component.id.clone(), component);
         }
+    }
 
-        // Update component topology
-        self.component_topology
-            .insert(component_id.clone(), tokens);
+    /// Inserts or updates tokens.
+    pub fn upsert_tokens(&mut self, tokens: impl IntoIterator<Item = Token>) {
+        for token in tokens {
+            self.tokens
+                .insert(token.address.clone(), token);
+        }
+    }
 
-        // Store component data
-        self.components
-            .insert(component_id, component_data);
-
-        self.last_updated = Block::default();
+    /// Updates the protocol sync status.
+    pub fn update_protocol_sync_status(
+        &mut self,
+        sync_states: impl IntoIterator<Item = (String, SynchronizerState)>,
+    ) {
+        for (protocol_system, status) in sync_states {
+            self.protocol_sync_status
+                .insert(protocol_system, status);
+        }
     }
 
     /// Removes a component.
-    pub fn remove_component(&mut self, id: &ComponentId) {
-        if self.components.remove(id).is_some() {
-            self.component_topology.remove(id);
-            self.last_updated = Block::default();
+    pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
+        for id in ids {
+            self.components.remove(id);
+            self.simulation_states.remove(id);
         }
     }
 
     /// Updates a component's state.
-    pub fn update_state(&mut self, id: &ComponentId, state: Box<dyn ProtocolSim>) {
-        if let Some(component_data) = self.components.get_mut(id) {
-            component_data.state = state;
-            self.last_updated = Block::default();
+    pub fn update_states(
+        &mut self,
+        states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
+    ) {
+        for (id, state) in states {
+            self.simulation_states.insert(id, state);
         }
     }
 
     /// Updates the gas price.
     pub fn update_gas_price(&mut self, gas_price: GasPrice) {
         self.gas_price = gas_price;
-        self.last_updated = Block::default();
     }
 
-    /// Updates gas constants for a protocol.
-    pub fn set_gas_constant(&mut self, protocol: ProtocolSystem, gas: u64) {
-        self.gas_constants.insert(protocol, gas);
+    /// Updates the last updated block info.
+    pub fn update_last_updated(&mut self, block_info: BlockInfo) {
+        self.last_updated = Some(block_info);
     }
 }

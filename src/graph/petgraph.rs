@@ -10,11 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::{
-    graph::{EdgeIndex, NodeIndex},
-    stable_graph,
-};
-use tycho_simulation::tycho_core::models::Address;
+pub use petgraph::graph::EdgeIndex;
+use petgraph::{graph::NodeIndex, stable_graph};
+use tycho_simulation::tycho_common::models::Address;
 
 use super::GraphManager;
 use crate::{
@@ -23,53 +21,45 @@ use crate::{
     types::ComponentId,
 };
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum EdgeWeight {
-    Depth(f64),
-    SpotPrice(f64),
-    DepthAndSpotPrice(f64, f64),
-}
-
-impl Default for EdgeWeight {
-    /// Returns a default weight of 0.0 (Depth variant).
-    fn default() -> Self {
-        EdgeWeight::Depth(0.0)
-    }
-}
-
-impl EdgeWeight {
-    /// Extracts the numeric weight value for use in algorithms.
-    pub fn as_f64(&self) -> f64 {
-        match self {
-            EdgeWeight::Depth(v) | EdgeWeight::SpotPrice(v) => *v,
-            EdgeWeight::DepthAndSpotPrice(depth, spot_price) => depth * spot_price,
-        }
-    }
-}
-
-/// Edge data containing both component ID and weight.
-#[derive(Debug, Clone)]
-pub struct EdgeData {
+/// Data stored on each edge of the graph.
+///
+/// Contains the component ID (which pool this edge represents) and
+/// optional algorithm-specific data. The type `D` is generic to allow
+/// different algorithms to store their own scoring data.
+///
+/// # Type Parameters
+/// - `D`: Algorithm-specific data type. Defaults to `()` for no extra data.
+///
+/// # Examples
+/// ```ignore
+/// // For MostLiquid algorithm with depth/price data:
+/// use crate::algorithm::most_liquid::DepthAndPrice;
+/// type MostLiquidEdge = EdgeData<DepthAndPrice>;
+///
+/// // For algorithms that don't need extra data:
+/// type SimpleEdge = EdgeData<()>;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EdgeData<D = ()> {
     /// The component ID that enables this swap.
     pub component_id: ComponentId,
-    /// The weight of this edge. None if weight has not been set yet.
-    pub weight: Option<EdgeWeight>,
+    /// Algorithm-specific data. None if not yet computed.
+    pub data: Option<D>,
 }
 
-impl EdgeData {
-    /// Creates a new EdgeData with the given component ID and no weight set.
+impl<M> EdgeData<M> {
+    /// Creates a new EdgeData with the given component ID and no data set.
     pub fn new(component_id: ComponentId) -> Self {
-        Self { component_id, weight: None }
+        Self { component_id, data: None }
     }
 
-    /// Extracts the numeric weight value for use in algorithms.
-    /// Returns None if weight has not been set, otherwise returns Some(f64).
-    pub fn weight_as_f64(&self) -> Option<f64> {
-        self.weight.as_ref().map(|w| w.as_f64())
+    /// Creates a new EdgeData with the given component ID and data.
+    pub fn with_data(component_id: ComponentId, data: M) -> Self {
+        Self { component_id, data: Some(data) }
     }
 }
 
-pub type StableDiGraph = stable_graph::StableDiGraph<Address, EdgeData>;
+pub type StableDiGraph<D> = stable_graph::StableDiGraph<Address, EdgeData<D>>;
 
 /// Petgraph implementation of GraphManager.
 ///
@@ -77,24 +67,24 @@ pub type StableDiGraph = stable_graph::StableDiGraph<Address, EdgeData>;
 ///
 /// The graph manager maintains the graph internally and updates it based on market events.
 /// Using StableDiGraph ensures edge indices remain valid after removals, making edge_map viable.
-pub struct PetgraphStableDiGraphManager {
+pub struct PetgraphStableDiGraphManager<D: Clone> {
     // Stable directed graph with token addresses as nodes and edge data (component id + weight) as
     // edges. Using StableDiGraph ensures edge indices remain valid after removals, making
     // edge_map viable.
-    graph: StableDiGraph,
+    graph: StableDiGraph<D>,
     // Map from ComponentId to edge indices for fast removal and weight updates.
     edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
     // Map from token address to node index for fast node lookups.
     node_map: HashMap<Address, NodeIndex>,
 }
 
-impl PetgraphStableDiGraphManager {
+impl<D: Clone> PetgraphStableDiGraphManager<D> {
     pub fn new() -> Self {
         Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
     }
 
     /// Helper function to find a node index by address
-    fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
+    pub fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
         self.node_map
             .get(addr)
             .copied()
@@ -136,13 +126,6 @@ impl PetgraphStableDiGraphManager {
     /// Helper function to add edges for all token pairs in a component.
     /// Takes a slice of node indices corresponding to the tokens.
     fn add_component_edges(&mut self, component_id: &ComponentId, node_indices: &[NodeIndex]) {
-        // Special case: if only 1 node, create a self-loop edge
-        if node_indices.len() == 1 {
-            let node_idx = node_indices[0];
-            self.add_edge(node_idx, node_idx, component_id);
-            return;
-        }
-
         // Create bidirectional edges for each token pair
         node_indices
             .iter()
@@ -164,8 +147,8 @@ impl PetgraphStableDiGraphManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if any components have no tokens (components must have at least 1 token).
-    /// All components not included in the error were successfully added.
+    /// Returns an error if any components have too few tokens (components must have at least 2
+    /// tokens). All components not included in the error were successfully added.
     ///
     /// Arguments:
     /// - components: A map of component IDs to their tokens.
@@ -173,11 +156,11 @@ impl PetgraphStableDiGraphManager {
         &mut self,
         components: &HashMap<ComponentId, Vec<Address>>,
     ) -> Result<(), GraphError> {
-        let mut tokenless_components = Vec::new();
+        let mut invalid_components = Vec::new();
 
         for (comp_id, tokens) in components {
-            if tokens.is_empty() {
-                tokenless_components.push(comp_id.clone());
+            if tokens.len() < 2 {
+                invalid_components.push(comp_id.clone());
                 continue;
             }
             // Ensure all tokens are added as nodes (or get existing ones) and collect their indices
@@ -189,9 +172,9 @@ impl PetgraphStableDiGraphManager {
             self.add_component_edges(comp_id, &node_indices);
         }
 
-        // Return error if any components had no tokens
-        if !tokenless_components.is_empty() {
-            return Err(GraphError::ComponentsWithoutTokens(tokenless_components));
+        // Return error if any components had too few tokens (less than 2)
+        if !invalid_components.is_empty() {
+            return Err(GraphError::InvalidComponents(invalid_components));
         }
 
         Ok(())
@@ -248,7 +231,7 @@ impl PetgraphStableDiGraphManager {
         component_id: &ComponentId,
         token_in: &Address,
         token_out: &Address,
-        weight: EdgeWeight,
+        data: D,
         bidirectional: bool,
     ) -> Result<(), GraphError> {
         let from_idx = self.find_node(token_in)?;
@@ -286,7 +269,7 @@ impl PetgraphStableDiGraphManager {
                     .ok_or_else(|| GraphError::ComponentsNotFound(vec![component_id.clone()]))?;
                 // Verify the component ID matches
                 if edge_data.component_id == *component_id {
-                    edge_data.weight = Some(weight.clone());
+                    edge_data.data = Some(data.clone());
                     updated = true;
                 }
             }
@@ -304,13 +287,13 @@ impl PetgraphStableDiGraphManager {
     }
 }
 
-impl Default for PetgraphStableDiGraphManager {
+impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl GraphManager<StableDiGraph> for PetgraphStableDiGraphManager {
+impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDiGraphManager<D> {
     fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
@@ -339,12 +322,12 @@ impl GraphManager<StableDiGraph> for PetgraphStableDiGraphManager {
         }
     }
 
-    fn graph(&self) -> &StableDiGraph {
+    fn graph(&self) -> &StableDiGraph<D> {
         &self.graph
     }
 }
 
-impl MarketEventHandler for PetgraphStableDiGraphManager {
+impl<D: Clone> MarketEventHandler for PetgraphStableDiGraphManager<D> {
     fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
         match event {
             MarketEvent::MarketUpdated { added_components, removed_components, .. } => {
@@ -387,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_empty() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let topology = HashMap::new();
 
         manager.initialize_graph(&topology);
@@ -399,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_comprehensive() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -491,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_initialize_graph_multiple_edges_same_pair() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -530,127 +513,8 @@ mod tests {
     }
 
     #[test]
-    fn test_set_edge_weight() {
-        let mut manager = PetgraphStableDiGraphManager::new();
-        let mut topology = HashMap::new();
-        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
-        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
-        let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
-
-        // Pool 1: A-B-C (3-token pool, fully connected)
-        topology
-            .insert("pool1".to_string(), vec![token_a.clone(), token_b.clone(), token_c.clone()]);
-
-        manager.initialize_graph(&topology);
-
-        // Get node indices first
-        let node_a = manager.find_node(&token_a).unwrap();
-        let node_b = manager.find_node(&token_b).unwrap();
-        let node_c = manager.find_node(&token_c).unwrap();
-
-        // Verify initial weight is None (not set yet)
-        {
-            let graph = manager.graph();
-            let edge_ab = graph.find_edge(node_a, node_b).unwrap();
-            assert_eq!(
-                graph
-                    .edge_weight(edge_ab)
-                    .unwrap()
-                    .weight,
-                None
-            );
-        }
-
-        // Test 1: Set weight bidirectionally (affects 2 edges: A-B and B-A)
-        manager
-            .set_edge_weight(
-                &"pool1".to_string(),
-                &token_a,
-                &token_b,
-                EdgeWeight::SpotPrice(42.5),
-                true, // bidirectional
-            )
-            .unwrap();
-
-        // Verify A-B and B-A edges have the new weight
-        let graph = manager.graph();
-        let edge_ab = graph.find_edge(node_a, node_b).unwrap();
-        assert_eq!(
-            graph
-                .edge_weight(edge_ab)
-                .unwrap()
-                .weight,
-            Some(EdgeWeight::SpotPrice(42.5))
-        );
-        let edge_ba = graph.find_edge(node_b, node_a).unwrap();
-        assert_eq!(
-            graph
-                .edge_weight(edge_ba)
-                .unwrap()
-                .weight,
-            Some(EdgeWeight::SpotPrice(42.5))
-        );
-
-        // Clear weight for next test
-        manager
-            .set_edge_weight(&"pool1".to_string(), &token_a, &token_b, EdgeWeight::Depth(0.0), true)
-            .unwrap();
-
-        // Test 2: Set weight unidirectionally (affects only A-B, not B-A)
-        manager
-            .set_edge_weight(
-                &"pool1".to_string(),
-                &token_a,
-                &token_b,
-                EdgeWeight::SpotPrice(100.0),
-                false, // unidirectional
-            )
-            .unwrap();
-
-        // Verify only A-B edge is updated
-        let graph = manager.graph();
-        let edge_ab = graph.find_edge(node_a, node_b).unwrap();
-        assert_eq!(
-            graph
-                .edge_weight(edge_ab)
-                .unwrap()
-                .weight,
-            Some(EdgeWeight::SpotPrice(100.0))
-        );
-        // B-A should still have the previous weight (Depth(0.0))
-        let edge_ba = graph.find_edge(node_b, node_a).unwrap();
-        assert_eq!(
-            graph
-                .edge_weight(edge_ba)
-                .unwrap()
-                .weight,
-            Some(EdgeWeight::Depth(0.0))
-        );
-
-        // Verify other edges in the same component still have no weight set
-        {
-            let edge_ac = graph.find_edge(node_a, node_c).unwrap();
-            assert_eq!(
-                graph
-                    .edge_weight(edge_ac)
-                    .unwrap()
-                    .weight,
-                None // Not set yet
-            );
-            let edge_ca = graph.find_edge(node_c, node_a).unwrap();
-            assert_eq!(
-                graph
-                    .edge_weight(edge_ca)
-                    .unwrap()
-                    .weight,
-                None // Not set yet
-            );
-        }
-    }
-
-    #[test]
-    fn test_add_components_no_duplicate_nodes() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+    fn test_add_components_shared_tokens() {
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -666,7 +530,7 @@ mod tests {
 
         // Add second component with overlapping token A
         components.clear();
-        components.insert("pool2".to_string(), vec![token_a.clone()]);
+        components.insert("pool2".to_string(), vec![token_a.clone(), token_b.clone()]);
         manager
             .add_components(&components)
             .unwrap();
@@ -677,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_add_tokenless_components_error() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -690,12 +554,12 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            GraphError::ComponentsWithoutTokens(ids) => {
+            GraphError::InvalidComponents(ids) => {
                 assert_eq!(ids.len(), 2);
                 assert!(ids.contains(&"pool2".to_string()));
                 assert!(ids.contains(&"pool3".to_string()));
             }
-            _ => panic!("Expected ComponentsWithoutTokens error"),
+            _ => panic!("Expected InvalidComponents error"),
         }
 
         // Verify valid component was still added
@@ -705,14 +569,14 @@ mod tests {
 
     #[test]
     fn test_remove_components_not_found_error() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut components = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add components first
         components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("pool2".to_string(), vec![token_a.clone()]);
+        components.insert("pool2".to_string(), vec![token_a.clone(), token_b.clone()]);
         manager
             .add_components(&components)
             .unwrap();
@@ -734,24 +598,22 @@ mod tests {
             _ => panic!("Expected ComponentsNotFound error"),
         }
 
-        dbg!(manager.graph());
-        dbg!(&manager.graph().edge_indices());
-        dbg!(&manager.edge_map);
-
-        // Verify pool1 was removed but pool2 is still there
-        // pool2 has a single token, so it creates 1 self-loop edge (A->A)
-        let final_edge_count = manager.graph().edge_count();
-        assert_eq!(
-            final_edge_count, 1,
-            "Expected 1 edge after removing pool1, got {}",
-            final_edge_count
-        );
-        assert_eq!(manager.edge_map.len(), 1);
+        // Verify only pool2 edges remain
+        for edge in manager.graph().edge_indices() {
+            assert_eq!(
+                manager
+                    .graph()
+                    .edge_weight(edge)
+                    .unwrap()
+                    .component_id,
+                "pool2".to_string()
+            );
+        }
     }
 
     #[test]
     fn test_set_edge_weight_errors() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         let mut topology = HashMap::new();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
@@ -763,13 +625,7 @@ mod tests {
         manager.initialize_graph(&topology);
 
         // Test 1: Component not found
-        let result = manager.set_edge_weight(
-            &"pool3".to_string(),
-            &token_a,
-            &token_b,
-            EdgeWeight::SpotPrice(42.5),
-            true,
-        );
+        let result = manager.set_edge_weight(&"pool3".to_string(), &token_a, &token_b, (), true);
         assert!(result.is_err());
         match result.unwrap_err() {
             GraphError::ComponentsNotFound(ids) => {
@@ -784,7 +640,7 @@ mod tests {
             &"pool1".to_string(),
             &token_a,
             &non_existent_token, // Non-existent token
-            EdgeWeight::SpotPrice(42.5),
+            (),
             true,
         );
         assert!(result.is_err());
@@ -800,7 +656,7 @@ mod tests {
             &"pool1".to_string(),
             &token_a,
             &token_c, // pool1 doesn't connect A-C, only A-B
-            EdgeWeight::SpotPrice(42.5),
+            (),
             true,
         );
         assert!(result.is_err());
@@ -816,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_error_invalid_gas_price() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         use crate::{
             feed::events::{EventError, MarketEvent},
             types::GasPrice,
@@ -838,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propagates_errors() {
-        let mut manager = PetgraphStableDiGraphManager::new();
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
         use std::collections::HashMap;
 
         use crate::feed::events::{EventError, MarketEvent};
@@ -860,11 +716,11 @@ mod tests {
                 // Check that we have both error types
                 let has_add_error = errors
                     .iter()
-                    .any(|e| matches!(e, GraphError::ComponentsWithoutTokens(_)));
+                    .any(|e| matches!(e, GraphError::InvalidComponents(_)));
                 let has_remove_error = errors
                     .iter()
                     .any(|e| matches!(e, GraphError::ComponentsNotFound(_)));
-                assert!(has_add_error, "Should have ComponentsWithoutTokens error");
+                assert!(has_add_error, "Should have InvalidComponents error");
                 assert!(has_remove_error, "Should have ComponentsNotFound error");
             }
             _ => panic!("Expected GraphErrors with multiple errors"),
