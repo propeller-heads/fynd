@@ -31,7 +31,10 @@ impl ComputationRequirements {
 
     /// Creates requirements with only required computations.
     pub fn required(ids: impl IntoIterator<Item = ComputationId>) -> Self {
-        Self { required: ids.into_iter().collect(), optional: HashSet::new() }
+        Self {
+            required: ids.into_iter().collect(),
+            optional: HashSet::new(),
+        }
     }
 
     /// Builder method to add a required computation.
@@ -45,6 +48,18 @@ impl ComputationRequirements {
         self.optional.insert(id);
         self
     }
+}
+
+/// Placeholder for `DerivedDataStore` - will be properly implemented later
+///
+/// This provides typed access to previously computed derived data.
+#[derive(Debug, Default)]
+pub struct DerivedDataStore {
+    // Fields will be added in Phase 2:
+    // token_prices: Option<TokenPrices>,
+    // pool_depths: Option<PoolDepths>,
+    // spot_prices: Option<SpotPrices>,
+    _placeholder: (),
 }
 
 /// Trait for derived data computations.
