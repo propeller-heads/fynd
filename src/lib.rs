@@ -82,7 +82,10 @@ pub mod worker_pool;
 
 // Re-export commonly used types at crate root (public API)
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
-pub use derived::{ComputationError, ComputationId, ComputationRequirements, DerivedComputation};
+pub use derived::{
+    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
+    PoolDepth, PoolDepths, SpotPrice, SpotPrices, TokenPrice, TokenPrices,
+};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
 pub use types::{
