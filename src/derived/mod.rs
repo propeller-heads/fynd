@@ -30,10 +30,14 @@
 //! ```
 
 mod computation;
+mod computations;
 mod error;
 mod store;
-mod types;
 
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
+pub use computations::{
+    GasTokenPrice, GasTokenPriceComputation, GasTokenPriceKey, GasTokenPrices,
+    PoolDepthComputation, PoolDepthKey, PoolDepths, SpotPriceComputation, SpotPriceKey, SpotPrices,
+};
 pub use error::ComputationError;
-pub use types::{PoolDepth, SpotPrice, TokenGasPrice};
+pub use store::DerivedDataStore;

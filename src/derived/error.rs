@@ -34,4 +34,8 @@ pub enum ComputationError {
     /// Internal error during computation.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Invalid configuration provided.
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
