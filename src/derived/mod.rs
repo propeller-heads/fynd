@@ -36,8 +36,8 @@ mod store;
 
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
 pub use computations::{
-    GasTokenPrice, GasTokenPriceComputation, GasTokenPriceKey, GasTokenPrices,
     PoolDepthComputation, PoolDepthKey, PoolDepths, SpotPriceComputation, SpotPriceKey, SpotPrices,
+    TokenGasPrice, TokenGasPriceComputation, TokenGasPriceKey, TokenGasPrices,
 };
 pub use error::ComputationError;
 pub use store::DerivedDataStore;

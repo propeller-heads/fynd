@@ -35,19 +35,19 @@ use crate::{
 };
 
 /// Key for token price lookups.
-pub type GasTokenPriceKey = Address;
+pub type TokenGasPriceKey = Address;
 
 /// Token price as (numerator, denominator).
 /// Price = numerator / denominator where:
 /// - numerator = amount of token received from 1 ETH input
 /// - denominator = 1 ETH (10^18) + total gas cost in wei
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GasTokenPrice {
+pub struct TokenGasPrice {
     pub numerator: BigUint,
     pub denominator: BigUint,
 }
 
-impl GasTokenPrice {
+impl TokenGasPrice {
     pub fn new(numerator: BigUint, denominator: BigUint) -> Self {
         Self { numerator, denominator }
     }
@@ -66,7 +66,7 @@ impl GasTokenPrice {
 }
 
 /// Token prices map: token address → price ratio.
-pub type GasTokenPrices = HashMap<GasTokenPriceKey, GasTokenPrice>;
+pub type TokenGasPrices = HashMap<TokenGasPriceKey, TokenGasPrice>;
 
 /// 1 ETH in wei.
 fn one_eth() -> BigUint {
@@ -103,20 +103,20 @@ impl TokenState {
 /// Uses DFS to explore paths, continuing when better rates are found,
 /// terminating paths that yield worse rates.
 #[derive(Debug)]
-pub struct GasTokenPriceComputation {
+pub struct TokenGasPriceComputation {
     /// The gas token address (e.g., WETH).
     gas_token: Address,
 }
 
-impl GasTokenPriceComputation {
-    /// Creates a new GasTokenPriceComputation with the given gas token.
+impl TokenGasPriceComputation {
+    /// Creates a new TokenGasPriceComputation with the given gas token.
     pub fn new(gas_token: Address) -> Self {
         Self { gas_token }
     }
 }
 
-impl DerivedComputation for GasTokenPriceComputation {
-    type Output = GasTokenPrices;
+impl DerivedComputation for TokenGasPriceComputation {
+    type Output = TokenGasPrices;
 
     const ID: ComputationId = "token_prices";
 
@@ -257,12 +257,12 @@ impl DerivedComputation for GasTokenPriceComputation {
             }
         }
 
-        // Convert states to GasTokenPrice (numerator, denominator)
-        let prices: GasTokenPrices = best_states
+        // Convert states to TokenGasPrice (numerator, denominator)
+        let prices: TokenGasPrices = best_states
             .into_iter()
             .map(|(addr, state)| {
                 let denominator = &one + &state.gas_used;
-                let price = GasTokenPrice::new(state.amount_out, denominator);
+                let price = TokenGasPrice::new(state.amount_out, denominator);
                 (addr, price)
             })
             .collect();
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn computation_id() {
-        assert_eq!(GasTokenPriceComputation::ID, "token_prices");
+        assert_eq!(TokenGasPriceComputation::ID, "token_prices");
     }
 
     /// Test single-hop price computation using setup_market.
@@ -294,7 +294,7 @@ mod tests {
             setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -324,7 +324,7 @@ mod tests {
         )]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -354,7 +354,7 @@ mod tests {
         ]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -394,7 +394,7 @@ mod tests {
         ]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -429,7 +429,7 @@ mod tests {
         ]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -469,7 +469,7 @@ mod tests {
         ]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();
@@ -500,7 +500,7 @@ mod tests {
         ]);
 
         let store = DerivedDataStore::new();
-        let computation = GasTokenPriceComputation::new(eth.address.clone());
+        let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
             .compute(&market, &store)
             .unwrap();

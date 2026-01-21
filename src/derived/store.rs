@@ -1,7 +1,7 @@
 //! Typed storage for derived data.
 
 use super::computations::{
-    gas_token_price::GasTokenPrices, pool_depth::PoolDepths, spot_price::SpotPrices,
+    pool_depth::PoolDepths, spot_price::SpotPrices, token_gas_price::TokenGasPrices,
 };
 
 /// Typed storage for derived data computations.
@@ -10,7 +10,7 @@ use super::computations::{
 /// Each field is `Option` to indicate whether the computation has run.
 #[derive(Debug, Default)]
 pub struct DerivedDataStore {
-    token_prices: Option<GasTokenPrices>,
+    token_prices: Option<TokenGasPrices>,
     pool_depths: Option<PoolDepths>,
     spot_prices: Option<SpotPrices>,
     /// Block number at which data was last computed.
@@ -33,12 +33,12 @@ impl DerivedDataStore {
     // -------------------------------------------------------------------------
 
     /// Returns token prices if computed.
-    pub fn token_prices(&self) -> Option<&GasTokenPrices> {
+    pub fn token_prices(&self) -> Option<&TokenGasPrices> {
         self.token_prices.as_ref()
     }
 
     /// Sets token prices.
-    pub fn set_token_prices(&mut self, prices: GasTokenPrices, block: Option<u64>) {
+    pub fn set_token_prices(&mut self, prices: TokenGasPrices, block: Option<u64>) {
         self.token_prices = Some(prices);
         self.last_block = block;
     }
