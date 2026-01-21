@@ -228,3 +228,79 @@ impl SharedMarketData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+
+    use super::*;
+    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+
+    #[test]
+    fn extract_subset_filters_by_component_ids() {
+        // Setup: market with 2 pools (A-B, B-C) and 3 tokens
+        let mut market = SharedMarketData::new();
+
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let token_c = token(0x0C, "C");
+
+        market.upsert_components([
+            component("pool_ab", &[token_a.clone(), token_b.clone()]),
+            component("pool_bc", &[token_b.clone(), token_c.clone()]),
+        ]);
+        market.upsert_tokens([token_a.clone(), token_b.clone(), token_c.clone()]);
+        market.update_states([
+            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2)) as Box<dyn ProtocolSim>),
+            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3)) as Box<dyn ProtocolSim>),
+        ]);
+        market.update_gas_price(GasPrice::new(BigUint::from(100u64), BigUint::from(10u64)));
+        market.update_last_updated(BlockInfo {
+            number: 12345,
+            hash: "0xabc".to_string(),
+            timestamp: 0,
+        });
+
+        // Extract only pool_ab
+        let ids: HashSet<_> = ["pool_ab".to_string()]
+            .into_iter()
+            .collect();
+        let subset = market.extract_subset(&ids);
+
+        // Components: only pool_ab
+        assert_eq!(subset.components.len(), 1);
+        assert!(subset
+            .components
+            .contains_key("pool_ab"));
+
+        // Tokens: only A and B (referenced by pool_ab), not C
+        assert_eq!(subset.tokens.len(), 2);
+        assert!(subset
+            .tokens
+            .contains_key(&token_a.address));
+        assert!(subset
+            .tokens
+            .contains_key(&token_b.address));
+        assert!(!subset
+            .tokens
+            .contains_key(&token_c.address));
+
+        // Simulation states: only pool_ab
+        assert_eq!(subset.simulation_states.len(), 1);
+        assert!(subset
+            .simulation_states
+            .contains_key("pool_ab"));
+
+        // Gas price and block info are copied
+        assert_eq!(subset.gas_price, market.gas_price);
+        assert!(subset.last_updated.is_some());
+
+        // Empty IDs returns empty subset
+        let empty_subset = market.extract_subset(&HashSet::new());
+        assert!(empty_subset.components.is_empty());
+        assert!(empty_subset.tokens.is_empty());
+        assert!(empty_subset
+            .simulation_states
+            .is_empty());
+    }
+}
