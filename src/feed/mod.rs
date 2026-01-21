@@ -13,9 +13,10 @@ pub struct TychoFeedConfig {
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
     pub(crate) chain: Chain,
-    /// Tycho API key.
-    // TODO: make this optional and add no_tls flag
-    pub(crate) tycho_api_key: String,
+    /// Tycho API key (optional).
+    pub(crate) tycho_api_key: Option<String>,
+    /// Use TLS for Tycho WebSocket connection.
+    pub(crate) use_tls: bool,
     /// Names of the protocols to index.
     /// For example, "uniswap_v2", "uniswap_v3", "sushiswap", etc.
     pub(crate) protocols: Vec<String>,
@@ -45,7 +46,8 @@ impl TychoFeedConfig {
     pub fn new(
         tycho_url: String,
         chain: Chain,
-        tycho_api_key: String,
+        tycho_api_key: Option<String>,
+        use_tls: bool,
         protocols: Vec<String>,
         min_tvl: f64,
         rpc_url: String,
@@ -54,6 +56,7 @@ impl TychoFeedConfig {
             tycho_url,
             chain,
             tycho_api_key,
+            use_tls,
             protocols,
             min_tvl,
             tvl_buffer_multiplier: 1.1,

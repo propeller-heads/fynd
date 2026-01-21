@@ -7,7 +7,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::select;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig};
+use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig, TychoSolverBuilder};
 
 fn main() -> Result<(), anyhow::Error> {
     create_tracing_subscriber();
@@ -80,11 +80,10 @@ async fn run_solver(cli: Cli) -> Result<(), anyhow::Error> {
     let chain = parse_chain(&cli.chain).map_err(|e| anyhow!("Failed to parse chain: {}", e))?;
 
     // Build solver with all fields from CLI
-    let builder = tycho_solver::builder::TychoSolverBuilder::new(
+    let mut builder = TychoSolverBuilder::new(
         chain,
         pools_config.pools,
         cli.tycho_url,
-        cli.tycho_api_key,
         cli.rpc_url,
         cli.protocols,
     )
@@ -96,6 +95,13 @@ async fn run_solver(cli: Cli) -> Result<(), anyhow::Error> {
     .reconnect_delay(Duration::from_secs(cli.reconnect_delay_secs))
     .order_manager_timeout(Duration::from_millis(cli.order_manager_timeout_ms))
     .order_manager_min_responses(cli.order_manager_min_responses);
+
+    if cli.disable_tls {
+        builder = builder.disable_tls();
+    }
+    if cli.tycho_api_key.is_some() {
+        builder = builder.tycho_api_key(cli.tycho_api_key.unwrap());
+    }
 
     // Build and start solver
     let solver = builder

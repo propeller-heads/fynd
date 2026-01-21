@@ -32,7 +32,8 @@ pub struct TychoSolverBuilder {
     http_port: u16,
     pools: HashMap<String, PoolConfig>,
     tycho_url: String,
-    tycho_api_key: String,
+    tycho_api_key: Option<String>,
+    use_tls: bool,
     rpc_url: String,
     protocols: Vec<String>,
     // Optional fields with defaults
@@ -50,7 +51,6 @@ impl TychoSolverBuilder {
         chain: Chain,
         pools: HashMap<String, PoolConfig>,
         tycho_url: String,
-        tycho_api_key: String,
         rpc_url: String,
         protocols: Vec<String>,
     ) -> Self {
@@ -60,7 +60,8 @@ impl TychoSolverBuilder {
             http_port: defaults::HTTP_PORT,
             pools,
             tycho_url,
-            tycho_api_key,
+            tycho_api_key: None,
+            use_tls: true, // Default to TLS enabled for Tycho WebSocket connection
             rpc_url,
             protocols,
             min_tvl: defaults::MIN_TVL,
@@ -120,6 +121,18 @@ impl TychoSolverBuilder {
         self
     }
 
+    /// Sets the Tycho API key
+    pub fn tycho_api_key(mut self, tycho_api_key: String) -> Self {
+        self.tycho_api_key = Some(tycho_api_key);
+        self
+    }
+
+    /// Disables TLS for Tycho WebSocket connection (TLS is enabled by default).
+    pub fn disable_tls(mut self) -> Self {
+        self.use_tls = false;
+        self
+    }
+
     pub fn build(self) -> Result<TychoSolver> {
         info!(
             host = %self.http_host,
@@ -137,6 +150,7 @@ impl TychoSolverBuilder {
             self.tycho_url.clone(),
             self.chain,
             self.tycho_api_key.clone(),
+            self.use_tls,
             self.protocols.clone(),
             self.min_tvl,
             self.rpc_url.clone(),

@@ -27,13 +27,12 @@ pub struct Cli {
     pub tycho_url: String,
 
     /// Tycho API key
-    // TODO: make this optional
     #[arg(long, env)]
-    pub tycho_api_key: String,
+    pub tycho_api_key: Option<String>,
 
     /// Disable TLS for Tycho WebSocket connection
     #[arg(long)]
-    pub no_tls: bool,
+    pub disable_tls: bool,
 
     /// Node RPC URL for the target chain
     #[arg(long, env)]
@@ -109,7 +108,7 @@ mod cli_tests {
         assert_eq!(cli.chain, "Ethereum");
         assert_eq!(cli.http_host, "127.0.0.1");
         assert_eq!(cli.http_port, 8080);
-        assert_eq!(cli.tycho_api_key, "test-key");
+        assert_eq!(cli.tycho_api_key, Some("test-key".to_string()));
         assert_eq!(cli.rpc_url, "https://rpc.example.com");
         assert_eq!(cli.tycho_url, "wss://custom.tycho.url");
         assert_eq!(cli.protocols, vec!["uniswap_v2", "uniswap_v3"]);
@@ -121,8 +120,6 @@ mod cli_tests {
     fn test_arg_parsing_defaults() {
         let cli = Cli::try_parse_from(vec![
             "tycho-solver",
-            "--tycho-api-key",
-            "test-key",
             "--rpc-url",
             "https://rpc.example.com",
             "--protocols",
@@ -133,9 +130,9 @@ mod cli_tests {
         assert_eq!(cli.chain, "Ethereum");
         assert_eq!(cli.http_host, "0.0.0.0");
         assert_eq!(cli.http_port, 3000);
-        assert_eq!(cli.tycho_api_key, "test-key");
+        assert_eq!(cli.tycho_api_key, None);
         assert_eq!(cli.rpc_url, "https://rpc.example.com");
-        assert_eq!(cli.tycho_url, "tycho.propellerheads.xyz");
+        assert_eq!(cli.tycho_url, "localhost:4242");
         assert_eq!(cli.protocols, vec!["uniswap_v2"]);
         assert_eq!(cli.min_tvl, 10.0);
         assert_eq!(cli.tvl_buffer_multiplier, 1.1);
@@ -163,25 +160,8 @@ mod cli_tests {
 
     #[test]
     fn test_arg_parsing_missing_required_args() {
+        // rpc_url required
         let args = Cli::try_parse_from(vec!["tycho-solver", "--protocols", "uniswap_v2"]);
-        assert!(args.is_err());
-
-        let args = Cli::try_parse_from(vec![
-            "tycho-solver",
-            "--tycho-api-key",
-            "test-key",
-            "--protocols",
-            "uniswap_v2",
-        ]);
-        assert!(args.is_err());
-
-        let args = Cli::try_parse_from(vec![
-            "tycho-solver",
-            "--rpc-url",
-            "https://rpc.example.com",
-            "--protocols",
-            "uniswap_v2",
-        ]);
         assert!(args.is_err());
     }
 }
