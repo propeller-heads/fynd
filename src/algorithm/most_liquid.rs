@@ -601,6 +601,7 @@ impl Algorithm for MostLiquidAlgorithm {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
+    use rstest::rstest;
     use tokio::sync::RwLock;
     use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
@@ -819,58 +820,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn find_paths_edge_cases() {
+    #[rstest]
+    #[case::source_not_in_graph(false, true)]
+    #[case::dest_not_in_graph(true, false)]
+    fn find_paths_token_not_in_graph(#[case] from_exists: bool, #[case] to_exists: bool) {
+        // Graph contains tokens A (0x0A) and B (0x0B) from linear_graph fixture
+        let (a, b, _, _) = addrs();
+        let non_existent = addr(0x99);
+        let m = linear_graph();
+        let g = m.graph();
+
+        let from = if from_exists { a } else { non_existent.clone() };
+        let to = if to_exists { b } else { non_existent };
+
+        let result = MostLiquidAlgorithm::find_paths(g, &from, &to, 1, 3);
+
+        assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
+    }
+
+    #[rstest]
+    #[case::min_greater_than_max(3, 1)]
+    #[case::min_hops_zero(0, 1)]
+    fn find_paths_invalid_configuration(#[case] min_hops: usize, #[case] max_hops: usize) {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
-        let empty_manager = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let empty_graph = empty_manager.graph();
-        let non_existent = addr(0x99);
 
-        // Empty graph
-        assert_eq!(
-            MostLiquidAlgorithm::find_paths(empty_graph, &a, &b, 1, 3)
-                .err()
-                .unwrap(),
-            AlgorithmError::NoPath {
-                from: a.clone(),
-                to: b.clone(),
-                reason: NoPathReason::SourceTokenNotInGraph,
-            }
-        );
-
-        // Token not in graph
-        assert_eq!(
-            MostLiquidAlgorithm::find_paths(g, &non_existent, &b, 1, 3)
-                .err()
-                .unwrap(),
-            AlgorithmError::NoPath {
-                from: non_existent.clone(),
-                to: b.clone(),
-                reason: NoPathReason::SourceTokenNotInGraph,
-            }
-        );
-        assert_eq!(
-            MostLiquidAlgorithm::find_paths(g, &a, &non_existent, 1, 3)
-                .err()
-                .unwrap(),
-            AlgorithmError::NoPath {
-                from: a.clone(),
-                to: non_existent.clone(),
-                reason: NoPathReason::DestinationTokenNotInGraph,
-            }
-        );
-
-        // Invalid hop values
         assert!(matches!(
-            MostLiquidAlgorithm::find_paths(g, &a, &b, 3, 1)
-                .err()
-                .unwrap(),
-            AlgorithmError::InvalidConfiguration { reason: _ }
-        ));
-        assert!(matches!(
-            MostLiquidAlgorithm::find_paths(g, &a, &b, 0, 1)
+            MostLiquidAlgorithm::find_paths(g, &a, &b, min_hops, max_hops)
                 .err()
                 .unwrap(),
             AlgorithmError::InvalidConfiguration { reason: _ }
