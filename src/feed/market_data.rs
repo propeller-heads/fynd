@@ -16,9 +16,10 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address},
         simulation::protocol_sim::ProtocolSim,
     },
+    tycho_ethereum::gas::GasPrice,
 };
 
-use crate::types::{BlockInfo, ComponentId, GasPrice};
+use crate::types::{BlockInfo, ComponentId};
 
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
@@ -40,8 +41,8 @@ pub struct SharedMarketData {
     simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
-    /// Current gas price.
-    gas_price: GasPrice,
+    /// Current gas price. None if not fetched yet.
+    gas_price: Option<GasPrice>,
     /// Protocol sync status indexed by their protocol system name.
     protocol_sync_status: HashMap<String, SynchronizerState>,
     /// Block info for the last update (only updated when protocols reported "Ready" status).
@@ -56,7 +57,7 @@ impl SharedMarketData {
             components: HashMap::new(),
             simulation_states: HashMap::new(),
             tokens: HashMap::new(),
-            gas_price: GasPrice::default(),
+            gas_price: None,
             protocol_sync_status: HashMap::new(),
             last_updated: None,
         }
@@ -99,9 +100,9 @@ impl SharedMarketData {
         self.tokens.get(address)
     }
 
-    /// Returns the current gas price.
-    pub fn gas_price(&self) -> &GasPrice {
-        &self.gas_price
+    /// Returns the current gas price. None if not fetched yet.
+    pub fn gas_price(&self) -> Option<&GasPrice> {
+        self.gas_price.as_ref()
     }
 
     /// Returns a reference to the component registry.
@@ -167,7 +168,7 @@ impl SharedMarketData {
 
     /// Updates the gas price.
     pub fn update_gas_price(&mut self, gas_price: GasPrice) {
-        self.gas_price = gas_price;
+        self.gas_price = Some(gas_price);
     }
 
     /// Updates the last updated block info.

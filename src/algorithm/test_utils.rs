@@ -5,14 +5,17 @@ use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use tycho_simulation::tycho_core::{
-    dto::ProtocolStateDelta,
-    models::{protocol::ProtocolComponent, token::Token, Address, Chain},
-    simulation::{
-        errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+use tycho_simulation::{
+    tycho_core::{
+        dto::ProtocolStateDelta,
+        models::{protocol::ProtocolComponent, token::Token, Address, Chain},
+        simulation::{
+            errors::{SimulationError, TransitionError},
+            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        },
+        Bytes,
     },
-    Bytes,
+    tycho_ethereum::gas::GasPrice,
 };
 
 use crate::{
@@ -20,7 +23,6 @@ use crate::{
     feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     types::{solution::OrderSide, Order},
-    GasPrice,
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -242,7 +244,10 @@ pub fn setup_market(
     let mut component_weights = HashMap::new();
 
     // Set gas_price = 1 wei/gas for simple calculations
-    market.update_gas_price(GasPrice::new(BigUint::from(1u64), BigUint::from(0u64)));
+    market.update_gas_price(GasPrice::Eip1559 {
+        base_fee_per_gas: BigUint::from(1u64),
+        max_priority_fee_per_gas: BigUint::from(0u64),
+    });
 
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];

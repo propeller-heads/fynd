@@ -3,6 +3,7 @@ use std::time::Duration;
 use tycho_simulation::tycho_common::models::Chain;
 
 pub mod events;
+pub mod gas;
 pub mod market_data;
 pub mod tycho_feed;
 
@@ -92,7 +93,10 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub enum TychoFeedError {
+pub enum DataFeedError {
+    #[error("gas price fetcher error: {0}")]
+    GasPriceFetcherError(String),
+
     /// Market data lock error.
     #[error("failed to acquire market data lock")]
     LockError,

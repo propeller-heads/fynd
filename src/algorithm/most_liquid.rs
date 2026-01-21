@@ -261,13 +261,13 @@ impl MostLiquidAlgorithm {
                 .get_token(address_in)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "token",
-                    id: format!("{:?}", address_in),
+                    id: Some(format!("{:?}", address_in)),
                 })?;
             let token_out = market
                 .get_token(address_out)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "token",
-                    id: format!("{:?}", address_out),
+                    id: Some(format!("{:?}", address_out)),
                 })?;
 
             let component_id = &edge_data.component_id;
@@ -275,13 +275,13 @@ impl MostLiquidAlgorithm {
                 .get_component(component_id)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "component",
-                    id: component_id.clone(),
+                    id: Some(component_id.clone()),
                 })?;
             let component_state = market
                 .get_simulation_state(component_id)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
-                    id: component_id.clone(),
+                    id: Some(component_id.clone()),
                 })?;
 
             let is_component_vm = component_state
@@ -353,7 +353,10 @@ impl MostLiquidAlgorithm {
             .iter()
             .map(|s| &s.gas_estimate)
             .sum();
-        let gas_price = market.gas_price().effective_gas_price();
+        let gas_price = market
+            .gas_price()
+            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+            .effective_gas_price();
         let gas_cost_wei = total_gas * gas_price;
         let gas_cost_out = gas_cost_wei * 1u32; // Placeholder until conversion is implemented
 
@@ -575,6 +578,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use tokio::sync::RwLock;
+    use tycho_simulation::tycho_ethereum::gas::GasPrice;
 
     use super::*;
     use crate::{
@@ -584,7 +588,7 @@ mod tests {
             order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
         types::OrderSide,
-        GasPrice, GraphManager,
+        GraphManager,
     };
 
     // ==================== try_score_path Tests ====================
@@ -1216,10 +1220,10 @@ mod tests {
 
         // Set a non-zero gas price so gas cost exceeds tiny output
         // gas_cost = 50_000 * (1_000_000 + 1_000_000) = 100_000_000_000 >> 2 wei output
-        market.update_gas_price(GasPrice::new(
-            BigUint::from(1_000_000u64),
-            BigUint::from(1_000_000u64),
-        ));
+        market.update_gas_price(GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(1_000_000u64),
+            max_priority_fee_per_gas: BigUint::from(1_000_000u64),
+        });
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output

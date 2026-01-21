@@ -361,6 +361,9 @@ impl<D: Clone> MarketEventHandler for PetgraphStableDiGraphManager<D> {
 mod tests {
     use std::str::FromStr;
 
+    use num_bigint::BigUint;
+    use tycho_simulation::tycho_ethereum::gas::GasPrice;
+
     use super::*;
 
     /// Helper function to create a test address from a hex string.
@@ -673,13 +676,15 @@ mod tests {
     #[test]
     fn test_handle_event_error_invalid_gas_price() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        use crate::{
-            feed::events::{EventError, MarketEvent},
-            types::GasPrice,
-        };
+        use crate::feed::events::{EventError, MarketEvent};
 
         // Try to handle a gas price update event
-        let event = MarketEvent::GasPriceUpdated { gas_price: GasPrice::default() };
+        let event = MarketEvent::GasPriceUpdated {
+            gas_price: GasPrice::Eip1559 {
+                base_fee_per_gas: BigUint::from(0u64),
+                max_priority_fee_per_gas: BigUint::from(0u64),
+            },
+        };
 
         let result = manager.handle_event(&event);
 

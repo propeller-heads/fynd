@@ -93,15 +93,15 @@ pub use feed::{
     events::MarketEvent,
     market_data::{SharedMarketData, SharedMarketDataRef},
     tycho_feed::TychoFeed,
-    TychoFeedConfig, TychoFeedError,
+    DataFeedError, TychoFeedConfig,
 };
 pub use graph::{GraphManager, Path};
 pub use order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle};
 pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
-    ComponentId, GasPrice, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution,
-    SolutionStatus, SolveError, SolveResult, SolveTask, Swap, TaskId,
+    ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
+    SolveError, SolveResult, SolveTask, Swap, TaskId,
 };
 pub use worker::{SolverWorker, WorkerConfig};
 pub use worker_pool::{UnknownAlgorithmError, WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

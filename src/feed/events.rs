@@ -6,12 +6,9 @@
 use std::collections::HashMap;
 
 use thiserror::Error;
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{tycho_common::models::Address, tycho_ethereum::gas::GasPrice};
 
-use crate::{
-    graph::GraphError,
-    types::{ComponentId, GasPrice},
-};
+use crate::{graph::GraphError, types::ComponentId};
 
 /// Events broadcast by the indexer when market data changes.
 #[derive(Debug, Clone)]

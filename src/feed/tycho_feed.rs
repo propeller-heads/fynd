@@ -7,10 +7,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use tokio::sync::{
-    broadcast::{self, Receiver, Sender},
-    RwLock,
-};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 use tycho_simulation::{
@@ -38,7 +35,7 @@ use tycho_simulation::{
 
 use crate::{
     api::HealthTracker,
-    feed::{events::MarketEvent, market_data::SharedMarketData, TychoFeedConfig, TychoFeedError},
+    feed::{events::MarketEvent, market_data::SharedMarketData, DataFeedError, TychoFeedConfig},
     types::BlockInfo,
     SharedMarketDataRef,
 };
@@ -58,10 +55,12 @@ pub struct TychoFeed {
     /// Shared market data (we have write access).
     market_data: Arc<RwLock<SharedMarketData>>,
     /// Event broadcaster.
-    event_tx: Sender<MarketEvent>,
+    event_tx: broadcast::Sender<MarketEvent>,
     #[allow(dead_code)]
     /// Health tracker for API health checks.
     health_tracker: HealthTracker,
+    /// Signal channel to notify the gas price worker to refresh gas price.
+    gas_price_worker_signal_tx: Option<mpsc::Sender<oneshot::Sender<()>>>,
 }
 
 impl TychoFeed {
@@ -81,20 +80,38 @@ impl TychoFeed {
         config: TychoFeedConfig,
         market_data: SharedMarketDataRef,
         health_tracker: HealthTracker,
-    ) -> (Self, Receiver<MarketEvent>) {
+    ) -> (Self, broadcast::Receiver<MarketEvent>) {
         let (event_tx, event_rx) = broadcast::channel(1024);
 
-        (Self { config, market_data, event_tx, health_tracker }, event_rx)
+        (
+            Self {
+                config,
+                market_data,
+                event_tx,
+                health_tracker,
+                gas_price_worker_signal_tx: None,
+            },
+            event_rx,
+        )
     }
 
     /// Returns a new subscriber for market events.
-    pub fn subscribe(&self) -> Receiver<MarketEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Sets the signal channel to notify the gas price worker to refresh gas price.
+    /// If not set, gas price refresh will not be triggered by the TychoFeed.
+    pub fn with_gas_price_worker_signal_tx(
+        self,
+        gas_price_worker_signal_tx: mpsc::Sender<oneshot::Sender<()>>,
+    ) -> Self {
+        Self { gas_price_worker_signal_tx: Some(gas_price_worker_signal_tx), ..self }
     }
 
     /// Returns an additional event sender. Currently only used for testing.
     #[cfg(test)]
-    pub fn event_sender_clone(&self) -> Sender<MarketEvent> {
+    pub fn event_sender_clone(&self) -> broadcast::Sender<MarketEvent> {
         self.event_tx.clone()
     }
 
@@ -102,7 +119,7 @@ impl TychoFeed {
     ///
     /// This method runs indefinitely, reconnecting on failures.
     /// It is recommended to call this in a dedicated tokio task.
-    pub async fn run(self) -> Result<(), TychoFeedError> {
+    pub async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
             protocols = ?self.config.protocols,
@@ -119,7 +136,7 @@ impl TychoFeed {
             None,
         )
         .await
-        .map_err(|e| TychoFeedError::StreamError(e.to_string()))?;
+        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
@@ -137,12 +154,12 @@ impl TychoFeed {
         .await
         .build()
         .await
-        .map_err(|e| TychoFeedError::StreamError(e.to_string()))?;
+        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
 
         // Loop through block updates
         while let Some(msg) = protocol_stream.next().await {
             trace!("Received message from Tycho stream {:?}", msg);
-            let msg = msg.map_err(|e| TychoFeedError::StreamError(e.to_string()))?;
+            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
             self.handle_tycho_message(msg).await?;
             self.refresh_gas_price().await?;
             self.health_tracker.update();
@@ -153,7 +170,7 @@ impl TychoFeed {
 
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
-    async fn handle_tycho_message(&self, msg: Update) -> Result<(), TychoFeedError> {
+    async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
         // Collect variables for market shared data update
         let Update {
             new_pairs: added_components,
@@ -263,16 +280,34 @@ impl TychoFeed {
 
             self.event_tx
                 .send(market_update_event)
-                .map_err(|e| TychoFeedError::EventChannelError(e.to_string()))?;
+                .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;
         }
 
         Ok(())
     }
 
-    #[allow(dead_code)]
     /// Updates gas price from RPC.
-    async fn refresh_gas_price(&self) -> Result<(), TychoFeedError> {
-        // TODO: Triggers gas price refresh from fetcher
+    async fn refresh_gas_price(&self) -> Result<(), DataFeedError> {
+        if let Some(gas_price_worker_signal_tx) = &self.gas_price_worker_signal_tx {
+            let (signal_tx, signal_rx) = oneshot::channel();
+
+            gas_price_worker_signal_tx
+                .send(signal_tx)
+                .await
+                .map_err(|e| {
+                    DataFeedError::GasPriceFetcherError(format!(
+                        "Failed to send gas price refresh signal: {}",
+                        e
+                    ))
+                })?;
+
+            signal_rx.await.map_err(|e| {
+                DataFeedError::GasPriceFetcherError(format!(
+                    "Failed to receive gas price refresh confirmation: {}",
+                    e
+                ))
+            })?;
+        }
         Ok(())
     }
 }
@@ -282,7 +317,7 @@ fn register_exchanges(
     mut builder: ProtocolStreamBuilder,
     tvl_filter: ComponentFilter,
     protocols: &[String],
-) -> Result<ProtocolStreamBuilder, TychoFeedError> {
+) -> Result<ProtocolStreamBuilder, DataFeedError> {
     for protocol in protocols {
         match protocol.as_str() {
             "uniswap_v2" => {
@@ -376,7 +411,7 @@ fn register_exchanges(
                 );
             }
             _ => {
-                return Err(TychoFeedError::Config(format!("Unknown protocol: {}", protocol)));
+                return Err(DataFeedError::Config(format!("Unknown protocol: {}", protocol)));
             }
         }
     }
