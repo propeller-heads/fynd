@@ -4,7 +4,11 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tokio::select;
+use thiserror::Error;
+use tokio::{
+    select,
+    signal::unix::{signal, SignalKind},
+};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig, TychoSolverBuilder};
@@ -13,9 +17,25 @@ fn main() -> Result<(), anyhow::Error> {
     create_tracing_subscriber();
     let cli = Cli::parse();
 
-    run_solver(cli).map_err(|e| anyhow!(e))?;
+    run_solver(cli).map_err(|e| anyhow!("{}", e))?;
 
     Ok(())
+}
+
+/// Errors that can occur during solver operation.
+#[derive(Debug, Error)]
+pub enum SolverError {
+    /// Setup error (before runtime).
+    #[error("setup error: {0}")]
+    SetupError(String),
+
+    /// Solver runtime error.
+    #[error("solver runtime error: {0}")]
+    SolverRuntimeError(String),
+
+    /// Shutdown error.
+    #[error("shutdown error: {0}")]
+    ShutdownError(String),
 }
 
 fn create_tracing_subscriber() {
@@ -66,28 +86,28 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
     })
 }
 
-#[tokio::main]
-async fn run_solver(cli: Cli) -> Result<(), anyhow::Error> {
-    info!("Starting Tycho Solver");
-
-    let _metrics_task = create_metrics_exporter();
-
+/// Sets up the solver (loads config, parses chain, builds solver).
+/// Returns setup errors if any step fails.
+async fn setup_solver(cli: &Cli) -> Result<tycho_solver::builder::TychoSolver, SolverError> {
     // Load worker pools config
-    let pools_config = WorkerPoolsConfig::load_from_file(&cli.worker_pools_config)
-        .map_err(|e| anyhow!("Failed to load worker pools config: {}", e))?;
+    let pools_config =
+        WorkerPoolsConfig::load_from_file(&cli.worker_pools_config).map_err(|e| {
+            SolverError::SetupError(format!("failed to load worker pools config: {}", e))
+        })?;
 
     // Parse chain
-    let chain = parse_chain(&cli.chain).map_err(|e| anyhow!("Failed to parse chain: {}", e))?;
+    let chain = parse_chain(&cli.chain)
+        .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
     // Build solver with all fields from CLI
     let mut builder = TychoSolverBuilder::new(
         chain,
         pools_config.pools,
-        cli.tycho_url,
-        cli.rpc_url,
-        cli.protocols,
+        cli.tycho_url.clone(),
+        cli.rpc_url.clone(),
+        cli.protocols.clone(),
     )
-    .http_host(cli.http_host)
+    .http_host(cli.http_host.clone())
     .http_port(cli.http_port)
     .min_tvl(cli.min_tvl)
     .tvl_buffer_multiplier(cli.tvl_buffer_multiplier)
@@ -99,35 +119,68 @@ async fn run_solver(cli: Cli) -> Result<(), anyhow::Error> {
     if cli.disable_tls {
         builder = builder.disable_tls();
     }
-    if cli.tycho_api_key.is_some() {
-        builder = builder.tycho_api_key(cli.tycho_api_key.unwrap());
+    if let Some(ref api_key) = cli.tycho_api_key {
+        builder = builder.tycho_api_key(api_key.clone());
     }
 
     // Build and start solver
     let solver = builder
         .build()
-        .map_err(|e| anyhow!("Failed to start solver: {}", e))?;
+        .map_err(|e| SolverError::SetupError(format!("failed to start solver: {}", e)))?;
+
+    Ok(solver)
+}
+
+#[tokio::main]
+async fn run_solver(cli: Cli) -> Result<(), SolverError> {
+    info!("Starting Tycho Solver");
+
+    let _metrics_task = create_metrics_exporter();
+
+    // Setup solver (handles setup errors)
+    let solver = setup_solver(&cli).await?;
 
     // Run with graceful shutdown
     // The shutdown signal stops the server, which causes solver.run() to complete
     // and automatically clean up workers and feed (see TychoSolver::run() in builder.rs)
     let server_handle = solver.server_handle();
     let shutdown_signal = tokio::spawn(async move {
-        // TODO: add support for other shutdown signals (sigTerm etc)
         let ctrl_c = tokio::signal::ctrl_c();
-        ctrl_c.await.ok();
-        info!("SIGINT (Ctrl+C) received. Stopping server...");
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(sig) => sig,
+            Err(e) => {
+                error!("Failed to register SIGTERM handler: {}", e);
+                return Err(SolverError::SetupError(format!(
+                    "failed to register signal handler: {}",
+                    e
+                )));
+            }
+        };
+
+        select! {
+            _ = ctrl_c => {
+                info!("SIGINT (Ctrl+C) received. Stopping server...");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received. Stopping server...");
+            }
+        }
+
         server_handle.stop(true).await;
+        Ok::<(), SolverError>(())
     });
 
     select! {
         result = solver.run() => {
             if let Err(e) = result {
-                error!("Solver error: {}", e);
+                return Err(SolverError::SolverRuntimeError(e.to_string()));
             }
         }
-        _ = shutdown_signal => {
+        result = shutdown_signal => {
             // Shutdown signal received and server stopped
+            if let Err(e) = result {
+                return Err(SolverError::ShutdownError(e.to_string()));
+            }
         }
     }
 
