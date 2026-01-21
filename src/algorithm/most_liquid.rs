@@ -420,6 +420,11 @@ impl Algorithm for MostLiquidAlgorithm {
         // Acquire lock to read market data
         let market = market.read().await;
 
+        // Early return if gas price is not found, we know this is required for simulation
+        if market.gas_price().is_none() {
+            return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
+        }
+
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
@@ -1133,6 +1138,12 @@ mod tests {
         let pool1_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
         let pool2_comp = component("pool2", &[token_a.clone(), token_b.clone()]);
 
+        // Set gas price (required for simulation)
+        market.update_gas_price(GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(1u64),
+            max_priority_fee_per_gas: BigUint::from(0u64),
+        });
+
         // Insert components
         market.upsert_components(vec![pool1_comp, pool2_comp]);
 
@@ -1185,6 +1196,12 @@ mod tests {
         let mut market = SharedMarketData::new();
         let pool_state = MockProtocolSim::new(2);
         let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
+
+        // Set gas price (required for simulation)
+        market.update_gas_price(GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(1u64),
+            max_priority_fee_per_gas: BigUint::from(0u64),
+        });
 
         market.upsert_components(vec![pool_comp]);
         market.update_states(vec![(
@@ -1265,6 +1282,50 @@ mod tests {
             .find_best_route(manager.graph(), market_ref, &order)
             .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
+    }
+
+    #[tokio::test]
+    async fn find_best_route_missing_gas_price_returns_error() {
+        // Test that missing gas price returns DataNotFound error, not InsufficientLiquidity
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let mut market = SharedMarketData::new();
+        let pool_state = MockProtocolSim::new(2);
+        let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
+
+        // DO NOT set gas price - this is what we're testing
+        market.upsert_components(vec![pool_comp]);
+        market.update_states(vec![(
+            "pool1".to_string(),
+            Box::new(pool_state.clone()) as Box<dyn ProtocolSim>,
+        )]);
+        market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
+
+        // Initialize graph and set edge weights
+        let mut manager = PetgraphStableDiGraphManager::default();
+        manager.initialize_graph(&market.component_topology());
+        let weight = DepthAndPrice::from_protocol_sim(&pool_state, &token_a, &token_b).unwrap();
+        manager
+            .set_edge_weight(
+                &"pool1".to_string(),
+                &token_a.address,
+                &token_b.address,
+                weight,
+                false,
+            )
+            .unwrap();
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let market_ref = Arc::new(RwLock::new(market));
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market_ref, &order)
+            .await;
+
+        // Should get DataNotFound for gas price, not InsufficientLiquidity
+        assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "gas price", .. })));
     }
 
     #[tokio::test]
