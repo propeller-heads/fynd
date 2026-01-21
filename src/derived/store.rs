@@ -4,12 +4,11 @@ use std::collections::HashMap;
 
 use tycho_simulation::tycho_common::models::Address;
 
+use super::types::{PoolDepth, SpotPrice, TokenGasPrice};
 use crate::types::ComponentId;
 
-use super::types::{PoolDepth, SpotPrice, TokenPrice};
-
 /// Type alias for token prices map.
-pub type TokenPrices = HashMap<Address, TokenPrice>;
+pub type TokenPrices = HashMap<Address, TokenGasPrice>;
 
 /// Type alias for pool depths map.
 /// Key: (component_id, token_in, token_out)

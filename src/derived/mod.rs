@@ -37,4 +37,4 @@ mod types;
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
 pub use error::ComputationError;
 pub use store::{DerivedDataStore, PoolDepths, SpotPrices, TokenPrices};
-pub use types::{PoolDepth, SpotPrice, TokenPrice};
+pub use types::{PoolDepth, SpotPrice, TokenGasPrice};

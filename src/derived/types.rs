@@ -9,16 +9,18 @@ use crate::types::ComponentId;
 ///
 /// Used for gas cost estimation in output token terms.
 #[derive(Debug, Clone)]
-pub struct TokenPrice {
+pub struct TokenGasPrice {
     /// Token address.
     pub token: Address,
-    /// Price in gas token units (e.g., 1 USDC = 0.0005 ETH).
+    /// Price in gas token units (e.g., 2000 USDC = 1 ETH).
     /// Represented as a ratio: price = numerator / denominator.
     pub numerator: BigUint,
+    // TODO: This was included here to have the denominator always clear to the user, but maybe
+    // this could be moved a layer up.
     pub denominator: BigUint,
 }
 
-impl TokenPrice {
+impl TokenGasPrice {
     pub fn new(token: Address, numerator: BigUint, denominator: BigUint) -> Self {
         Self { token, numerator, denominator }
     }
@@ -61,10 +63,8 @@ pub struct SpotPrice {
     pub token_in: Address,
     /// Token being bought.
     pub token_out: Address,
-    /// Spot price as ratio: price = numerator / denominator.
-    /// "1 token_in = (numerator/denominator) token_out"
-    pub numerator: BigUint,
-    pub denominator: BigUint,
+    /// Spot price
+    pub price: f64,
 }
 
 impl SpotPrice {
@@ -72,9 +72,8 @@ impl SpotPrice {
         component_id: ComponentId,
         token_in: Address,
         token_out: Address,
-        numerator: BigUint,
-        denominator: BigUint,
+        price: f64,
     ) -> Self {
-        Self { component_id, token_in, token_out, numerator, denominator }
+        Self { component_id, token_in, token_out, price }
     }
 }
