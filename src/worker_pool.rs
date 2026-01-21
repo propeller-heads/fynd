@@ -5,6 +5,8 @@
 //! A pool is configured with a specific algorithm (by name), allowing multiple pools
 //! with different algorithms to compete via the OrderManager.
 
+// TODO: move file to /worker_pool module
+
 mod registry;
 
 use std::thread::JoinHandle;

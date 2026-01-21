@@ -1,188 +1,129 @@
-//! Tycho Router - Main entry point.
-//!
-//! This binary starts the Tycho Router service with:
-//! - HTTP API server (Actix Web)
-//! - OrderManager with multiple solver pools
-//! - Tycho indexer for market data
+use std::time::Duration;
 
-use std::sync::Arc;
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use anyhow::anyhow;
+use clap::Parser;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use tokio::select;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig};
 
-use actix_web::{App, HttpServer};
-use tokio::sync::RwLock;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
-use tycho_simulation::tycho_common::models::Chain;
-use tycho_solver::{
-    api::{configure_app, AppState, HealthTracker},
-    feed::market_data::SharedMarketData,
-    order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
-    task_queue::{TaskQueue, TaskQueueConfig},
-    worker::WorkerConfig,
-    worker_pool::WorkerPoolBuilder,
-    TychoFeed, TychoFeedConfig,
-};
+fn main() -> Result<(), anyhow::Error> {
+    create_tracing_subscriber();
+    let cli = Cli::parse();
 
-/// Application configuration.
+    run_solver(cli).map_err(|e| anyhow!(e))?;
+
+    Ok(())
+}
+
+fn create_tracing_subscriber() {
+    // RUST_LOG environment variable controls log level
+    let format = tracing_subscriber::fmt::format()
+        .with_level(true)
+        .with_target(true) // Show module path where log originated
+        .compact();
+    tracing_subscriber::fmt()
+        .event_format(format)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+}
+
+/// Creates and runs the Prometheus metrics exporter using Actix Web.
 ///
-/// TODO: Load from environment variables or config file.
-struct Config {
-    chain: Chain,
-    http_host: String,
-    http_port: u16,
-    num_workers_per_pool: usize,
-    task_queue_capacity: usize,
-    tycho_url: String,
-    tycho_api_key: String,
-    rpc_url: String,
+/// This exposes the metrics on the '/metrics' endpoint on a separate HTTP server on port 9898.
+fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
+    let exporter_builder = PrometheusBuilder::new();
+    let handle = exporter_builder
+        .install_recorder()
+        .expect("Failed to install Prometheus recorder");
+
+    tokio::spawn(async move {
+        async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
+            let metrics = handle.render();
+            HttpResponse::Ok()
+                .content_type("text/plain; version=0.0.4; charset=utf-8")
+                .body(metrics)
+        }
+
+        if let Err(e) = HttpServer::new(move || {
+            App::new().route(
+                "/metrics",
+                web::get().to({
+                    let handle = handle.clone();
+                    move || metrics_handler(handle.clone())
+                }),
+            )
+        })
+        .bind(("0.0.0.0", 9898))
+        .expect("Failed to bind metrics server")
+        .run()
+        .await
+        {
+            error!("Metrics server failed: {}", e);
+        }
+    })
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            chain: Chain::Ethereum,
-            http_host: "0.0.0.0".to_string(),
-            http_port: 3000,
-            num_workers_per_pool: num_cpus::get(),
-            task_queue_capacity: 1000,
-            tycho_url: "wss://tycho.propellerheads.xyz".to_string(),
-            tycho_api_key: String::new(),
-            rpc_url: String::new(),
-        }
-    }
-}
+#[tokio::main]
+async fn run_solver(cli: Cli) -> Result<(), anyhow::Error> {
+    info!("Starting Tycho Solver");
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    // Initialize tracing
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_target(true)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+    let _metrics_task = create_metrics_exporter();
 
-    // Load configuration
-    let config = Config::default();
+    // Load worker pools config
+    let pools_config = WorkerPoolsConfig::load_from_file(&cli.worker_pools_config)
+        .map_err(|e| anyhow!("Failed to load worker pools config: {}", e))?;
 
-    info!(
-        host = %config.http_host,
-        port = config.http_port,
-        workers_per_pool = config.num_workers_per_pool,
-        "starting tycho router"
-    );
+    // Parse chain
+    let chain = parse_chain(&cli.chain).map_err(|e| anyhow!("Failed to parse chain: {}", e))?;
 
-    // Create shared market data
-    let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+    // Build solver with all fields from CLI
+    let builder = tycho_solver::builder::TychoSolverBuilder::new(
+        chain,
+        pools_config.pools,
+        cli.tycho_url,
+        cli.tycho_api_key,
+        cli.rpc_url,
+        cli.protocols,
+    )
+    .http_host(cli.http_host)
+    .http_port(cli.http_port)
+    .min_tvl(cli.min_tvl)
+    .tvl_buffer_multiplier(cli.tvl_buffer_multiplier)
+    .gas_refresh_interval(Duration::from_secs(cli.gas_refresh_interval_secs))
+    .reconnect_delay(Duration::from_secs(cli.reconnect_delay_secs))
+    .order_manager_timeout(Duration::from_millis(cli.order_manager_timeout_ms))
+    .order_manager_min_responses(cli.order_manager_min_responses);
 
-    // Create health tracker (shared between TychoFeed and API)
-    let health_tracker = HealthTracker::new();
+    // Build and start solver
+    let solver = builder
+        .build()
+        .map_err(|e| anyhow!("Failed to start solver: {}", e))?;
 
-    let tycho_feed_config = TychoFeedConfig::new(
-        config.tycho_url,
-        config.chain,
-        config.tycho_api_key,
-        vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
-        10.0,
-        config.rpc_url,
-    );
-
-    let (tycho_feed, event_rx) =
-        TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
-
-    // Create worker pools - each pool has its own task queue
-    // Currently we only have "most_liquid", but this is where you'd add more algorithms
-    let mut solver_pool_handles = Vec::new();
-    let mut worker_pools = Vec::new();
-
-    // Pool 1: most_liquid algorithm
-    let worker_config = WorkerConfig::default();
-    let task_queue = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
-    let (task_handle, task_rx) = task_queue.split();
-
-    let worker_pool = WorkerPoolBuilder::new()
-        .name("most_liquid")
-        .algorithm("most_liquid")
-        .num_workers(config.num_workers_per_pool)
-        .worker_config(worker_config)
-        .build(task_rx, Arc::clone(&market_data), event_rx)
-        .expect("failed to create worker pool: algorithm not registered");
-
-    info!(
-        name = %worker_pool.name(),
-        algorithm = %worker_pool.algorithm(),
-        num_workers = worker_pool.num_workers(),
-        "worker pool started"
-    );
-
-    solver_pool_handles.push(SolverPoolHandle::new(
-        worker_pool.name(),
-        worker_pool.algorithm(),
-        task_handle,
-    ));
-    worker_pools.push(worker_pool);
-
-    // Future: Add more worker pools here with different algorithms/configs
-    // Example:
-    // let task_queue2 = TaskQueue::new(TaskQueueConfig { capacity: config.task_queue_capacity });
-    // let (task_handle2, task_rx2) = task_queue2.split();
-    // let worker_pool2 = WorkerPoolBuilder::new()
-    //     .name("most_liquid_thorough")
-    //     .algorithm("most_liquid")
-    //     .num_workers(8)
-    //     .worker_config(WorkerConfig { max_hops: 5, ..Default::default() })
-    //     .build(task_rx2, Arc::clone(&market_data), event_rx.resubscribe());
-    // solver_pool_handles.push(SolverPoolHandle::new(
-    //     worker_pool2.name(),
-    //     worker_pool2.algorithm(),
-    //     task_handle2,
-    // ));
-    // worker_pools.push(worker_pool2);
-
-    // Create OrderManager with all solver pool handles
-    let order_manager_config = OrderManagerConfig::default();
-    let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
-
-    info!(num_pools = order_manager.num_pools(), "order manager created");
-
-    // Start Tycho feed in background
-    let feed_handle = tokio::spawn(async move {
-        if let Err(e) = tycho_feed.run().await {
-            tracing::error!(error = %e, "tycho feed error");
-        }
+    // Run with graceful shutdown
+    // The shutdown signal stops the server, which causes solver.run() to complete
+    // and automatically clean up workers and feed (see TychoSolver::run() in builder.rs)
+    let server_handle = solver.server_handle();
+    let shutdown_signal = tokio::spawn(async move {
+        // TODO: add support for other shutdown signals (sigTerm etc)
+        let ctrl_c = tokio::signal::ctrl_c();
+        ctrl_c.await.ok();
+        info!("SIGINT (Ctrl+C) received. Stopping server...");
+        server_handle.stop(true).await;
     });
 
-    // Create app state with OrderManager
-    let app_state = AppState::new(order_manager, health_tracker);
-
-    // Start HTTP server
-    let server = HttpServer::new(move || {
-        App::new()
-            .wrap(tracing_actix_web::TracingLogger::default())
-            .configure(|cfg| configure_app(cfg, app_state.clone()))
-    })
-    .bind((config.http_host.as_str(), config.http_port))?
-    .run();
-
-    info!("HTTP server started");
-
-    // Wait for shutdown signal
-    tokio::select! {
-        result = server => {
+    select! {
+        result = solver.run() => {
             if let Err(e) = result {
-                tracing::error!(error = %e, "HTTP server error");
+                error!("Solver error: {}", e);
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutdown signal received");
+        _ = shutdown_signal => {
+            // Shutdown signal received and server stopped
         }
     }
 
-    // Cleanup
-    info!("shutting down...");
-    feed_handle.abort();
-    for pool in worker_pools {
-        pool.shutdown();
-    }
-
-    info!("shutdown complete");
     Ok(())
 }

@@ -1,0 +1,301 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use actix_web::{dev::ServerHandle, App, HttpServer};
+use anyhow::{Context, Result};
+use futures::future::Either;
+use tokio::{sync::RwLock, task::JoinHandle};
+use tracing::{error, info};
+use tycho_simulation::tycho_common::models::Chain;
+
+use crate::{
+    api::{configure_app, AppState, HealthTracker},
+    config::{defaults, PoolConfig},
+    feed::market_data::SharedMarketData,
+    order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
+    task_queue::{TaskQueue, TaskQueueConfig},
+    worker::WorkerConfig,
+    worker_pool::{WorkerPool, WorkerPoolBuilder},
+    TychoFeed, TychoFeedConfig,
+};
+
+/// Builder that assembles the Tycho solver and returns a running server handle.
+///
+/// The builder does the following:
+/// - Creates a new Tycho feed
+/// - Creates worker pools (one task queue per pool)
+/// - Creates a new order manager
+/// - Creates a new HTTP server
+/// - Returns a running server handle
+pub struct TychoSolverBuilder {
+    chain: Chain,
+    http_host: String,
+    http_port: u16,
+    pools: HashMap<String, PoolConfig>,
+    tycho_url: String,
+    tycho_api_key: String,
+    rpc_url: String,
+    protocols: Vec<String>,
+    // Optional fields with defaults
+    min_tvl: f64,
+    tvl_buffer_multiplier: f64,
+    gas_refresh_interval: Duration,
+    reconnect_delay: Duration,
+    order_manager_timeout: Duration,
+    order_manager_min_responses: usize,
+}
+
+impl TychoSolverBuilder {
+    /// Creates a new builder with required fields.
+    pub fn new(
+        chain: Chain,
+        pools: HashMap<String, PoolConfig>,
+        tycho_url: String,
+        tycho_api_key: String,
+        rpc_url: String,
+        protocols: Vec<String>,
+    ) -> Self {
+        Self {
+            chain,
+            http_host: defaults::HTTP_HOST.to_owned(),
+            http_port: defaults::HTTP_PORT,
+            pools,
+            tycho_url,
+            tycho_api_key,
+            rpc_url,
+            protocols,
+            min_tvl: defaults::MIN_TVL,
+            tvl_buffer_multiplier: defaults::TVL_BUFFER_MULTIPLIER,
+            gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
+            reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
+            order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
+            order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
+        }
+    }
+
+    /// Sets the HTTP host (default: "0.0.0.0").
+    pub fn http_host(mut self, host: String) -> Self {
+        self.http_host = host;
+        self
+    }
+
+    /// Sets the HTTP port (default: 3000).
+    pub fn http_port(mut self, port: u16) -> Self {
+        self.http_port = port;
+        self
+    }
+
+    /// Sets the minimum TVL filter (default: 10.0).
+    pub fn min_tvl(mut self, min_tvl: f64) -> Self {
+        self.min_tvl = min_tvl;
+        self
+    }
+
+    /// Sets the TVL buffer multiplier (default: 1.1).
+    pub fn tvl_buffer_multiplier(mut self, multiplier: f64) -> Self {
+        self.tvl_buffer_multiplier = multiplier;
+        self
+    }
+
+    /// Sets the gas price refresh interval (default: 30 seconds).
+    pub fn gas_refresh_interval(mut self, interval: Duration) -> Self {
+        self.gas_refresh_interval = interval;
+        self
+    }
+
+    /// Sets the reconnect delay on connection failure (default: 5 seconds).
+    pub fn reconnect_delay(mut self, delay: Duration) -> Self {
+        self.reconnect_delay = delay;
+        self
+    }
+
+    /// Sets the order manager timeout (default: 100ms).
+    pub fn order_manager_timeout(mut self, timeout: Duration) -> Self {
+        self.order_manager_timeout = timeout;
+        self
+    }
+
+    /// Sets the minimum number of solver responses before early return (default: 0, wait for all).
+    pub fn order_manager_min_responses(mut self, min: usize) -> Self {
+        self.order_manager_min_responses = min;
+        self
+    }
+
+    pub fn build(self) -> Result<TychoSolver> {
+        info!(
+            host = %self.http_host,
+            port = self.http_port,
+            pools = self.pools.len(),
+            "starting tycho solver"
+        );
+
+        // Shared state
+        let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+        let health_tracker = HealthTracker::new();
+
+        // Tycho feed
+        let tycho_feed_config = TychoFeedConfig::new(
+            self.tycho_url.clone(),
+            self.chain,
+            self.tycho_api_key.clone(),
+            self.protocols.clone(),
+            self.min_tvl,
+            self.rpc_url.clone(),
+        )
+        .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
+        .gas_refresh_interval(self.gas_refresh_interval)
+        .reconnect_delay(self.reconnect_delay);
+
+        let (tycho_feed, event_rx) =
+            TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
+
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = tycho_feed.run().await {
+                error!(error = %e, "tycho feed error");
+            }
+        });
+
+        // Worker pools (one task queue per pool)
+        let mut solver_pool_handles = Vec::new();
+        let mut worker_pools = Vec::new();
+
+        let event_rx_primary = event_rx;
+        for (pool_name, pool_cfg) in self.pools.iter() {
+            // Convert pool's config to WorkerConfig
+            let worker_config = WorkerConfig {
+                min_hops: pool_cfg.min_hops,
+                max_hops: pool_cfg.max_hops,
+                timeout: Duration::from_millis(pool_cfg.timeout_ms),
+            };
+            let task_queue =
+                TaskQueue::new(TaskQueueConfig { capacity: pool_cfg.task_queue_capacity });
+            let (task_handle, task_rx) = task_queue.split();
+
+            // Each pool gets its own subscription to feed events
+            let pool_event_rx = event_rx_primary.resubscribe();
+
+            let worker_pool = WorkerPoolBuilder::new()
+                .name(pool_name.clone())
+                .algorithm(pool_cfg.algorithm.clone())
+                .num_workers(pool_cfg.num_workers)
+                .worker_config(worker_config)
+                .build(task_rx, Arc::clone(&market_data), pool_event_rx)
+                .context("failed to create worker pool")?;
+
+            info!(
+                name = %worker_pool.name(),
+                algorithm = %worker_pool.algorithm(),
+                num_workers = worker_pool.num_workers(),
+                "worker pool started"
+            );
+
+            solver_pool_handles.push(SolverPoolHandle::new(
+                worker_pool.name(),
+                worker_pool.algorithm(),
+                task_handle,
+            ));
+            worker_pools.push(worker_pool);
+        }
+
+        let order_manager_config = OrderManagerConfig::default()
+            .with_timeout(self.order_manager_timeout)
+            .with_min_responses(self.order_manager_min_responses);
+        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
+
+        let app_state = AppState::new(order_manager, health_tracker);
+
+        let server = HttpServer::new(move || {
+            App::new()
+                .wrap(tracing_actix_web::TracingLogger::default())
+                .configure(|cfg| configure_app(cfg, app_state.clone()))
+        })
+        .bind((self.http_host.as_str(), self.http_port))
+        .context("failed to bind HTTP server")?
+        .run();
+
+        let server_handle = server.handle();
+        let server_task = tokio::spawn(async move {
+            if let Err(e) = server.await {
+                tracing::error!(error = %e, "HTTP server error");
+            }
+        });
+
+        Ok(TychoSolver { server_handle, server_task, worker_pools, feed_handle })
+    }
+}
+
+/// Running Tycho solver. Call `run` to block until shutdown and perform cleanup.
+pub struct TychoSolver {
+    server_handle: ServerHandle,
+    server_task: JoinHandle<()>,
+    worker_pools: Vec<WorkerPool>,
+    feed_handle: JoinHandle<()>,
+}
+
+impl TychoSolver {
+    /// Returns a handle to the HTTP server for graceful shutdown.
+    pub fn server_handle(&self) -> ServerHandle {
+        self.server_handle.clone()
+    }
+
+    /// Runs the solver until shutdown. Performs cleanup on exit.
+    pub async fn run(self) -> std::io::Result<()> {
+        let TychoSolver { server_handle, server_task, worker_pools, feed_handle } = self;
+
+        info!("HTTP server started");
+
+        // Monitor both server and feed. If feed errors, shutdown the server.
+        match futures::future::select(server_task, feed_handle).await {
+            Either::Left((server_result, feed_handle)) => {
+                // Server completed first
+                if let Err(e) = server_result {
+                    tracing::error!(error = %e, "Server task error");
+                }
+                info!("shutting down...");
+                feed_handle.abort();
+                for pool in worker_pools {
+                    pool.shutdown();
+                }
+            }
+            Either::Right((_, _server_task)) => {
+                // Feed handle completed, which means it errored (feed.run() only returns on error)
+                error!("Tycho feed error detected, shutting down solver");
+                server_handle.stop(true).await;
+                // Wait for server to stop
+                _server_task.await.ok();
+                info!("shutting down...");
+                for pool in worker_pools {
+                    pool.shutdown();
+                }
+            }
+        }
+
+        info!("shutdown complete");
+        Ok(())
+    }
+}
+
+pub fn parse_chain(chain: &str) -> Result<Chain> {
+    let candidates = [
+        chain.to_string(),
+        chain.to_ascii_lowercase(),
+        chain.to_ascii_uppercase(),
+        capitalize_first(chain),
+    ];
+
+    for candidate in candidates {
+        let candidate = format!("\"{}\"", candidate);
+        if let Ok(parsed) = serde_json::from_str::<Chain>(&candidate) {
+            return Ok(parsed);
+        }
+    }
+
+    anyhow::bail!("unsupported chain '{}'. Try values like 'Ethereum'", chain)
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}

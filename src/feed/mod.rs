@@ -14,6 +14,7 @@ pub struct TychoFeedConfig {
     /// Blockchain to connect to.
     pub(crate) chain: Chain,
     /// Tycho API key.
+    // TODO: make this optional and add no_tls flag
     pub(crate) tycho_api_key: String,
     /// Names of the protocols to index.
     /// For example, "uniswap_v2", "uniswap_v3", "sushiswap", etc.
