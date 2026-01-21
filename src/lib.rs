@@ -85,8 +85,8 @@ pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use derived::{
     ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
-    GasTokenPrice, GasTokenPriceKey, GasTokenPrices, PoolDepthKey, PoolDepths, SpotPriceKey,
-    SpotPrices,
+    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPrice, TokenGasPriceKey,
+    TokenGasPrices,
 };
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
