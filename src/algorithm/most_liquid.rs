@@ -461,11 +461,12 @@ impl Algorithm for MostLiquidAlgorithm {
             })
             .collect();
 
-        // Step 4: Extract market subset and drop our Rc clone to potentially release the lock
-        // (lock is released when the last Rc clone is dropped, typically after all orders
-        // processed)
-        let market = market_guard.extract_subset(&component_ids);
-        drop(market_guard);
+        // Step 4: Extract market subset and release the lock over the main market data
+        let market = {
+            let market_subset = market.extract_subset(&component_ids);
+            drop(market);
+            market_subset
+        };
 
         let mut paths_simulated = 0usize;
         let mut simulation_failures = 0usize;
@@ -608,7 +609,7 @@ mod tests {
         algorithm::test_utils::{
             addr, component,
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
-            market_guard, market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
+            market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
         types::OrderSide,
         GraphManager,
@@ -1058,9 +1059,8 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1090,9 +1090,8 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1114,10 +1113,9 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -1135,9 +1133,8 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::with_config(1, 2, 100).unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1283,11 +1280,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
-        let market_ref = Arc::new(RwLock::new(market));
 
         // Route should still be returned, but with negative net_amount_out
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .expect("should return route even with negative net_amount_out");
 
@@ -1315,10 +1311,9 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
-        let market_ref = Arc::new(RwLock::new(market));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
@@ -1382,10 +1377,9 @@ mod tests {
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
 
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1424,10 +1418,9 @@ mod tests {
         // min_hops=2 should skip the 1-hop direct path
         let algorithm = MostLiquidAlgorithm::with_config(2, 3, 100).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
 
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1453,10 +1446,9 @@ mod tests {
         // max_hops=1 cannot reach C from A (needs 2 hops)
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1484,10 +1476,9 @@ mod tests {
         // timeout=0ms should timeout after processing some paths
         let algorithm = MostLiquidAlgorithm::with_config(1, 1, 0).unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
 
         // With 0ms timeout, we either get:

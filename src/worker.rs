@@ -7,10 +7,7 @@
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
 
-use std::{
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
