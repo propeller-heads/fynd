@@ -7,37 +7,31 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::{
+    sync::{broadcast, mpsc, oneshot, RwLock},
+    task::JoinHandle,
+};
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 use tycho_simulation::{
-    evm::{
-        engine_db::tycho_db::PreCachedDB,
-        protocol::{
-            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
-            ekubo::state::EkuboState,
-            erc4626::state::ERC4626State,
-            filters::{balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter},
-            fluid::FluidV1,
-            pancakeswap_v2::state::PancakeswapV2State,
-            rocketpool::state::RocketpoolState,
-            uniswap_v2::state::UniswapV2State,
-            uniswap_v3::state::UniswapV3State,
-            uniswap_v4::state::UniswapV4State,
-            vm::state::EVMPoolState,
-        },
-        stream::ProtocolStreamBuilder,
-    },
+    evm::stream::ProtocolStreamBuilder,
     protocol::models::Update,
+    rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
+    tycho_core::Bytes,
     utils::load_all_tokens,
 };
 
 use crate::{
     api::HealthTracker,
-    feed::{events::MarketEvent, market_data::SharedMarketData, DataFeedError, TychoFeedConfig},
+    feed::{
+        events::MarketEvent,
+        market_data::SharedMarketData,
+        protocol_registry::{register_exchanges, register_rfq},
+        TychoFeedConfig,
+    },
     types::BlockInfo,
-    SharedMarketDataRef,
+    DataFeedError, SharedMarketDataRef,
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -140,6 +134,7 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
+        // Spawn protocol stream
         let mut protocol_stream = register_exchanges(
             ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain),
             ComponentFilter::with_tvl_range(
@@ -150,19 +145,83 @@ impl TychoFeed {
         )?
         .auth_key(self.config.tycho_api_key.clone())
         .skip_state_decode_failures(true)
-        .set_tokens(all_tokens)
+        .set_tokens(all_tokens.clone())
         .await
         .build()
         .await
         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
 
-        // Loop through block updates
-        while let Some(msg) = protocol_stream.next().await {
-            trace!("Received message from Tycho stream {:?}", msg);
-            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-            self.handle_tycho_message(msg).await?;
-            self.refresh_gas_price().await?;
-            self.health_tracker.update();
+        // Spawn rfq stream
+        let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
+
+        let rfq_stream_builder = register_rfq(
+            RFQStreamBuilder::new()
+                .set_tokens(all_tokens)
+                .await,
+            self.config.chain,
+            self.config.min_tvl,
+            &self.config.protocols,
+            rfq_tokens,
+        )?;
+
+        let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel(64);
+
+        let mut rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
+            rfq_stream_builder
+                .build(rfq_tx)
+                .await
+                .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+            Ok(())
+        });
+
+        // Loop through block updates from both streams
+        loop {
+            tokio::select! {
+                // Handle protocol stream messages
+                msg = protocol_stream.next() => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from protocol stream: {:?}", msg);
+                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                            self.handle_tycho_message(msg).await?;
+                            self.refresh_gas_price().await?;
+                            self.health_tracker.update();
+                        }
+                        None => {
+                            info!("Protocol stream ended");
+                            break;
+                        }
+                    }
+                }
+                // Handle RFQ stream messages
+                msg = rfq_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from RFQ stream: {:?}", msg);
+                            self.handle_tycho_message(msg).await?;
+                            self.health_tracker.update();
+                        }
+                        None => {
+                            info!("RFQ stream ended");
+                            break;
+                        }
+                    }
+                }
+                // Check if RFQ handle has finished or errored
+                rfq_result = &mut rfq_handle => {
+                    match rfq_result {
+                        Ok(Ok(())) => {
+                            return Err(DataFeedError::StreamError("RFQ stream task ended unexpectedly".to_string()));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {}", e)));
+                        }
+                        Err(e) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {}", e)));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -310,112 +369,6 @@ impl TychoFeed {
         }
         Ok(())
     }
-}
-
-//TODO: make this public in tycho_simulation and import it here?
-fn register_exchanges(
-    mut builder: ProtocolStreamBuilder,
-    tvl_filter: ComponentFilter,
-    protocols: &[String],
-) -> Result<ProtocolStreamBuilder, DataFeedError> {
-    for protocol in protocols {
-        match protocol.as_str() {
-            "uniswap_v2" => {
-                builder =
-                    builder.exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None);
-            }
-            "sushiswap_v2" => {
-                builder =
-                    builder.exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None);
-            }
-            "pancakeswap_v2" => {
-                builder = builder.exchange::<PancakeswapV2State>(
-                    "pancakeswap_v2",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "uniswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
-            }
-            "pancakeswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None);
-            }
-            "vm:balancer_v2" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:balancer_v2",
-                    tvl_filter.clone(),
-                    Some(balancer_v2_pool_filter),
-                );
-            }
-            "uniswap_v4" => {
-                builder =
-                    builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None);
-            }
-            "ekubo_v2" => {
-                builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
-            }
-            "vm:curve" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "uniswap_v4_hooks" => {
-                builder = builder.exchange::<UniswapV4State>(
-                    "uniswap_v4_hooks",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "vm:maverick_v2" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:maverick_v2",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "fluid_v1" => {
-                builder = builder.exchange::<FluidV1>(
-                    "fluid_v1",
-                    tvl_filter.clone(),
-                    Some(fluid_v1_paused_pools_filter),
-                );
-            }
-            "aerodrome_slipstreams" => {
-                builder = builder.exchange::<AerodromeSlipstreamsState>(
-                    "aerodrome_slipstreams",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "erc4626" => {
-                builder = builder.exchange::<ERC4626State>(
-                    "erc4626",
-                    tvl_filter.clone(),
-                    Some(erc4626_filter),
-                );
-            }
-            "rocketpool" => {
-                builder =
-                    builder.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);
-            }
-            "velodrome_slipstreams" => {
-                builder = builder.exchange::<AerodromeSlipstreamsState>(
-                    "velodrome_slipstreams",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            _ => {
-                return Err(DataFeedError::Config(format!("Unknown protocol: {}", protocol)));
-            }
-        }
-    }
-    Ok(builder)
 }
 
 #[cfg(test)]
@@ -993,7 +946,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
     #[ignore]
-    async fn test_real_feed() {
+    async fn test_real_protocol_feed() {
         let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
         let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
         let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
@@ -1003,6 +956,47 @@ mod tests {
             Some(tycho_api_key),
             true, // Use TLS for real feed test
             vec!["uniswap_v2".to_string()],
+            100.0,
+            rpc_url,
+        );
+
+        let mut message_count = 5;
+
+        let market_data = new_shared_market_data();
+        let health_tracker = HealthTracker::new();
+
+        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+
+        // Start Tycho feed in background
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = feed.run().await {
+                panic!("Failed to run feed: {:?}", e);
+            }
+        });
+
+        while let Ok(event) = event_rx.recv().await {
+            message_count -= 1;
+            if message_count == 0 {
+                break;
+            }
+            dbg!(&event);
+        }
+
+        feed_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
+    #[ignore]
+    async fn test_real_combined_feed() {
+        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
+        let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
+        let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
+        let config = TychoFeedConfig::new(
+            tycho_url,
+            Chain::Ethereum,
+            Some(tycho_api_key),
+            true, // Use TLS for real feed test
+            vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string(), "uniswap_v2".to_string()],
             100.0,
             rpc_url,
         );
