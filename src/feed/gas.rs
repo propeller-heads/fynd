@@ -1,3 +1,5 @@
+use chrono::Utc;
+use metrics::gauge;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::GasPrice};
@@ -33,10 +35,14 @@ impl<C: FeePriceGetter<FeePrice = GasPrice>> GasPriceFetcher<C> {
                 .await
                 .unwrap();
 
-            self.shared_market_data
-                .write()
-                .await
-                .update_gas_price(fee_price);
+            {
+                let mut lock = self.shared_market_data.write().await;
+                lock.update_gas_price(fee_price);
+                if let Some(last_block_ts) = lock.last_updated().map(|b| b.timestamp) {
+                    let update_lag_ms = Utc::now().timestamp_millis() - last_block_ts as i64;
+                    gauge!("gas_price_update_lag_ms").set(update_lag_ms as f64);
+                }
+            }
 
             // Warn if the update notification is not correctly sent.
             if update_tx.send(()).is_err() {
