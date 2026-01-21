@@ -1,6 +1,6 @@
 //! Shared test utilities for algorithm tests.
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
@@ -238,7 +238,7 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 /// Sets up market with components and a graph. Returns (market_lock, graph_manager).
 ///
 /// The market is wrapped in `Arc<RwLock<...>>` for use with `find_best_route`.
-/// Use `market_guard(&market_lock)` to get an `Rc<RwLockReadGuard>` for tests.
+/// Use `market_read(&market_lock)` to get a `SharedMarketData` for other tests.
 pub fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
 ) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<DepthAndPrice>) {
@@ -292,16 +292,6 @@ pub fn setup_market(
     }
 
     (Arc::new(RwLock::new(market)), graph_manager)
-}
-
-/// Helper to create an Rc-wrapped read guard for `find_best_route` tests.
-pub fn market_guard(
-    lock: &Arc<RwLock<SharedMarketData>>,
-) -> Rc<tokio::sync::RwLockReadGuard<'_, SharedMarketData>> {
-    Rc::new(
-        lock.try_read()
-            .expect("lock should not be contested in test"),
-    )
 }
 
 /// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
