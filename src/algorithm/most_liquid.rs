@@ -576,7 +576,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::collections::HashSet;
 
     use rstest::rstest;
     use tokio::sync::RwLock;
@@ -589,10 +589,10 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
+        feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
-
     // ==================== try_score_path Tests ====================
 
     #[test]
@@ -1016,6 +1016,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
+        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1052,6 +1053,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1075,6 +1077,7 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1098,6 +1101,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1167,7 +1171,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market_ref, &order)
             .await
@@ -1213,7 +1217,7 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market_ref, &order)
@@ -1248,6 +1252,7 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
+        let market_ref = wrap_market(market);
 
         // Route should still be returned, but with negative net_amount_out
         let route = algorithm
@@ -1320,7 +1325,7 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market_ref, &order)
@@ -1348,6 +1353,7 @@ mod tests {
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
+        let market_ref = wrap_market(market);
 
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1392,6 +1398,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let market_ref = wrap_market(market);
 
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1423,6 +1430,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
+        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1456,6 +1464,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)

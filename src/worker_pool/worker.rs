@@ -89,7 +89,11 @@ where
     pub async fn process_event(&mut self, event: MarketEvent) {
         match event {
             MarketEvent::MarketUpdated { .. } => {
-                if let Err(e) = self.graph_manager.handle_event(&event).await {
+                if let Err(e) = self
+                    .graph_manager
+                    .handle_event(&event)
+                    .await
+                {
                     // Graph errors currently returned by handle_event are non-fatal, so we just log
                     // them.
                     warn!("Error handling market event: {:?}", e);

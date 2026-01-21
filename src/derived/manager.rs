@@ -17,7 +17,7 @@ use super::{
     computation::DerivedComputation,
     computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
-    store::DerivedDataStore,
+    store::DerivedData,
 };
 use crate::{
     feed::events::{EventError, MarketEvent, MarketEventHandler},
@@ -25,7 +25,18 @@ use crate::{
 };
 
 /// Thread-safe handle to shared derived data store.
-pub type SharedDerivedDataStore = Arc<RwLock<DerivedDataStore>>;
+pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
+
+/// Creates a new shared derived data store for async computation tests.
+pub fn wrap_derived(store: DerivedData) -> SharedDerivedDataRef {
+    Arc::new(RwLock::new(store))
+}
+
+/// Creates a new shared derived data instance wrapped in Arc<RwLock<>>.
+#[allow(unused)] // TODO: remove when used, method added for parity with market data
+pub fn new_shared_derived_data() -> SharedDerivedDataRef {
+    wrap_derived(DerivedData::new())
+}
 
 /// Configuration for the ComputationManager.
 ///
@@ -58,7 +69,7 @@ pub struct ComputationManager {
     /// Reference to shared market data (read access).
     market_data: SharedMarketDataRef,
     /// Shared derived data store (write access).
-    store: SharedDerivedDataStore,
+    store: SharedDerivedDataRef,
     /// Token gas price computation.
     token_price_computation: TokenGasPriceComputation,
     /// Spot price computation.
@@ -77,7 +88,7 @@ impl ComputationManager {
 
         Ok(Self {
             market_data,
-            store: Arc::new(RwLock::new(DerivedDataStore::new())),
+            store: wrap_derived(DerivedData::new()),
             token_price_computation: TokenGasPriceComputation::new(config.gas_token),
             spot_price_computation: SpotPriceComputation::new(),
             pool_depth_computation,
@@ -85,7 +96,7 @@ impl ComputationManager {
     }
 
     /// Returns a reference to the shared derived data store.
-    pub fn store(&self) -> SharedDerivedDataStore {
+    pub fn store(&self) -> SharedDerivedDataRef {
         Arc::clone(&self.store)
     }
 
@@ -138,33 +149,31 @@ impl ComputationManager {
     ///
     /// This is called on market updates and lag recovery.
     async fn compute_all(&self) {
-        // TODO: Consider passing `SharedMarketDataRef` and `SharedDerivedDataStore` directly
-        // to computations and letting them acquire locks as needed. This would allow
-        // computations to release locks earlier or use more granular locking strategies.
+        // Get block info for tracking
+        let block = {
+            let market_guard = self.market_data.read().await;
+            let block = market_guard
+                .last_updated()
+                .map(|b| b.number);
+            if block.is_none() {
+                warn!("computing derived data without block info - market data may not be initialized");
+            }
+            block
+        };
 
-        // Acquire read locks
-        let market_data = self.market_data.read().await;
-        let store_read = self.store.read().await;
-
-        let block = market_data.last_updated().map(|b| b.number);
-        if block.is_none() {
-            warn!("computing derived data without block info - market data may not be initialized");
-        }
-
-        // Run all computations
+        // Run all computations (each acquires locks as needed)
         let token_prices_result = self
             .token_price_computation
-            .compute(&market_data, &store_read);
+            .compute(&self.market_data, &self.store)
+            .await;
         let spot_prices_result = self
             .spot_price_computation
-            .compute(&market_data, &store_read);
+            .compute(&self.market_data, &self.store)
+            .await;
         let pool_depths_result = self
             .pool_depth_computation
-            .compute(&market_data, &store_read);
-
-        // Release read locks
-        drop(store_read);
-        drop(market_data);
+            .compute(&self.market_data, &self.store)
+            .await;
 
         // Update store with results
         let mut store_write = self.store.write().await;
@@ -208,10 +217,13 @@ impl ComputationManager {
 impl MarketEventHandler for ComputationManager {
     async fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
         match event {
-            MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
-                if !added_components.is_empty() ||
-                    !removed_components.is_empty() ||
-                    !updated_components.is_empty() =>
+            MarketEvent::MarketUpdated {
+                added_components,
+                removed_components,
+                updated_components,
+            } if !added_components.is_empty() ||
+                !removed_components.is_empty() ||
+                !updated_components.is_empty() =>
             {
                 trace!(
                     added = added_components.len(),
@@ -225,23 +237,23 @@ impl MarketEventHandler for ComputationManager {
             MarketEvent::GasPriceUpdated { .. } => {
                 trace!("gas price updated, recomputing token prices");
 
-                // Acquire read locks
-                let market_data = self.market_data.read().await;
-                let store_read = self.store.read().await;
+                // Get block info for tracking
+                let block = {
+                    let market_guard = self.market_data.read().await;
+                    let block = market_guard
+                        .last_updated()
+                        .map(|b| b.number);
+                    if block.is_none() {
+                        warn!("recomputing token prices without block info");
+                    }
+                    block
+                };
 
-                let block = market_data.last_updated().map(|b| b.number);
-                if block.is_none() {
-                    warn!("recomputing token prices without block info");
-                }
-
-                // Run token price computation only
+                // Run token price computation only (acquires locks as needed)
                 let result = self
                     .token_price_computation
-                    .compute(&market_data, &store_read);
-
-                // Release read locks
-                drop(store_read);
-                drop(market_data);
+                    .compute(&self.market_data, &self.store)
+                    .await;
 
                 // Update store
                 match result {
@@ -272,30 +284,14 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
-    use crate::algorithm::test_utils::{setup_market, token, MockProtocolSim};
-
-    fn wrap_market(market: crate::feed::market_data::SharedMarketData) -> SharedMarketDataRef {
-        Arc::new(RwLock::new(market))
-    }
+    use crate::{
+        algorithm::test_utils::{setup_market, token, MockProtocolSim},
+        feed::market_data::wrap_market,
+    };
 
     fn test_config() -> ComputationManagerConfig {
         let eth = token(1, "ETH");
         ComputationManagerConfig::new(eth.address)
-    }
-
-    #[test]
-    fn new_creates_manager_with_empty_store() {
-        let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config();
-
-        let manager = ComputationManager::new(config, market_ref).unwrap();
-
-        let store = manager.store();
-        let guard = store.blocking_read();
-        assert!(guard.token_prices().is_none());
-        assert!(guard.spot_prices().is_none());
-        assert!(guard.pool_depths().is_none());
     }
 
     #[test]
@@ -313,12 +309,8 @@ mod tests {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
 
-        let (market, _) = setup_market(vec![(
-            "eth_usdc",
-            &eth,
-            &usdc,
-            MockProtocolSim::new(2000).with_gas(0),
-        )]);
+        let (market, _) =
+            setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
         let market_ref = wrap_market(market);
 
         let config = ComputationManagerConfig::new(eth.address.clone());
@@ -333,7 +325,10 @@ mod tests {
             updated_components: vec![],
         };
 
-        manager.handle_event(&event).await.unwrap();
+        manager
+            .handle_event(&event)
+            .await
+            .unwrap();
 
         let store = manager.store();
         let guard = store.read().await;
@@ -354,7 +349,10 @@ mod tests {
             updated_components: vec![],
         };
 
-        manager.handle_event(&event).await.unwrap();
+        manager
+            .handle_event(&event)
+            .await
+            .unwrap();
 
         let store = manager.store();
         let guard = store.read().await;

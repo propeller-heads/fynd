@@ -3,6 +3,9 @@
 //! Computes spot prices for all pools in both directions using `ProtocolSim::spot_price()`.
 //! Spot prices are the instantaneous exchange rates without slippage.
 
+use std::collections::HashMap;
+
+use async_trait::async_trait;
 use itertools::Itertools;
 use tracing::{instrument, Span};
 
@@ -10,7 +13,7 @@ use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
         error::ComputationError,
-        store::DerivedDataStore,
+        manager::SharedDerivedDataRef,
         types::SpotPrices,
     },
     feed::market_data::SharedMarketData,
@@ -32,17 +35,19 @@ impl SpotPriceComputation {
     }
 }
 
+#[async_trait]
 impl DerivedComputation for SpotPriceComputation {
     type Output = SpotPrices;
 
     const ID: ComputationId = "spot_prices";
 
     #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_spot_prices))]
-    fn compute(
+    async fn compute(
         &self,
-        market: &SharedMarketData,
-        _store: &DerivedDataStore,
+        market: &SharedMarketDataRef,
+        _store: &SharedDerivedDataRef,
     ) -> Result<Self::Output, ComputationError> {
+        let market = market.read().await;
         let mut spot_prices = SpotPrices::new();
 
         let topology = market.component_topology();
@@ -105,20 +110,25 @@ mod tests {
     use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
-    use crate::algorithm::test_utils::{token, MockProtocolSim};
+    use crate::{
+        algorithm::test_utils::{token, MockProtocolSim},
+        derived::manager::new_shared_derived_data,
+        feed::market_data::{wrap_market, SharedMarketData},
+    };
 
     #[test]
     fn computation_id() {
         assert_eq!(SpotPriceComputation::ID, "spot_prices");
     }
 
-    #[test]
-    fn handles_empty_market() {
-        let market = SharedMarketData::new();
-        let store = DerivedDataStore::new();
+    #[tokio::test]
+    async fn handles_empty_market() {
+        let market_ref = wrap_market(SharedMarketData::new());
+        let derived_ref = new_shared_derived_data();
 
         let output = SpotPriceComputation::new()
-            .compute(&market, &store)
+            .compute(&market_ref, &derived_ref)
+            .await
             .unwrap();
 
         assert!(output.is_empty());

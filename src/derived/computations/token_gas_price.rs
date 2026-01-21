@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
@@ -45,7 +46,7 @@ use crate::{
         computation::{ComputationId, DerivedComputation},
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
-        store::DerivedDataStore,
+        manager::SharedDerivedDataRef,
         types::{SpotPriceKey, SpotPrices, TokenGasPrices},
     },
     feed::market_data::SharedMarketData,
@@ -282,17 +283,19 @@ impl TokenGasPriceComputation {
     }
 }
 
+#[async_trait]
 impl DerivedComputation for TokenGasPriceComputation {
     type Output = TokenGasPrices;
 
     const ID: ComputationId = "token_prices";
 
     #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_token_prices))]
-    fn compute(
+    async fn compute(
         &self,
-        market: &SharedMarketData,
-        store: &DerivedDataStore,
+        market: &SharedMarketDataRef,
+        store: &SharedDerivedDataRef,
     ) -> Result<Self::Output, ComputationError> {
+        let market = market.read().await;
         // Get spot prices (required dependency)
         let spot_prices = store
             .spot_prices()
@@ -472,8 +475,8 @@ mod tests {
         assert_eq!(path.score, 0.0);
     }
 
-    #[test]
-    fn test_discover_paths_multi_hop() {
+    #[tokio::test]
+    async fn test_discover_paths_multi_hop() {
         let eth = token(0, "ETH");
         let mid = token(2, "MID");
         let target = token(3, "TARGET");
@@ -542,8 +545,8 @@ mod tests {
         assert!(!paths.contains_key(&c.address), "C should NOT be reachable (3 hops)");
     }
 
-    #[test]
-    fn test_discover_paths_returns_multiple_candidates() {
+    #[tokio::test]
+    async fn test_discover_paths_returns_multiple_candidates() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -658,8 +661,8 @@ mod tests {
 
     // ==================== compute tests ====================
 
-    #[test]
-    fn test_compute_single_hop_mid_price() {
+    #[tokio::test]
+    async fn test_compute_single_hop_mid_price() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -676,7 +679,8 @@ mod tests {
         let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_ref, &derived_ref)
+            .await
             .unwrap();
 
         // Exactly 2 prices: ETH (gas token) and USDC
@@ -761,7 +765,8 @@ mod tests {
         let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_ref, &derived_ref)
+            .await
             .unwrap();
 
         assert_eq!(prices.len(), 4, "should have prices for ETH, A, B, C");
@@ -813,8 +818,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_missing_spot_prices_returns_error() {
+    #[tokio::test]
+    async fn test_compute_missing_spot_prices_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -833,8 +838,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_gas_token_with_no_pools_returns_only_self() {
+    #[tokio::test]
+    async fn test_compute_gas_token_with_no_pools_returns_only_self() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let dai = token(2, "DAI");
@@ -846,7 +851,8 @@ mod tests {
         let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_ref, &derived_ref)
+            .await
             .unwrap();
 
         // Only the gas token itself should have a price (1:1)
@@ -860,8 +866,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_missing_gas_price_returns_error() {
+    #[tokio::test]
+    async fn test_compute_missing_gas_price_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 

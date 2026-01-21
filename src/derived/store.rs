@@ -7,7 +7,7 @@ use super::types::{PoolDepths, SpotPrices, TokenGasPrices};
 /// Provides typed access to previously computed derived data.
 /// Each field is `Option` to indicate whether the computation has run.
 #[derive(Debug, Default)]
-pub struct DerivedDataStore {
+pub struct DerivedData {
     token_prices: Option<TokenGasPrices>,
     pool_depths: Option<PoolDepths>,
     spot_prices: Option<SpotPrices>,
@@ -15,7 +15,7 @@ pub struct DerivedDataStore {
     last_block: Option<u64>,
 }
 
-impl DerivedDataStore {
+impl DerivedData {
     /// Creates an empty store.
     pub fn new() -> Self {
         Self::default()

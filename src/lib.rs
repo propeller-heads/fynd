@@ -84,7 +84,7 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use derived::{
-    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
+    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,
     PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPrice, TokenGasPriceKey,
     TokenGasPrices,
 };
