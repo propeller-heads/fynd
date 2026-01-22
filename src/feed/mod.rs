@@ -13,14 +13,18 @@ pub struct TychoFeedConfig {
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
     pub(crate) chain: Chain,
-    /// Tycho API key.
-    pub(crate) tycho_api_key: String,
+    /// Tycho API key (optional).
+    pub(crate) tycho_api_key: Option<String>,
+    /// Use TLS for Tycho WebSocket connection.
+    pub(crate) use_tls: bool,
     /// Names of the protocols to index.
     /// For example, "uniswap_v2", "uniswap_v3", "sushiswap", etc.
     pub(crate) protocols: Vec<String>,
     /// TVL filter in native token, usually ETH.
     /// Components with TVL below this threshold will be ignored/removed from the market data.
     pub(crate) min_tvl: f64,
+    /// Minimum token quality filter.
+    pub(crate) min_token_quality: i32,
     /// Multiplier used to define the upper bound of the TVL filter.
     /// The upper bound is calculated as `min_tvl * tvl_buffer_multiplier`.
     /// Only components with TVL above this upper bound will be added to the market data.
@@ -44,7 +48,8 @@ impl TychoFeedConfig {
     pub fn new(
         tycho_url: String,
         chain: Chain,
-        tycho_api_key: String,
+        tycho_api_key: Option<String>,
+        use_tls: bool,
         protocols: Vec<String>,
         min_tvl: f64,
         rpc_url: String,
@@ -53,8 +58,10 @@ impl TychoFeedConfig {
             tycho_url,
             chain,
             tycho_api_key,
+            use_tls,
             protocols,
             min_tvl,
+            min_token_quality: 100,
             tvl_buffer_multiplier: 1.1,
             rpc_url,
             gas_refresh_interval: Duration::from_secs(30),
@@ -74,6 +81,11 @@ impl TychoFeedConfig {
 
     pub fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
         self.reconnect_delay = reconnect_delay;
+        self
+    }
+
+    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
+        self.min_token_quality = min_token_quality;
         self
     }
 }

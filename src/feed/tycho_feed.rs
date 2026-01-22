@@ -111,11 +111,11 @@ impl TychoFeed {
 
         let all_tokens = load_all_tokens(
             self.config.tycho_url.as_str(),
-            false,
-            Some(self.config.tycho_api_key.as_str()),
+            !self.config.use_tls,
+            self.config.tycho_api_key.as_deref(),
             true,
             self.config.chain,
-            None,
+            Some(self.config.min_token_quality),
             None,
         )
         .await
@@ -131,7 +131,7 @@ impl TychoFeed {
             ),
             &self.config.protocols,
         )?
-        .auth_key(Some(self.config.tycho_api_key.clone()))
+        .auth_key(self.config.tycho_api_key.clone())
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens)
         .await
@@ -479,7 +479,8 @@ mod tests {
         TychoFeedConfig::new(
             "ws://test.tycho.io".to_string(),
             Chain::Ethereum,
-            "test_api_key".to_string(),
+            Some("test_api_key".to_string()),
+            false, // no TLS for test
             vec!["uniswap_v2".to_string()],
             10.0,
             "http://test.rpc".to_string(),
@@ -964,7 +965,8 @@ mod tests {
         let config = TychoFeedConfig::new(
             tycho_url,
             Chain::Ethereum,
-            tycho_api_key,
+            Some(tycho_api_key),
+            true, // Use TLS for real feed test
             vec!["uniswap_v2".to_string()],
             100.0,
             rpc_url,
