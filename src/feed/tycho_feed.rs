@@ -134,51 +134,78 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        // Spawn protocol stream
-        let mut protocol_stream = register_exchanges(
-            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain),
-            ComponentFilter::with_tvl_range(
-                self.config.min_tvl,
-                self.config.min_tvl * self.config.tvl_buffer_multiplier,
-            ),
-            &self.config.protocols,
-        )?
-        .auth_key(self.config.tycho_api_key.clone())
-        .skip_state_decode_failures(true)
-        .set_tokens(all_tokens.clone())
-        .await
-        .build()
-        .await
-        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+        let mut protocol_stream = if !self
+            .config
+            .protocols
+            .iter()
+            .all(|p| p.starts_with("rfq:"))
+        {
+            // Spawn protocol stream
+            Some(
+                register_exchanges(
+                    ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain),
+                    ComponentFilter::with_tvl_range(
+                        self.config.min_tvl,
+                        self.config.min_tvl * self.config.tvl_buffer_multiplier,
+                    ),
+                    &self.config.protocols,
+                )?
+                .auth_key(self.config.tycho_api_key.clone())
+                .skip_state_decode_failures(true)
+                .set_tokens(all_tokens.clone())
+                .await
+                .build()
+                .await
+                .map_err(|e| DataFeedError::StreamError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
 
         // Spawn rfq stream
-        let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
+        let (mut rfq_rx, mut rfq_handle) = if self
+            .config
+            .protocols
+            .iter()
+            .any(|p| p.starts_with("rfq:"))
+        {
+            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
 
-        let rfq_stream_builder = register_rfq(
-            RFQStreamBuilder::new()
-                .set_tokens(all_tokens)
-                .await,
-            self.config.chain,
-            self.config.min_tvl,
-            &self.config.protocols,
-            rfq_tokens,
-        )?;
+            let rfq_stream_builder = register_rfq(
+                RFQStreamBuilder::new()
+                    .set_tokens(all_tokens)
+                    .await,
+                self.config.chain,
+                self.config.min_tvl,
+                &self.config.protocols,
+                rfq_tokens,
+            )?;
 
-        let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel(64);
+            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
 
-        let mut rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
-            rfq_stream_builder
-                .build(rfq_tx)
-                .await
-                .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-            Ok(())
-        });
+            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
+                rfq_stream_builder
+                    .build(rfq_tx)
+                    .await
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                Ok(())
+            });
+            (Some(rfq_rx), Some(rfq_handle))
+        } else {
+            (None, None)
+        };
 
         // Loop through block updates from both streams
         loop {
             tokio::select! {
                 // Handle protocol stream messages
-                msg = protocol_stream.next() => {
+                msg = async {
+                    if let Some(stream) = &mut protocol_stream {
+                        stream.next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
@@ -194,7 +221,13 @@ impl TychoFeed {
                     }
                 }
                 // Handle RFQ stream messages
-                msg = rfq_rx.recv() => {
+                msg = async {
+                    if let Some(rx) = &mut rfq_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from RFQ stream: {:?}", msg);
@@ -208,7 +241,13 @@ impl TychoFeed {
                     }
                 }
                 // Check if RFQ handle has finished or errored
-                rfq_result = &mut rfq_handle => {
+                rfq_result = async {
+                    if let Some(handle) = &mut rfq_handle {
+                        handle.await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
                     match rfq_result {
                         Ok(Ok(())) => {
                             return Err(DataFeedError::StreamError("RFQ stream task ended unexpectedly".to_string()));
@@ -956,6 +995,47 @@ mod tests {
             Some(tycho_api_key),
             true, // Use TLS for real feed test
             vec!["uniswap_v2".to_string()],
+            100.0,
+            rpc_url,
+        );
+
+        let mut message_count = 5;
+
+        let market_data = new_shared_market_data();
+        let health_tracker = HealthTracker::new();
+
+        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+
+        // Start Tycho feed in background
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = feed.run().await {
+                panic!("Failed to run feed: {:?}", e);
+            }
+        });
+
+        while let Ok(event) = event_rx.recv().await {
+            message_count -= 1;
+            if message_count == 0 {
+                break;
+            }
+            dbg!(&event);
+        }
+
+        feed_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
+    #[ignore]
+    async fn test_real_rfq_feed() {
+        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
+        let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
+        let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
+        let config = TychoFeedConfig::new(
+            tycho_url,
+            Chain::Ethereum,
+            Some(tycho_api_key),
+            true, // Use TLS for real feed test
+            vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string()],
             100.0,
             rpc_url,
         );
