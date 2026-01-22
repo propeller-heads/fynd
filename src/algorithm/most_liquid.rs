@@ -583,7 +583,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use tokio::sync::RwLock;
-    use tycho_simulation::tycho_ethereum::gas::GasPrice;
+    use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
     use super::*;
     use crate::{
@@ -1139,9 +1139,11 @@ mod tests {
         let pool2_comp = component("pool2", &[token_a.clone(), token_b.clone()]);
 
         // Set gas price (required for simulation)
-        market.update_gas_price(GasPrice::Eip1559 {
-            base_fee_per_gas: BigUint::from(1u64),
-            max_priority_fee_per_gas: BigUint::from(0u64),
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
         });
 
         // Insert components
@@ -1198,9 +1200,14 @@ mod tests {
         let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
 
         // Set gas price (required for simulation)
-        market.update_gas_price(GasPrice::Eip1559 {
-            base_fee_per_gas: BigUint::from(1u64),
-            max_priority_fee_per_gas: BigUint::from(0u64),
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Eip1559 {
+                base_fee_per_gas: BigUint::from(1u64),
+                max_priority_fee_per_gas: BigUint::from(0u64),
+            },
         });
 
         market.upsert_components(vec![pool_comp]);
@@ -1237,9 +1244,14 @@ mod tests {
 
         // Set a non-zero gas price so gas cost exceeds tiny output
         // gas_cost = 50_000 * (1_000_000 + 1_000_000) = 100_000_000_000 >> 2 wei output
-        market.update_gas_price(GasPrice::Eip1559 {
-            base_fee_per_gas: BigUint::from(1_000_000u64),
-            max_priority_fee_per_gas: BigUint::from(1_000_000u64),
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Eip1559 {
+                base_fee_per_gas: BigUint::from(1_000_000u64),
+                max_priority_fee_per_gas: BigUint::from(1_000_000u64),
+            },
         });
 
         let algorithm = MostLiquidAlgorithm::new();

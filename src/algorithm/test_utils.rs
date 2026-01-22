@@ -15,7 +15,7 @@ use tycho_simulation::{
         },
         Bytes,
     },
-    tycho_ethereum::gas::GasPrice,
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::{
@@ -244,9 +244,11 @@ pub fn setup_market(
     let mut component_weights = HashMap::new();
 
     // Set gas_price = 1 wei/gas for simple calculations
-    market.update_gas_price(GasPrice::Eip1559 {
-        base_fee_per_gas: BigUint::from(1u64),
-        max_priority_fee_per_gas: BigUint::from(0u64),
+    market.update_gas_price(BlockGasPrice {
+        block_number: 1,
+        block_hash: Default::default(),
+        block_timestamp: 0,
+        pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
     });
 
     for (pool_id, token_in, token_out, state) in pools {

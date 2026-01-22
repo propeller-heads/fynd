@@ -16,7 +16,7 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address},
         simulation::protocol_sim::ProtocolSim,
     },
-    tycho_ethereum::gas::GasPrice,
+    tycho_ethereum::gas::BlockGasPrice,
 };
 
 use crate::types::{BlockInfo, ComponentId};
@@ -42,7 +42,7 @@ pub struct SharedMarketData {
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
     /// Current gas price. None if not fetched yet.
-    gas_price: Option<GasPrice>,
+    gas_price: Option<BlockGasPrice>,
     /// Protocol sync status indexed by their protocol system name.
     protocol_sync_status: HashMap<String, SynchronizerState>,
     /// Block info for the last update (only updated when protocols reported "Ready" status).
@@ -101,7 +101,7 @@ impl SharedMarketData {
     }
 
     /// Returns the current gas price. None if not fetched yet.
-    pub fn gas_price(&self) -> Option<&GasPrice> {
+    pub fn gas_price(&self) -> Option<&BlockGasPrice> {
         self.gas_price.as_ref()
     }
 
@@ -167,7 +167,7 @@ impl SharedMarketData {
     }
 
     /// Updates the gas price.
-    pub fn update_gas_price(&mut self, gas_price: GasPrice) {
+    pub fn update_gas_price(&mut self, gas_price: BlockGasPrice) {
         self.gas_price = Some(gas_price);
     }
 

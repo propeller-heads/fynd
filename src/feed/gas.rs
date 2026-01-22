@@ -2,17 +2,17 @@ use chrono::Utc;
 use metrics::gauge;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
-use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::GasPrice};
+use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::BlockGasPrice};
 
 use crate::{DataFeedError, SharedMarketDataRef};
 
-pub struct GasPriceFetcher<C: FeePriceGetter<FeePrice = GasPrice>> {
+pub struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     signal_rx: mpsc::Receiver<oneshot::Sender<()>>,
     shared_market_data: SharedMarketDataRef,
 }
 
-impl<C: FeePriceGetter<FeePrice = GasPrice>> GasPriceFetcher<C> {
+impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
     pub fn new(
         client: C,
         shared_market_data: SharedMarketDataRef,
@@ -37,10 +37,20 @@ impl<C: FeePriceGetter<FeePrice = GasPrice>> GasPriceFetcher<C> {
 
             {
                 let mut lock = self.shared_market_data.write().await;
+                let update_block_number = fee_price.block_number;
                 lock.update_gas_price(fee_price);
-                if let Some(last_block_ts) = lock.last_updated().map(|b| b.timestamp) {
-                    let update_lag_ms = Utc::now().timestamp_millis() - last_block_ts as i64;
+                if let Some(last_block_info) = lock.last_updated() {
+                    let update_lag_ms =
+                        Utc::now().timestamp_millis() - last_block_info.timestamp as i64;
                     gauge!("gas_price_update_lag_ms").set(update_lag_ms as f64);
+
+                    if last_block_info
+                        .number
+                        .abs_diff(update_block_number) >
+                        3
+                    {
+                        warn!("Gas price update is out of sync with the last block info. Gas price: {}, Last block info: {}", update_block_number, last_block_info.number);
+                    }
                 }
             }
 
