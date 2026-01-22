@@ -38,6 +38,7 @@ pub struct TychoSolverBuilder {
     rpc_url: String,
     protocols: Vec<String>,
     min_tvl: f64,
+    min_token_quality: i32,
     tvl_buffer_multiplier: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
@@ -65,6 +66,7 @@ impl TychoSolverBuilder {
             rpc_url,
             protocols,
             min_tvl: defaults::MIN_TVL,
+            min_token_quality: defaults::MIN_TOKEN_QUALITY,
             tvl_buffer_multiplier: defaults::TVL_BUFFER_MULTIPLIER,
             gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
@@ -88,6 +90,12 @@ impl TychoSolverBuilder {
     /// Sets the minimum TVL filter (default: 10.0).
     pub fn min_tvl(mut self, min_tvl: f64) -> Self {
         self.min_tvl = min_tvl;
+        self
+    }
+
+    /// Sets the minimum token quality filter.
+    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
+        self.min_token_quality = min_token_quality;
         self
     }
 
@@ -157,7 +165,8 @@ impl TychoSolverBuilder {
         )
         .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
         .gas_refresh_interval(self.gas_refresh_interval)
-        .reconnect_delay(self.reconnect_delay);
+        .reconnect_delay(self.reconnect_delay)
+        .min_token_quality(self.min_token_quality);
 
         let (tycho_feed, event_rx) =
             TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());

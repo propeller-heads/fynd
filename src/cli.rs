@@ -55,6 +55,10 @@ pub struct Cli {
     #[arg(long, default_value_t = defaults::TVL_BUFFER_MULTIPLIER)]
     pub tvl_buffer_multiplier: f64,
 
+    /// Minimum token quality filter.
+    #[arg(long, default_value_t = defaults::MIN_TOKEN_QUALITY)]
+    pub min_token_quality: i32,
+
     /// Gas price refresh interval in seconds
     #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL_SECS)]
     pub gas_refresh_interval_secs: u64,

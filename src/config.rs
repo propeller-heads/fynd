@@ -59,6 +59,7 @@ pub mod defaults {
     pub const HTTP_HOST: &str = "0.0.0.0";
     pub const HTTP_PORT: u16 = 3000;
     pub const MIN_TVL: f64 = 10.0;
+    pub const MIN_TOKEN_QUALITY: i32 = 100;
     pub const TVL_BUFFER_MULTIPLIER: f64 = 1.1;
     pub const GAS_REFRESH_INTERVAL_SECS: u64 = 30;
     pub const RECONNECT_DELAY_SECS: u64 = 5;

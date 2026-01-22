@@ -115,7 +115,7 @@ impl TychoFeed {
             self.config.tycho_api_key.as_deref(),
             true,
             self.config.chain,
-            None,
+            Some(self.config.min_token_quality),
             None,
         )
         .await

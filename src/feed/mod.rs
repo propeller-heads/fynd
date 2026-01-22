@@ -23,6 +23,8 @@ pub struct TychoFeedConfig {
     /// TVL filter in native token, usually ETH.
     /// Components with TVL below this threshold will be ignored/removed from the market data.
     pub(crate) min_tvl: f64,
+    /// Minimum token quality filter.
+    pub(crate) min_token_quality: i32,
     /// Multiplier used to define the upper bound of the TVL filter.
     /// The upper bound is calculated as `min_tvl * tvl_buffer_multiplier`.
     /// Only components with TVL above this upper bound will be added to the market data.
@@ -59,6 +61,7 @@ impl TychoFeedConfig {
             use_tls,
             protocols,
             min_tvl,
+            min_token_quality: 100,
             tvl_buffer_multiplier: 1.1,
             rpc_url,
             gas_refresh_interval: Duration::from_secs(30),
@@ -78,6 +81,11 @@ impl TychoFeedConfig {
 
     pub fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
         self.reconnect_delay = reconnect_delay;
+        self
+    }
+
+    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
+        self.min_token_quality = min_token_quality;
         self
     }
 }
