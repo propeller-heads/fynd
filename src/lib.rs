@@ -88,7 +88,6 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
-pub use cli::Cli;
 pub use config::{PoolConfig, WorkerPoolsConfig};
 pub use feed::{
     events::MarketEvent,

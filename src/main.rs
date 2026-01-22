@@ -119,7 +119,7 @@ async fn setup_solver(cli: &Cli) -> Result<tycho_solver::builder::TychoSolver, S
     if cli.disable_tls {
         builder = builder.disable_tls();
     }
-    if let Some(ref api_key) = cli.tycho_api_key {
+    if let Some(api_key) = &cli.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
 
