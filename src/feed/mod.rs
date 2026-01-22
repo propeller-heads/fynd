@@ -5,6 +5,7 @@ use tycho_simulation::tycho_common::models::Chain;
 pub mod events;
 pub mod gas;
 pub mod market_data;
+pub mod protocol_registry;
 pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
