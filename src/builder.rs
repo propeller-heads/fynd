@@ -2,15 +2,14 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
-use futures::future::{select, Either};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info};
-use tycho_simulation::tycho_common::models::Chain;
+use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, PoolConfig},
-    feed::market_data::SharedMarketData,
+    feed::{gas::GasPriceFetcher, market_data::SharedMarketData},
     order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
     task_queue::{TaskQueue, TaskQueueConfig},
     worker::WorkerConfig,
@@ -168,12 +167,27 @@ impl TychoSolverBuilder {
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality);
 
-        let (tycho_feed, event_rx) =
+        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
+            .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;
+
+        let (mut gas_price_fetcher, gas_price_worker_signal_tx) =
+            GasPriceFetcher::new(ethereum_client, Arc::clone(&market_data));
+
+        let (mut tycho_feed, event_rx) =
             TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
+
+        tycho_feed = tycho_feed.with_gas_price_worker_signal_tx(gas_price_worker_signal_tx);
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = tycho_feed.run().await {
                 error!(error = %e, "tycho feed error");
+            }
+        });
+
+        // Start gas price fetcher in background
+        let gas_price_worker_handle = tokio::spawn(async move {
+            if let Err(e) = gas_price_fetcher.run().await {
+                tracing::error!(error = %e, "gas price fetcher error");
             }
         });
 
@@ -242,7 +256,13 @@ impl TychoSolverBuilder {
             }
         });
 
-        Ok(TychoSolver { server_handle, server_task, worker_pools, feed_handle })
+        Ok(TychoSolver {
+            server_handle,
+            server_task,
+            worker_pools,
+            feed_handle,
+            gas_price_worker_handle,
+        })
     }
 }
 
@@ -252,6 +272,7 @@ pub struct TychoSolver {
     server_task: JoinHandle<()>,
     worker_pools: Vec<WorkerPool>,
     feed_handle: JoinHandle<()>,
+    gas_price_worker_handle: JoinHandle<()>,
 }
 
 impl TychoSolver {
@@ -262,26 +283,41 @@ impl TychoSolver {
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
-        let TychoSolver { server_handle, server_task, worker_pools, feed_handle } = self;
+        let TychoSolver {
+            server_handle,
+            mut server_task,
+            worker_pools,
+            mut feed_handle,
+            mut gas_price_worker_handle,
+        } = self;
 
         info!("HTTP server started");
 
-        // Monitor both server and feed. If feed errors, shutdown the server.
-        match select(server_task, feed_handle).await {
-            Either::Left((server_result, feed_handle)) => {
+        // Monitor server, feed, and gas price worker. If any errors, shutdown everything.
+        tokio::select! {
+            server_result = &mut server_task => {
                 // Server completed first
                 if let Err(e) = server_result {
                     error!(error = %e, "Server task error");
                 }
                 info!("shutting down...");
                 feed_handle.abort();
+                gas_price_worker_handle.abort();
             }
-            Either::Right((_, server_task)) => {
+            _ = &mut feed_handle => {
                 // Feed handle completed, which means it errored (feed.run() only returns on error)
                 error!("Tycho feed error detected, shutting down solver");
                 server_handle.stop(true).await;
-                // Wait for server to stop
                 server_task.await.ok();
+                gas_price_worker_handle.abort();
+                info!("shutting down...");
+            }
+            _ = &mut gas_price_worker_handle => {
+                // Gas price worker completed, which means it errored
+                error!("Gas price worker error detected, shutting down solver");
+                server_handle.stop(true).await;
+                server_task.await.ok();
+                feed_handle.abort();
                 info!("shutting down...");
             }
         }

@@ -8,10 +8,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tycho_simulation::tycho_common::models::Address;
 
-use crate::{
-    graph::GraphError,
-    types::{ComponentId, GasPrice},
-};
+use crate::{graph::GraphError, types::ComponentId};
 
 /// Events broadcast by the indexer when market data changes.
 #[derive(Debug, Clone)]
@@ -23,9 +20,6 @@ pub enum MarketEvent {
         removed_components: Vec<ComponentId>,
         updated_components: Vec<ComponentId>,
     },
-
-    /// Gas price was updated.
-    GasPriceUpdated { gas_price: GasPrice },
 }
 
 /// Errors that can occur when handling market events.

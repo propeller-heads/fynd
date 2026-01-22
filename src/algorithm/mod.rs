@@ -110,8 +110,8 @@ pub enum AlgorithmError {
     SimulationFailed { component_id: String, error: String },
 
     /// Required data not found in market.
-    #[error("{kind} not found: {id}")]
-    DataNotFound { kind: &'static str, id: String },
+    #[error("{kind} not found{}", id.as_ref().map(|i| format!(": {i}")).unwrap_or_default())]
+    DataNotFound { kind: &'static str, id: Option<String> },
 
     /// Other algorithm-specific error.
     #[error("{0}")]

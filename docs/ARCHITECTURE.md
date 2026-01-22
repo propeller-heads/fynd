@@ -280,10 +280,7 @@ pub enum MarketEvent {
         added_components: HashMap<ComponentId, Vec<Address>>,
         removed_components: Vec<ComponentId>,
         updated_components: Vec<ComponentId>,
-    },
-
-    /// Gas price was updated.
-    GasPriceUpdated { gas_price: GasPrice },
+    }
 }
 ```
 

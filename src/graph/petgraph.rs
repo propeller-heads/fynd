@@ -350,9 +350,6 @@ impl<D: Clone> MarketEventHandler for PetgraphStableDiGraphManager<D> {
                     _ => Err(EventError::GraphErrors(errors)),
                 }
             }
-            MarketEvent::GasPriceUpdated { .. } => Err(EventError::InvalidEvent(
-                "Gas price updates cannot be applied to the graph".to_string(),
-            )),
         }
     }
 }
@@ -667,28 +664,6 @@ mod tests {
                 assert_eq!(comp_id, "pool1".to_string());
             }
             _ => panic!("Expected MissingComponentBetweenTokens error"),
-        }
-    }
-
-    #[test]
-    fn test_handle_event_error_invalid_gas_price() {
-        let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        use crate::{
-            feed::events::{EventError, MarketEvent},
-            types::GasPrice,
-        };
-
-        // Try to handle a gas price update event
-        let event = MarketEvent::GasPriceUpdated { gas_price: GasPrice::default() };
-
-        let result = manager.handle_event(&event);
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            EventError::InvalidEvent(msg) => {
-                assert!(msg.contains("Gas price updates cannot be applied"));
-            }
-            _ => panic!("Expected InvalidEvent error"),
         }
     }
 

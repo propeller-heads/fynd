@@ -118,9 +118,6 @@ where
                     warn!("Error handling market event: {:?}", e);
                 }
             }
-            MarketEvent::GasPriceUpdated { .. } => {
-                unimplemented!("Gas price updates are not supported yet");
-            }
         }
     }
 
