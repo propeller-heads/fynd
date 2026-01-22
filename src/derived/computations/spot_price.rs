@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use itertools::Itertools;
 use tracing::{instrument, Span};
 use tycho_simulation::tycho_common::models::Address;
 
@@ -79,28 +80,24 @@ impl DerivedComputation for SpotPriceComputation {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            for (i, token_in) in pool_tokens.iter().enumerate() {
-                for (j, token_out) in pool_tokens.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
+            for perm in pool_tokens.iter().permutations(2) {
+                let (token_in, token_out) = (*perm[0], *perm[1]);
 
-                    match sim_state.spot_price(token_out, token_in) {
-                        Ok(price) => {
-                            let key = (
-                                component_id.clone(),
-                                token_in.address.clone(),
-                                token_out.address.clone(),
-                            );
-                            spot_prices.insert(key, price);
-                        }
-                        Err(e) => {
-                            Err(ComputationError::SimulationFailed(format!(
-                                "failed to compute spot price for pool {component_id} \
+                match sim_state.spot_price(token_out, token_in) {
+                    Ok(price) => {
+                        let key = (
+                            component_id.clone(),
+                            token_in.address.clone(),
+                            token_out.address.clone(),
+                        );
+                        spot_prices.insert(key, price);
+                    }
+                    Err(e) => {
+                        Err(ComputationError::SimulationFailed(format!(
+                            "failed to compute spot price for pool {component_id} \
                                  {}/{}: {e}",
-                                token_in.address, token_out.address
-                            )))?;
-                        }
+                            token_in.address, token_out.address
+                        )))?;
                     }
                 }
             }

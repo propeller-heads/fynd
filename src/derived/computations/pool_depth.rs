@@ -1,17 +1,22 @@
 //! Pool depth computation.
 //!
-//! Computes liquidity depths for all pools using binary search with `get_amount_out`.
+//! Computes liquidity depths for all pools using `query_pool_swap` when available,
+//! falling back to binary search with `get_amount_out`.
 //! Depth represents the maximum input amount before reaching the configured slippage
 //! threshold from the spot price.
 
 use std::collections::HashMap;
 
+use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
 use tracing::{instrument, Span};
-use tycho_simulation::tycho_common::{
-    models::{token::Token, Address},
-    simulation::protocol_sim::ProtocolSim,
+use tycho_simulation::{
+    tycho_common::{
+        models::{token::Token, Address},
+        simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
+    },
+    tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
 };
 
 use crate::{
@@ -78,17 +83,21 @@ impl PoolDepthComputation {
         sim_state: &dyn ProtocolSim,
         token_in: &Token,
         token_out: &Token,
-        spot_price: f64,
+        min_price: f64,
+        component_id: &ComponentId,
     ) -> Result<BigUint, ComputationError> {
         let (max_input, _) = sim_state
             .get_limits(token_in.address.clone(), token_out.address.clone())
-            .map_err(|e| ComputationError::SimulationFailed(format!("get_limits failed: {e:?}")))?;
+            .map_err(|e| {
+                ComputationError::SimulationFailed(format!(
+                    "get_limits failed for pool {component_id} {}/{}: {e}",
+                    token_in.address, token_out.address
+                ))
+            })?;
 
         if max_input.is_zero() {
             return Ok(BigUint::zero());
         }
-
-        let min_acceptable_price = spot_price * (1.0 - self.slippage_threshold);
 
         let mut low = BigUint::one();
         let mut high = max_input.clone();
@@ -112,7 +121,7 @@ impl PoolDepthComputation {
 
                     let effective_price = amount_out / amount_in;
 
-                    if effective_price >= min_acceptable_price {
+                    if effective_price >= min_price {
                         best_valid = Some(mid.clone());
                         low = mid;
                     } else {
@@ -129,7 +138,7 @@ impl PoolDepthComputation {
 
         best_valid.ok_or(ComputationError::NoValidResult {
             reason: format!(
-                "could not find valid depth for pool with tokens {}/{}",
+                "could not find valid depth for pool {component_id} {}/{}",
                 token_in.address, token_out.address
             ),
         })
@@ -174,39 +183,64 @@ impl DerivedComputation for PoolDepthComputation {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            for (i, token_in) in pool_tokens.iter().enumerate() {
-                for (j, token_out) in pool_tokens.iter().enumerate() {
-                    if i == j {
-                        continue;
+            for perm in pool_tokens.iter().permutations(2) {
+                let (token_in, token_out) = (*perm[0], *perm[1]);
+
+                // Get spot price for limit calculation
+                let spot_price = sim_state
+                    .spot_price(token_in, token_out)
+                    .map_err(|e| {
+                        ComputationError::SimulationFailed(format!(
+                            "spot price failed for {}/{}: {e}",
+                            token_in.address, token_out.address
+                        ))
+                    })?;
+
+                // Calculate minimum acceptable price at slippage threshold
+                let min_price = spot_price * (1.0 - self.slippage_threshold);
+
+                // Convert the f64 price to a BigUint / BigUint price representation by scaling
+                const SCALE: u128 = 10u128.pow(18);
+                let min_price_scaled = (min_price * SCALE as f64) as u128;
+
+                let limit_price = Price::new(BigUint::from(min_price_scaled), BigUint::from(SCALE));
+
+                let params = QueryPoolSwapParams::new(
+                    token_in.clone(),
+                    token_out.clone(),
+                    SwapConstraint::TradeLimitPrice {
+                        limit: limit_price,
+                        tolerance: 0.0,
+                        min_amount_in: None,
+                        max_amount_in: None,
+                    },
+                );
+
+                // Try query_pool_swap first, fall back to binary search if not implemented
+                let pool_depth = match sim_state.query_pool_swap(&params) {
+                    Ok(swap) => swap.amount_in().clone(),
+                    Err(SimulationError::FatalError(msg))
+                        if msg == "query_pool_swap not implemented" =>
+                    {
+                        self.find_depth_binary_search(
+                            sim_state,
+                            token_in,
+                            token_out,
+                            min_price,
+                            component_id,
+                        )?
                     }
+                    Err(e) => {
+                        return Err(ComputationError::SimulationFailed(format!(
+                            "query_pool_swap failed for {}/{}: {e}",
+                            token_in.address, token_out.address
+                        )));
+                    }
+                };
 
-                    let spot_price = sim_state
-                        .spot_price(token_in, token_out)
-                        .map_err(|e| {
-                            ComputationError::SimulationFailed(format!(
-                                "failed to compute spot price for pool {component_id} \
-                                 {}/{}: {e}",
-                                token_in.address, token_out.address
-                            ))
-                        })
-                        .and_then(|p| {
-                            if p.is_finite() && p > 0.0 {
-                                Ok(p)
-                            } else {
-                                Err(ComputationError::SimulationFailed(format!(
-                                    "invalid spot price {p} for pool {component_id} {}/{}",
-                                    token_in.address, token_out.address
-                                )))
-                            }
-                        })?;
-
-                    let pool_depth =
-                        self.find_depth_binary_search(sim_state, token_in, token_out, spot_price)?;
-
-                    let key =
-                        (component_id.clone(), token_in.address.clone(), token_out.address.clone());
-                    pool_depths.insert(key, pool_depth);
-                }
+                let key =
+                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                pool_depths.insert(key, pool_depth);
             }
         }
 
@@ -288,9 +322,10 @@ mod tests {
         let spot = sim
             .spot_price(&token_a, &token_b)
             .unwrap();
+        let min_price = spot * (1.0 - comp.slippage_threshold);
 
         let depth = comp
-            .find_depth_binary_search(&sim, &token_a, &token_b, spot)
+            .find_depth_binary_search(&sim, &token_a, &token_b, min_price, &"mock_pool".into())
             .unwrap();
 
         assert_eq!(
