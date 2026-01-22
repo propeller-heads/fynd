@@ -29,9 +29,6 @@ use crate::{
     types::ComponentId,
 };
 
-/// Maximum iterations for binary search to prevent infinite loops.
-const MAX_BINARY_SEARCH_ITERATIONS: u32 = 64;
-
 /// Key for pool depth lookups: (component_id, token_in, token_out).
 pub type PoolDepthKey = (ComponentId, Address, Address);
 
@@ -103,11 +100,7 @@ impl PoolDepthComputation {
         let mut high = max_input.clone();
         let mut best_valid = None;
 
-        for _ in 0..MAX_BINARY_SEARCH_ITERATIONS {
-            if high <= &low + BigUint::one() {
-                break;
-            }
-
+        while low < high {
             let mid = (&low + &high) / 2u32;
 
             match sim_state.get_amount_out(mid.clone(), token_in, token_out) {
@@ -123,7 +116,7 @@ impl PoolDepthComputation {
 
                     if effective_price >= min_price {
                         best_valid = Some(mid.clone());
-                        low = mid;
+                        low = mid + BigUint::one();
                     } else {
                         high = mid;
                     }
@@ -131,7 +124,7 @@ impl PoolDepthComputation {
                 Err(_) => {
                     // Simulation failed - below protocol minimum as we maintain an invariant that
                     // the `high` should always succeed at simulation.
-                    low = mid;
+                    low = mid + BigUint::one();
                 }
             }
         }
