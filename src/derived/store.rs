@@ -28,7 +28,7 @@ pub struct DerivedDataStore {
     pool_depths: Option<PoolDepths>,
     spot_prices: Option<SpotPrices>,
     /// Block number at which data was last computed.
-    last_block: u64,
+    last_block: Option<u64>,
 }
 
 impl DerivedDataStore {
@@ -38,7 +38,7 @@ impl DerivedDataStore {
     }
 
     /// Returns the block number at which data was last computed.
-    pub fn last_block(&self) -> u64 {
+    pub fn last_block(&self) -> Option<u64> {
         self.last_block
     }
 
@@ -52,7 +52,7 @@ impl DerivedDataStore {
     }
 
     /// Sets token prices.
-    pub fn set_token_prices(&mut self, prices: TokenPrices, block: u64) {
+    pub fn set_token_prices(&mut self, prices: TokenPrices, block: Option<u64>) {
         self.token_prices = Some(prices);
         self.last_block = block;
     }
@@ -72,7 +72,7 @@ impl DerivedDataStore {
     }
 
     /// Sets pool depths.
-    pub fn set_pool_depths(&mut self, depths: PoolDepths, block: u64) {
+    pub fn set_pool_depths(&mut self, depths: PoolDepths, block: Option<u64>) {
         self.pool_depths = Some(depths);
         self.last_block = block;
     }
@@ -92,7 +92,7 @@ impl DerivedDataStore {
     }
 
     /// Sets spot prices.
-    pub fn set_spot_prices(&mut self, prices: SpotPrices, block: u64) {
+    pub fn set_spot_prices(&mut self, prices: SpotPrices, block: Option<u64>) {
         self.spot_prices = Some(prices);
         self.last_block = block;
     }
@@ -111,6 +111,6 @@ impl DerivedDataStore {
         self.token_prices = None;
         self.pool_depths = None;
         self.spot_prices = None;
-        self.last_block = 0;
+        self.last_block = None;
     }
 }
