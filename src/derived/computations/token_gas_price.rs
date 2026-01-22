@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
-use tracing::{debug, trace};
+use tracing::{instrument, trace, Span};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
@@ -120,6 +120,7 @@ impl DerivedComputation for TokenGasPriceComputation {
 
     const ID: ComputationId = "token_prices";
 
+    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_token_prices))]
     fn compute(
         &self,
         market: &SharedMarketData,
@@ -179,9 +180,13 @@ impl DerivedComputation for TokenGasPriceComputation {
         }];
 
         while let Some(current) = stack.pop() {
-            let Some(current_token_info) = tokens.get(&current.token) else {
-                continue;
-            };
+            let current_token_info =
+                tokens
+                    .get(&current.token)
+                    .ok_or(ComputationError::InvalidDependencyData {
+                        dependency: "market_data::tokens",
+                        reason: format!("missing token metadata for {}", current.token),
+                    })?;
 
             // Explore all pools containing this token
             let Some(pools) = adjacency.get(&current.token) else {
@@ -189,9 +194,12 @@ impl DerivedComputation for TokenGasPriceComputation {
             };
 
             for (component_id, pool_tokens) in pools {
-                let Some(sim_state) = market.get_simulation_state(component_id) else {
-                    continue;
-                };
+                let sim_state = market
+                    .get_simulation_state(component_id)
+                    .ok_or(ComputationError::InvalidDependencyData {
+                        dependency: "simulation_states",
+                        reason: format!("missing simulation state for {component_id}"),
+                    })?;
 
                 // Try swapping to each other token in the pool
                 for neighbor_addr in pool_tokens {
@@ -205,13 +213,18 @@ impl DerivedComputation for TokenGasPriceComputation {
                     };
 
                     // Simulate the swap using the actual amount we have
-                    let Ok(sim_result) = sim_state.get_amount_out(
-                        current.amount.clone(),
-                        current_token_info,
-                        neighbor_token_info,
-                    ) else {
-                        continue;
-                    };
+                    let sim_result = sim_state
+                        .get_amount_out(
+                            current.amount.clone(),
+                            current_token_info,
+                            neighbor_token_info,
+                        )
+                        .map_err(|e| {
+                            ComputationError::SimulationFailed(format!(
+                                "failed to simulate swap in {} from {} to {}: {}",
+                                component_id, current.token, neighbor_addr, e
+                            ))
+                        })?;
 
                     let new_amount_out = sim_result.amount;
 
@@ -269,7 +282,7 @@ impl DerivedComputation for TokenGasPriceComputation {
             })
             .collect();
 
-        debug!(token_count = prices.len(), "computed token prices via DFS");
+        Span::current().record("updated_token_prices", prices.len());
 
         Ok(prices)
     }

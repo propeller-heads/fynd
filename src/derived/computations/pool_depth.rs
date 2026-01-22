@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
-use tracing::{trace, warn};
+use tracing::{instrument, Span};
 use tycho_simulation::tycho_common::{
     models::{token::Token, Address},
     simulation::protocol_sim::ProtocolSim,
@@ -91,8 +91,8 @@ impl PoolDepthComputation {
         let min_acceptable_price = spot_price * (1.0 - self.slippage_threshold);
 
         let mut low = BigUint::one();
-        let mut high = max_input;
-        let mut best_valid = BigUint::zero();
+        let mut high = max_input.clone();
+        let mut best_valid = None;
 
         for _ in 0..MAX_BINARY_SEARCH_ITERATIONS {
             if high <= &low + BigUint::one() {
@@ -113,7 +113,7 @@ impl PoolDepthComputation {
                     let effective_price = amount_out / amount_in;
 
                     if effective_price >= min_acceptable_price {
-                        best_valid = mid.clone();
+                        best_valid = Some(mid.clone());
                         low = mid;
                     } else {
                         high = mid;
@@ -127,7 +127,12 @@ impl PoolDepthComputation {
             }
         }
 
-        Ok(best_valid)
+        best_valid.ok_or(ComputationError::NoValidResult {
+            reason: format!(
+                "could not find valid depth for pool with tokens {}/{}",
+                token_in.address, token_out.address
+            ),
+        })
     }
 }
 
@@ -136,13 +141,13 @@ impl DerivedComputation for PoolDepthComputation {
 
     const ID: ComputationId = "pool_depths";
 
+    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_pool_depths))]
     fn compute(
         &self,
         market: &SharedMarketData,
         _store: &DerivedDataStore,
     ) -> Result<Self::Output, ComputationError> {
         let mut pool_depths = PoolDepths::new();
-        let mut error_count = 0usize;
 
         let topology = market.component_topology();
         let tokens = market.token_registry_ref();
@@ -175,44 +180,38 @@ impl DerivedComputation for PoolDepthComputation {
                         continue;
                     }
 
-                    let spot_price = match sim_state.spot_price(token_in, token_out) {
-                        Ok(p) if p.is_finite() && p > 0.0 => p,
-                        _ => {
-                            error_count += 1;
-                            continue;
-                        }
-                    };
+                    let spot_price = sim_state
+                        .spot_price(token_in, token_out)
+                        .map_err(|e| {
+                            ComputationError::SimulationFailed(format!(
+                                "failed to compute spot price for pool {component_id} \
+                                 {}/{}: {e}",
+                                token_in.address, token_out.address
+                            ))
+                        })
+                        .and_then(|p| {
+                            if p.is_finite() && p > 0.0 {
+                                Ok(p)
+                            } else {
+                                Err(ComputationError::SimulationFailed(format!(
+                                    "invalid spot price {p} for pool {component_id} {}/{}",
+                                    token_in.address, token_out.address
+                                )))
+                            }
+                        })?;
 
-                    match self.find_depth_binary_search(sim_state, token_in, token_out, spot_price)
-                    {
-                        Ok(depth) if !depth.is_zero() => {
-                            let key = (
-                                component_id.clone(),
-                                token_in.address.clone(),
-                                token_out.address.clone(),
-                            );
-                            pool_depths.insert(key, depth);
-                        }
-                        Ok(_) => {
-                            trace!(component_id = %component_id, "zero depth");
-                        }
-                        Err(e) => {
-                            trace!(component_id = %component_id, error = ?e, "depth failed");
-                            error_count += 1;
-                        }
-                    }
+                    let pool_depth =
+                        self.find_depth_binary_search(sim_state, token_in, token_out, spot_price)?;
+
+                    let key =
+                        (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                    pool_depths.insert(key, pool_depth);
                 }
             }
         }
 
-        if pool_depths.is_empty() && error_count > 0 {
-            warn!(error_count, "pool depth computation failed for all pairs");
-            return Err(ComputationError::NoValidResult {
-                reason: format!("pool depth computation failed for all {error_count} pairs"),
-            });
-        }
+        Span::current().record("updated_pool_depths", pool_depths.len());
 
-        trace!(count = pool_depths.len(), "computed pool depths");
         Ok(pool_depths)
     }
 }

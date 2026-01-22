@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use tracing::{debug, trace, warn};
+use tracing::{instrument, Span};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
@@ -46,13 +46,13 @@ impl DerivedComputation for SpotPriceComputation {
 
     const ID: ComputationId = "spot_prices";
 
+    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_spot_prices))]
     fn compute(
         &self,
         market: &SharedMarketData,
         _store: &DerivedDataStore,
     ) -> Result<Self::Output, ComputationError> {
         let mut spot_prices = SpotPrices::new();
-        let mut error_count = 0usize;
 
         let topology = market.component_topology();
         let tokens = market.token_registry_ref();
@@ -95,36 +95,19 @@ impl DerivedComputation for SpotPriceComputation {
                             spot_prices.insert(key, price);
                         }
                         Err(e) => {
-                            error_count += 1;
-                            trace!(
-                                component_id = %component_id,
-                                token_in = ?token_in.address,
-                                token_out = ?token_out.address,
-                                error = ?e,
-                                "failed to compute spot price"
-                            );
+                            Err(ComputationError::SimulationFailed(format!(
+                                "failed to compute spot price for pool {component_id} \
+                                 {}/{}: {e}",
+                                token_in.address, token_out.address
+                            )))?;
                         }
                     }
                 }
             }
         }
 
-        if error_count > 0 {
-            debug!(
-                error_count,
-                success_count = spot_prices.len(),
-                "spot price computation completed with some errors"
-            );
-        }
+        Span::current().record("updated_spot_prices", spot_prices.len());
 
-        if spot_prices.is_empty() && error_count > 0 {
-            warn!(error_count, "spot price computation failed for all pairs");
-            return Err(ComputationError::NoValidResult {
-                reason: format!("spot price computation failed for all {error_count} pairs"),
-            });
-        }
-
-        trace!(count = spot_prices.len(), "computed spot prices");
         Ok(spot_prices)
     }
 }
