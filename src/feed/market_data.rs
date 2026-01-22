@@ -232,6 +232,7 @@ impl SharedMarketData {
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
+    use tycho_simulation::tycho_ethereum::gas::GasPrice;
 
     use super::*;
     use crate::algorithm::test_utils::{component, token, MockProtocolSim};
@@ -254,7 +255,12 @@ mod tests {
             ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2)) as Box<dyn ProtocolSim>),
             ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3)) as Box<dyn ProtocolSim>),
         ]);
-        market.update_gas_price(GasPrice::new(BigUint::from(100u64), BigUint::from(10u64)));
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        });
         market.update_last_updated(BlockInfo {
             number: 12345,
             hash: "0xabc".to_string(),
