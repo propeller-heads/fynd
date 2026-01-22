@@ -7,7 +7,10 @@
 //!
 //! We use tokio RwLock (which is write-preferring) to avoid writer starvation.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::sync::RwLock;
 use tycho_simulation::{
@@ -174,5 +177,136 @@ impl SharedMarketData {
     /// Updates the last updated block info.
     pub fn update_last_updated(&mut self, block_info: BlockInfo) {
         self.last_updated = Some(block_info);
+    }
+
+    /// Creates a filtered subset containing only data needed for the given components.
+    ///
+    /// This is used to create a local snapshot of market data that can be used for
+    /// simulation without holding the main lock. The subset includes:
+    /// - Components matching the provided IDs
+    /// - Simulation states for those components (cloned via `clone_box`)
+    /// - Tokens referenced by those components
+    /// - Gas price and block info
+    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> SharedMarketData {
+        // Filter components
+        let components: HashMap<ComponentId, ProtocolComponent> = self
+            .components
+            .iter()
+            .filter(|(id, _)| component_ids.contains(*id))
+            .map(|(id, component)| (id.clone(), component.clone()))
+            .collect();
+
+        // Collect all token addresses from the filtered components
+        let token_addresses: HashSet<&Address> = components
+            .values()
+            .flat_map(|c| &c.tokens)
+            .collect();
+
+        // Filter tokens
+        let tokens: HashMap<Address, Token> = self
+            .tokens
+            .iter()
+            .filter(|(addr, _)| token_addresses.contains(addr))
+            .map(|(addr, token)| (addr.clone(), token.clone()))
+            .collect();
+
+        // Clone simulation states using clone_box
+        let simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = self
+            .simulation_states
+            .iter()
+            .filter(|(id, _)| component_ids.contains(*id))
+            .map(|(id, state)| (id.clone(), state.clone_box()))
+            .collect();
+
+        SharedMarketData {
+            components,
+            simulation_states,
+            tokens,
+            gas_price: self.gas_price.clone(),
+            protocol_sync_status: HashMap::new(), // Not needed for simulation
+            last_updated: self.last_updated.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+    use tycho_simulation::tycho_ethereum::gas::GasPrice;
+
+    use super::*;
+    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+
+    #[test]
+    fn extract_subset_filters_by_component_ids() {
+        // Setup: market with 2 pools (A-B, B-C) and 3 tokens
+        let mut market = SharedMarketData::new();
+
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let token_c = token(0x0C, "C");
+
+        market.upsert_components([
+            component("pool_ab", &[token_a.clone(), token_b.clone()]),
+            component("pool_bc", &[token_b.clone(), token_c.clone()]),
+        ]);
+        market.upsert_tokens([token_a.clone(), token_b.clone(), token_c.clone()]);
+        market.update_states([
+            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2)) as Box<dyn ProtocolSim>),
+            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3)) as Box<dyn ProtocolSim>),
+        ]);
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        });
+        market.update_last_updated(BlockInfo {
+            number: 12345,
+            hash: "0xabc".to_string(),
+            timestamp: 0,
+        });
+
+        // Extract only pool_ab
+        let ids: HashSet<_> = ["pool_ab".to_string()]
+            .into_iter()
+            .collect();
+        let subset = market.extract_subset(&ids);
+
+        // Components: only pool_ab
+        assert_eq!(subset.components.len(), 1);
+        assert!(subset
+            .components
+            .contains_key("pool_ab"));
+
+        // Tokens: only A and B (referenced by pool_ab), not C
+        assert_eq!(subset.tokens.len(), 2);
+        assert!(subset
+            .tokens
+            .contains_key(&token_a.address));
+        assert!(subset
+            .tokens
+            .contains_key(&token_b.address));
+        assert!(!subset
+            .tokens
+            .contains_key(&token_c.address));
+
+        // Simulation states: only pool_ab
+        assert_eq!(subset.simulation_states.len(), 1);
+        assert!(subset
+            .simulation_states
+            .contains_key("pool_ab"));
+
+        // Gas price and block info are copied
+        assert_eq!(subset.gas_price, market.gas_price);
+        assert!(subset.last_updated.is_some());
+
+        // Empty IDs returns empty subset
+        let empty_subset = market.extract_subset(&HashSet::new());
+        assert!(empty_subset.components.is_empty());
+        assert!(empty_subset.tokens.is_empty());
+        assert!(empty_subset
+            .simulation_states
+            .is_empty());
     }
 }

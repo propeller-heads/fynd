@@ -1,10 +1,11 @@
 //! Shared test utilities for algorithm tests.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_core::{
         dto::ProtocolStateDelta,
@@ -234,12 +235,13 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
     }
 }
 
-/// Sets up market with components and a graph. Returns (market, graph_manager).
+/// Sets up market with components and a graph. Returns (market_lock, graph_manager).
 ///
-/// Pools map ComponentId to (tokens, spot_price).
+/// The market is wrapped in `Arc<RwLock<...>>` for use with `find_best_route`.
+/// Use `market_read(&market_lock)` to get a `SharedMarketData` for other tests.
 pub fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-) -> (SharedMarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = SharedMarketData::new();
     let mut component_weights = HashMap::new();
 
@@ -289,7 +291,16 @@ pub fn setup_market(
             .unwrap();
     }
 
-    (market, graph_manager)
+    (Arc::new(RwLock::new(market)), graph_manager)
+}
+
+/// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
+/// Returns the guard which derefs to `&SharedMarketData`.
+pub fn market_read(
+    lock: &Arc<RwLock<SharedMarketData>>,
+) -> tokio::sync::RwLockReadGuard<'_, SharedMarketData> {
+    lock.try_read()
+        .expect("lock should not be contested in test")
 }
 
 /// Common fixtures for tests.
