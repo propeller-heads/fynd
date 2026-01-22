@@ -167,9 +167,8 @@ impl TychoSolverBuilder {
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality);
 
-        // TODO: builder should return an error instead of panicking
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
-            .expect("failed to create ethereum client");
+            .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;
 
         let (mut gas_price_fetcher, gas_price_worker_signal_tx) =
             GasPriceFetcher::new(ethereum_client, Arc::clone(&market_data));
