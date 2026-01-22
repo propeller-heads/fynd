@@ -9,6 +9,15 @@ pub enum ComputationError {
     #[error("missing dependency: {0}")]
     MissingDependency(ComputationId),
 
+    /// Dependency data has been computed but is invalid.
+    #[error("invalid data: {dependency} - {reason}")]
+    InvalidDependencyData {
+        /// What entity has invalid data (e.g., "spot_prices", "simulation_states").
+        dependency: ComputationId,
+        /// Description of the validation failure.
+        reason: String,
+    },
+
     /// Type mismatch when retrieving dependency output.
     #[error("type mismatch for computation {0}")]
     TypeMismatch(ComputationId),

@@ -30,7 +30,7 @@ use crate::{
         error::ComputationError,
         store::DerivedDataStore,
     },
-    feed::market_data::SharedMarketData,
+    feed::{market_data::SharedMarketData, GAS_PRICE_DEPENDENCY_ID},
     types::ComponentId,
 };
 
@@ -144,7 +144,9 @@ impl DerivedComputation for TokenGasPriceComputation {
 
         // Gas price in wei per gas unit
         let gas_price = market.gas_price();
-        let gas_price_wei = gas_price.effective_gas_price();
+        let gas_price_wei = gas_price
+            .map(|gp| gp.effective_gas_price())
+            .ok_or(ComputationError::MissingDependency(GAS_PRICE_DEPENDENCY_ID))?;
 
         // Best state found for each token
         let mut best_states: HashMap<Address, TokenState> = HashMap::new();

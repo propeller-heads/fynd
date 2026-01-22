@@ -148,20 +148,26 @@ impl DerivedComputation for PoolDepthComputation {
         let tokens = market.token_registry_ref();
 
         for (component_id, token_addresses) in topology.iter() {
-            let Some(sim_state) = market.get_simulation_state(component_id) else {
-                trace!(component_id = %component_id, "skipping: no simulation state");
-                continue;
-            };
+            let sim_state = market
+                .get_simulation_state(component_id)
+                .ok_or(ComputationError::InvalidDependencyData {
+                    dependency: "market_data::simulation_states",
+                    reason: format!("missing simulation state for {component_id}"),
+                })?;
 
             let pool_tokens: Vec<_> = token_addresses
                 .iter()
-                .filter_map(|addr| tokens.get(addr))
-                .collect();
-
-            if pool_tokens.len() != token_addresses.len() {
-                trace!(component_id = %component_id, "skipping: missing token metadata");
-                continue;
-            }
+                .map(|addr| {
+                    tokens
+                        .get(addr)
+                        .ok_or_else(|| ComputationError::InvalidDependencyData {
+                            dependency: "market_data::tokens",
+                            reason: format!(
+                                "missing token metadata for {addr} in pool {component_id}"
+                            ),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             for (i, token_in) in pool_tokens.iter().enumerate() {
                 for (j, token_out) in pool_tokens.iter().enumerate() {
