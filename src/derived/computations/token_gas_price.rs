@@ -276,7 +276,7 @@ impl DerivedComputation for TokenGasPriceComputation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algorithm::test_utils::{setup_market, token, MockProtocolSim};
+    use crate::algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim};
 
     #[test]
     fn computation_id() {
@@ -296,7 +296,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         // ETH price = 1 (gas token)
@@ -326,7 +326,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let usdc_price = prices.get(&usdc.address).unwrap();
@@ -356,7 +356,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let one = one_eth();
@@ -396,7 +396,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let one = one_eth();
@@ -431,7 +431,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let one = one_eth();
@@ -471,7 +471,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let one = one_eth();
@@ -502,7 +502,7 @@ mod tests {
         let store = DerivedDataStore::new();
         let computation = TokenGasPriceComputation::new(eth.address.clone());
         let prices = computation
-            .compute(&market, &store)
+            .compute(&market_read(&market), &store)
             .unwrap();
 
         let one = one_eth();
