@@ -17,19 +17,19 @@ pub struct PoolConfig {
     /// Algorithm name for this pool (e.g., "most_liquid", "dijkstra")
     pub algorithm: String,
     /// Number of worker threads for this pool
-    #[serde(default = "default_workers_per_pool")]
+    #[serde(default = "num_cpus::get")]
     pub num_workers: usize,
     /// Task queue capacity for this pool
-    #[serde(default = "default_task_queue_capacity")]
+    #[serde(default = "usize_val::<1000>")]
     pub task_queue_capacity: usize,
     /// Minimum hops to search (must be >= 1)
-    #[serde(default = "default_min_hops")]
+    #[serde(default = "usize_val::<1>")]
     pub min_hops: usize,
     /// Maximum hops to search
-    #[serde(default = "default_max_hops")]
+    #[serde(default = "usize_val::<3>")]
     pub max_hops: usize,
     /// Timeout for solving in milliseconds
-    #[serde(default = "default_worker_timeout_ms")]
+    #[serde(default = "u64_val::<100>")]
     pub timeout_ms: u64,
 }
 
@@ -46,24 +46,12 @@ impl WorkerPoolsConfig {
 
 // Worker defaults
 
-fn default_workers_per_pool() -> usize {
-    num_cpus::get()
+fn usize_val<const V: usize>() -> usize {
+    V
 }
 
-const fn default_task_queue_capacity() -> usize {
-    1000
-}
-
-const fn default_min_hops() -> usize {
-    1
-}
-
-const fn default_max_hops() -> usize {
-    3
-}
-
-const fn default_worker_timeout_ms() -> u64 {
-    100
+fn u64_val<const V: u64>() -> u64 {
+    V
 }
 
 // Solver defaults

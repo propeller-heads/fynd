@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
-use futures::future::Either;
+use futures::future::{select, Either};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info};
 use tycho_simulation::tycho_common::models::Chain;
@@ -33,10 +33,10 @@ pub struct TychoSolverBuilder {
     pools: HashMap<String, PoolConfig>,
     tycho_url: String,
     tycho_api_key: Option<String>,
-    use_tls: bool,
+    /// Use TLS for Tycho WebSocket connection.
+    tycho_use_tls: bool,
     rpc_url: String,
     protocols: Vec<String>,
-    // Optional fields with defaults
     min_tvl: f64,
     tvl_buffer_multiplier: f64,
     gas_refresh_interval: Duration,
@@ -61,7 +61,7 @@ impl TychoSolverBuilder {
             pools,
             tycho_url,
             tycho_api_key: None,
-            use_tls: true, // Default to TLS enabled for Tycho WebSocket connection
+            tycho_use_tls: true, // Default to TLS enabled for Tycho WebSocket connection
             rpc_url,
             protocols,
             min_tvl: defaults::MIN_TVL,
@@ -129,7 +129,7 @@ impl TychoSolverBuilder {
 
     /// Disables TLS for Tycho WebSocket connection (TLS is enabled by default).
     pub fn disable_tls(mut self) -> Self {
-        self.use_tls = false;
+        self.tycho_use_tls = false;
         self
     }
 
@@ -150,7 +150,7 @@ impl TychoSolverBuilder {
             self.tycho_url.clone(),
             self.chain,
             self.tycho_api_key.clone(),
-            self.use_tls,
+            self.tycho_use_tls,
             self.protocols.clone(),
             self.min_tvl,
             self.rpc_url.clone(),
@@ -258,29 +258,27 @@ impl TychoSolver {
         info!("HTTP server started");
 
         // Monitor both server and feed. If feed errors, shutdown the server.
-        match futures::future::select(server_task, feed_handle).await {
+        match select(server_task, feed_handle).await {
             Either::Left((server_result, feed_handle)) => {
                 // Server completed first
                 if let Err(e) = server_result {
-                    tracing::error!(error = %e, "Server task error");
+                    error!(error = %e, "Server task error");
                 }
                 info!("shutting down...");
                 feed_handle.abort();
-                for pool in worker_pools {
-                    pool.shutdown();
-                }
             }
-            Either::Right((_, _server_task)) => {
+            Either::Right((_, server_task)) => {
                 // Feed handle completed, which means it errored (feed.run() only returns on error)
                 error!("Tycho feed error detected, shutting down solver");
                 server_handle.stop(true).await;
                 // Wait for server to stop
-                _server_task.await.ok();
+                server_task.await.ok();
                 info!("shutting down...");
-                for pool in worker_pools {
-                    pool.shutdown();
-                }
             }
+        }
+
+        for pool in worker_pools {
+            pool.shutdown();
         }
 
         info!("shutdown complete");
@@ -289,27 +287,7 @@ impl TychoSolver {
 }
 
 pub fn parse_chain(chain: &str) -> Result<Chain> {
-    let candidates = [
-        chain.to_string(),
-        chain.to_ascii_lowercase(),
-        chain.to_ascii_uppercase(),
-        capitalize_first(chain),
-    ];
-
-    for candidate in candidates {
-        let candidate = format!("\"{}\"", candidate);
-        if let Ok(parsed) = serde_json::from_str::<Chain>(&candidate) {
-            return Ok(parsed);
-        }
-    }
-
-    anyhow::bail!("unsupported chain '{}'. Try values like 'Ethereum'", chain)
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
+    let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
+    serde_json::from_str::<Chain>(&candidate)
+        .map_err(|_| anyhow::anyhow!("unsupported chain '{}'. Try values like 'Ethereum'", chain))
 }
