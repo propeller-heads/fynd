@@ -32,7 +32,7 @@ pub(crate) type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
 /// This struct is the single source of truth for market data.
 /// The indexer updates it, and solvers read from it.
 #[derive(Debug, Default)]
-pub(crate) struct SharedMarketData {
+pub struct SharedMarketData {
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ProtocolComponent>,
     /// All states indexed by their component ID.

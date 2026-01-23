@@ -29,7 +29,7 @@ impl Default for TaskQueueConfig {
 ///
 /// This is cloned and shared with HTTP handlers.
 #[derive(Clone)]
-pub(crate) struct TaskQueueHandle {
+pub struct TaskQueueHandle {
     sender: async_channel::Sender<SolveTask>,
 }
 

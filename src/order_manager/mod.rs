@@ -35,7 +35,7 @@ use crate::{
 
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
-pub(crate) struct SolverPoolHandle {
+pub struct SolverPoolHandle {
     /// Human-readable name for this pool (used in logging & metrics).
     pub name: String,
     /// Queue handle for this pool.
