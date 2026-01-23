@@ -1,6 +1,6 @@
 //! HTTP API layer using Actix Web.
 //!
-//! This module provides the HTTP endpoints for the router:
+//! This module provides the HTTP endpoints for the solver:
 //! - POST /solve - Submit solve requests
 //! - GET /health - Health check endpoint
 

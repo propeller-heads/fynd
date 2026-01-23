@@ -1,4 +1,4 @@
-//! HTTP request handlers for the router API.
+//! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
 use tracing::{info, instrument};
