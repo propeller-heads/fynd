@@ -11,16 +11,16 @@ use tracing::{error, info};
 
 use crate::{
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
-    types::SolveTask,
+    types::internal::SolveTask,
     worker_pool::{
         registry::{spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM},
-        WorkerConfig,
+        worker::WorkerConfig,
     },
 };
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
-pub struct WorkerPoolConfig {
+pub(crate) struct WorkerPoolConfig {
     /// Human-readable name for this pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
     pub name: String,
@@ -48,7 +48,7 @@ impl Default for WorkerPoolConfig {
 ///
 /// Each pool is dedicated to a specific algorithm. Workers in the pool
 /// compete for tasks from the shared queue.
-pub struct WorkerPool {
+pub(crate) struct WorkerPool {
     /// Human-readable name for this pool.
     name: String,
     /// Algorithm name for this pool.
@@ -143,7 +143,7 @@ impl WorkerPool {
 }
 
 /// Builder for WorkerPool with a fluent API.
-pub struct WorkerPoolBuilder {
+pub(crate) struct WorkerPoolBuilder {
     config: WorkerPoolConfig,
 }
 

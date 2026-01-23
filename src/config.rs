@@ -55,7 +55,7 @@ fn u64_val<const V: u64>() -> u64 {
 }
 
 // Solver defaults
-pub mod defaults {
+pub(crate) mod defaults {
     pub const HTTP_HOST: &str = "0.0.0.0";
     pub const HTTP_PORT: u16 = 3000;
     pub const MIN_TVL: f64 = 10.0;

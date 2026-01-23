@@ -26,12 +26,11 @@ use crate::{
     api::HealthTracker,
     feed::{
         events::MarketEvent,
-        market_data::SharedMarketData,
+        market_data::{SharedMarketData, SharedMarketDataRef},
         protocol_registry::{register_exchanges, register_rfq},
-        TychoFeedConfig,
+        DataFeedError, TychoFeedConfig,
     },
     types::BlockInfo,
-    DataFeedError, SharedMarketDataRef,
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -43,7 +42,7 @@ use crate::{
 /// - Update SharedMarketData (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
-pub struct TychoFeed {
+pub(crate) struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
@@ -352,9 +351,9 @@ impl TychoFeed {
         trace!("Market data updated");
 
         // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
-            !removed_components.is_empty() ||
-            !updated_components_ids.is_empty()
+        if !added_components.is_empty()
+            || !removed_components.is_empty()
+            || !updated_components_ids.is_empty()
         {
             let market_update_event = MarketEvent::MarketUpdated {
                 added_components: added_components

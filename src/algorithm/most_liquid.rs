@@ -43,7 +43,7 @@ pub struct MostLiquidAlgorithm {
 /// Contains the spot price and liquidity depth.
 /// Note that the fee is included in the spot price already.
 #[derive(Debug, Clone, Default)]
-pub struct DepthAndPrice {
+pub(crate) struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
     /// Liquidity depth in USD (or native token terms).
@@ -612,8 +612,8 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
+        graph::GraphManager,
         types::OrderSide,
-        GraphManager,
     };
 
     // ==================== try_score_path Tests ====================

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 /// Configuration for the OrderManager.
 #[derive(Debug, Clone)]
-pub struct OrderManagerConfig {
+pub(crate) struct OrderManagerConfig {
     /// Default timeout per order (can be overridden per-request).
     pub default_timeout: Duration,
     /// Minimum number of solver responses to wait for before returning early.

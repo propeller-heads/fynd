@@ -8,13 +8,13 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
-    types::{SingleOrderSolution, SolveError, SolveTask},
+    types::{internal::SolveTask, SingleOrderSolution, SolveError},
     Order,
 };
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
-pub struct TaskQueueConfig {
+pub(crate) struct TaskQueueConfig {
     /// Maximum number of pending tasks.
     pub capacity: usize,
 }
@@ -29,7 +29,7 @@ impl Default for TaskQueueConfig {
 ///
 /// This is cloned and shared with HTTP handlers.
 #[derive(Clone)]
-pub struct TaskQueueHandle {
+pub(crate) struct TaskQueueHandle {
     sender: async_channel::Sender<SolveTask>,
 }
 
@@ -83,7 +83,7 @@ impl TaskQueueHandle {
 /// The task queue itself.
 ///
 /// This is consumed when creating the worker pool.
-pub struct TaskQueue {
+pub(crate) struct TaskQueue {
     receiver: async_channel::Receiver<SolveTask>,
     handle: TaskQueueHandle,
 }

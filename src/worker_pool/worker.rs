@@ -19,13 +19,16 @@ use crate::{
         market_data::SharedMarketDataRef,
     },
     graph::GraphManager,
-    types::{BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError, SolveTask},
+    types::{
+        internal::SolveTask, BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus,
+        SolveError,
+    },
     Order,
 };
 
 /// Configuration for a Solver instance.
 #[derive(Debug, Clone)]
-pub struct WorkerConfig {
+pub(crate) struct WorkerConfig {
     /// Minimum hops to search (must be >= 1).
     pub min_hops: usize,
     /// Maximum hops to search.
@@ -41,7 +44,7 @@ impl Default for WorkerConfig {
 }
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
-pub struct SolverWorker<A>
+pub(crate) struct SolverWorker<A>
 where
     A: Algorithm,
     A::GraphManager: MarketEventHandler,

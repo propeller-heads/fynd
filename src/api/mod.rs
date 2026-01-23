@@ -17,7 +17,7 @@ use std::{
 
 use actix_web::web;
 pub use error::ApiError;
-pub use handlers::configure_routes;
+use handlers::configure_routes;
 
 use crate::order_manager::OrderManager;
 

@@ -20,23 +20,23 @@ use tracing::info;
 use crate::{
     algorithm::MostLiquidAlgorithm,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
-    types::SolveTask,
+    types::internal::SolveTask,
     worker_pool::worker::{SolverWorker, WorkerConfig},
 };
 
 /// List of available algorithm names.
-pub const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid"];
+pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid"];
 
 /// Default algorithm to use if none specified.
-pub const DEFAULT_ALGORITHM: &str = "most_liquid";
+pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 
 /// Returns a list of all registered algorithm names.
-pub fn list_algorithms() -> &'static [&'static str] {
+pub(crate) fn list_algorithms() -> &'static [&'static str] {
     AVAILABLE_ALGORITHMS
 }
 
 /// Parameters for spawning workers.
-pub struct SpawnWorkersParams {
+pub(crate) struct SpawnWorkersParams {
     /// Algorithm name (e.g., "most_liquid").
     pub algorithm: String,
     /// Number of worker threads to spawn.
@@ -56,7 +56,7 @@ pub struct SpawnWorkersParams {
 /// Error returned when algorithm registration fails.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
-pub struct UnknownAlgorithmError {
+pub(crate) struct UnknownAlgorithmError {
     /// The algorithm name that was not found.
     pub name: String,
 }
@@ -70,7 +70,7 @@ pub struct UnknownAlgorithmError {
 ///
 /// Vector of join handles for the spawned worker threads, or an error if the
 /// algorithm is not registered.
-pub fn spawn_workers(
+pub(crate) fn spawn_workers(
     params: SpawnWorkersParams,
 ) -> Result<Vec<JoinHandle<()>>, UnknownAlgorithmError> {
     match params.algorithm.as_str() {

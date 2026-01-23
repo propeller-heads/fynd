@@ -9,10 +9,18 @@ use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::Ethereu
 use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, PoolConfig},
-    feed::{gas::GasPriceFetcher, market_data::SharedMarketData},
-    order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
-    worker_pool::{TaskQueue, TaskQueueConfig, WorkerConfig, WorkerPool, WorkerPoolBuilder},
-    TychoFeed, TychoFeedConfig,
+    feed::{
+        gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
+    },
+    order_manager::{
+        config::OrderManagerConfig,
+        OrderManager, SolverPoolHandle,
+    },
+    worker_pool::{
+        task_queue::{TaskQueue, TaskQueueConfig},
+        worker::WorkerConfig,
+        worker_pool::{WorkerPool, WorkerPoolBuilder},
+    },
 };
 
 /// Builder that assembles the Tycho solver and returns a running server handle.

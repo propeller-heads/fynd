@@ -31,7 +31,7 @@ use tycho_simulation::{
     tycho_core::Bytes,
 };
 
-use crate::DataFeedError;
+use super::DataFeedError;
 
 pub(crate) fn register_exchanges(
     mut builder: ProtocolStreamBuilder,

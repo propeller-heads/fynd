@@ -42,7 +42,7 @@ use crate::{
 /// - They should use `market` to read component states for simulation
 /// - They should NOT modify the graph or market data
 #[allow(async_fn_in_trait)] // Trait is internal; auto-trait bounds are not needed
-pub trait Algorithm: Send + Sync {
+pub(crate) trait Algorithm: Send + Sync {
     /// The graph type this algorithm uses.
     type GraphType: Send + Sync;
 

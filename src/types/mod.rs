@@ -14,8 +14,8 @@ pub mod solution;
 
 // Re-export API types
 pub use api::HealthStatus;
-// Re-export internal types
-pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
+// Re-export error types (needed for API responses)
+pub use internal::SolveError;
 pub use primitives::*;
 // Re-export public solution types
 pub use solution::{

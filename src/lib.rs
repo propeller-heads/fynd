@@ -65,38 +65,27 @@
 //! solver.run().await?;
 //! ```
 
+// Public modules - exposed for external library users
 pub mod algorithm;
-pub mod api;
 pub mod builder;
-pub mod cli;
 pub mod config;
+pub mod types;
+
+// Internal modules - public for main.rs and internal use, but not re-exported
+pub mod api;
+pub mod cli;
 pub mod derived;
 pub mod feed;
 pub mod graph;
 pub mod order_manager;
-pub mod types;
 pub mod worker_pool;
 
-// Re-export commonly used types at crate root
+// Re-export commonly used types at crate root (public API)
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
-pub use api::{ApiError, AppState};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
-pub use derived::{
-    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
-    PoolDepth, PoolDepths, SpotPrice, SpotPrices, TokenGasPrice, TokenPrices,
-};
-pub use feed::{
-    events::MarketEvent,
-    market_data::{SharedMarketData, SharedMarketDataRef},
-    tycho_feed::TychoFeed,
-    DataFeedError, TychoFeedConfig,
-};
-pub use graph::{GraphManager, Path};
-pub use order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
-    SolveError, SolveResult, SolveTask, Swap, TaskId,
+    SolveError, Swap,
 };
-pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

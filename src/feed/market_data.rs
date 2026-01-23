@@ -25,10 +25,10 @@ use tycho_simulation::{
 use crate::types::{BlockInfo, ComponentId};
 
 /// Thread-safe handle to shared market data.
-pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
+pub(crate) type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
 
 /// Creates a new shared market data instance wrapped in Arc<RwLock<>>.
-pub fn new_shared_market_data() -> SharedMarketDataRef {
+pub(crate) fn new_shared_market_data() -> SharedMarketDataRef {
     Arc::new(RwLock::new(SharedMarketData::new()))
 }
 
@@ -37,7 +37,7 @@ pub fn new_shared_market_data() -> SharedMarketDataRef {
 /// This struct is the single source of truth for market data.
 /// The indexer updates it, and solvers read from it.
 #[derive(Debug, Default)]
-pub struct SharedMarketData {
+pub(crate) struct SharedMarketData {
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ProtocolComponent>,
     /// All states indexed by their component ID.

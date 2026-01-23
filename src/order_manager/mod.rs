@@ -12,14 +12,14 @@
 //! 3. **Collection**: Wait for N responses OR timeout per order
 //! 4. **Selection**: Choose best solution (max `amount_out_net_gas`)
 
-mod config;
+pub mod config;
 
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
 
-pub use config::OrderManagerConfig;
+use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
@@ -35,7 +35,7 @@ use crate::{
 
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
-pub struct SolverPoolHandle {
+pub(crate) struct SolverPoolHandle {
     /// Human-readable name for this pool (used in logging & metrics).
     pub name: String,
     /// Algorithm name.
@@ -57,7 +57,7 @@ impl SolverPoolHandle {
 
 /// Collected responses for a single order from multiple solvers.
 #[derive(Debug)]
-pub struct OrderResponses {
+pub(crate) struct OrderResponses {
     /// ID of the order these responses correspond to.
     pub order_id: String,
     /// Solutions received from each solver pool (pool_name, solution).
@@ -68,7 +68,7 @@ pub struct OrderResponses {
 }
 
 /// Orchestrates multiple solver pools to find the best solution.
-pub struct OrderManager {
+pub(crate) struct OrderManager {
     /// All registered solver pools.
     solver_pools: Vec<SolverPoolHandle>,
     /// Configuration for the order manager.
@@ -373,7 +373,10 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::types::{solution::OrderSide, SingleOrderSolution, SolveTask};
+    use crate::types::{
+        internal::SolveTask,
+        solution::{OrderSide, SingleOrderSolution},
+    };
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
