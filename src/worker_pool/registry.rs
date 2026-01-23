@@ -21,7 +21,7 @@ use crate::{
     algorithm::MostLiquidAlgorithm,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::SolveTask,
-    worker::{SolverWorker, WorkerConfig},
+    worker_pool::worker::{SolverWorker, WorkerConfig},
 };
 
 /// List of available algorithm names.

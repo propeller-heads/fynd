@@ -11,9 +11,7 @@ use crate::{
     config::{defaults, PoolConfig},
     feed::{gas::GasPriceFetcher, market_data::SharedMarketData},
     order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle},
-    task_queue::{TaskQueue, TaskQueueConfig},
-    worker::WorkerConfig,
-    worker_pool::{WorkerPool, WorkerPoolBuilder},
+    worker_pool::{TaskQueue, TaskQueueConfig, WorkerConfig, WorkerPool, WorkerPoolBuilder},
     TychoFeed, TychoFeedConfig,
 };
 

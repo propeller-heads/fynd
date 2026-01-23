@@ -4,24 +4,18 @@
 //! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
 //! A pool is configured with a specific algorithm (by name), allowing multiple pools
 //! with different algorithms to compete via the OrderManager.
-
-// TODO: move file to /worker_pool module
-
-mod registry;
-
 use std::thread::JoinHandle;
 
-pub use registry::{
-    list_algorithms, spawn_workers, SpawnWorkersParams, UnknownAlgorithmError,
-    AVAILABLE_ALGORITHMS, DEFAULT_ALGORITHM,
-};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::{
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::SolveTask,
-    worker::WorkerConfig,
+    worker_pool::{
+        registry::{spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM},
+        WorkerConfig,
+    },
 };
 
 /// Configuration for the worker pool.

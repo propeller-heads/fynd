@@ -80,9 +80,7 @@ pub mod derived;
 pub mod feed;
 pub mod graph;
 pub mod order_manager;
-pub mod task_queue;
 pub mod types;
-pub mod worker;
 pub mod worker_pool;
 
 // Re-export commonly used types at crate root
@@ -102,11 +100,9 @@ pub use feed::{
 };
 pub use graph::{GraphManager, Path};
 pub use order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle};
-pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
     SolveError, SolveResult, SolveTask, Swap, TaskId,
 };
-pub use worker::{SolverWorker, WorkerConfig};
-pub use worker_pool::{UnknownAlgorithmError, WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};
+pub use worker_pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

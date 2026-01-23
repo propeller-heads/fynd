@@ -26,11 +26,11 @@ use num_bigint::BigUint;
 use tracing::{debug, warn};
 
 use crate::{
-    task_queue::TaskQueueHandle,
     types::{
         solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
         OrderSolution, Solution, SolutionStatus, SolveError,
     },
+    worker_pool::task_queue::TaskQueueHandle,
 };
 
 /// Handle to a solver pool for dispatching orders.
