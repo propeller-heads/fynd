@@ -305,7 +305,6 @@ where
     graph_manager: A::GraphManager,  // Maintains the graph internally
     market_data: SharedMarketDataRef,
     event_rx: broadcast::Receiver<MarketEvent>,
-    config: WorkerConfig,
     initialized: bool,
 }
 ```

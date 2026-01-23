@@ -4,9 +4,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::BlockGasPrice};
 
-use crate::{DataFeedError, SharedMarketDataRef};
+use crate::feed::{market_data::SharedMarketDataRef, DataFeedError};
 
-pub struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
+pub(crate) struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     signal_rx: mpsc::Receiver<oneshot::Sender<()>>,
     shared_market_data: SharedMarketDataRef,

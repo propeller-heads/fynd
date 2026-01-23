@@ -10,7 +10,7 @@ pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
-pub struct TychoFeedConfig {
+pub(crate) struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
@@ -94,12 +94,13 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub enum DataFeedError {
+pub(crate) enum DataFeedError {
     #[error("gas price fetcher error: {0}")]
     GasPriceFetcherError(String),
 
     /// Market data lock error.
     #[error("failed to acquire market data lock")]
+    #[allow(dead_code)]
     LockError,
 
     /// Configuration error.

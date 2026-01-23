@@ -1,112 +1,91 @@
-//! Tycho Router - A high-performance DEX router built on Tycho.
+//! Tycho Solver - A high-performance DEX solver built on Tycho.
 //!
-//! This crate provides a production-ready DEX router that:
+//! This crate provides a production-ready DEX solver that:
 //! - Finds optimal swap routes across multiple protocols
-//! - Supports multiple concurrent solvers with different algorithms
+//! - Supports multiple concurrent solver pools with different algorithms
 //! - Maintains real-time market data via Tycho WebSocket
 //! - Provides a REST API for solve requests
 //!
 //! # Architecture
 //!
-//! The router is organized into several key components:
+//! The solver is organized into several key components:
 //!
 //! - **API Layer** (`api`): Actix Web HTTP handlers for `/solve`, `/health`, `/metrics`
-//! - **Task Queue** (`task_queue`): Bounded queue with backpressure for solve requests
+//! - **Order Manager** (`order_manager`): Orchestrates solve requests across multiple solver pools
 //! - **Worker Pool** (`worker_pool`): Dedicated OS threads for CPU-bound route finding
-//! - **Solver** (`solver`): Route finding logic, owns local market topology copy
+//! - **Task Queue** (`task_queue`): Bounded queue with backpressure for solve requests
 //! - **Algorithm** (`algorithm`): Pluggable route-finding algorithms
 //! - **Market Data** (`market_data`): Shared state (components, tokens, gas prices)
 //! - **Graph** (`graph`): Graph management for algorithms
-//! - **Indexer** (`indexer`): Tycho WebSocket connection, updates market data
-//! - **Events** (`events`): Market events broadcast from indexer to solvers
+//! - **Tycho Feed** (`tycho_feed`): Tycho WebSocket connection, updates market data
+//! - **Events** (`events`): Market events broadcast from feed to solver workers
 //!
 //! # Data Flow
 //!
 //! ```text
-//! HTTP Request -> TaskQueue -> WorkerPool -> Solver -> Algorithm -> Solution
+//! HTTP Request -> OrderManager -> TaskQueue -> WorkerPool -> SolverWorker -> Algorithm -> Solution
 //!                                              ^
 //!                                              |
 //!                               SharedMarketData (read)
 //!                                              ^
 //!                                              |
-//!                                       TychoIndexer (write)
+//!                                       TychoFeed (write)
 //! ```
 //!
 //! # Example Usage
 //!
 //! ```ignore
-//! use tycho_router::{
-//!     api::AppState,
-//!     indexer::{IndexerBuilder, TychoIndexer},
-//!     market_data::SharedMarketData,
-//!     task_queue::{TaskQueue, TaskQueueConfig},
-//!     worker_pool::{WorkerPool, WorkerPoolConfig},
-//! };
+//! use tycho_solver::{parse_chain, PoolConfig, TychoSolverBuilder};
+//! use std::collections::HashMap;
 //!
-//! // Create shared market data
-//! let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+//! // Parse chain
+//! let chain = parse_chain("Ethereum")?;
 //!
-//! // Create task queue
-//! let task_queue = TaskQueue::new(TaskQueueConfig::default());
-//! let (task_handle, task_rx) = task_queue.split();
+//! // Configure solver pools
+//! let mut pools = HashMap::new();
+//! pools.insert("most_liquid".to_string(), PoolConfig {
+//!     algorithm: "most_liquid".to_string(),
+//!     num_workers: 4,
+//!     min_hops: 1,
+//!     max_hops: 3,
+//!     timeout_ms: 100,
+//!     task_queue_capacity: 1000,
+//! });
 //!
-//! // Create indexer
-//! let indexer_config = IndexerBuilder::new()
-//!     .tycho_url("wss://tycho.propellerheads.xyz")
-//!     .build();
-//! let (indexer, event_tx) = TychoIndexer::new(indexer_config, market_data.clone());
+//! // Build and run solver
+//! let solver = TychoSolverBuilder::new(
+//!     chain,
+//!     pools,
+//!     "wss://tycho.propellerheads.xyz".to_string(),
+//!     "https://eth.llamarpc.com".to_string(),
+//!     vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
+//! )
+//! .build()?;
 //!
-//! // Create worker pool
-//! let worker_pool = WorkerPool::spawn(
-//!     WorkerPoolConfig::default(),
-//!     task_rx,
-//!     market_data.clone(),
-//!     event_tx,
-//! );
-//!
-//! // Start indexer
-//! tokio::spawn(indexer.run());
-//!
-//! // Create app state and start HTTP server
-//! let app_state = AppState::new(task_handle, market_data);
+//! solver.run().await?;
 //! ```
 
+// Public modules - exposed for external library users
 pub mod algorithm;
-pub mod api;
 pub mod builder;
-pub mod cli;
 pub mod config;
+pub mod types;
+
+// Internal modules - public for main.rs and internal use, but not re-exported
+pub mod api;
+pub mod cli;
 pub mod derived;
 pub mod feed;
 pub mod graph;
 pub mod order_manager;
-pub mod task_queue;
-pub mod types;
-pub mod worker;
 pub mod worker_pool;
 
-// Re-export commonly used types at crate root
+// Re-export commonly used types at crate root (public API)
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
-pub use api::{ApiError, AppState};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
-pub use derived::{
-    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedDataStore,
-    PoolDepth, PoolDepths, SpotPrice, SpotPrices, TokenGasPrice, TokenPrices,
-};
-pub use feed::{
-    events::MarketEvent,
-    market_data::{SharedMarketData, SharedMarketDataRef},
-    tycho_feed::TychoFeed,
-    DataFeedError, TychoFeedConfig,
-};
-pub use graph::{GraphManager, Path};
-pub use order_manager::{OrderManager, OrderManagerConfig, SolverPoolHandle};
-pub use task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
-    SolveError, SolveResult, SolveTask, Swap, TaskId,
+    SolveError, Swap,
 };
-pub use worker::{SolverWorker, WorkerConfig};
-pub use worker_pool::{UnknownAlgorithmError, WorkerPool, WorkerPoolBuilder, WorkerPoolConfig};

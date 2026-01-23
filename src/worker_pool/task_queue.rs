@@ -8,13 +8,13 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
-    types::{SingleOrderSolution, SolveError, SolveTask},
+    types::{internal::SolveTask, SingleOrderSolution, SolveError},
     Order,
 };
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
-pub struct TaskQueueConfig {
+pub(crate) struct TaskQueueConfig {
     /// Maximum number of pending tasks.
     pub capacity: usize,
 }
@@ -70,11 +70,13 @@ impl TaskQueueHandle {
     /// Returns the current approximate queue depth.
     ///
     /// Note: This is not exact due to the async nature of the queue.
+    #[allow(dead_code)]
     pub fn approximate_depth(&self) -> usize {
         self.sender.len()
     }
 
     /// Returns true if the queue is likely full.
+    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.sender.is_full()
     }
@@ -83,7 +85,7 @@ impl TaskQueueHandle {
 /// The task queue itself.
 ///
 /// This is consumed when creating the worker pool.
-pub struct TaskQueue {
+pub(crate) struct TaskQueue {
     receiver: async_channel::Receiver<SolveTask>,
     handle: TaskQueueHandle,
 }
@@ -98,6 +100,7 @@ impl TaskQueue {
     }
 
     /// Returns a handle for enqueueing tasks.
+    #[allow(dead_code)]
     pub fn handle(&self) -> TaskQueueHandle {
         self.handle.clone()
     }
@@ -105,6 +108,7 @@ impl TaskQueue {
     /// Consumes the queue and returns the receiver.
     ///
     /// This is called when setting up the worker pool.
+    #[allow(dead_code)]
     pub fn into_receiver(self) -> async_channel::Receiver<SolveTask> {
         self.receiver
     }

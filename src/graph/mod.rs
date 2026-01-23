@@ -19,7 +19,7 @@ use crate::types::ComponentId;
 /// Each edge index points to an edge in the graph containing the component ID and weight.
 /// This representation allows O(1) access to edge data during scoring and simulation.
 #[derive(Clone, Default)]
-pub struct Path<'a, D> {
+pub(crate) struct Path<'a, D> {
     /// Sequence of token addresses in the path.
     pub tokens: Vec<&'a Address>,
     /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
@@ -68,20 +68,10 @@ impl<'a, D> Path<'a, D> {
             .zip(self.edge_data.iter())
             .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
     }
-
-    /// Returns the starting token.
-    pub fn start_token(&self) -> Option<&Address> {
-        self.tokens.first().copied()
-    }
-
-    /// Returns the ending token.
-    pub fn end_token(&self) -> Option<&Address> {
-        self.tokens.last().copied()
-    }
 }
 
 #[derive(Error, Debug)]
-pub enum GraphError {
+pub(crate) enum GraphError {
     #[error("Token not found in graph: {0:?}")]
     TokenNotFound(Address),
     #[error("Components not found in graph: {0:?}")]
@@ -96,7 +86,7 @@ pub enum GraphError {
 ///
 /// Graph managers are stateful - they maintain the graph internally and update it based on market
 /// events.
-pub trait GraphManager<G>: Send + Sync
+pub(crate) trait GraphManager<G>: Send + Sync
 where
     G: Send + Sync,
 {

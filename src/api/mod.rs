@@ -1,6 +1,6 @@
 //! HTTP API layer using Actix Web.
 //!
-//! This module provides the HTTP endpoints for the router:
+//! This module provides the HTTP endpoints for the solver:
 //! - POST /solve - Submit solve requests
 //! - GET /health - Health check endpoint
 
@@ -17,7 +17,7 @@ use std::{
 
 use actix_web::web;
 pub use error::ApiError;
-pub use handlers::configure_routes;
+use handlers::configure_routes;
 
 use crate::order_manager::OrderManager;
 

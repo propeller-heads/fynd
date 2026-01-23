@@ -84,7 +84,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     }
 
     /// Helper function to find a node index by address
-    pub fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
+    pub(crate) fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
         self.node_map
             .get(addr)
             .copied()
@@ -226,7 +226,8 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// - If `bidirectional` is `true`, updates edges in both directions (token_in -> token_out and
     ///   token_out -> token_in).
     /// - If `bidirectional` is `false`, updates only the forward direction (token_in -> token_out).
-    pub fn set_edge_weight(
+    #[allow(dead_code)]
+    pub(crate) fn set_edge_weight(
         &mut self,
         component_id: &ComponentId,
         token_in: &Address,

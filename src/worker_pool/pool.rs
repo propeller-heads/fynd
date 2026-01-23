@@ -4,29 +4,23 @@
 //! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
 //! A pool is configured with a specific algorithm (by name), allowing multiple pools
 //! with different algorithms to compete via the OrderManager.
-
-// TODO: move file to /worker_pool module
-
-mod registry;
-
 use std::thread::JoinHandle;
 
-pub use registry::{
-    list_algorithms, spawn_workers, SpawnWorkersParams, UnknownAlgorithmError,
-    AVAILABLE_ALGORITHMS, DEFAULT_ALGORITHM,
-};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::{
+    algorithm::AlgorithmConfig,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
-    types::SolveTask,
-    worker::WorkerConfig,
+    types::internal::SolveTask,
+    worker_pool::registry::{
+        spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM,
+    },
 };
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
-pub struct WorkerPoolConfig {
+pub(crate) struct WorkerPoolConfig {
     /// Human-readable name for this pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
     pub name: String,
@@ -35,8 +29,8 @@ pub struct WorkerPoolConfig {
     pub algorithm: String,
     /// Number of worker threads.
     pub num_workers: usize,
-    /// Configuration for each worker.
-    pub worker_config: WorkerConfig,
+    /// Configuration for the algorithm used by each worker.
+    pub algorithm_config: AlgorithmConfig,
 }
 
 impl Default for WorkerPoolConfig {
@@ -45,7 +39,7 @@ impl Default for WorkerPoolConfig {
             name: DEFAULT_ALGORITHM.to_string(),
             algorithm: DEFAULT_ALGORITHM.to_string(),
             num_workers: num_cpus::get(),
-            worker_config: WorkerConfig::default(),
+            algorithm_config: AlgorithmConfig::default(),
         }
     }
 }
@@ -54,7 +48,7 @@ impl Default for WorkerPoolConfig {
 ///
 /// Each pool is dedicated to a specific algorithm. Workers in the pool
 /// compete for tasks from the shared queue.
-pub struct WorkerPool {
+pub(crate) struct WorkerPool {
     /// Human-readable name for this pool.
     name: String,
     /// Algorithm name for this pool.
@@ -92,7 +86,7 @@ impl WorkerPool {
         let params = SpawnWorkersParams {
             algorithm: config.algorithm,
             num_workers: config.num_workers,
-            worker_config: config.worker_config,
+            algorithm_config: config.algorithm_config,
             task_rx,
             market_data,
             event_rx,
@@ -149,7 +143,7 @@ impl WorkerPool {
 }
 
 /// Builder for WorkerPool with a fluent API.
-pub struct WorkerPoolBuilder {
+pub(crate) struct WorkerPoolBuilder {
     config: WorkerPoolConfig,
 }
 
@@ -172,15 +166,15 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the number of worker threads.
-    pub fn num_workers(mut self, n: usize) -> Self {
-        self.config.num_workers = n;
+    /// Sets the algorithm configuration.
+    pub fn algorithm_config(mut self, config: AlgorithmConfig) -> Self {
+        self.config.algorithm_config = config;
         self
     }
 
-    /// Sets the worker configuration.
-    pub fn worker_config(mut self, config: WorkerConfig) -> Self {
-        self.config.worker_config = config;
+    /// Sets the number of worker threads.
+    pub fn num_workers(mut self, n: usize) -> Self {
+        self.config.num_workers = n;
         self
     }
 

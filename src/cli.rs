@@ -4,7 +4,7 @@ use clap::Parser;
 
 use crate::config::defaults;
 
-/// Tycho Solver - High-performance DEX router built on Tycho
+/// Tycho Solver - High-performance DEX solver built on Tycho
 ///
 /// Finds optimal swap routes across multiple protocols using real-time market data.
 #[derive(Parser, PartialEq, Debug)]

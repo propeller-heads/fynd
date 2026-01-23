@@ -1,1 +1,1 @@
-# tycho-router
+# tycho-solver

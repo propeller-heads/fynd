@@ -25,12 +25,7 @@ use tycho_simulation::{
 use crate::types::{BlockInfo, ComponentId};
 
 /// Thread-safe handle to shared market data.
-pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
-
-/// Creates a new shared market data instance wrapped in Arc<RwLock<>>.
-pub fn new_shared_market_data() -> SharedMarketDataRef {
-    Arc::new(RwLock::new(SharedMarketData::new()))
-}
+pub(crate) type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
 
 /// Shared market data containing all component states and market information.
 ///
@@ -72,6 +67,7 @@ impl SharedMarketData {
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
+    #[allow(dead_code)]
     pub fn get_protocol_sync_status(&self, protocol_system: &String) -> Option<&SynchronizerState> {
         self.protocol_sync_status
             .get(protocol_system)
@@ -106,16 +102,6 @@ impl SharedMarketData {
     /// Returns the current gas price. None if not fetched yet.
     pub fn gas_price(&self) -> Option<&BlockGasPrice> {
         self.gas_price.as_ref()
-    }
-
-    /// Returns a reference to the component registry.
-    pub fn component_registry_ref(&self) -> &HashMap<ComponentId, ProtocolComponent> {
-        &self.components
-    }
-
-    /// Returns a reference to the simulation state registry.
-    pub fn simulation_state_registry_ref(&self) -> &HashMap<ComponentId, Box<dyn ProtocolSim>> {
-        &self.simulation_states
     }
 
     /// Returns a reference to the token registry.

@@ -12,25 +12,25 @@
 //! 3. **Collection**: Wait for N responses OR timeout per order
 //! 4. **Selection**: Choose best solution (max `amount_out_net_gas`)
 
-mod config;
+pub mod config;
 
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
 
-pub use config::OrderManagerConfig;
+use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
 
 use crate::{
-    task_queue::TaskQueueHandle,
     types::{
         solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
         OrderSolution, Solution, SolutionStatus, SolveError,
     },
+    worker_pool::task_queue::TaskQueueHandle,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -38,26 +38,20 @@ use crate::{
 pub struct SolverPoolHandle {
     /// Human-readable name for this pool (used in logging & metrics).
     pub name: String,
-    /// Algorithm name.
-    pub algorithm: String,
     /// Queue handle for this pool.
     pub queue: TaskQueueHandle,
 }
 
 impl SolverPoolHandle {
     /// Creates a new solver pool handle.
-    pub fn new(
-        name: impl Into<String>,
-        algorithm: impl Into<String>,
-        queue: TaskQueueHandle,
-    ) -> Self {
-        Self { name: name.into(), algorithm: algorithm.into(), queue }
+    pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
+        Self { name: name.into(), queue }
     }
 }
 
 /// Collected responses for a single order from multiple solvers.
 #[derive(Debug)]
-pub struct OrderResponses {
+pub(crate) struct OrderResponses {
     /// ID of the order these responses correspond to.
     pub order_id: String,
     /// Solutions received from each solver pool (pool_name, solution).
@@ -373,7 +367,10 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::types::{solution::OrderSide, SingleOrderSolution, SolveTask};
+    use crate::types::{
+        internal::SolveTask,
+        solution::{OrderSide, SingleOrderSolution},
+    };
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
@@ -412,7 +409,6 @@ mod tests {
     // Helper to create a mock solver pool that responds with a given solution
     fn create_mock_pool(
         name: &str,
-        algorithm: &str,
         response: Result<SingleOrderSolution, SolveError>,
         delay_ms: u64,
     ) -> (SolverPoolHandle, tokio::task::JoinHandle<()>) {
@@ -428,7 +424,7 @@ mod tests {
             }
         });
 
-        (SolverPoolHandle::new(name, algorithm, handle), worker)
+        (SolverPoolHandle::new(name, handle), worker)
     }
 
     #[test]
@@ -459,8 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_order_manager_single_pool_success() {
-        let (pool, worker) =
-            create_mock_pool("pool_a", "most_liquid", Ok(make_single_solution(900)), 0);
+        let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_solution(900)), 0);
 
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
         let request =
@@ -481,11 +476,9 @@ mod tests {
     #[tokio::test]
     async fn test_order_manager_selects_best_of_two() {
         // Pool A: worse solution (net gas = 800)
-        let (pool_a, worker_a) =
-            create_mock_pool("pool_a", "algo_a", Ok(make_single_solution(800)), 0);
+        let (pool_a, worker_a) = create_mock_pool("pool_a", Ok(make_single_solution(800)), 0);
         // Pool B: better solution (net gas = 950)
-        let (pool_b, worker_b) =
-            create_mock_pool("pool_b", "algo_b", Ok(make_single_solution(950)), 0);
+        let (pool_b, worker_b) = create_mock_pool("pool_b", Ok(make_single_solution(950)), 0);
 
         let manager = OrderManager::new(vec![pool_a, pool_b], OrderManagerConfig::default());
         let request =
@@ -507,8 +500,7 @@ mod tests {
     #[tokio::test]
     async fn test_order_manager_timeout() {
         // Pool that takes too long
-        let (pool, worker) =
-            create_mock_pool("slow_pool", "slow_algo", Ok(make_single_solution(900)), 500);
+        let (pool, worker) = create_mock_pool("slow_pool", Ok(make_single_solution(900)), 500);
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
         let manager = OrderManager::new(vec![pool], config);
@@ -533,11 +525,9 @@ mod tests {
     #[tokio::test]
     async fn test_order_manager_early_return_on_min_responses() {
         // Pool A: fast
-        let (pool_a, worker_a) =
-            create_mock_pool("fast_pool", "fast_algo", Ok(make_single_solution(800)), 0);
+        let (pool_a, worker_a) = create_mock_pool("fast_pool", Ok(make_single_solution(800)), 0);
         // Pool B: slow (but we won't wait for it)
-        let (pool_b, worker_b) =
-            create_mock_pool("slow_pool", "slow_algo", Ok(make_single_solution(950)), 500);
+        let (pool_b, worker_b) = create_mock_pool("slow_pool", Ok(make_single_solution(950)), 500);
 
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(1000))
@@ -616,7 +606,6 @@ mod tests {
         // Pool that returns an error
         let (pool, worker) = create_mock_pool(
             "error_pool",
-            "error_algo",
             Err(SolveError::NoRouteFound { order_id: "test-order".to_string() }),
             0,
         );
