@@ -10,6 +10,4 @@ pub mod token_gas_price;
 
 pub use pool_depth::{PoolDepthComputation, PoolDepthKey, PoolDepths};
 pub use spot_price::{SpotPriceComputation, SpotPriceKey, SpotPrices};
-pub use token_gas_price::{
-    TokenGasPrice, TokenGasPriceComputation, TokenGasPriceKey, TokenGasPrices,
-};
+pub use token_gas_price::{TokenGasPriceComputation, TokenGasPriceKey, TokenGasPrices};
