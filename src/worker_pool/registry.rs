@@ -18,10 +18,10 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::{
-    algorithm::MostLiquidAlgorithm,
+    algorithm::{AlgorithmConfig, MostLiquidAlgorithm},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::internal::SolveTask,
-    worker_pool::worker::{SolverWorker, WorkerConfig},
+    worker_pool::worker::SolverWorker,
 };
 
 /// List of available algorithm names.
@@ -41,8 +41,8 @@ pub(crate) struct SpawnWorkersParams {
     pub algorithm: String,
     /// Number of worker threads to spawn.
     pub num_workers: usize,
-    /// Configuration for each worker.
-    pub worker_config: WorkerConfig,
+    /// Configuration for the algorithm used by each worker.
+    pub algorithm_config: AlgorithmConfig,
     /// Receiver for solve tasks.
     pub task_rx: async_channel::Receiver<SolveTask>,
     /// Shared market data reference.
@@ -95,7 +95,7 @@ fn spawn_workers_generic<A, F>(
 where
     A: crate::algorithm::Algorithm + 'static,
     A::GraphManager: crate::feed::events::MarketEventHandler,
-    F: Fn(&WorkerConfig) -> A + Send + Sync + Clone + 'static,
+    F: Fn(&AlgorithmConfig) -> A + Send + Sync + Clone + 'static,
 {
     let mut workers = Vec::with_capacity(params.num_workers);
 
@@ -103,7 +103,7 @@ where
         let task_rx = params.task_rx.clone();
         let market_data = Arc::clone(&params.market_data);
         let event_rx = params.event_rx.resubscribe();
-        let worker_config = params.worker_config.clone();
+        let algorithm_config = params.algorithm_config.clone();
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
         let create_algorithm = create_algorithm.clone();
@@ -117,10 +117,9 @@ where
                     .expect("failed to create tokio runtime");
 
                 rt.block_on(async move {
-                    let algorithm = create_algorithm(&worker_config);
+                    let algorithm = create_algorithm(&algorithm_config);
 
-                    let mut worker =
-                        SolverWorker::new(market_data, algorithm, worker_config, worker_id);
+                    let mut worker = SolverWorker::new(market_data, algorithm, worker_id);
 
                     worker.initialize_graph().await;
                     worker
@@ -145,12 +144,8 @@ where
 /// Spawns workers for the MostLiquid algorithm.
 fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
     spawn_workers_generic(params, |config| {
-        MostLiquidAlgorithm::with_config(
-            config.min_hops,
-            config.max_hops,
-            config.timeout.as_millis() as u64,
-        )
-        .expect("invalid worker configuration for MostLiquidAlgorithm")
+        MostLiquidAlgorithm::with_config(config.clone())
+            .expect("invalid worker configuration for MostLiquidAlgorithm")
     })
 }
 
@@ -179,7 +174,7 @@ mod tests {
         let params = SpawnWorkersParams {
             algorithm: "unknown_algorithm".to_string(),
             num_workers: 1,
-            worker_config: WorkerConfig::default(),
+            algorithm_config: AlgorithmConfig::default(),
             task_rx,
             market_data,
             event_rx,
@@ -211,11 +206,7 @@ mod tests {
         let params = SpawnWorkersParams {
             algorithm: "most_liquid".to_string(),
             num_workers: 3,
-            worker_config: WorkerConfig {
-                min_hops: 1,
-                max_hops: 2,
-                timeout: Duration::from_millis(50),
-            },
+            algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50)).unwrap(),
             task_rx,
             market_data,
             event_rx,

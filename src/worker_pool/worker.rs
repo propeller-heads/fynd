@@ -7,7 +7,7 @@
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -26,23 +26,6 @@ use crate::{
     Order,
 };
 
-/// Configuration for a Solver instance.
-#[derive(Debug, Clone)]
-pub(crate) struct WorkerConfig {
-    /// Minimum hops to search (must be >= 1).
-    pub min_hops: usize,
-    /// Maximum hops to search.
-    pub max_hops: usize,
-    /// Timeout for solving.
-    pub timeout: Duration,
-}
-
-impl Default for WorkerConfig {
-    fn default() -> Self {
-        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(100) }
-    }
-}
-
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -55,8 +38,6 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
-    /// Configuration.
-    config: WorkerConfig,
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
@@ -77,19 +58,12 @@ where
     ///
     /// * `market_data` - Shared reference to market data
     /// * `algorithm` - The algorithm to use for route finding
-    /// * `config` - Solver configuration
     /// * `worker_id` - Identifier for this worker (for logging)
-    pub fn new(
-        market_data: SharedMarketDataRef,
-        algorithm: A,
-        config: WorkerConfig,
-        worker_id: usize,
-    ) -> Self {
+    pub fn new(market_data: SharedMarketDataRef, algorithm: A, worker_id: usize) -> Self {
         Self {
             algorithm,
             graph_manager: A::GraphManager::default(),
             market_data,
-            config,
             initialized: false,
             worker_id,
         }
@@ -341,10 +315,5 @@ where
     /// Returns the algorithm name.
     pub fn algorithm_name(&self) -> &str {
         self.algorithm.name()
-    }
-
-    /// Returns the config.
-    pub fn config(&self) -> &WorkerConfig {
-        &self.config
     }
 }

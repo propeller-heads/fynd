@@ -23,7 +23,7 @@ use tycho_simulation::{
     tycho_core::models::{token::Token, Address},
 };
 
-use super::{Algorithm, NoPathReason};
+use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
@@ -100,28 +100,12 @@ impl MostLiquidAlgorithm {
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidConfiguration` if:
-    /// - `min_hops == 0` (at least one hop is required)
-    /// - `min_hops > max_hops`
-    pub fn with_config(
-        min_hops: usize,
-        max_hops: usize,
-        timeout_ms: u64,
-    ) -> Result<Self, AlgorithmError> {
-        if min_hops == 0 {
-            return Err(AlgorithmError::InvalidConfiguration {
-                reason: "min_hops must be at least 1".to_string(),
-            });
-        }
-        if min_hops > max_hops {
-            return Err(AlgorithmError::InvalidConfiguration {
-                reason: format!("min_hops ({min_hops}) cannot exceed max_hops ({max_hops})"),
-            });
-        }
-        Ok(Self { min_hops, max_hops, timeout: Duration::from_millis(timeout_ms) })
+    pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
+        Ok(Self {
+            min_hops: config.min_hops(),
+            max_hops: config.max_hops(),
+            timeout: config.timeout(),
+        })
     }
 
     /// Finds all paths between two tokens using BFS directly on the graph.
@@ -1034,7 +1018,10 @@ mod tests {
         let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1065,7 +1052,10 @@ mod tests {
             ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(3000)),
         ]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1108,7 +1098,10 @@ mod tests {
             ("pool2", &token_b, &token_c, MockProtocolSim::new(3)),
         ]);
 
-        let algorithm = MostLiquidAlgorithm::with_config(1, 2, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 2, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1174,7 +1167,10 @@ mod tests {
             .unwrap();
 
         // Use max_hops=1 to focus only on direct 1-hop paths
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let market_ref = Arc::new(RwLock::new(market));
         let route = algorithm
@@ -1350,7 +1346,10 @@ mod tests {
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         // Use min_hops=2 to require at least 2 hops (circular)
-        let algorithm = MostLiquidAlgorithm::with_config(2, 2, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
@@ -1393,7 +1392,10 @@ mod tests {
         ]);
 
         // min_hops=2 should skip the 1-hop direct path
-        let algorithm = MostLiquidAlgorithm::with_config(2, 3, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 3, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let route = algorithm
@@ -1421,7 +1423,10 @@ mod tests {
         ]);
 
         // max_hops=1 cannot reach C from A (needs 2 hops)
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 100).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algorithm
@@ -1451,7 +1456,10 @@ mod tests {
         ]);
 
         // timeout=0ms should timeout after processing some paths
-        let algorithm = MostLiquidAlgorithm::with_config(1, 1, 0).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(0)).unwrap(),
+        )
+        .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algorithm
@@ -1489,7 +1497,10 @@ mod tests {
     ) {
         use crate::algorithm::Algorithm;
 
-        let algorithm = MostLiquidAlgorithm::with_config(min_hops, max_hops, timeout_ms).unwrap();
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(min_hops, max_hops, Duration::from_millis(timeout_ms)).unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(algorithm.max_hops(), max_hops);
         assert_eq!(algorithm.timeout(), Duration::from_millis(timeout_ms));
@@ -1512,8 +1523,8 @@ mod tests {
     // ==================== Configuration Validation Tests ====================
 
     #[test]
-    fn with_config_rejects_zero_min_hops() {
-        let result = MostLiquidAlgorithm::with_config(0, 3, 100);
+    fn algorithm_config_rejects_zero_min_hops() {
+        let result = AlgorithmConfig::new(0, 3, Duration::from_millis(100));
         assert!(matches!(
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("min_hops must be at least 1")
@@ -1521,8 +1532,8 @@ mod tests {
     }
 
     #[test]
-    fn with_config_rejects_min_greater_than_max() {
-        let result = MostLiquidAlgorithm::with_config(5, 3, 100);
+    fn algorithm_config_rejects_min_greater_than_max() {
+        let result = AlgorithmConfig::new(5, 3, Duration::from_millis(100));
         assert!(matches!(
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("cannot exceed")

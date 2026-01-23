@@ -28,6 +28,66 @@ use crate::{
     types::{solution::Order, Route},
 };
 
+/// Configuration for an Algorithm instance.
+#[derive(Debug, Clone)]
+pub(crate) struct AlgorithmConfig {
+    /// Minimum hops to search (must be >= 1).
+    min_hops: usize,
+    /// Maximum hops to search.
+    max_hops: usize,
+    /// Timeout for solving.
+    timeout: Duration,
+}
+
+impl AlgorithmConfig {
+    /// Creates a new `AlgorithmConfig` with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` if:
+    /// - `min_hops == 0` (at least one hop is required)
+    /// - `min_hops > max_hops`
+    pub(crate) fn new(
+        min_hops: usize,
+        max_hops: usize,
+        timeout: Duration,
+    ) -> Result<Self, AlgorithmError> {
+        if min_hops == 0 {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: "min_hops must be at least 1".to_string(),
+            });
+        }
+        if min_hops > max_hops {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: format!("min_hops ({}) cannot exceed max_hops ({})", min_hops, max_hops),
+            });
+        }
+        Ok(Self { min_hops, max_hops, timeout })
+    }
+
+    /// Returns the minimum number of hops to search.
+    pub(crate) fn min_hops(&self) -> usize {
+        self.min_hops
+    }
+
+    /// Returns the maximum number of hops to search.
+    pub(crate) fn max_hops(&self) -> usize {
+        self.max_hops
+    }
+
+    /// Returns the timeout for solving.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl Default for AlgorithmConfig {
+    fn default() -> Self {
+        // Default values are valid, so we can unwrap safely
+        Self::new(1, 3, Duration::from_millis(100)).unwrap()
+    }
+}
+
 /// Trait for route-finding algorithms.
 ///
 /// Algorithms are generic over their preferred graph type `G`, allowing them to:

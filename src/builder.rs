@@ -7,18 +7,15 @@ use tracing::{error, info};
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
+    algorithm::AlgorithmConfig,
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, PoolConfig},
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
-    order_manager::{
-        config::OrderManagerConfig,
-        OrderManager, SolverPoolHandle,
-    },
+    order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     worker_pool::{
         task_queue::{TaskQueue, TaskQueueConfig},
-        worker::WorkerConfig,
         worker_pool::{WorkerPool, WorkerPoolBuilder},
     },
 };
@@ -203,12 +200,13 @@ impl TychoSolverBuilder {
 
         let event_rx_primary = event_rx;
         for (pool_name, pool_cfg) in self.pools.iter() {
-            // Convert pool's config to WorkerConfig
-            let worker_config = WorkerConfig {
-                min_hops: pool_cfg.min_hops,
-                max_hops: pool_cfg.max_hops,
-                timeout: Duration::from_millis(pool_cfg.timeout_ms),
-            };
+            // Convert pool's config to AlgorithmConfig
+            let algorithm_config = AlgorithmConfig::new(
+                pool_cfg.min_hops,
+                pool_cfg.max_hops,
+                Duration::from_millis(pool_cfg.timeout_ms),
+            )
+            .context(format!("invalid algorithm configuration for pool '{}'", pool_name))?;
             let task_queue =
                 TaskQueue::new(TaskQueueConfig { capacity: pool_cfg.task_queue_capacity });
             let (task_handle, task_rx) = task_queue.split();
@@ -219,8 +217,8 @@ impl TychoSolverBuilder {
             let worker_pool = WorkerPoolBuilder::new()
                 .name(pool_name.clone())
                 .algorithm(pool_cfg.algorithm.clone())
+                .algorithm_config(algorithm_config)
                 .num_workers(pool_cfg.num_workers)
-                .worker_config(worker_config)
                 .build(task_rx, Arc::clone(&market_data), pool_event_rx)
                 .context("failed to create worker pool")?;
 

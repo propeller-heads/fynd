@@ -10,11 +10,11 @@ use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::{
+    algorithm::AlgorithmConfig,
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::internal::SolveTask,
-    worker_pool::{
-        registry::{spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM},
-        worker::WorkerConfig,
+    worker_pool::registry::{
+        spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM,
     },
 };
 
@@ -29,8 +29,8 @@ pub(crate) struct WorkerPoolConfig {
     pub algorithm: String,
     /// Number of worker threads.
     pub num_workers: usize,
-    /// Configuration for each worker.
-    pub worker_config: WorkerConfig,
+    /// Configuration for the algorithm used by each worker.
+    pub algorithm_config: AlgorithmConfig,
 }
 
 impl Default for WorkerPoolConfig {
@@ -39,7 +39,7 @@ impl Default for WorkerPoolConfig {
             name: DEFAULT_ALGORITHM.to_string(),
             algorithm: DEFAULT_ALGORITHM.to_string(),
             num_workers: num_cpus::get(),
-            worker_config: WorkerConfig::default(),
+            algorithm_config: AlgorithmConfig::default(),
         }
     }
 }
@@ -86,7 +86,7 @@ impl WorkerPool {
         let params = SpawnWorkersParams {
             algorithm: config.algorithm,
             num_workers: config.num_workers,
-            worker_config: config.worker_config,
+            algorithm_config: config.algorithm_config,
             task_rx,
             market_data,
             event_rx,
@@ -166,15 +166,15 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the number of worker threads.
-    pub fn num_workers(mut self, n: usize) -> Self {
-        self.config.num_workers = n;
+    /// Sets the algorithm configuration.
+    pub fn algorithm_config(mut self, config: AlgorithmConfig) -> Self {
+        self.config.algorithm_config = config;
         self
     }
 
-    /// Sets the worker configuration.
-    pub fn worker_config(mut self, config: WorkerConfig) -> Self {
-        self.config.worker_config = config;
+    /// Sets the number of worker threads.
+    pub fn num_workers(mut self, n: usize) -> Self {
+        self.config.num_workers = n;
         self
     }
 
