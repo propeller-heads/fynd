@@ -133,13 +133,8 @@ pub(crate) trait Algorithm: Send + Sync {
     ) -> Result<Route, AlgorithmError>;
 
     /// Returns whether this algorithm supports exact-out orders.
+    #[allow(dead_code)]
     fn supports_exact_out(&self) -> bool;
-
-    /// Returns the maximum number of hops to search.
-    fn max_hops(&self) -> usize;
-
-    /// Returns the timeout for route finding.
-    fn timeout(&self) -> Duration;
 }
 
 /// Errors that can occur during route finding.

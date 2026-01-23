@@ -70,11 +70,13 @@ impl TaskQueueHandle {
     /// Returns the current approximate queue depth.
     ///
     /// Note: This is not exact due to the async nature of the queue.
+    #[allow(dead_code)]
     pub fn approximate_depth(&self) -> usize {
         self.sender.len()
     }
 
     /// Returns true if the queue is likely full.
+    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.sender.is_full()
     }
@@ -98,6 +100,7 @@ impl TaskQueue {
     }
 
     /// Returns a handle for enqueueing tasks.
+    #[allow(dead_code)]
     pub fn handle(&self) -> TaskQueueHandle {
         self.handle.clone()
     }
@@ -105,6 +108,7 @@ impl TaskQueue {
     /// Consumes the queue and returns the receiver.
     ///
     /// This is called when setting up the worker pool.
+    #[allow(dead_code)]
     pub fn into_receiver(self) -> async_channel::Receiver<SolveTask> {
         self.receiver
     }

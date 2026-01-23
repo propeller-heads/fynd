@@ -68,16 +68,6 @@ impl<'a, D> Path<'a, D> {
             .zip(self.edge_data.iter())
             .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
     }
-
-    /// Returns the starting token.
-    pub fn start_token(&self) -> Option<&Address> {
-        self.tokens.first().copied()
-    }
-
-    /// Returns the ending token.
-    pub fn end_token(&self) -> Option<&Address> {
-        self.tokens.last().copied()
-    }
 }
 
 #[derive(Error, Debug)]

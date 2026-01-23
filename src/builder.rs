@@ -176,30 +176,19 @@ impl TychoSolverBuilder {
         let (mut gas_price_fetcher, gas_price_worker_signal_tx) =
             GasPriceFetcher::new(ethereum_client, Arc::clone(&market_data));
 
-        let (mut tycho_feed, event_rx) =
+        let mut tycho_feed =
             TychoFeed::new(tycho_feed_config, Arc::clone(&market_data), health_tracker.clone());
 
         tycho_feed = tycho_feed.with_gas_price_worker_signal_tx(gas_price_worker_signal_tx);
-
-        let feed_handle = tokio::spawn(async move {
-            if let Err(e) = tycho_feed.run().await {
-                error!(error = %e, "tycho feed error");
-            }
-        });
-
-        // Start gas price fetcher in background
-        let gas_price_worker_handle = tokio::spawn(async move {
-            if let Err(e) = gas_price_fetcher.run().await {
-                tracing::error!(error = %e, "gas price fetcher error");
-            }
-        });
 
         // Worker pools (one task queue per pool)
         let mut solver_pool_handles = Vec::new();
         let mut worker_pools = Vec::new();
 
-        let event_rx_primary = event_rx;
         for (pool_name, pool_cfg) in self.pools.iter() {
+            // Each pool gets its own subscription to feed events
+            let pool_event_rx = tycho_feed.subscribe();
+
             // Convert pool's config to AlgorithmConfig
             let algorithm_config = AlgorithmConfig::new(
                 pool_cfg.min_hops,
@@ -210,9 +199,6 @@ impl TychoSolverBuilder {
             let task_queue =
                 TaskQueue::new(TaskQueueConfig { capacity: pool_cfg.task_queue_capacity });
             let (task_handle, task_rx) = task_queue.split();
-
-            // Each pool gets its own subscription to feed events
-            let pool_event_rx = event_rx_primary.resubscribe();
 
             let worker_pool = WorkerPoolBuilder::new()
                 .name(pool_name.clone())
@@ -229,13 +215,23 @@ impl TychoSolverBuilder {
                 "worker pool started"
             );
 
-            solver_pool_handles.push(SolverPoolHandle::new(
-                worker_pool.name(),
-                worker_pool.algorithm(),
-                task_handle,
-            ));
+            solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
             worker_pools.push(worker_pool);
         }
+
+        // Spawn feed after all subscriptions are created
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = tycho_feed.run().await {
+                error!(error = %e, "tycho feed error");
+            }
+        });
+
+        // Start gas price fetcher in background
+        let gas_price_worker_handle = tokio::spawn(async move {
+            if let Err(e) = gas_price_fetcher.run().await {
+                tracing::error!(error = %e, "gas price fetcher error");
+            }
+        });
 
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)

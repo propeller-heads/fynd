@@ -64,28 +64,14 @@ impl TychoFeed {
     /// * `config` - Indexer configuration
     /// * `market_data` - Shared market data reference
     /// * `health_tracker` - Health tracker for API health checks
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (TychoFeed, Receiver) - the receiver can be
-    /// used to subscribe additional consumers before calling `run()`.
     pub fn new(
         config: TychoFeedConfig,
         market_data: SharedMarketDataRef,
         health_tracker: HealthTracker,
-    ) -> (Self, broadcast::Receiver<MarketEvent>) {
-        let (event_tx, event_rx) = broadcast::channel(1024);
+    ) -> Self {
+        let (event_tx, _event_rx) = broadcast::channel(1024);
 
-        (
-            Self {
-                config,
-                market_data,
-                event_tx,
-                health_tracker,
-                gas_price_worker_signal_tx: None,
-            },
-            event_rx,
-        )
+        Self { config, market_data, event_tx, health_tracker, gas_price_worker_signal_tx: None }
     }
 
     /// Returns a new subscriber for market events.
@@ -411,9 +397,10 @@ impl TychoFeed {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, env};
+    use std::{collections::HashMap, env, sync::Arc};
 
     use num_bigint::BigUint;
+    use tokio::sync::RwLock;
     use tycho_simulation::{
         protocol::models::{ProtocolComponent, Update},
         tycho_common::{
@@ -429,8 +416,16 @@ mod tests {
     use super::*;
     use crate::{
         api::HealthTracker,
-        feed::{market_data::new_shared_market_data, TychoFeedConfig},
+        feed::{
+            market_data::{SharedMarketData, SharedMarketDataRef},
+            TychoFeedConfig,
+        },
     };
+
+    /// Creates a new shared market data instance wrapped in Arc<RwLock<>>.
+    fn new_shared_market_data() -> SharedMarketDataRef {
+        Arc::new(RwLock::new(SharedMarketData::new()))
+    }
 
     #[derive(Debug, Clone)]
     struct MockProtocolSim {
@@ -551,7 +546,7 @@ mod tests {
         let market_data = new_shared_market_data();
         let health_tracker = HealthTracker::new();
 
-        let (feed, _initial_rx) = TychoFeed::new(config, market_data, health_tracker);
+        let feed = TychoFeed::new(config, market_data, health_tracker);
 
         // Subscribe multiple times to verify multiple subscribers can be created
         let mut sub1 = feed.subscribe();
@@ -584,8 +579,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_message_adds_new_components() {
         let market_data = new_shared_market_data();
-        let (feed, mut event_rx) =
-            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let feed = TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
 
         // Create a new component
         let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -650,8 +645,8 @@ mod tests {
     async fn test_handle_message_removes_components() {
         let market_data = new_shared_market_data();
 
-        let (feed, mut event_rx) =
-            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let feed = TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
 
         let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
@@ -732,8 +727,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_message_updates_states() {
         let market_data = new_shared_market_data();
-        let (feed, mut event_rx) =
-            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let feed = TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
 
         let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
@@ -847,8 +842,8 @@ mod tests {
     async fn test_handle_message_multiple_operations() {
         let market_data = new_shared_market_data();
 
-        let (feed, mut event_rx) =
-            TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let feed = TychoFeed::new(create_test_config(), market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
 
         let old_component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let new_component_id = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -963,7 +958,8 @@ mod tests {
         let market_data = new_shared_market_data();
         let health_tracker = HealthTracker::new();
 
-        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let feed = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let mut event_rx = feed.subscribe();
 
         // Send an empty update
         let update = Update::new(12345, HashMap::new(), HashMap::new());
@@ -1003,7 +999,8 @@ mod tests {
         let market_data = new_shared_market_data();
         let health_tracker = HealthTracker::new();
 
-        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let feed = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let mut event_rx = feed.subscribe();
 
         // Start Tycho feed in background
         let feed_handle = tokio::spawn(async move {
@@ -1044,7 +1041,8 @@ mod tests {
         let market_data = new_shared_market_data();
         let health_tracker = HealthTracker::new();
 
-        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let feed = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let mut event_rx = feed.subscribe();
 
         // Start Tycho feed in background
         let feed_handle = tokio::spawn(async move {
@@ -1085,7 +1083,8 @@ mod tests {
         let market_data = new_shared_market_data();
         let health_tracker = HealthTracker::new();
 
-        let (feed, mut event_rx) = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let feed = TychoFeed::new(config, market_data.clone(), health_tracker);
+        let mut event_rx = feed.subscribe();
 
         // Start Tycho feed in background
         let feed_handle = tokio::spawn(async move {

@@ -50,6 +50,7 @@ pub(crate) struct DepthAndPrice {
     pub depth: f64,
 }
 
+#[allow(dead_code)]
 impl DepthAndPrice {
     /// Creates a new DepthAndPrice with all fields set.
     pub fn new(spot_price: f64, depth: f64) -> Self {
@@ -570,14 +571,6 @@ impl Algorithm for MostLiquidAlgorithm {
 
     fn supports_exact_out(&self) -> bool {
         false // TODO: Implement exact-out support
-    }
-
-    fn max_hops(&self) -> usize {
-        self.max_hops
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
     }
 }
 
@@ -1502,8 +1495,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(algorithm.max_hops(), max_hops);
-        assert_eq!(algorithm.timeout(), Duration::from_millis(timeout_ms));
+        assert_eq!(algorithm.max_hops, max_hops);
+        assert_eq!(algorithm.timeout, Duration::from_millis(timeout_ms));
         assert!(!algorithm.supports_exact_out()); // Currently always false
         assert_eq!(algorithm.name(), "most_liquid");
     }
@@ -1514,8 +1507,8 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
 
-        assert_eq!(algorithm.max_hops(), 3);
-        assert_eq!(algorithm.timeout(), Duration::from_millis(50));
+        assert_eq!(algorithm.max_hops, 3);
+        assert_eq!(algorithm.timeout, Duration::from_millis(50));
         assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
     }

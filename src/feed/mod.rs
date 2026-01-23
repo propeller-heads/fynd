@@ -100,6 +100,7 @@ pub(crate) enum DataFeedError {
 
     /// Market data lock error.
     #[error("failed to acquire market data lock")]
+    #[allow(dead_code)]
     LockError,
 
     /// Configuration error.

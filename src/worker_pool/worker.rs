@@ -311,9 +311,4 @@ where
             }
         }
     }
-
-    /// Returns the algorithm name.
-    pub fn algorithm_name(&self) -> &str {
-        self.algorithm.name()
-    }
 }

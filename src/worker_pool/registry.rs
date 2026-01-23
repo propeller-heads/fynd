@@ -31,6 +31,7 @@ pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid"];
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 
 /// Returns a list of all registered algorithm names.
+#[allow(dead_code)]
 pub(crate) fn list_algorithms() -> &'static [&'static str] {
     AVAILABLE_ALGORITHMS
 }

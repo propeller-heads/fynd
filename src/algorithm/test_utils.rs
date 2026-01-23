@@ -239,7 +239,8 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 ///
 /// The market is wrapped in `Arc<RwLock<...>>` for use with `find_best_route`.
 /// Use `market_read(&market_lock)` to get a `SharedMarketData` for other tests.
-pub fn setup_market(
+#[allow(dead_code)]
+pub(crate) fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
 ) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = SharedMarketData::new();
@@ -296,7 +297,8 @@ pub fn setup_market(
 
 /// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
 /// Returns the guard which derefs to `&SharedMarketData`.
-pub fn market_read(
+#[allow(dead_code)]
+pub(crate) fn market_read(
     lock: &Arc<RwLock<SharedMarketData>>,
 ) -> tokio::sync::RwLockReadGuard<'_, SharedMarketData> {
     lock.try_read()
@@ -313,7 +315,8 @@ pub mod fixtures {
     }
 
     /// A <-> B <-> C <-> D linear chain (bidirectional).
-    pub fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    #[allow(dead_code)]
+    pub(crate) fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
         let mut t = HashMap::new();
@@ -325,7 +328,8 @@ pub mod fixtures {
     }
 
     /// 3 parallel pools A<->B, 2 pools B<->C.
-    pub fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    #[allow(dead_code)]
+    pub(crate) fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
         let mut t = HashMap::new();
@@ -339,7 +343,8 @@ pub mod fixtures {
     }
 
     /// Diamond: A->B->D, A->C->D (two 2-hop paths).
-    pub fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    #[allow(dead_code)]
+    pub(crate) fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
         let mut t = HashMap::new();
