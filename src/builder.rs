@@ -15,8 +15,8 @@ use crate::{
     },
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     worker_pool::{
+        pool::{WorkerPool, WorkerPoolBuilder},
         task_queue::{TaskQueue, TaskQueueConfig},
-        worker_pool::{WorkerPool, WorkerPoolBuilder},
     },
 };
 
