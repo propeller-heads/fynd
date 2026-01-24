@@ -4,6 +4,12 @@
 //! falling back to binary search with `get_amount_out`.
 //! Depth represents the maximum input amount before reaching the configured slippage
 //! threshold from the spot price.
+//!
+//! # Dependencies
+//!
+//! This computation depends on [`SpotPrices`](super::spot_price::SpotPrices) being
+//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
+//! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::HashMap;
 
@@ -22,6 +28,7 @@ use tycho_simulation::{
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
+        computations::spot_price::{SpotPriceComputation, SpotPriceKey},
         error::ComputationError,
         store::DerivedDataStore,
     },
@@ -146,12 +153,17 @@ impl DerivedComputation for PoolDepthComputation {
 
     const ID: ComputationId = "pool_depths";
 
-    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_pool_depths))]
+    #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_pool_depths))]
     fn compute(
         &self,
         market: &SharedMarketData,
-        _store: &DerivedDataStore,
+        store: &DerivedDataStore,
     ) -> Result<Self::Output, ComputationError> {
+        // Get precomputed spot prices (required dependency)
+        let spot_prices = store
+            .spot_prices()
+            .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?;
+
         let mut pool_depths = PoolDepths::new();
 
         let topology = market.component_topology();
@@ -182,14 +194,17 @@ impl DerivedComputation for PoolDepthComputation {
             for perm in pool_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
 
-                // Get spot price for limit calculation
-                let spot_price = sim_state
-                    .spot_price(token_in, token_out)
-                    .map_err(|e| {
-                        ComputationError::SimulationFailed(format!(
-                            "spot price failed for {}/{}: {e}",
-                            token_in.address, token_out.address
-                        ))
+                // Look up precomputed spot price
+                let spot_price_key: SpotPriceKey =
+                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                let spot_price = spot_prices
+                    .get(&spot_price_key)
+                    .ok_or_else(|| ComputationError::InvalidDependencyData {
+                        dependency: SpotPriceComputation::ID,
+                        reason: format!(
+                            "missing spot price for pool {} {}/{}",
+                            component_id, token_in.address, token_out.address
+                        ),
                     })?;
 
                 // Calculate minimum acceptable price at slippage threshold
@@ -249,9 +264,13 @@ impl DerivedComputation for PoolDepthComputation {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
-    use crate::algorithm::test_utils::{token, MockProtocolSim};
+    use crate::{
+        algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim},
+        derived::computations::spot_price::{SpotPriceComputation, SpotPrices},
+    };
 
     #[test]
     fn computation_id() {
@@ -290,9 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn handles_empty_market() {
+    fn test_compute_handles_empty_market() {
         let market = SharedMarketData::new();
-        let store = DerivedDataStore::new();
+        let mut store = DerivedDataStore::new();
+        store.set_spot_prices(SpotPrices::new(), None);
 
         let output = PoolDepthComputation::default()
             .compute(&market, &store)
@@ -301,11 +321,29 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[test]
+    fn test_compute_missing_spot_prices_returns_error() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let (market_lock, _) =
+            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+        let market = market_read(&market_lock);
+        let store = DerivedDataStore::new(); // No spot prices
+
+        let result = PoolDepthComputation::default().compute(&market, &store);
+
+        assert!(
+            matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
+            "should return MissingDependency for spot_prices, got {result:?}"
+        );
+    }
+
     /// MockProtocolSim has constant price (no slippage), so depth equals sell_limit - 1.
     #[rstest]
     #[case::normal(2, 1_000_000, 499_999)]
     #[case::zero_for_zero_liquidity(2, 0, 0)]
-    fn binary_search_finds_exact_depth_for_constant_price_pool(
+    fn test_binary_search_finds_exact_depth_for_constant_price_pool(
         #[case] spot_price: u32,
         #[case] liquidity: u128,
         #[case] expected_depth: u64,
@@ -329,5 +367,45 @@ mod tests {
             BigUint::from(expected_depth),
             "expected depth {expected_depth} for spot_price={spot_price}, liquidity={liquidity}"
         );
+    }
+
+    #[test]
+    fn test_compute_integration() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        // Use spot_price=1 for symmetric behavior in both directions
+        let (market, _) = setup_market(vec![(
+            "pool",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(1).with_liquidity(1_000_000),
+        )]);
+        let mut store = DerivedDataStore::new();
+        let spot_comp = SpotPriceComputation::new();
+        let spot_prices = spot_comp
+            .compute(&market_read(&market), &store)
+            .expect("spot price computation should succeed");
+        store.set_spot_prices(spot_prices, None);
+
+        let pool_depths = PoolDepthComputation::default()
+            .compute(&market_read(&market), &store)
+            .expect("computation should succeed");
+
+        // Should have depths for both directions: ETH→USDC and USDC→ETH
+        assert_eq!(pool_depths.len(), 2, "should have depths for both directions");
+
+        let key_eth_usdc: PoolDepthKey = ("pool".into(), eth.address.clone(), usdc.address.clone());
+        let key_usdc_eth: PoolDepthKey = ("pool".into(), usdc.address.clone(), eth.address.clone());
+
+        assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
+        assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
+
+        // With spot_price=1 and no fee, effective_price = 1.0 for all amounts.
+        // min_price = 1.0 * 0.99 = 0.99, so all amounts satisfy effective_price >= min_price.
+        // Binary search finds depth = sell_limit - 1 = liquidity - 1 = 999_999.
+        let expected_depth = BigUint::from(999_999u64);
+        assert_eq!(pool_depths.get(&key_eth_usdc).unwrap(), &expected_depth, "ETH→USDC depth");
+        assert_eq!(pool_depths.get(&key_usdc_eth).unwrap(), &expected_depth, "USDC→ETH depth");
     }
 }

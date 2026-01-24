@@ -11,6 +11,22 @@
 //! - **Events**: Broadcast notifications when computations complete
 //! - **Tracker**: Per-worker readiness tracking based on algorithm requirements
 //!
+//! # Computation Dependencies
+//!
+//! Computations may depend on other computations' outputs via the `DerivedDataStore`.
+//! The dependency graph must be respected when running computations:
+//!
+//! ```text
+//!                 SpotPriceComputation
+//!                    /           \
+//!                   v             v
+//!    PoolDepthComputation    TokenGasPriceComputation
+//! ```
+//!
+//! - **SpotPriceComputation**: No dependencies, computes spot prices for all pools
+//! - **PoolDepthComputation**: Depends on `spot_prices`
+//! - **TokenGasPriceComputation**: Depends on `spot_prices` and `gas_price` (from market data)
+//!
 //! # Example
 //!
 //! ```ignore

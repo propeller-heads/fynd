@@ -23,6 +23,12 @@
 //! - `sell_price` = buy_out / (sell_out - gas_cost)
 //! - `mid_price` = (buy_price + sell_price) / 2
 //! - `spread` = |sell_price - buy_price|
+//!
+//! # Dependencies
+//!
+//! This computation depends on [`SpotPrices`](super::spot_price::SpotPrices) being
+//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
+//! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::HashMap;
 
