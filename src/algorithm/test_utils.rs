@@ -251,7 +251,7 @@ pub(crate) fn setup_market(
         block_number: 1,
         block_hash: Default::default(),
         block_timestamp: 0,
-        pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
     });
 
     for (pool_id, token_in, token_out, state) in pools {

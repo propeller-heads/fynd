@@ -1029,20 +1029,22 @@ mod tests {
     #[tokio::test]
     async fn find_best_route_ranks_by_net_amount_out() {
         // Tests that route selection is based on net_amount_out (output - gas cost),
-        // not just gross output. Four parallel pools with different spot_price/gas combos:
+        // not just gross output. Three parallel pools with different spot_price/gas combos:
         //
-        // | Pool      | spot_price | gas  | Output (1000 in) | Gas Cost | Net   |
-        // |-----------|------------|------|------------------|----------|-------|
-        // | best      | 3          | 1000 | 3000             | 1500     | 2000  |
-        // | low_out   | 2          | 500  | 2000             | 500      | 1500  |
-        // | high_gas  | 4          | 3000 | 4000             | 3000     | 1000  |
+        // Gas price = 100 wei/gas (set by setup_market)
+        //
+        // | Pool      | spot_price | gas | Output (1000 in) | Gas Cost (gas*100) | Net   |
+        // |-----------|------------|-----|------------------|-------------------|-------|
+        // | best      | 3          | 10  | 3000             | 1000              | 2000  |
+        // | low_out   | 2          | 5   | 2000             | 500               | 1500  |
+        // | high_gas  | 4          | 30  | 4000             | 3000              | 1000  |
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market(vec![
-            ("best", &token_a, &token_b, MockProtocolSim::new(3).with_gas(1000)),
-            ("low_out", &token_a, &token_b, MockProtocolSim::new(2).with_gas(500)),
-            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(3000)),
+            ("best", &token_a, &token_b, MockProtocolSim::new(3).with_gas(10)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2).with_gas(5)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(30)),
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
