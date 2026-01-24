@@ -62,7 +62,7 @@ impl DerivedComputation for SpotPriceComputation {
             let sim_state = market
                 .get_simulation_state(component_id)
                 .ok_or(ComputationError::InvalidDependencyData {
-                    dependency: "simulation_states",
+                    dependency: "market_data::simulation_states",
                     reason: format!("missing simulation state for {component_id}"),
                 })?;
 
