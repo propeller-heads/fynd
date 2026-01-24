@@ -83,7 +83,7 @@ impl DerivedComputation for SpotPriceComputation {
             for perm in pool_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
 
-                match sim_state.spot_price(token_out, token_in) {
+                match sim_state.spot_price(token_in, token_out) {
                     Ok(price) => {
                         let key = (
                             component_id.clone(),
