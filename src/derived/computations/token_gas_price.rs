@@ -5,9 +5,9 @@
 //! # Algorithm
 //!
 //! 1. **Path Discovery (DFS)**: Enumerate all paths from gas_token to each reachable token, scoring
-//!    by composed spot prices (forward × reverse) as a heuristic for path quality.
+//!    by spot-price spread: `|forward_spot - 1/reverse_spot|`. Lower spread = better score.
 //!
-//! 2. **Sort**: Order paths per token by spot-based mid-price estimate.
+//! 2. **Sort**: Order paths per token by spread score (lowest spread first).
 //!
 //! 3. **Round-Robin Simulation**: For each token, simulate paths in ranked order and compute their
 //!    spread and mid_price by simulating both directions on the same path. Pick the path with the
@@ -91,7 +91,7 @@ impl TokenGasPriceComputation {
         &self.simulation_amount
     }
 
-    /// DFS to discover all paths from gas_token, scored by spot prices.
+    /// DFS to discover all paths from gas_token, scored by spot-price spread.
     fn discover_paths<'a>(
         &self,
         graph_manager: &'a PetgraphStableDiGraphManager<()>,
@@ -126,11 +126,19 @@ impl TokenGasPriceComputation {
 
             // Record non-empty paths (skip the starting node's empty path)
             if !frame.path.is_empty() {
-                let mid_spot_score = (frame.forward_spot + frame.reverse_spot) / 2.0;
+                // Compute spread from spot prices:
+                // buy_price = forward_spot (target per gas when buying)
+                // sell_price = 1/reverse_spot (target per gas when selling)
+                // spread = |buy_price - sell_price|
+                // Score = spread directly (lower = better, 0 for symmetric pools)
+                let buy_price = frame.forward_spot;
+                let sell_price = 1.0 / frame.reverse_spot;
+                let spot_spread = (buy_price - sell_price).abs();
+
                 paths_by_token
                     .entry(token_reached.clone())
                     .or_default()
-                    .push(CandidatePath { path: frame.path.clone(), score: mid_spot_score });
+                    .push(CandidatePath { path: frame.path.clone(), score: spot_spread });
             }
 
             // Stop exploring further if max depth reached
@@ -284,13 +292,13 @@ impl DerivedComputation for TokenGasPriceComputation {
         // Phase 1: Discover all paths using DFS
         let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
 
-        // Phase 2: Sort token's paths in ascending order (highest spot-price last)
+        // Phase 2: Sort token's paths such that the lowest spread is last (for popping later)
         for paths in paths_by_token.values_mut() {
-            paths.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+            paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
         }
 
-        // Phase 2: Run round-robin and process paths in order of decreasing score (best paths first
-        // via pop from ascending-sorted vec), and keep the best price (lowest spread) per token.
+        // Phase 3: Run round-robin and process paths in order of increasing spot-spread score,
+        // keeping the best mid-price (based on the lowest spread) per token.
         let mut best_prices = HashMap::new();
 
         // Flag to indicate there are no more candidates to evaluate for any token.
@@ -442,8 +450,8 @@ mod tests {
         assert_eq!(path.path.len(), 1, "path should be single hop");
         assert_eq!(path.path.edge_data[0].component_id, "pool");
 
-        // Score = (forward_spot + reverse_spot) / 2 = (2000 + 1/2000) / 2
-        assert_eq!(path.score, (2000.0 + 1.0 / 2000.0) / 2.0);
+        // For a symmetric pool, spread = 0
+        assert_eq!(path.score, 0.0);
     }
 
     #[test]
@@ -463,22 +471,19 @@ mod tests {
             .unwrap();
 
         // MID: exactly 1 path (1-hop via hop1)
-        // Score = (2 + 1/2) / 2 = 1.25
         let mid_paths = &paths[&mid.address];
         assert_eq!(mid_paths.len(), 1, "should have exactly 1 path to MID");
         assert_eq!(mid_paths[0].path.len(), 1, "MID path should be 1 hop");
         assert_eq!(mid_paths[0].path.edge_data[0].component_id, "hop1");
-        assert_eq!(mid_paths[0].score, (2.0 + 1.0 / 2.0) / 2.0);
+        assert_eq!(mid_paths[0].score, 0.0);
 
         // TARGET: exactly 1 path (2-hop via hop1 → hop2)
-        // forward = 2 * 3 = 6, reverse = 0.5 * (1/3) = 1/6
-        // Score = (6 + 1/6) / 2
         let target_paths = &paths[&target.address];
         assert_eq!(target_paths.len(), 1, "should have exactly 1 path to TARGET");
         assert_eq!(target_paths[0].path.len(), 2, "TARGET path should be 2 hops");
         assert_eq!(target_paths[0].path.edge_data[0].component_id, "hop1");
         assert_eq!(target_paths[0].path.edge_data[1].component_id, "hop2");
-        assert_eq!(target_paths[0].score, (6.0 + 1.0 / 6.0) / 2.0);
+        assert_eq!(target_paths[0].score, 0.0);
     }
 
     #[test]
@@ -501,22 +506,19 @@ mod tests {
             .unwrap();
 
         // A: exactly 1 path (1 hop via eth_a)
-        // Score = (2 + 1/2) / 2 = 1.25
         let a_paths = &paths[&a.address];
         assert_eq!(a_paths.len(), 1, "should have exactly 1 path to A");
         assert_eq!(a_paths[0].path.len(), 1, "A path should be 1 hop");
         assert_eq!(a_paths[0].path.edge_data[0].component_id, "eth_a");
-        assert_eq!(a_paths[0].score, (2.0 + 1.0 / 2.0) / 2.0);
+        assert_eq!(a_paths[0].score, 0.0);
 
         // B: exactly 1 path (2 hops via eth_a → a_b)
-        // forward = 2 * 2 = 4, reverse = 0.5 * 0.5 = 0.25
-        // Score = (4 + 0.25) / 2 = 2.125
         let b_paths = &paths[&b.address];
         assert_eq!(b_paths.len(), 1, "should have exactly 1 path to B");
         assert_eq!(b_paths[0].path.len(), 2, "B path should be 2 hops");
         assert_eq!(b_paths[0].path.edge_data[0].component_id, "eth_a");
         assert_eq!(b_paths[0].path.edge_data[1].component_id, "a_b");
-        assert_eq!(b_paths[0].score, (4.0 + 0.25) / 2.0);
+        assert_eq!(b_paths[0].score, 0.0);
 
         // C: not reachable (would require 3 hops, exceeds max_hops=2)
         assert!(!paths.contains_key(&c.address), "C should NOT be reachable (3 hops)");
@@ -528,11 +530,6 @@ mod tests {
         let usdc = token(1, "USDC");
 
         // Two pools with different spot prices
-        // Score = (forward_spot + reverse_spot) / 2
-        // For MockProtocolSim with spot_price S:
-        //   forward_spot (ETH→USDC, ETH < USDC) = S
-        //   reverse_spot (USDC→ETH, USDC > ETH) = 1/S
-        //   score = (S + 1/S) / 2
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
             ("pool_low", &eth, &usdc, MockProtocolSim::new(1000)),
             ("pool_high", &eth, &usdc, MockProtocolSim::new(2000)),
@@ -544,22 +541,28 @@ mod tests {
             .unwrap();
 
         // Exactly 2 paths to USDC (one via each pool)
-        let mut usdc_paths = paths[&usdc.address].clone();
+        let usdc_paths = &paths[&usdc.address];
         assert_eq!(usdc_paths.len(), 2, "should have exactly 2 paths to USDC");
 
-        // Sort paths by score ascending
-        usdc_paths.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        // MockProtocolSim's spot_price is symmetric: forward_spot = 1/reverse_spot,
+        // so spread = |forward - 1/reverse| = 0 for all pools.
+        // TODO: Test with asymmetric simulation component to verify non-zero spread ranking.
+        for path in usdc_paths {
+            assert_eq!(path.path.len(), 1, "path should be single hop");
+            assert_eq!(path.score, 0.0, "symmetric mock produces zero spread");
+        }
 
-        // pool_low: score = (1000 + 1/1000) / 2 = 500.0005 (lower, index 0)
-        // pool_high: score = (2000 + 1/2000) / 2 = 1000.00025 (higher, index 1)
-        let CandidatePath { path: path_low, score: score_low } = usdc_paths[0].clone();
-        let CandidatePath { path: path_high, score: score_high } = usdc_paths[1].clone();
-
-        assert_eq!(path_low.edge_data[0].component_id, "pool_low");
-        assert_eq!(path_high.edge_data[0].component_id, "pool_high");
-
-        assert_eq!(score_low, (1000.0 + 1.0 / 1000.0) / 2.0);
-        assert_eq!(score_high, (2000.0 + 1.0 / 2000.0) / 2.0);
+        // Verify both pools are discovered (order is arbitrary when scores are equal)
+        let component_ids: Vec<_> = usdc_paths
+            .iter()
+            .map(|p| {
+                p.path.edge_data[0]
+                    .component_id
+                    .as_str()
+            })
+            .collect();
+        assert!(component_ids.contains(&"pool_low"));
+        assert!(component_ids.contains(&"pool_high"));
     }
 
     // ==================== compute_spread_and_mid_price tests ====================
@@ -688,21 +691,52 @@ mod tests {
     #[test]
     fn diamond_selects_best_path_by_spread() {
         // Diamond topology: two paths to C
-        // Path 1: ETH → A → C (score = 2*5 = 10)
-        // Path 2: ETH → B → C (score = 3*2 = 6)
         //
-        // Both paths are symmetric (no fees), so both have spread = 0.
-        // Algorithm sorts by score ascending, then pops (highest first).
-        // Path A→C (score 10) is evaluated first and wins since 0 < 0 is false.
+        //     A (10% fee on eth_a)
+        //    / \
+        // ETH   C
+        //    \ /
+        //     B (5% fee on eth_b)
+        //
+        // Only first hops have fees; second hops (a_c, b_c) are fee-free.
+        // Gas = 0 to simplify calculations.
+        //
+        // Path via A (eth_a=10% fee, a_c=0% fee):
+        //   Forward: 1e18 * 2 * 0.9 * 5 = 9e18
+        //   Reverse: 9e18 / 5 / 2 * 0.9 = 0.81e18
+        //   buy_price = 9, sell_price = 9/0.81 = 100/9
+        //   spread_A = |100/9 - 9| = 19/9 ≈ 2.11
+        //
+        // Path via B (eth_b=5% fee, b_c=0% fee):
+        //   Forward: 1e18 * 3 * 0.95 * 2 = 5.7e18 = (57/10)e18
+        //   Reverse: 5.7e18 / 2 / 3 * 0.95 = 0.9025e18 = (361/400)e18
+        //   buy_price = 57/10, sell_price = (57/10)/(361/400) = 2280/361
+        //   spread_B = |2280/361 - 57/10| = 2223/3610 ≈ 0.62
+        //
+        // spread_B < spread_A → Path via B selected.
         let eth = token(0, "ETH");
         let a = token(2, "A");
         let b = token(3, "B");
         let c = token(4, "C");
 
         let (market_lock, store) = setup_test_env(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2).with_gas(0)),
+            (
+                "eth_a",
+                &eth,
+                &a,
+                MockProtocolSim::new(2)
+                    .with_fee(0.1)
+                    .with_gas(0),
+            ),
             ("a_c", &a, &c, MockProtocolSim::new(5).with_gas(0)),
-            ("eth_b", &eth, &b, MockProtocolSim::new(3).with_gas(0)),
+            (
+                "eth_b",
+                &eth,
+                &b,
+                MockProtocolSim::new(3)
+                    .with_fee(0.05)
+                    .with_gas(0),
+            ),
             ("b_c", &b, &c, MockProtocolSim::new(2).with_gas(0)),
         ]);
 
@@ -712,29 +746,53 @@ mod tests {
             .compute(&market, &store)
             .unwrap();
 
-        // Should have prices for: ETH, A, B, C (4 tokens)
-        assert_eq!(prices.len(), 4, "should have exactly 4 token prices");
+        assert_eq!(prices.len(), 4, "should have prices for ETH, A, B, C");
 
-        // A: 1-hop from ETH, rate = 2 (symmetric pool, spread = 0)
+        // A: 1-hop from ETH with 10% fee
+        // buy_out = 1e18 * 2 * 0.9 = 1.8e18 = (9/5)e18
+        // sell_out = 1.8e18 / 2 * 0.9 = 0.81e18 = (81/100)e18
+        // buy_price = 9/5, sell_price = (9/5)/(81/100) = 9*100/(5*81) = 20/9
+        // mid_price = (9/5 + 20/9) / 2 = (81 + 100) / 90 = 181/90
         let a_price = prices
             .get(&a.address)
             .expect("A should have price");
         let a_ratio = a_price.numerator.to_f64().unwrap() / a_price.denominator.to_f64().unwrap();
-        assert_eq!(a_ratio, 2.0, "A price should be exactly 2");
+        let expected_a = 181.0 / 90.0;
+        assert!(
+            (a_ratio - expected_a).abs() < 1e-10,
+            "A mid_price should be 181/90 = {expected_a}, got {a_ratio}"
+        );
 
-        // B: 1-hop from ETH, rate = 3 (symmetric pool, spread = 0)
+        // B: 1-hop from ETH with 5% fee
+        // buy_out = 1e18 * 3 * 0.95 = 2.85e18 = (57/20)e18
+        // sell_out = 2.85e18 / 3 * 0.95 = 0.9025e18 = (361/400)e18
+        // buy_price = 57/20, sell_price = (57/20)/(361/400) = 57*400/(20*361) = 1140/361
+        // mid_price = (57/20 + 1140/361) / 2 = (57*361 + 1140*20) / (2*20*361)
+        //           = (20577 + 22800) / 14440 = 43377/14440
         let b_price = prices
             .get(&b.address)
             .expect("B should have price");
         let b_ratio = b_price.numerator.to_f64().unwrap() / b_price.denominator.to_f64().unwrap();
-        assert_eq!(b_ratio, 3.0, "B price should be exactly 3");
+        let expected_b = 43377.0 / 14440.0;
+        assert!(
+            (b_ratio - expected_b).abs() < 1e-10,
+            "B mid_price should be 43377/14440 = {expected_b}, got {b_ratio}"
+        );
 
-        // C: 2-hop via A→C (higher score evaluated first), rate = 2 * 5 = 10
+        // C: Path via B selected (lower spread)
+        // buy_out = 1e18 * 3 * 0.95 * 2 = 5.7e18 = (57/10)e18
+        // sell_out = 5.7e18 / 2 / 3 * 0.95 = 0.9025e18 = (361/400)e18
+        // buy_price = 57/10, sell_price = (57/10)/(361/400) = 2280/361
+        // mid_price = (57/10 + 2280/361) / 2 = (20577 + 22800) / 7220 = 43377/7220
         let c_price = prices
             .get(&c.address)
             .expect("C should have price");
         let c_ratio = c_price.numerator.to_f64().unwrap() / c_price.denominator.to_f64().unwrap();
-        assert_eq!(c_ratio, 10.0, "C price should be exactly 10 (via A→C path)");
+        let expected_c = 43377.0 / 7220.0;
+        assert!(
+            (c_ratio - expected_c).abs() < 1e-10,
+            "C mid_price should be 43377/7220 = {expected_c} (via B), got {c_ratio}"
+        );
     }
 
     #[test]
