@@ -99,9 +99,10 @@ impl TokenGasPriceComputation {
     ) -> Result<HashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
         let graph = graph_manager.graph();
 
-        let entry_node = graph_manager
-            .find_node(&self.gas_token)
-            .expect("gas token node must exist in graph");
+        // If gas token has no pools, it won't be in the graph → no paths to discover
+        let Ok(entry_node) = graph_manager.find_node(&self.gas_token) else {
+            return Ok(HashMap::new());
+        };
 
         let mut paths_by_token: HashMap<Address, Vec<CandidatePath>> = HashMap::new();
 
@@ -812,6 +813,33 @@ mod tests {
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
             "should return MissingDependency for spot_prices"
+        );
+    }
+
+    #[test]
+    fn test_compute_gas_token_with_no_pools_returns_only_self() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let dai = token(2, "DAI");
+
+        // Create a pool that doesn't include ETH (gas token)
+        let (market_lock, store) =
+            setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1))]);
+
+        let market = market_read(&market_lock);
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market, &store)
+            .unwrap();
+
+        // Only the gas token itself should have a price (1:1)
+        assert_eq!(prices.len(), 1, "should only have gas token price");
+        let eth_price = prices
+            .get(&eth.address)
+            .expect("ETH should have price");
+        assert_eq!(
+            eth_price.numerator, eth_price.denominator,
+            "gas token must have exact 1:1 price"
         );
     }
 
