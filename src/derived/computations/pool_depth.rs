@@ -34,8 +34,8 @@ use crate::{
         manager::SharedDerivedDataRef,
         types::{PoolDepths, SpotPriceKey},
     },
+    feed::market_data::SharedMarketDataRef,
     types::ComponentId,
-    SharedMarketDataRef,
 };
 
 /// Computes pool depths for all pools in all directions.

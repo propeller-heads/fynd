@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 
 use super::{error::ComputationError, manager::SharedDerivedDataRef};
-use crate::SharedMarketDataRef;
+use crate::feed::market_data::SharedMarketDataRef;
 
 /// Unique identifier for a computation type.
 ///

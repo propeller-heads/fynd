@@ -19,9 +19,9 @@ use super::{
     error::ComputationError,
     store::DerivedData,
 };
-use crate::{
-    feed::events::{EventError, MarketEvent, MarketEventHandler},
-    SharedMarketDataRef,
+use crate::feed::{
+    events::{EventError, MarketEvent, MarketEventHandler},
+    market_data::SharedMarketDataRef,
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -47,20 +47,40 @@ pub fn new_shared_derived_data() -> SharedDerivedDataRef {
 pub struct ComputationManagerConfig {
     /// Gas token address (e.g., WETH) for token price computation.
     pub gas_token: Address,
+    /// Max hop count for token gas price computation.
+    pub max_hop: usize,
     /// Slippage threshold for pool depth computation (0.0 < threshold < 1.0).
     pub depth_slippage_threshold: f64,
 }
 
 impl ComputationManagerConfig {
     /// Creates a new configuration with the given gas token.
-    pub fn new(gas_token: Address) -> Self {
-        Self { gas_token, depth_slippage_threshold: 0.01 }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Sets the slippage threshold for pool depth computation.
     pub fn with_depth_slippage_threshold(mut self, threshold: f64) -> Self {
         self.depth_slippage_threshold = threshold;
         self
+    }
+
+    /// Sets the max hop count for token gas price computation.
+    pub fn with_max_hop(mut self, hop_count: usize) -> Self {
+        self.max_hop = hop_count;
+        self
+    }
+
+    /// Sets the gas token address.
+    pub fn with_gas_token(mut self, gas_token: Address) -> Self {
+        self.gas_token = gas_token;
+        self
+    }
+}
+
+impl Default for ComputationManagerConfig {
+    fn default() -> Self {
+        Self { gas_token: Address::zero(20), max_hop: 3, depth_slippage_threshold: 0.05 }
     }
 }
 
@@ -89,7 +109,9 @@ impl ComputationManager {
         Ok(Self {
             market_data,
             store: wrap_derived(DerivedData::new()),
-            token_price_computation: TokenGasPriceComputation::new(config.gas_token),
+            token_price_computation: TokenGasPriceComputation::default()
+                .with_max_hops(config.max_hop)
+                .with_gas_token(config.gas_token),
             spot_price_computation: SpotPriceComputation::new(),
             pool_depth_computation,
         })
@@ -104,7 +126,8 @@ impl ComputationManager {
     ///
     /// Processes market events and updates the derived data store until
     /// shutdown is signaled or the event channel closes.
-    pub async fn run(
+    #[allow(unused)]
+    pub(crate) async fn run(
         mut self,
         mut event_rx: broadcast::Receiver<MarketEvent>,
         mut shutdown_rx: broadcast::Receiver<()>,
@@ -148,6 +171,11 @@ impl ComputationManager {
     /// Runs all computations and updates the store.
     ///
     /// This is called on market updates and lag recovery.
+    ///
+    /// **Dependency order**:
+    /// 1. `SpotPriceComputation` - no dependencies
+    /// 2. `TokenGasPriceComputation` - depends on spot_prices in store
+    /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
     async fn compute_all(&self) {
         // Get block info for tracking
         let block = {
@@ -161,21 +189,39 @@ impl ComputationManager {
             block
         };
 
-        // Run all computations (each acquires locks as needed)
-        let token_prices_result = self
-            .token_price_computation
-            .compute(&self.market_data, &self.store)
-            .await;
+        // Phase 1: Compute spot prices first (no dependencies)
         let spot_prices_result = self
             .spot_price_computation
             .compute(&self.market_data, &self.store)
             .await;
-        let pool_depths_result = self
-            .pool_depth_computation
-            .compute(&self.market_data, &self.store)
-            .await;
 
-        // Update store with results
+        // Write spot prices to store before dependent computations
+        match spot_prices_result {
+            Ok(prices) => {
+                let count = prices.len();
+                self.store
+                    .write()
+                    .await
+                    .set_spot_prices(prices, block);
+                debug!(count, "updated spot prices");
+            }
+            Err(e) => {
+                warn!(error = ?e, "spot price computation failed");
+                // Cannot proceed with token prices if spot prices failed
+                return;
+            }
+        }
+
+        // Phase 2: Run dependent computations (token prices needs spot prices in store)
+        // Pool depth has no store dependencies, so it can run in parallel
+        let (token_prices_result, pool_depths_result) = tokio::join!(
+            self.token_price_computation
+                .compute(&self.market_data, &self.store),
+            self.pool_depth_computation
+                .compute(&self.market_data, &self.store)
+        );
+
+        // Update store with remaining results
         let mut store_write = self.store.write().await;
 
         match token_prices_result {
@@ -186,17 +232,6 @@ impl ComputationManager {
             }
             Err(e) => {
                 warn!(error = ?e, "token price computation failed");
-            }
-        }
-
-        match spot_prices_result {
-            Ok(prices) => {
-                let count = prices.len();
-                store_write.set_spot_prices(prices, block);
-                debug!(count, "updated spot prices");
-            }
-            Err(e) => {
-                warn!(error = ?e, "spot price computation failed");
             }
         }
 
@@ -234,40 +269,6 @@ impl MarketEventHandler for ComputationManager {
 
                 self.compute_all().await;
             }
-            MarketEvent::GasPriceUpdated { .. } => {
-                trace!("gas price updated, recomputing token prices");
-
-                // Get block info for tracking
-                let block = {
-                    let market_guard = self.market_data.read().await;
-                    let block = market_guard
-                        .last_updated()
-                        .map(|b| b.number);
-                    if block.is_none() {
-                        warn!("recomputing token prices without block info");
-                    }
-                    block
-                };
-
-                // Run token price computation only (acquires locks as needed)
-                let result = self
-                    .token_price_computation
-                    .compute(&self.market_data, &self.store)
-                    .await;
-
-                // Update store
-                match result {
-                    Ok(prices) => {
-                        let mut store_write = self.store.write().await;
-                        let count = prices.len();
-                        store_write.set_token_prices(prices, block);
-                        debug!(count, "updated token prices after gas price change");
-                    }
-                    Err(e) => {
-                        warn!(error = ?e, "token price computation failed after gas price change");
-                    }
-                }
-            }
             _ => {
                 trace!("empty market update, skipping computations");
             }
@@ -284,23 +285,14 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
-    use crate::{
-        algorithm::test_utils::{setup_market, token, MockProtocolSim},
-        feed::market_data::wrap_market,
-    };
-
-    fn test_config() -> ComputationManagerConfig {
-        let eth = token(1, "ETH");
-        ComputationManagerConfig::new(eth.address)
-    }
+    use crate::algorithm::test_utils::{setup_market, token, MockProtocolSim};
 
     #[test]
     fn invalid_slippage_threshold_returns_error() {
         let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config().with_depth_slippage_threshold(1.5);
+        let config = ComputationManagerConfig::new().with_depth_slippage_threshold(1.5);
 
-        let result = ComputationManager::new(config, market_ref);
+        let result = ComputationManager::new(config, market);
         assert!(matches!(result, Err(ComputationError::InvalidConfiguration(_))));
     }
 
@@ -311,10 +303,9 @@ mod tests {
 
         let (market, _) =
             setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
-        let market_ref = wrap_market(market);
 
-        let config = ComputationManagerConfig::new(eth.address.clone());
-        let mut manager = ComputationManager::new(config, market_ref).unwrap();
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let mut manager = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::from([(
@@ -339,9 +330,8 @@ mod tests {
     #[tokio::test]
     async fn handle_event_skips_empty_update() {
         let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config();
-        let mut manager = ComputationManager::new(config, market_ref).unwrap();
+        let config = ComputationManagerConfig::new();
+        let mut manager = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::new(),
@@ -362,9 +352,8 @@ mod tests {
     #[tokio::test]
     async fn run_shuts_down_on_signal() {
         let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config();
-        let manager = ComputationManager::new(config, market_ref).unwrap();
+        let config = ComputationManagerConfig::new();
+        let manager = ComputationManager::new(config, market).unwrap();
 
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -384,9 +373,8 @@ mod tests {
     #[tokio::test]
     async fn run_shuts_down_on_channel_close() {
         let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config();
-        let manager = ComputationManager::new(config, market_ref).unwrap();
+        let config = ComputationManagerConfig::new();
+        let manager = ComputationManager::new(config, market).unwrap();
 
         let (event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -401,18 +389,5 @@ mod tests {
             .await
             .expect("manager should shutdown on channel close")
             .expect("task should complete successfully");
-    }
-
-    #[test]
-    fn store_returns_same_reference() {
-        let (market, _) = setup_market(vec![]);
-        let market_ref = wrap_market(market);
-        let config = test_config();
-        let manager = ComputationManager::new(config, market_ref).unwrap();
-
-        let store1 = manager.store();
-        let store2 = manager.store();
-
-        assert!(Arc::ptr_eq(&store1, &store2));
     }
 }

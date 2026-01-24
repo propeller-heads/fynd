@@ -83,13 +83,12 @@ pub mod worker_pool;
 // Re-export commonly used types at crate root (public API)
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
-pub use derived::{
-    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,
-    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPrice, TokenGasPriceKey,
-    TokenGasPrices,
-};
 pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
+pub use derived::{
+    ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,
+    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
+};
 pub use types::{
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,

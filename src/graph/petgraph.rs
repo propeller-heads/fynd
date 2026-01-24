@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    fn test_handle_event_propagates_errors() {
+    async fn test_handle_event_propagates_errors() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
         use std::collections::HashMap;
 

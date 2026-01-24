@@ -16,7 +16,8 @@ use crate::{
         manager::SharedDerivedDataRef,
         types::SpotPrices,
     },
-    feed::market_data::SharedMarketData,
+    feed::market_data::SharedMarketDataRef,
+    types::ComponentId,
 };
 
 /// Computes spot prices for all pools.

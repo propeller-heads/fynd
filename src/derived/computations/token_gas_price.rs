@@ -49,7 +49,7 @@ use crate::{
         manager::SharedDerivedDataRef,
         types::{SpotPriceKey, SpotPrices, TokenGasPrices},
     },
-    feed::market_data::SharedMarketData,
+    feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{GraphManager, Path, PetgraphStableDiGraphManager},
     MostLiquidAlgorithm,
 };
@@ -89,6 +89,16 @@ impl Default for TokenGasPriceComputation {
 impl TokenGasPriceComputation {
     pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
         Self { gas_token, max_hops, simulation_amount }
+    }
+
+    /// Sets the maximum number of hops to explore.
+    pub fn with_max_hops(self, max_hops: usize) -> Self {
+        Self { max_hops, ..self }
+    }
+
+    /// Sets the gas token address.
+    pub fn with_gas_token(self, gas_token: Address) -> Self {
+        Self { gas_token, ..self }
     }
 
     pub fn simulation_amount(&self) -> &BigUint {
@@ -296,6 +306,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
     ) -> Result<Self::Output, ComputationError> {
         let market = market.read().await;
+        let store = store.read().await;
         // Get spot prices (required dependency)
         let spot_prices = store
             .spot_prices()
@@ -336,7 +347,7 @@ impl DerivedComputation for TokenGasPriceComputation {
                 };
                 candidates_exhausted = false; // Found at least one candidate
 
-                match self.compute_spread_and_mid_price(candidate.path, market, &gas_price) {
+                match self.compute_spread_and_mid_price(candidate.path, &market, &gas_price) {
                     Ok((spread_ratio, buy_price)) => {
                         // Update if better (lower spread = tighter bid/ask = more reliable price)
                         let is_better = best_prices
@@ -390,17 +401,15 @@ impl DerivedComputation for TokenGasPriceComputation {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use tokio::sync::RwLock;
     use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{component, market_read, setup_market, token, MockProtocolSim},
-        derived::computations::spot_price::SpotPriceComputation,
+        derived::{computations::spot_price::SpotPriceComputation, manager::wrap_derived},
+        feed::market_data::wrap_market,
+        DerivedData,
     };
-
     // ==================== Constants ====================
 
     /// Standard simulation amount: 1 ETH = 10^18 wei.
@@ -413,33 +422,40 @@ mod tests {
 
     /// Sets up a complete test environment: market with pools + precomputed spot prices.
     /// Returns (market_guard, store) ready for computation.
-    fn setup_test_env(
+    async fn setup_test_env(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-    ) -> (Arc<RwLock<SharedMarketData>>, DerivedDataStore) {
-        let (market_lock, _) = setup_market(pools);
-        let market_guard = market_read(&market_lock);
+    ) -> (SharedMarketDataRef, SharedDerivedDataRef) {
+        let (wrapped_market, _) = setup_market(pools);
 
-        let mut store = DerivedDataStore::new();
+        let wrapped_store = wrap_derived(DerivedData::new());
         let spot_comp = SpotPriceComputation::new();
         let spot_prices = spot_comp
-            .compute(&market_guard, &store)
+            .compute(&wrapped_market, &wrapped_store)
+            .await
             .expect("spot price computation should succeed");
-        store.set_spot_prices(spot_prices, None);
+        wrapped_store
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_prices, None);
 
-        drop(market_guard);
-        (market_lock, store)
+        (wrapped_market, wrapped_store)
     }
 
-    fn setup_graph_and_spot_prices(
+    async fn setup_graph_and_spot_prices(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (PetgraphStableDiGraphManager<()>, SpotPrices) {
-        let (market_lock, store) = setup_test_env(pools);
-        let market = market_read(&market_lock);
+        let (market, derived) = setup_test_env(pools).await;
+        let market = market_read(&market);
 
         let mut graph = PetgraphStableDiGraphManager::new();
         graph.initialize_graph(&market.component_topology());
 
-        let spot_prices = store.spot_prices().unwrap().clone();
+        let spot_prices = derived
+            .try_write()
+            .unwrap()
+            .spot_prices()
+            .unwrap()
+            .clone();
         (graph, spot_prices)
     }
 
@@ -450,13 +466,14 @@ mod tests {
 
     // ==================== discover_paths tests ====================
 
-    #[test]
-    fn test_discover_paths_single_hop() {
+    #[tokio::test]
+    async fn test_discover_paths_single_hop() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
         let (graph_manager, spot_prices) =
-            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))])
+                .await;
 
         let computation = computation_for(&eth.address);
         let paths = computation
@@ -484,7 +501,8 @@ mod tests {
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
             ("hop1", &eth, &mid, MockProtocolSim::new(2)),
             ("hop2", &mid, &target, MockProtocolSim::new(3)),
-        ]);
+        ])
+        .await;
 
         let computation = computation_for(&eth.address);
         let paths = computation
@@ -507,8 +525,8 @@ mod tests {
         assert_eq!(target_paths[0].score, 0.0);
     }
 
-    #[test]
-    fn test_discover_paths_respects_max_hops() {
+    #[tokio::test]
+    async fn test_discover_paths_respects_max_hops() {
         let eth = token(0, "ETH");
         let a = token(2, "A");
         let b = token(3, "B");
@@ -518,7 +536,8 @@ mod tests {
             ("eth_a", &eth, &a, MockProtocolSim::new(2)),
             ("a_b", &a, &b, MockProtocolSim::new(2)),
             ("b_c", &b, &c, MockProtocolSim::new(2)),
-        ]);
+        ])
+        .await;
 
         // max_hops = 2
         let computation = computation_for(&eth.address);
@@ -554,7 +573,8 @@ mod tests {
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
             ("pool_low", &eth, &usdc, MockProtocolSim::new(1000)),
             ("pool_high", &eth, &usdc, MockProtocolSim::new(2000)),
-        ]);
+        ])
+        .await;
 
         let computation = computation_for(&eth.address);
         let paths = computation
@@ -588,8 +608,8 @@ mod tests {
 
     // ==================== compute_spread_and_mid_price tests ====================
 
-    #[test]
-    fn test_compute_spread_and_mid_price_with_gas_and_fee() {
+    #[tokio::test]
+    async fn test_compute_spread_and_mid_price_with_gas_and_fee() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -613,15 +633,16 @@ mod tests {
         // spread = |sell_price - buy_price| = 180000/71 - 18000/11 = 702000/781 ≈ 898.85
         // mid_price = (buy_price + sell_price) / 2 ≈ 2085.79
         let gas_units: u64 = 1_000_000_000_000_000; // 1e15
-        let (market_lock, _store) = setup_test_env(vec![(
+        let (market, _) = setup_test_env(vec![(
             "pool",
             &eth,
             &usdc,
             MockProtocolSim::new(2000)
                 .with_gas(gas_units)
                 .with_fee(0.1),
-        )]);
-        let market = market_read(&market_lock);
+        )])
+        .await;
+        let market = market_read(&market);
 
         // Build path manually using graph
         let mut graph = PetgraphStableDiGraphManager::new();
@@ -669,17 +690,17 @@ mod tests {
         let spot_price: u32 = 2000;
         let gas_units: u64 = 50_000;
 
-        let (market_lock, store) = setup_test_env(vec![(
+        let (market, derived) = setup_test_env(vec![(
             "eth_usdc",
             &eth,
             &usdc,
             MockProtocolSim::new(spot_price).with_gas(gas_units),
-        )]);
+        )])
+        .await;
 
-        let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market_ref, &derived_ref)
+            .compute(&market, &derived)
             .await
             .unwrap();
 
@@ -710,8 +731,8 @@ mod tests {
         assert!((ratio - 2000.0).abs() < 1e-6, "mid-price should be ~2000, got {ratio}");
     }
 
-    #[test]
-    fn test_compute_selects_best_path_by_spread() {
+    #[tokio::test]
+    async fn test_compute_selects_best_path_by_spread() {
         // Diamond topology: two paths to C
         //
         //     A (10% fee on eth_a)
@@ -741,7 +762,7 @@ mod tests {
         let b = token(3, "B");
         let c = token(4, "C");
 
-        let (market_lock, store) = setup_test_env(vec![
+        let (market, derived) = setup_test_env(vec![
             (
                 "eth_a",
                 &eth,
@@ -760,12 +781,12 @@ mod tests {
                     .with_gas(0),
             ),
             ("b_c", &b, &c, MockProtocolSim::new(2).with_gas(0)),
-        ]);
+        ])
+        .await;
 
-        let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market_ref, &derived_ref)
+            .compute(&market, &derived)
             .await
             .unwrap();
 
@@ -824,13 +845,13 @@ mod tests {
         let usdc = token(1, "USDC");
 
         // Create market without spot prices set
-        let (market_lock, _) =
-            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
-        let market = market_read(&market_lock);
-        let store = DerivedDataStore::new(); // No spot prices
+        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+        let derived = wrap_derived(DerivedData::new()); // No spot prices
 
         let computation = computation_for(&eth.address);
-        let result = computation.compute(&market, &store);
+        let result = computation
+            .compute(&market, &derived)
+            .await;
 
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
@@ -845,13 +866,12 @@ mod tests {
         let dai = token(2, "DAI");
 
         // Create a pool that doesn't include ETH (gas token)
-        let (market_lock, store) =
-            setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1))]);
+        let (market, derived) =
+            setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1))]).await;
 
-        let market = market_read(&market_lock);
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market_ref, &derived_ref)
+            .compute(&market, &derived)
             .await
             .unwrap();
 
@@ -877,17 +897,25 @@ mod tests {
         market.upsert_components(std::iter::once(comp));
         market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000)) as _)]);
         market.upsert_tokens([eth.clone(), usdc.clone()]);
+        let market = wrap_market(market);
 
         // Compute spot prices
-        let mut store = DerivedDataStore::new();
+        let derived = wrap_derived(DerivedData::new());
+
         let spot_comp = SpotPriceComputation::new();
         let spot_prices = spot_comp
-            .compute(&market, &store)
+            .compute(&market, &derived)
+            .await
             .unwrap();
-        store.set_spot_prices(spot_prices, None);
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_prices, None);
 
         let computation = computation_for(&eth.address);
-        let result = computation.compute(&market, &store);
+        let result = computation
+            .compute(&market, &derived)
+            .await;
 
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("gas_price"))),

@@ -579,7 +579,6 @@ mod tests {
     use std::collections::HashSet;
 
     use rstest::rstest;
-    use tokio::sync::RwLock;
     use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
     use super::*;
@@ -1016,7 +1015,6 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1053,7 +1051,6 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
-        let market_ref = wrap_market(market);
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1077,7 +1074,6 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1101,7 +1097,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
+
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1171,9 +1167,9 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
+        let market = wrap_market(market);
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1217,10 +1213,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(matches!(
             result,
@@ -1252,7 +1248,6 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
-        let market_ref = wrap_market(market);
 
         // Route should still be returned, but with negative net_amount_out
         let route = algorithm
@@ -1325,10 +1320,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = wrap_market(market);
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity
@@ -1353,7 +1348,6 @@ mod tests {
 
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
-        let market_ref = wrap_market(market);
 
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1398,7 +1392,6 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
-        let market_ref = wrap_market(market);
 
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1430,7 +1423,6 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
-        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)
@@ -1464,7 +1456,6 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
-        let market_ref = wrap_market(market);
 
         let result = algorithm
             .find_best_route(manager.graph(), market, &order)
