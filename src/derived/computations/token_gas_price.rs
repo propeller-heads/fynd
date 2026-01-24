@@ -430,7 +430,7 @@ mod tests {
     // ==================== discover_paths tests ====================
 
     #[test]
-    fn discovers_single_hop_path() {
+    fn test_discover_paths_single_hop() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn discovers_multi_hop_paths() {
+    fn test_discover_paths_multi_hop() {
         let eth = token(0, "ETH");
         let mid = token(2, "MID");
         let target = token(3, "TARGET");
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn respects_max_hops() {
+    fn test_discover_paths_respects_max_hops() {
         let eth = token(0, "ETH");
         let a = token(2, "A");
         let b = token(3, "B");
@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_candidate_paths() {
+    fn test_discover_paths_returns_multiple_candidates() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -568,7 +568,7 @@ mod tests {
     // ==================== compute_spread_and_mid_price tests ====================
 
     #[test]
-    fn computes_spread_and_mid_price_with_gas_and_fee() {
+    fn test_compute_spread_and_mid_price_with_gas_and_fee() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -641,7 +641,7 @@ mod tests {
     // ==================== compute tests ====================
 
     #[test]
-    fn single_hop_computes_correct_mid_price() {
+    fn test_compute_single_hop_mid_price() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn diamond_selects_best_path_by_spread() {
+    fn test_compute_selects_best_path_by_spread() {
         // Diamond topology: two paths to C
         //
         //     A (10% fee on eth_a)
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_spot_prices_returns_error() {
+    fn test_compute_missing_spot_prices_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_gas_price_returns_error() {
+    fn test_compute_missing_gas_price_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
