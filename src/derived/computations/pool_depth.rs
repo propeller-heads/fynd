@@ -304,7 +304,7 @@ mod tests {
     #[case::zero_for_zero_liquidity(2, 0, 0)]
     fn binary_search_finds_exact_depth_for_constant_price_pool(
         #[case] spot_price: u32,
-        #[case] liquidity: u64,
+        #[case] liquidity: u128,
         #[case] expected_depth: u64,
     ) {
         let token_a = token(0x01, "A");
