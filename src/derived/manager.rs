@@ -265,6 +265,7 @@ impl MarketEventHandler for ComputationManager {
                     "market updated, running all computations"
                 );
 
+                // TODO: only recompute affected computations based on changed components
                 self.compute_all().await;
             }
             _ => {
