@@ -1,35 +1,47 @@
-//! Gas token price computation.
-//!
-//! Computes token prices relative to the native gas token (e.g., ETH/WETH).
+//! Computes the `mid_price` of tokens relative to a gas token (e.g., ETH), selecting paths
+//! by the lowest spread (the most reliable price) derived from full simulation of both buy and sell
+//! directions.
 //!
 //! # Algorithm
 //!
-//! Calculates the token price as the amount of token received when swapping a fixed
-//! `simulation_amount` of the gas token, adjusted for gas costs incurred during the swaps.
+//! 1. **Path Discovery (DFS)**: Enumerate all paths from gas_token to each reachable token, scoring
+//!    by composed spot prices (forward × reverse) as a heuristic for path quality.
 //!
-//! We compare paths using: `amount_out / (simulation_amount + gas_used)` - higher is better.
+//! 2. **Sort**: Order paths per token by spot-based mid-price estimate.
 //!
-//! The final price is stored as (numerator, denominator) where:
-//! - numerator = `amount_out` (the best route)
-//! - denominator = `simulation_amount` + `total_gas_cost`
+//! 3. **Round-Robin Simulation**: For each token, simulate paths in ranked order and compute their
+//!    spread and mid_price by simulating both directions on the same path. Pick the path with the
+//!    tightest spread for each token, as this indicates the most reliable/liquid route, and provide
+//!    its mid_price as the token's price.
+//!
+//! # Price Formulas
+//!
+//! For a path P from gas_token to target:
+//! - `buy_out` = simulate(P, probe_amount) → tokens received
+//! - `sell_out` = simulate(reverse(P), buy_out) → gas_token received back
+//! - `buy_price` = buy_out / (probe_amount + gas_cost)
+//! - `sell_price` = buy_out / (sell_out - gas_cost)
+//! - `mid_price` = (buy_price + sell_price) / 2
+//! - `spread` = |sell_price - buy_price|
 
 use std::collections::HashMap;
 
 use num_bigint::BigUint;
-use num_traits::Zero;
-use tracing::{instrument, trace, Span};
-use tycho_simulation::{
-    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
-};
+use num_traits::ToPrimitive;
+use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use tracing::{debug, instrument, trace, warn, Span};
+use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::Price};
 
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
+        computations::spot_price::{SpotPriceKey, SpotPrices},
         error::ComputationError,
         store::DerivedDataStore,
     },
-    feed::{market_data::SharedMarketData, GAS_PRICE_DEPENDENCY_ID},
-    types::ComponentId,
+    feed::market_data::SharedMarketData,
+    graph::{GraphManager, Path, PetgraphStableDiGraphManager},
+    MostLiquidAlgorithm,
 };
 
 /// Key for token price lookups.
@@ -38,61 +50,203 @@ pub type TokenGasPriceKey = Address;
 /// Token prices map: token address → price ratio.
 pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;
 
-/// State tracked for each token during price discovery.
-#[derive(Debug, Clone)]
-struct TokenState {
-    /// Amount of this token received from the initial `simulation_amount` of gas token.
-    amount_out: BigUint,
-    /// Total gas cost in smallest atomic units spent on the path to reach this token.
-    path_gas_cost: BigUint,
+/// A path with its score
+#[derive(Clone)]
+struct CandidatePath<'a> {
+    edges: Path<'a, ()>,
+    score: f64,
 }
 
-impl TokenState {
-    /// Compares two states. Returns true if `self` is better than `other`.
-    /// Better means: amount_out / (simulation_amount + gas_used) is higher.
-    fn is_better_than(&self, other: &TokenState, simulation_amount: &BigUint) -> bool {
-        let self_denom = simulation_amount + &self.path_gas_cost;
-        let other_denom = simulation_amount + &other.path_gas_cost;
-        // self.amount_out / self_denom > other.amount_out / other_denom
-        // => self.amount_out * other_denom > other.amount_out * self_denom
-        &self.amount_out * &other_denom > &other.amount_out * &self_denom
-    }
-}
-
-/// Computes token prices relative to the gas token using DFS.
+/// Computes token prices relative to the gas token. Returns the buy price for the path
+/// with the lowest spread (most reliable) that we managed to find.
 ///
-/// Starting from `simulation_amount` of the gas token, simulates actual swaps through the graph.
-/// Uses DFS to explore paths, continuing when better rates are found,
-/// terminating paths that yield worse rates.
-///
-/// The simulation amount controls the trade size used for price discovery,
-/// which affects slippage modeling. Default is 10^18 (1 ETH equivalent).
+/// Uses DFS to discover paths, spot prices for ranking, and full simulation
+/// for accurate output amounts and spread calculation.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
     /// The gas token address (e.g., ETH).
     gas_token: Address,
-    /// Amount of gas token to simulate purchases with.
-    /// This affects slippage in the price model.
+    /// Maximum path length to explore.
+    max_hops: usize,
+    /// Amount of gas token to simulate with (affects slippage).
     simulation_amount: BigUint,
 }
 
 impl Default for TokenGasPriceComputation {
-    /// Creates a computation with ETH (Ethereum mainnet) and 10^18 simulation amount (1 ETH).
     fn default() -> Self {
         Self {
-            gas_token: Address::zero(20), // ETH address TODO: should we use WETH?
+            gas_token: Address::zero(20), // ETH address
+            max_hops: 2,
             simulation_amount: BigUint::from(10u64).pow(18), // 1 ETH
         }
     }
 }
 
 impl TokenGasPriceComputation {
-    pub fn new(gas_token: Address, simulation_amount: BigUint) -> Self {
-        Self { gas_token, simulation_amount }
+    pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
+        Self { gas_token, max_hops, simulation_amount }
     }
 
     pub fn simulation_amount(&self) -> &BigUint {
         &self.simulation_amount
+    }
+
+    /// DFS to discover all paths from gas_token, scored by spot prices.
+    fn discover_paths<'a>(
+        &self,
+        graph_manager: &'a PetgraphStableDiGraphManager<()>,
+        spot_prices: &SpotPrices,
+    ) -> Result<HashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
+        let graph = graph_manager.graph();
+
+        let entry_node = graph_manager
+            .find_node(&self.gas_token)
+            .expect("gas token node must exist in graph");
+
+        let mut paths_by_token: HashMap<Address, Vec<CandidatePath>> = HashMap::new();
+
+        // DFS state
+        struct DfsFrame<'a> {
+            token_node: NodeIndex,
+            path: Path<'a, ()>,
+            forward_spot: f64,
+            reverse_spot: f64,
+        }
+
+        let mut stack = vec![DfsFrame {
+            token_node: entry_node,
+            path: Path::new(),
+            forward_spot: 1.0,
+            reverse_spot: 1.0,
+        }];
+
+        while let Some(frame) = stack.pop() {
+            // Stop if max depth reached
+            if frame.path.len() >= self.max_hops {
+                continue;
+            }
+
+            // Token that we reached in this frame
+            let token_reached = &graph[frame.token_node];
+
+            // Explore neighbors
+            for edge in graph.edges(frame.token_node) {
+                // We can assume that the graph is directed and edges point to neighbors
+                let next_node = edge.target();
+                let next_token = &graph[next_node];
+
+                let mut new_path = frame.path.clone();
+                new_path.add_hop(token_reached, edge.weight(), next_token);
+
+                let component_id = edge.weight().component_id.clone();
+
+                // Look up spot prices for this edge
+                let fwd_key: SpotPriceKey =
+                    (component_id.clone(), token_reached.clone(), next_token.clone());
+                let rev_key: SpotPriceKey =
+                    (component_id.clone(), next_token.clone(), token_reached.clone());
+
+                let Some(&fwd_spot) = spot_prices.get(&fwd_key) else {
+                    continue;
+                };
+                let Some(&rev_spot) = spot_prices.get(&rev_key) else {
+                    continue;
+                };
+
+                stack.push(DfsFrame {
+                    token_node: next_node,
+                    path: new_path,
+                    forward_spot: frame.forward_spot * fwd_spot,
+                    reverse_spot: frame.reverse_spot * rev_spot,
+                });
+            }
+
+            // Record the path for the token we have reached
+            let mid_spot_score = (frame.forward_spot + frame.reverse_spot) / 2.0;
+            paths_by_token
+                .entry(token_reached.clone())
+                .or_default()
+                .push(CandidatePath { edges: frame.path, score: mid_spot_score });
+        }
+
+        Ok(paths_by_token)
+    }
+
+    /// Compute the spread and mid_price for a given path by simulating both directions.
+    ///
+    /// Returns (spread_ratio, mid_price) where:
+    /// - spread_ratio: |sell - buy|, lower = more reliable
+    /// - mid_price: precise Price struct
+    fn compute_spread_and_mid_price(
+        &self,
+        path: Path<()>,
+        market: &SharedMarketData,
+        gas_price: &BigUint,
+    ) -> Result<(f64, Price), ComputationError> {
+        // Forward: gas_token → target_token
+        let buy_route =
+            MostLiquidAlgorithm::simulate_path(&path, market, self.simulation_amount.clone())
+                .map_err(|e| {
+                    ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
+                })?;
+        let buy_gas_units = buy_route.total_gas();
+        let buy_gas_cost = &buy_gas_units * gas_price; // Convert gas units to actual cost
+        let buy_out = buy_route
+            .swaps
+            .into_iter()
+            .last()
+            .ok_or(ComputationError::Internal("no output from buy simulation".into()))?
+            .amount_out;
+
+        // Reverse: target_token → gas_token
+        let reversed_path = path.reversed();
+
+        let sell_route =
+            MostLiquidAlgorithm::simulate_path(&reversed_path, market, buy_out.clone()).map_err(
+                |e| ComputationError::SimulationFailed(format!("sell simulation failed: {}", e)),
+            )?;
+        let sell_gas_units = sell_route.total_gas();
+        let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
+        let sell_out = sell_route
+            .swaps
+            .into_iter()
+            .last()
+            .ok_or(ComputationError::Internal("no output from sell simulation".into()))?
+            .amount_out;
+
+        // Convert to f64 for mid_price calculation
+        let buy_out_f = buy_out
+            .to_f64()
+            .ok_or(ComputationError::Internal("overflow computing buy_out".into()))?;
+        let sell_out_f = sell_out
+            .to_f64()
+            .ok_or(ComputationError::Internal("overflow computing sell_out".into()))?;
+        let buy_gas_cost_f = buy_gas_cost
+            .to_f64()
+            .ok_or(ComputationError::Internal("overflow computing buy_gas_cost".into()))?;
+        let sell_gas_cost_f = sell_gas_cost
+            .to_f64()
+            .ok_or(ComputationError::Internal("overflow computing sell_gas_cost".into()))?;
+        let sim_amount_f = self
+            .simulation_amount
+            .to_f64()
+            .ok_or(ComputationError::Internal("overflow computing simulation_amount".into()))?;
+
+        // buy_price: tokens received per (gas_token spent + gas cost)
+        let buy_price = buy_out_f / (sim_amount_f + buy_gas_cost_f);
+
+        // sell_price: tokens we had / (gas_token received - gas cost)
+        let sell_price = buy_out_f / (sell_out_f - sell_gas_cost_f);
+
+        let spread = (sell_price - buy_price).abs();
+
+        // Compute buy_price in numerator/denominator form (precise BigUint arithmetic)
+        let buy_price_precise = Price {
+            numerator: buy_out,
+            denominator: self.simulation_amount.clone() + buy_gas_cost,
+        };
+
+        Ok((spread, buy_price_precise))
     }
 }
 
@@ -101,249 +255,565 @@ impl DerivedComputation for TokenGasPriceComputation {
 
     const ID: ComputationId = "token_prices";
 
-    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_token_prices
-    ))]
+    #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_token_prices))]
     fn compute(
         &self,
         market: &SharedMarketData,
-        _store: &DerivedDataStore,
+        store: &DerivedDataStore,
     ) -> Result<Self::Output, ComputationError> {
-        /// DFS exploration state for price discovery.
-        struct DfsState {
-            /// Current token being explored.
-            token: Address,
-            /// Amount of this token we have (from swapping simulation_amount through the path).
-            amount: BigUint,
-            /// Total gas cost spent to reach this token.
-            path_gas_cost: BigUint,
-            /// Path taken to reach this token (for cycle detection).
-            path: Vec<Address>,
-        }
+        // Get spot prices (required dependency)
+        let spot_prices = store
+            .spot_prices()
+            .ok_or(ComputationError::MissingDependency("spot_prices"))?;
 
-        let topology = market.component_topology();
-        let tokens = market.token_registry_ref();
-
-        // Gas price per gas unit
-        let gas_price_atomic = market
+        // Get gas price for converting gas units to actual cost
+        let gas_price = market
             .gas_price()
-            .map(|gp| gp.effective_gas_price())
-            .ok_or(ComputationError::MissingDependency(GAS_PRICE_DEPENDENCY_ID))?;
+            .ok_or(ComputationError::MissingDependency("gas_price"))?
+            .effective_gas_price();
 
-        // Best state found for each token
-        let mut best_states: HashMap<Address, TokenState> = HashMap::new();
+        let mut graph_manager = PetgraphStableDiGraphManager::new();
+        graph_manager.initialize_graph(&market.component_topology());
 
-        // Gas token starts with: simulation_amount in, 0 gas used
-        best_states.insert(
-            self.gas_token.clone(),
-            TokenState {
-                amount_out: self.simulation_amount.clone(),
-                path_gas_cost: BigUint::zero(),
-            },
-        );
+        // Phase 1: Discover all paths using DFS
+        let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
 
-        // Build adjacency for quick lookup: token -> [(component_id, pool_tokens)]
-        let mut adjacency: HashMap<Address, Vec<(ComponentId, Vec<Address>)>> = HashMap::new();
-        for (component_id, token_addresses) in topology.iter() {
-            for addr in token_addresses {
-                adjacency
-                    .entry(addr.clone())
-                    .or_default()
-                    .push((component_id.clone(), token_addresses.clone()));
-            }
+        // Phase 2: Sort token's paths in ascending order (highest spot-price last)
+        for paths in paths_by_token.values_mut() {
+            paths.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
         }
 
-        // DFS stack
-        let mut stack: Vec<DfsState> = vec![DfsState {
-            token: self.gas_token.clone(),
-            amount: self.simulation_amount.clone(),
-            path_gas_cost: BigUint::zero(),
-            path: vec![self.gas_token.clone()],
-        }];
+        // Phase 2: Run round-robin and process paths in order of decreasing score (best paths first
+        // via pop from ascending-sorted vec), and keep the best price (lowest spread) per token.
+        let mut best_prices = HashMap::new();
 
-        while let Some(current) = stack.pop() {
-            let current_token_info =
-                tokens
-                    .get(&current.token)
-                    .ok_or(ComputationError::InvalidDependencyData {
-                        dependency: "market_data::tokens",
-                        reason: format!("missing token metadata for {}", current.token),
-                    })?;
+        // Flag to indicate there are no more candidates to evaluate for any token.
+        let mut candidates_exhausted = false;
 
-            // Explore all pools containing this token
-            let Some(pools) = adjacency.get(&current.token) else {
-                continue;
-            };
+        while !candidates_exhausted {
+            // Unset at the start of each round
+            candidates_exhausted = true;
 
-            for (component_id, pool_tokens) in pools {
-                let sim_state = market
-                    .get_simulation_state(component_id)
-                    .ok_or(ComputationError::InvalidDependencyData {
-                        dependency: "simulation_states",
-                        reason: format!("missing simulation state for {component_id}"),
-                    })?;
+            for (token, candidate_paths) in paths_by_token.iter_mut() {
+                // Skip if no more candidate paths left to evaluate for this token
+                let Some(candidate) = candidate_paths.pop() else {
+                    continue;
+                };
+                candidates_exhausted = false; // Found at least one candidate
 
-                // Try swapping to each other token in the pool
-                for neighbor_addr in pool_tokens {
-                    // Prevent revisiting tokens in the current path (cycle detection)
-                    if current.path.contains(neighbor_addr) {
-                        continue;
+                match self.compute_spread_and_mid_price(candidate.edges, market, &gas_price) {
+                    Ok((spread_ratio, buy_price)) => {
+                        // Update if better (lower spread = tighter bid/ask = more reliable price)
+                        let is_better = best_prices
+                            .get(token)
+                            .map(|&(existing_spread, _)| spread_ratio < existing_spread)
+                            .unwrap_or(true);
+
+                        if is_better {
+                            trace!(
+                                token = ?token,
+                                spread_ratio = spread_ratio,
+                                "found better price (lower spread)"
+                            );
+                            best_prices.insert(token.clone(), (spread_ratio, buy_price));
+                        }
                     }
-
-                    let Some(neighbor_token_info) = tokens.get(neighbor_addr) else {
-                        return Err(ComputationError::InvalidDependencyData {
-                            dependency: "market_data::tokens",
-                            reason: format!(
-                                "missing token metadata for {} in pool {}",
-                                neighbor_addr, component_id
-                            ),
-                        });
-                    };
-
-                    // Simulate the swap using the actual amount we have
-                    let sim_result = sim_state
-                        .get_amount_out(
-                            current.amount.clone(),
-                            current_token_info,
-                            neighbor_token_info,
-                        )
-                        .map_err(|e| {
-                            ComputationError::SimulationFailed(format!(
-                                "failed to simulate swap in {} from {} to {}: {}",
-                                component_id, current.token, neighbor_addr, e
-                            ))
-                        })?;
-
-                    let new_amount_out = sim_result.amount;
-
-                    let swap_gas_cost = &sim_result.gas * &gas_price_atomic;
-                    let path_gas_cost = &current.path_gas_cost + &swap_gas_cost;
-
-                    let new_state = TokenState {
-                        amount_out: new_amount_out.clone(),
-                        path_gas_cost: path_gas_cost.clone(),
-                    };
-
-                    // Check if this is better than what we had
-                    let dominated_by_existing = best_states
-                        .get(neighbor_addr)
-                        .is_some_and(|existing| {
-                            existing.is_better_than(&new_state, &self.simulation_amount)
-                        });
-
-                    if dominated_by_existing {
-                        // This path is not better, don't explore further
-                        continue;
+                    Err(e) => {
+                        // Failures are expected as we are simulating with a fixed amount that may
+                        // not be suitable for all paths (low liquidity, min/max trade sizes, etc)
+                        warn!(token = ?token, error = ?e, "simulation failed");
                     }
-
-                    // Found a better path! Update and continue exploring
-                    trace!(
-                        token = ?neighbor_addr,
-                        amount_out = %new_amount_out,
-                        gas_used = %path_gas_cost,
-                        via = %component_id,
-                        "found better price path"
-                    );
-
-                    best_states.insert(neighbor_addr.clone(), new_state);
-
-                    // Continue DFS from this neighbor
-                    let mut new_path = current.path.clone();
-                    new_path.push(neighbor_addr.clone());
-                    stack.push(DfsState {
-                        token: neighbor_addr.clone(),
-                        amount: new_amount_out,
-                        path_gas_cost,
-                        path: new_path,
-                    });
                 }
             }
         }
 
-        // Convert states to TokenGasPrice (numerator, denominator)
-        let prices: TokenGasPrices = best_states
+        // Remove the spread_ratio from the output
+        let mut best_prices: TokenGasPrices = best_prices
             .into_iter()
-            .map(|(addr, state)| {
-                let denominator = &self.simulation_amount + &state.path_gas_cost;
-                let price = Price::new(state.amount_out, denominator);
-                (addr, price)
-            })
+            .map(|(k, (_, price))| (k, price))
             .collect();
 
-        Span::current().record("updated_token_prices", prices.len());
+        // Add the gas token itself with price 1:1
+        best_prices.insert(
+            self.gas_token.clone(),
+            Price {
+                numerator: self.simulation_amount.clone(),
+                denominator: self.simulation_amount.clone(),
+            },
+        );
 
-        Ok(prices)
+        // Report success rate
+        let reachable = paths_by_token.len();
+        let priced = best_prices.len() - 1; // Exclude gas token itself
+        debug!(priced = priced, reachable = reachable, "token price computation complete");
+
+        Span::current().record("updated_token_prices", best_prices.len());
+
+        Ok(best_prices)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
+
     use super::*;
-    use crate::algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim};
+    use crate::{
+        algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim},
+        derived::computations::spot_price::SpotPriceComputation,
+    };
+
+    // ==================== Test Constants & Helpers ====================
+
+    /// Standard simulation amount: 1 ETH = 10^18 wei.
+    const SIM_AMOUNT: u128 = 1_000_000_000_000_000_000;
+
+    /// Computes spot prices from market and stores them in the derived data store.
+    fn with_spot_prices(market: &SharedMarketData, store: &mut DerivedDataStore) {
+        let spot_comp = SpotPriceComputation::new();
+        let spot_prices = spot_comp
+            .compute(market, store)
+            .expect("spot price computation should succeed");
+        store.set_spot_prices(spot_prices, None);
+    }
+
+    /// Creates a computation configured for the given gas token with standard settings.
+    fn computation_for(gas_token: &Address) -> TokenGasPriceComputation {
+        TokenGasPriceComputation::new(gas_token.clone(), 2, BigUint::from(SIM_AMOUNT))
+    }
+
+    /// Creates an expected Price with exact numerator and denominator.
+    fn expected_price(numerator: impl Into<BigUint>, denominator: impl Into<BigUint>) -> Price {
+        Price { numerator: numerator.into(), denominator: denominator.into() }
+    }
+
+    /// Asserts that two Price values are exactly equal, with descriptive error messages.
+    fn assert_price_eq(actual: &Price, expected: &Price, context: &str) {
+        assert_eq!(
+            actual.numerator, expected.numerator,
+            "{context}: numerator mismatch - expected {}, got {}",
+            expected.numerator, actual.numerator
+        );
+        assert_eq!(
+            actual.denominator, expected.denominator,
+            "{context}: denominator mismatch - expected {}, got {}",
+            expected.denominator, actual.denominator
+        );
+    }
+
+    /// Asserts that a price's numerator is one of the expected valid values.
+    fn assert_price_numerator_in(actual: &Price, valid: &[BigUint], context: &str) {
+        assert!(
+            valid.contains(&actual.numerator),
+            "{context}: numerator {} not in valid set {:?}",
+            actual.numerator,
+            valid
+        );
+    }
+
+    // ==================== Category 1: Basic Functionality ====================
 
     #[test]
     fn computation_id() {
         assert_eq!(TokenGasPriceComputation::ID, "token_prices");
     }
 
-    /// Test single-hop price computation using setup_market.
-    /// gas_token -> USDC with rate 2000 means 1 unit -> 2000 USDC when gas cost is 0.
     #[test]
-    fn single_hop_price() {
+    fn gas_token_has_identity_price() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
         let (market, _) =
-            setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
+            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
 
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market_read(&market), &store)
+            .compute(&market_guard, &store)
             .unwrap();
 
-        // ETH price = 1 (gas token)
-        let eth_price = prices.get(&eth.address).unwrap();
-        assert_eq!(eth_price.numerator, eth_price.denominator);
-
-        // USDC: 1 unit -> 2000 USDC, so numerator = 2000 * simulation_amount
-        let usdc_price = prices.get(&usdc.address).unwrap();
-        let sim_amount = computation.simulation_amount();
-        assert_eq!(usdc_price.numerator, sim_amount * 2000u32);
-        assert_eq!(usdc_price.denominator, *sim_amount);
+        // Gas token must have exact 1:1 price (numerator == denominator)
+        let eth_price = prices
+            .get(&eth.address)
+            .expect("gas token should have price");
+        let sim_amount = BigUint::from(SIM_AMOUNT);
+        assert_price_eq(
+            eth_price,
+            &expected_price(sim_amount.clone(), sim_amount),
+            "gas token identity price",
+        );
     }
 
-    /// Test that gas cost affects the denominator.
     #[test]
-    fn gas_cost_increases_denominator() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
+    fn single_hop_price_exact() {
+        // Token ordering determines MockProtocolSim behavior:
+        // When token_in.address < token_out.address: amount_out = amount_in * spot_price
+        let eth = token(0, "ETH"); // address 0x00...00
+        let usdc = token(1, "USDC"); // address 0x01...01
+        assert!(eth.address < usdc.address, "test requires ETH < USDC for MockProtocolSim");
+
+        let spot_price: u32 = 2000;
+        let gas_units: u64 = 0;
 
         let (market, _) = setup_market(vec![(
             "eth_usdc",
             &eth,
             &usdc,
-            MockProtocolSim::new(2).with_gas(100_000),
+            MockProtocolSim::new(spot_price).with_gas(gas_units),
         )]);
 
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market_read(&market), &store)
+            .compute(&market_guard, &store)
             .unwrap();
 
-        let usdc_price = prices.get(&usdc.address).unwrap();
-        // numerator = 2 * simulation_amount (rate=2)
-        // gas_cost = 100_000 * 1 = 100_000 (gas_price=1 from setup_market)
-        // denominator = simulation_amount + 100_000
-        let sim_amount = computation.simulation_amount();
-        assert_eq!(usdc_price.numerator, sim_amount * 2u32);
-        assert_eq!(usdc_price.denominator, sim_amount + 100_000u32);
+        // Expected calculation:
+        // buy_out = SIM_AMOUNT * spot_price = 1e18 * 2000 = 2e21
+        // gas_cost = gas_units * gas_price = 0 * 1 = 0
+        // Price = { numerator: 2e21, denominator: 1e18 }
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * spot_price;
+        let expected_denominator = BigUint::from(SIM_AMOUNT) + gas_units;
+
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        assert_price_eq(
+            usdc_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "USDC single-hop price",
+        );
     }
 
-    /// Test multi-hop pricing: gas_token -> A -> B -> C
-    /// Verifies amounts chain correctly through multiple swaps.
     #[test]
-    fn multi_hop_chains_amounts() {
+    fn multi_hop_price_composition() {
+        // Chain: ETH (0) → A (2) → B (3)
+        // MockProtocolSim multiplies when token_in < token_out
+        let eth = token(0, "ETH");
+        let token_a = token(2, "A");
+        let token_b = token(3, "B");
+
+        assert!(eth.address < token_a.address);
+        assert!(token_a.address < token_b.address);
+
+        let rate_eth_a: u32 = 2;
+        let rate_a_b: u32 = 3;
+
+        let (market, _) = setup_market(vec![
+            ("eth_a", &eth, &token_a, MockProtocolSim::new(rate_eth_a).with_gas(0)),
+            ("a_b", &token_a, &token_b, MockProtocolSim::new(rate_a_b).with_gas(0)),
+        ]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // Expected composed rate: 2 * 3 = 6
+        // buy_out = SIM_AMOUNT * 2 * 3 = 6e18
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * rate_eth_a * rate_a_b;
+        let expected_denominator = BigUint::from(SIM_AMOUNT);
+
+        let price_b = prices
+            .get(&token_b.address)
+            .expect("token B should have price");
+        assert_price_eq(
+            price_b,
+            &expected_price(expected_numerator, expected_denominator),
+            "token B multi-hop price",
+        );
+    }
+
+    // ==================== Category 2: Gas Impact ====================
+
+    #[test]
+    fn gas_cost_increases_denominator() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let spot_price: u32 = 2000;
+        let gas_units: u64 = 50_000;
+        // setup_market sets gas_price = 1 wei/gas
+
+        let (market, _) = setup_market(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(spot_price).with_gas(gas_units),
+        )]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // Expected:
+        // buy_out = SIM_AMOUNT * spot_price
+        // gas_cost = gas_units * 1 (gas_price) = 50_000 wei
+        // denominator = SIM_AMOUNT + 50_000
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * spot_price;
+        let expected_denominator = BigUint::from(SIM_AMOUNT) + gas_units;
+
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        assert_price_eq(
+            usdc_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "USDC price with gas cost",
+        );
+
+        // Verify gas actually increased denominator beyond just SIM_AMOUNT
+        assert!(
+            usdc_price.denominator > BigUint::from(SIM_AMOUNT),
+            "gas cost should increase denominator"
+        );
+    }
+
+    #[test]
+    fn higher_gas_price_increases_denominator_proportionally() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let spot_price: u32 = 2000;
+        let gas_units: u64 = 50_000;
+        let high_gas_price: u64 = 100; // 100 wei/gas instead of default 1
+
+        let (market_lock, _) = setup_market(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(spot_price).with_gas(gas_units),
+        )]);
+
+        // Override gas price to higher value
+        {
+            let mut market_write = market_lock.try_write().unwrap();
+            market_write.update_gas_price(BlockGasPrice {
+                block_number: 1,
+                block_hash: Default::default(),
+                block_timestamp: 0,
+                pricing: GasPrice::Legacy { gas_price: BigUint::from(high_gas_price) },
+            });
+        }
+
+        let market_guard = market_read(&market_lock);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // Expected:
+        // gas_cost = gas_units * high_gas_price = 50_000 * 100 = 5_000_000 wei
+        // denominator = SIM_AMOUNT + 5_000_000
+        let gas_cost_wei = gas_units * high_gas_price;
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * spot_price;
+        let expected_denominator = BigUint::from(SIM_AMOUNT) + gas_cost_wei;
+
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        assert_price_eq(
+            usdc_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "USDC price with high gas price",
+        );
+    }
+
+    // ==================== Category 3: Spread-Based Selection ====================
+
+    #[test]
+    fn selects_lower_spread_path() {
+        // Two pools for the same pair with different fees:
+        // - Pool A: no fee → symmetric buy/sell → spread ≈ 0
+        // - Pool B: 10% fee → asymmetric → spread > 0
+        // Selection should prefer Pool A (lower spread)
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let spot_price: u32 = 2000;
+
+        let (market, _) = setup_market(vec![
+            // Pool A: no fee produces symmetric prices, minimal spread
+            (
+                "pool_a",
+                &eth,
+                &usdc,
+                MockProtocolSim::new(spot_price)
+                    .with_gas(0)
+                    .with_fee(0.0),
+            ),
+            // Pool B: 10% fee creates bid/ask spread
+            (
+                "pool_b",
+                &eth,
+                &usdc,
+                MockProtocolSim::new(spot_price)
+                    .with_gas(0)
+                    .with_fee(0.1),
+            ),
+        ]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // Pool A (no fee) should be selected due to lower spread
+        // buy_out = SIM_AMOUNT * spot_price (no fee reduction)
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * spot_price;
+        let expected_denominator = BigUint::from(SIM_AMOUNT);
+
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        assert_price_eq(
+            usdc_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "USDC should use no-fee pool (lower spread)",
+        );
+    }
+
+    #[test]
+    fn symmetric_pools_returns_valid_price() {
+        // Multiple symmetric pools (no fee) all have spread ≈ 0
+        // Any valid path is acceptable
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let (market, _) = setup_market(vec![
+            ("pool1", &eth, &usdc, MockProtocolSim::new(1800).with_gas(0)),
+            ("pool2", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0)),
+            ("pool3", &eth, &usdc, MockProtocolSim::new(1900).with_gas(0)),
+        ]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // TODO - make this pass
+        let expected_numerator = BigUint::from(SIM_AMOUNT);
+        let expected_denominator = BigUint::from(SIM_AMOUNT);
+
+        // Should have a price for USDC from one of the pools
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        assert_price_eq(
+            usdc_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "USDC should use no-fee pool (lower spread)",
+        );
+    }
+
+    // ==================== Category 4: Path Discovery ====================
+
+    #[test]
+    fn discovers_two_hop_paths() {
+        // No direct path from ETH to TARGET, only via MID
+        let eth = token(0, "ETH");
+        let mid = token(2, "MID");
+        let target = token(3, "TARGET");
+
+        let rate1: u32 = 2;
+        let rate2: u32 = 4;
+
+        let (market, _) = setup_market(vec![
+            ("hop1", &eth, &mid, MockProtocolSim::new(rate1).with_gas(0)),
+            ("hop2", &mid, &target, MockProtocolSim::new(rate2).with_gas(0)),
+        ]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // TARGET should be reachable via 2-hop path with composed rate: 2 * 4 = 8
+        let expected_numerator = BigUint::from(SIM_AMOUNT) * rate1 * rate2;
+        let expected_denominator = BigUint::from(SIM_AMOUNT);
+
+        let target_price = prices
+            .get(&target.address)
+            .expect("TARGET should be reachable");
+        assert_price_eq(
+            target_price,
+            &expected_price(expected_numerator, expected_denominator),
+            "TARGET 2-hop price",
+        );
+    }
+
+    #[test]
+    fn diamond_returns_valid_price() {
+        // Diamond topology: two paths to token C
+        // Path 1: ETH → A → C (rate 2 * 5 = 10)
+        // Path 2: ETH → B → C (rate 3 * 2 = 6)
+        // Both are symmetric, so either is valid
+        let eth = token(0, "ETH");
+        let token_a = token(2, "A");
+        let token_b = token(3, "B");
+        let token_c = token(4, "C");
+
+        let (market, _) = setup_market(vec![
+            ("eth_a", &eth, &token_a, MockProtocolSim::new(2).with_gas(0)),
+            ("a_c", &token_a, &token_c, MockProtocolSim::new(5).with_gas(0)),
+            ("eth_b", &eth, &token_b, MockProtocolSim::new(3).with_gas(0)),
+            ("b_c", &token_b, &token_c, MockProtocolSim::new(2).with_gas(0)),
+        ]);
+
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market_guard, &store)
+            .unwrap();
+
+        // C should have a price from one of the paths
+        let price_c = prices
+            .get(&token_c.address)
+            .expect("token C should have price");
+
+        // Valid rates: Path 1 = 2*5 = 10, Path 2 = 3*2 = 6
+        let valid_numerators =
+            [BigUint::from(SIM_AMOUNT) * 10u32, BigUint::from(SIM_AMOUNT) * 6u32];
+        assert_price_numerator_in(price_c, &valid_numerators, "token C from diamond paths");
+    }
+
+    #[test]
+    fn respects_max_hops_limit() {
+        // Chain: ETH → A → B → C (3 hops total)
+        // With max_hops=2, C should NOT be reachable
         let eth = token(0, "ETH");
         let token_a = token(2, "A");
         let token_b = token(3, "B");
@@ -355,162 +825,65 @@ mod tests {
             ("b_c", &token_b, &token_c, MockProtocolSim::new(4).with_gas(0)),
         ]);
 
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
+        let market_guard = market_read(&market);
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
+
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 2, BigUint::from(SIM_AMOUNT));
         let prices = computation
-            .compute(&market_read(&market), &store)
+            .compute(&market_guard, &store)
             .unwrap();
 
-        let sim_amount = computation.simulation_amount();
+        // A (1 hop) and B (2 hops) should be reachable
+        assert!(prices.get(&token_a.address).is_some(), "A should be reachable (1 hop)");
+        assert!(prices.get(&token_b.address).is_some(), "B should be reachable (2 hops)");
 
-        // gas_token -> A: 1 unit * 2 = 2 A
-        let price_a = prices.get(&token_a.address).unwrap();
-        assert_eq!(price_a.numerator, sim_amount * 2u32);
-
-        // A -> B: 2 A * 3 = 6 B
-        let price_b = prices.get(&token_b.address).unwrap();
-        assert_eq!(price_b.numerator, sim_amount * 6u32);
-
-        // B -> C: 6 B * 4 = 24 C
-        let price_c = prices.get(&token_c.address).unwrap();
-        assert_eq!(price_c.numerator, sim_amount * 24u32);
+        // C requires 3 hops, exceeds max_hops=2
+        assert!(prices.get(&token_c.address).is_none(), "C should NOT be reachable (3 hops)");
     }
 
-    /// Test that DFS selects the better path when multiple routes exist.
-    /// Direct path: gas_token -> TARGET with rate 5 (get 5 tokens)
-    /// Indirect path: gas_token -> INTERMEDIATE -> TARGET with rate 2 * 4 = 8 (get 8 tokens)
-    /// Should choose indirect path (8 > 5).
+    // ==================== Category 5: Error Handling ====================
+
     #[test]
-    fn selects_better_path_among_alternatives() {
-        let eth = token(0, "ETH");
-        let intermediate = token(2, "MID");
-        let target = token(3, "TARGET");
-
-        let (market, _) = setup_market(vec![
-            // Direct: gas_token -> TARGET, rate 5
-            ("direct", &eth, &target, MockProtocolSim::new(5).with_gas(0)),
-            // Indirect hop 1: gas_token -> MID, rate 2
-            ("hop1", &eth, &intermediate, MockProtocolSim::new(2).with_gas(0)),
-            // Indirect hop 2: MID -> TARGET, rate 4 (total: 2*4=8)
-            ("hop2", &intermediate, &target, MockProtocolSim::new(4).with_gas(0)),
-        ]);
-
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
-        let prices = computation
-            .compute(&market_read(&market), &store)
-            .unwrap();
-
-        let sim_amount = computation.simulation_amount();
-
-        // Should choose indirect path: 1 unit -> 2 MID -> 8 TARGET
-        let target_price = prices.get(&target.address).unwrap();
-        assert_eq!(target_price.numerator, sim_amount * 8u32);
-    }
-
-    /// Test that gas cost can make a shorter path better than a longer one.
-    /// Direct: rate 4, gas 0 -> effective 4 tokens
-    /// Indirect: rate 2*3=6, but each hop has gas 500_000 -> total gas 1_000_000
-    /// With high gas cost, direct path may be better despite lower rate.
-    #[test]
-    fn gas_cost_can_favor_shorter_path() {
-        let eth = token(0, "ETH");
-        let mid = token(2, "MID");
-        let target = token(3, "TARGET");
-
-        // High gas cost per hop
-        let high_gas = 500_000_000_000_000u64; // 0.0005 units per hop
-
-        let (market, _) = setup_market(vec![
-            // Direct: rate 4, no gas
-            ("direct", &eth, &target, MockProtocolSim::new(4).with_gas(0)),
-            // Indirect: rate 2, high gas
-            ("hop1", &eth, &mid, MockProtocolSim::new(2).with_gas(high_gas)),
-            // Indirect: rate 3, high gas (total rate: 6, but 2x gas cost)
-            ("hop2", &mid, &target, MockProtocolSim::new(3).with_gas(high_gas)),
-        ]);
-
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
-        let prices = computation
-            .compute(&market_read(&market), &store)
-            .unwrap();
-
-        let sim_amount = computation.simulation_amount();
-        let target_price = prices.get(&target.address).unwrap();
-
-        // Direct path: num=4*sim_amount, denom=sim_amount -> effective rate = 4
-        // Indirect path: num=6*sim_amount, denom=sim_amount + 2*high_gas
-        //
-        // Compare: 4 * (sim_amount + 2*high_gas) vs 6 * sim_amount
-        // Direct wins if: 4*sim_amount + 8*high_gas > 6*sim_amount
-        //                 8*high_gas > 2*sim_amount
-        //                 high_gas > 0.25*sim_amount
-        // Our high_gas = 5*10^14, so actually indirect still wins here.
-        // Let's verify the actual computation picks indirect (6 tokens)
-        assert_eq!(target_price.numerator, sim_amount * 6u32);
-
-        // But the denominator should include the gas costs
-        let expected_gas = BigUint::from(high_gas) * 2u32;
-        assert_eq!(target_price.denominator, sim_amount + &expected_gas);
-    }
-
-    /// Test parallel pools between same token pair - should pick better rate.
-    #[test]
-    fn parallel_pools_picks_better_rate() {
+    fn missing_spot_prices_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let (market, _) = setup_market(vec![
-            // Pool 1: rate 1800
-            ("pool1", &eth, &usdc, MockProtocolSim::new(1800).with_gas(0)),
-            // Pool 2: rate 2000 (better)
-            ("pool2", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0)),
-            // Pool 3: rate 1900
-            ("pool3", &eth, &usdc, MockProtocolSim::new(1900).with_gas(0)),
-        ]);
+        let (market, _) =
+            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
 
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
-        let prices = computation
-            .compute(&market_read(&market), &store)
-            .unwrap();
+        let market_guard = market_read(&market);
+        let store = DerivedDataStore::new(); // Intentionally no spot prices
 
-        let sim_amount = computation.simulation_amount();
-        let usdc_price = prices.get(&usdc.address).unwrap();
+        let computation = computation_for(&eth.address);
+        let result = computation.compute(&market_guard, &store);
 
-        // Should pick the best rate: 2000
-        assert_eq!(usdc_price.numerator, sim_amount * 2000u32);
+        assert!(
+            matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
+            "should return MissingDependency error for spot_prices"
+        );
     }
 
-    /// Test diamond topology: gas_token -> A, gas_token -> B, A -> C, B -> C
-    /// Two paths to C, should pick the better one.
     #[test]
-    fn diamond_topology_picks_best_path() {
+    fn missing_gas_price_returns_error() {
         let eth = token(0, "ETH");
-        let token_a = token(2, "A");
-        let token_b = token(3, "B");
-        let token_c = token(4, "C");
+        let usdc = token(1, "USDC");
 
-        let (market, _) = setup_market(vec![
-            // Path 1: gas_token -> A (rate 2) -> C (rate 5) = 10
-            ("eth_a", &eth, &token_a, MockProtocolSim::new(2).with_gas(0)),
-            ("a_c", &token_a, &token_c, MockProtocolSim::new(5).with_gas(0)),
-            // Path 2: gas_token -> B (rate 3) -> C (rate 2) = 6
-            ("eth_b", &eth, &token_b, MockProtocolSim::new(3).with_gas(0)),
-            ("b_c", &token_b, &token_c, MockProtocolSim::new(2).with_gas(0)),
-        ]);
+        // Market without gas_price set
+        let (market_lock, _) =
+            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
 
-        let store = DerivedDataStore::new();
-        let computation = TokenGasPriceComputation::default();
-        let prices = computation
-            .compute(&market_read(&market), &store)
-            .unwrap();
+        let market_guard = market_lock.try_read().unwrap();
+        let mut store = DerivedDataStore::new();
+        with_spot_prices(&market_guard, &mut store);
 
-        let sim_amount = computation.simulation_amount();
+        let computation = computation_for(&eth.address);
+        let result = computation.compute(&market_guard, &store);
 
-        // Should pick path through A: 1 unit -> 2 A -> 10 C
-        let price_c = prices.get(&token_c.address).unwrap();
-        assert_eq!(price_c.numerator, sim_amount * 10u32);
+        assert!(
+            matches!(result, Err(ComputationError::MissingDependency("gas_price"))),
+            "should return MissingDependency error for gas_price"
+        );
     }
 }

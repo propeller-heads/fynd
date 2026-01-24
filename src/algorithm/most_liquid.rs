@@ -227,8 +227,8 @@ impl MostLiquidAlgorithm {
     /// * `market` - Market data for token/component lookups and gas price
     /// * `amount_in` - The input amount to simulate
     #[instrument(level = "trace", skip(path, market), fields(hop_count = path.len()))]
-    fn simulate_path<D>(
-        path: Path<D>,
+    pub(crate) fn simulate_path<D>(
+        path: &Path<D>,
         market: &SharedMarketData,
         amount_in: BigUint,
     ) -> Result<Route, AlgorithmError> {
@@ -467,7 +467,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let route = match Self::simulate_path(edge_path, &market, amount_in.clone()) {
+            let route = match Self::simulate_path(&edge_path, &market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -873,7 +873,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 1);
@@ -904,7 +904,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
@@ -941,7 +941,7 @@ mod tests {
         let path = paths[0].clone();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
@@ -974,7 +974,7 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result = MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64));
+        let result = MostLiquidAlgorithm::simulate_path(&path, &market, BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
@@ -997,7 +997,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let result =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64));
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 
