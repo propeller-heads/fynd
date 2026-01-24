@@ -177,15 +177,15 @@ impl ComputationManager {
     /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
     async fn compute_all(&self) {
         // Get block info for tracking
-        let block = {
-            let market_guard = self.market_data.read().await;
-            let block = market_guard
-                .last_updated()
-                .map(|b| b.number);
-            if block.is_none() {
-                warn!("computing derived data without block info - market data may not be initialized");
-            }
-            block
+        let Some(block) = self
+            .market_data
+            .read()
+            .await
+            .last_updated()
+            .map(|b| b.number)
+        else {
+            warn!("market data has no last updated block, skipping computations");
+            return;
         };
 
         // Phase 1: Compute spot prices first (no dependencies)

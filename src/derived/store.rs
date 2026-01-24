@@ -36,9 +36,9 @@ impl DerivedData {
     }
 
     /// Sets token prices.
-    pub fn set_token_prices(&mut self, prices: TokenGasPrices, block: Option<u64>) {
+    pub fn set_token_prices(&mut self, prices: TokenGasPrices, block: u64) {
         self.token_prices = Some(prices);
-        self.last_block = block;
+        self.last_block = Some(block);
     }
 
     /// Clears token prices.
@@ -56,9 +56,9 @@ impl DerivedData {
     }
 
     /// Sets pool depths.
-    pub fn set_pool_depths(&mut self, depths: PoolDepths, block: Option<u64>) {
+    pub fn set_pool_depths(&mut self, depths: PoolDepths, block: u64) {
         self.pool_depths = Some(depths);
-        self.last_block = block;
+        self.last_block = Some(block);
     }
 
     /// Clears pool depths.
@@ -76,9 +76,9 @@ impl DerivedData {
     }
 
     /// Sets spot prices.
-    pub fn set_spot_prices(&mut self, prices: SpotPrices, block: Option<u64>) {
+    pub fn set_spot_prices(&mut self, prices: SpotPrices, block: u64) {
         self.spot_prices = Some(prices);
-        self.last_block = block;
+        self.last_block = Some(block);
     }
 
     /// Clears spot prices.

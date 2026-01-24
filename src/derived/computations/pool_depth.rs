@@ -317,7 +317,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::new(), None);
+            .set_spot_prices(SpotPrices::new(), 0);
 
         let output = PoolDepthComputation::default()
             .compute(&market, &derived)
@@ -396,7 +396,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_prices, None);
+            .set_spot_prices(spot_prices, 0);
 
         let pool_depths = PoolDepthComputation::default()
             .compute(&market, &derived)
