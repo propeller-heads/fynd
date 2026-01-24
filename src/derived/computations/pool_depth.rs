@@ -70,7 +70,12 @@ impl PoolDepthComputation {
     /// Binary search to find the maximum amount_in with acceptable slippage.
     ///
     /// Finds the largest amount where `effective_price >= spot_price * (1 - threshold)`.
-    /// Uses `get_limits()` for the upper bound.
+    /// Uses `get_limits()` for the upper bound and assumes that it returns a simulatable input
+    /// amount.
+    ///
+    /// As we never exceed the upper bound, we assume that if the simulation errors, it's because
+    /// we are below the lower bound of valid amounts, and thus should increase the lower bound.
+    /// This assumes that the simulation should not have errors in the valid range.
     ///
     /// # Behavior
     /// - Simulation errors indicate we're outside valid range → adjust bounds accordingly
@@ -122,8 +127,6 @@ impl PoolDepthComputation {
                     }
                 }
                 Err(_) => {
-                    // Simulation failed - below protocol minimum as we maintain an invariant that
-                    // the `high` should always succeed at simulation.
                     low = mid + BigUint::one();
                 }
             }
