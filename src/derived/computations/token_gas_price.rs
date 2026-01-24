@@ -240,10 +240,15 @@ impl TokenGasPriceComputation {
 
         let spread = (sell_price - buy_price).abs();
 
-        // Compute buy_price in numerator/denominator form (precise BigUint arithmetic)
+        // Compute mid_price in numerator/denominator form (precise BigUint arithmetic)
+        // numerator = buy_out * (sell_out - sell_gas_cost) + buy_out * (sim_amount + buy_gas_cost)
+        // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
         let buy_price_precise = Price {
-            numerator: buy_out,
-            denominator: self.simulation_amount.clone() + buy_gas_cost,
+            numerator: &buy_out * (&sell_out - &sell_gas_cost) +
+                &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8) *
+                (&self.simulation_amount + &buy_gas_cost) *
+                (&sell_out - &sell_gas_cost),
         };
 
         Ok((spread, buy_price_precise))
