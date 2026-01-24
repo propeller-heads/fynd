@@ -122,10 +122,9 @@ impl ComputationManager {
         Arc::clone(&self.store)
     }
 
-    /// Runs the computation manager's main loop.
+    /// Runs the main loop until shutdown or channel close.
     ///
-    /// Processes market events and updates the derived data store until
-    /// shutdown is signaled or the event channel closes.
+    /// **Note:** Consumes `self`. Call [`store()`](Self::store) before `run()` to retain access.
     #[allow(unused)]
     pub(crate) async fn run(
         mut self,
