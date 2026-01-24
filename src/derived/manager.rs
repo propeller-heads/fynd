@@ -212,8 +212,7 @@ impl ComputationManager {
             }
         }
 
-        // Phase 2: Run dependent computations (token prices needs spot prices in store)
-        // Pool depth has no store dependencies, so it can run in parallel
+        // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
         let (token_prices_result, pool_depths_result) = tokio::join!(
             self.token_price_computation
                 .compute(&self.market_data, &self.store),
