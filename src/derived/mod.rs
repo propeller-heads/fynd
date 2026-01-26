@@ -57,8 +57,8 @@ mod types;
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
 pub use computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation};
 pub use error::ComputationError;
-pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataStore};
-pub use store::DerivedDataStore;
+pub use manager::{ComputationManager, ComputationManagerConfig};
+pub use store::DerivedData;
 pub use types::{
     PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
 };

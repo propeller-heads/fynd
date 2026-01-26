@@ -11,8 +11,6 @@
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
@@ -271,7 +269,7 @@ mod tests {
         algorithm::test_utils::{setup_market, token, MockProtocolSim},
         derived::manager::wrap_derived,
         feed::market_data::{wrap_market, SharedMarketData},
-        DerivedData, SpotPrices,
+        DerivedData, PoolDepthKey, SpotPrices,
     };
 
     #[test]

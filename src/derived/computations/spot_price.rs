@@ -3,8 +3,6 @@
 //! Computes spot prices for all pools in both directions using `ProtocolSim::spot_price()`.
 //! Spot prices are the instantaneous exchange rates without slippage.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use itertools::Itertools;
 use tracing::{instrument, Span};
@@ -17,7 +15,6 @@ use crate::{
         types::SpotPrices,
     },
     feed::market_data::SharedMarketDataRef,
-    types::ComponentId,
 };
 
 /// Computes spot prices for all pools.
