@@ -7,11 +7,9 @@
 //!
 //! # Dependencies
 //!
-//! This computation depends on [`SpotPrices`](super::spot_price::SpotPrices) being
+//! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
-
-use std::collections::HashMap;
 
 use itertools::Itertools;
 use num_bigint::BigUint;
@@ -19,7 +17,7 @@ use num_traits::{One, ToPrimitive, Zero};
 use tracing::{instrument, Span};
 use tycho_simulation::{
     tycho_common::{
-        models::{token::Token, Address},
+        models::token::Token,
         simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
     },
     tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
@@ -28,19 +26,14 @@ use tycho_simulation::{
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
-        computations::spot_price::{SpotPriceComputation, SpotPriceKey},
+        computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         store::DerivedDataStore,
+        types::{PoolDepths, SpotPriceKey},
     },
     feed::market_data::SharedMarketData,
     types::ComponentId,
 };
-
-/// Key for pool depth lookups: (component_id, token_in, token_out).
-pub type PoolDepthKey = (ComponentId, Address, Address);
-
-/// Pool depths map: key → maximum input amount at configured slippage threshold.
-pub type PoolDepths = HashMap<PoolDepthKey, BigUint>;
 
 /// Computes pool depths for all pools in all directions.
 ///
@@ -269,7 +262,10 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim},
-        derived::computations::spot_price::{SpotPriceComputation, SpotPrices},
+        derived::{
+            computations::spot_price::SpotPriceComputation,
+            types::{PoolDepthKey, SpotPrices},
+        },
     };
 
     #[test]

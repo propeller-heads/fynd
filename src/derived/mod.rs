@@ -49,11 +49,12 @@ mod computation;
 mod computations;
 mod error;
 mod store;
+mod types;
 
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
-pub use computations::{
-    PoolDepthComputation, PoolDepthKey, PoolDepths, SpotPriceComputation, SpotPriceKey, SpotPrices,
-    TokenGasPriceComputation, TokenGasPriceKey, TokenGasPrices,
-};
+pub use computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation};
 pub use error::ComputationError;
 pub use store::DerivedDataStore;
+pub use types::{
+    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
+};

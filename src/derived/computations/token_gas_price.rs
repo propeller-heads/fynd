@@ -26,7 +26,7 @@
 //!
 //! # Dependencies
 //!
-//! This computation depends on [`SpotPrices`](super::spot_price::SpotPrices) being
+//! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
@@ -36,26 +36,22 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
 use tracing::{debug, instrument, trace, warn, Span};
-use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::Price};
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
-        computations::spot_price::{SpotPriceKey, SpotPrices},
+        computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         store::DerivedDataStore,
-        SpotPriceComputation,
+        types::{SpotPriceKey, SpotPrices, TokenGasPrices},
     },
     feed::market_data::SharedMarketData,
     graph::{GraphManager, Path, PetgraphStableDiGraphManager},
     MostLiquidAlgorithm,
 };
-
-/// Key for token price lookups.
-pub type TokenGasPriceKey = Address;
-
-/// Token prices map: token address → price ratio.
-pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;
 
 /// A path with its score
 #[derive(Clone)]

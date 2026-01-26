@@ -1,8 +1,6 @@
 //! Typed storage for derived data.
 
-use super::computations::{
-    pool_depth::PoolDepths, spot_price::SpotPrices, token_gas_price::TokenGasPrices,
-};
+use super::types::{PoolDepths, SpotPrices, TokenGasPrices};
 
 /// Typed storage for derived data computations.
 ///

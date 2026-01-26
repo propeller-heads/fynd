@@ -3,28 +3,18 @@
 //! Computes spot prices for all pools in both directions using `ProtocolSim::spot_price()`.
 //! Spot prices are the instantaneous exchange rates without slippage.
 
-use std::collections::HashMap;
-
 use itertools::Itertools;
 use tracing::{instrument, Span};
-use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
         error::ComputationError,
         store::DerivedDataStore,
+        types::SpotPrices,
     },
     feed::market_data::SharedMarketData,
-    types::ComponentId,
 };
-
-/// Key for spot price lookups: (component_id, token_in, token_out).
-pub type SpotPriceKey = (ComponentId, Address, Address);
-
-/// Spot prices map: key → spot price as f64.
-/// Represents: 1 token_in = spot_price token_out.
-pub type SpotPrices = HashMap<SpotPriceKey, f64>;
 
 /// Computes spot prices for all pools.
 ///
