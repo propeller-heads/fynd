@@ -57,6 +57,8 @@ chrono = "0.4"
 criterion = "0.5"
 rstest = "0.18"
 chrono = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+fastrand = "2.3.0"
 
 # Benchmarks (uncomment when ready)
 # [[bench]]
