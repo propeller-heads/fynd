@@ -5,6 +5,8 @@ use tycho_simulation::tycho_common::models::Chain;
 pub mod events;
 pub mod gas;
 pub mod market_data;
+
+pub use gas::GAS_PRICE_DEPENDENCY_ID;
 pub mod protocol_registry;
 pub mod tycho_feed;
 

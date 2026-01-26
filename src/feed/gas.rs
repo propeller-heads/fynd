@@ -6,6 +6,9 @@ use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::
 
 use crate::feed::{market_data::SharedMarketDataRef, DataFeedError};
 
+// TODO: Refactor gas price fetching into a `DerivedComputation`.
+pub const GAS_PRICE_DEPENDENCY_ID: &str = "gas_price";
+
 pub(crate) struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     signal_rx: mpsc::Receiver<oneshot::Sender<()>>,

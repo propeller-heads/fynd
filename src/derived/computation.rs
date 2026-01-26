@@ -99,6 +99,7 @@ pub trait DerivedComputation: Send + Sync + 'static {
     /// # Returns
     ///
     /// The computed output, or an error if computation failed.
+    // TODO: Support Partial Failures, including IDs for which computation failed.
     fn compute(
         &self,
         market: &SharedMarketData,

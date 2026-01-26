@@ -1,22 +1,6 @@
 //! Typed storage for derived data.
 
-use std::collections::HashMap;
-
-use tycho_simulation::tycho_common::models::Address;
-
-use super::types::{PoolDepth, SpotPrice, TokenGasPrice};
-use crate::types::ComponentId;
-
-/// Type alias for token prices map.
-pub type TokenPrices = HashMap<Address, TokenGasPrice>;
-
-/// Type alias for pool depths map.
-/// Key: (component_id, token_in, token_out)
-pub type PoolDepths = HashMap<(ComponentId, Address, Address), PoolDepth>;
-
-/// Type alias for spot prices map.
-/// Key: (component_id, token_in, token_out)
-pub type SpotPrices = HashMap<(ComponentId, Address, Address), SpotPrice>;
+use super::types::{PoolDepths, SpotPrices, TokenGasPrices};
 
 /// Typed storage for derived data computations.
 ///
@@ -24,7 +8,7 @@ pub type SpotPrices = HashMap<(ComponentId, Address, Address), SpotPrice>;
 /// Each field is `Option` to indicate whether the computation has run.
 #[derive(Debug, Default)]
 pub struct DerivedDataStore {
-    token_prices: Option<TokenPrices>,
+    token_prices: Option<TokenGasPrices>,
     pool_depths: Option<PoolDepths>,
     spot_prices: Option<SpotPrices>,
     /// Block number at which data was last computed.
@@ -47,12 +31,12 @@ impl DerivedDataStore {
     // -------------------------------------------------------------------------
 
     /// Returns token prices if computed.
-    pub fn token_prices(&self) -> Option<&TokenPrices> {
+    pub fn token_prices(&self) -> Option<&TokenGasPrices> {
         self.token_prices.as_ref()
     }
 
     /// Sets token prices.
-    pub fn set_token_prices(&mut self, prices: TokenPrices, block: Option<u64>) {
+    pub fn set_token_prices(&mut self, prices: TokenGasPrices, block: Option<u64>) {
         self.token_prices = Some(prices);
         self.last_block = block;
     }

@@ -11,6 +11,22 @@
 //! - **Events**: Broadcast notifications when computations complete
 //! - **Tracker**: Per-worker readiness tracking based on algorithm requirements
 //!
+//! # Computation Dependencies
+//!
+//! Computations may depend on other computations' outputs via the `DerivedDataStore`.
+//! The dependency graph must be respected when running computations:
+//!
+//! ```text
+//!                 SpotPriceComputation
+//!                    /           \
+//!                   v             v
+//!    PoolDepthComputation    TokenGasPriceComputation
+//! ```
+//!
+//! - **SpotPriceComputation**: No dependencies, computes spot prices for all pools
+//! - **PoolDepthComputation**: Depends on `spot_prices`
+//! - **TokenGasPriceComputation**: Depends on `spot_prices` and `gas_price` (from market data)
+//!
 //! # Example
 //!
 //! ```ignore
@@ -30,11 +46,15 @@
 //! ```
 
 mod computation;
+mod computations;
 mod error;
 mod store;
 mod types;
 
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
+pub use computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation};
 pub use error::ComputationError;
-pub use store::{DerivedDataStore, PoolDepths, SpotPrices, TokenPrices};
-pub use types::{PoolDepth, SpotPrice, TokenGasPrice};
+pub use store::DerivedDataStore;
+pub use types::{
+    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
+};

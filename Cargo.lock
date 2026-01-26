@@ -7060,6 +7060,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "futures 0.3.31",
+ "itertools 0.14.0",
  "lazy_static",
  "metrics 0.24.3",
  "metrics-exporter-prometheus",
