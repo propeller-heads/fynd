@@ -25,7 +25,11 @@ use tycho_simulation::{
 use crate::types::{BlockInfo, ComponentId};
 
 /// Thread-safe handle to shared market data.
-pub(crate) type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
+pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
+
+pub fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
+    Arc::new(RwLock::new(market))
+}
 
 /// Shared market data containing all component states and market information.
 ///

@@ -23,7 +23,7 @@ use crate::{
     algorithm::most_liquid::DepthAndPrice,
     feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
-    types::{solution::OrderSide, Order},
+    types::{solution::OrderSide, BlockInfo, Order},
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -253,6 +253,7 @@ pub(crate) fn setup_market(
         block_timestamp: 0,
         pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
     });
+    market.update_last_updated(BlockInfo { number: 1, hash: "0x00".into(), timestamp: 0 });
 
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];

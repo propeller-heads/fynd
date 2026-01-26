@@ -86,10 +86,14 @@ where
     }
 
     /// Processes a single market event.
-    pub fn process_event(&mut self, event: MarketEvent) {
+    pub async fn process_event(&mut self, event: MarketEvent) {
         match event {
             MarketEvent::MarketUpdated { .. } => {
-                if let Err(e) = self.graph_manager.handle_event(&event) {
+                if let Err(e) = self
+                    .graph_manager
+                    .handle_event(&event)
+                    .await
+                {
                     // Graph errors currently returned by handle_event are non-fatal, so we just log
                     // them.
                     warn!("Error handling market event: {:?}", e);
@@ -259,7 +263,7 @@ where
                 event_result = event_rx.recv() => {
                     match event_result {
                         Ok(event) => {
-                            self.process_event(event);
+                            self.process_event(event).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!(self.worker_id, "event receiver closed, shutting down");

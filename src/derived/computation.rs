@@ -2,8 +2,10 @@
 
 use std::collections::HashSet;
 
-use super::{error::ComputationError, store::DerivedDataStore};
-use crate::feed::market_data::SharedMarketData;
+use async_trait::async_trait;
+
+use super::{error::ComputationError, manager::SharedDerivedDataRef};
+use crate::feed::market_data::SharedMarketDataRef;
 
 /// Unique identifier for a computation type.
 ///
@@ -57,6 +59,8 @@ impl ComputationRequirements {
 /// - No `dependencies()` method - execution order is hardcoded in `ComputationManager`
 /// - Typed `DerivedDataStore` - access previous results via `store.token_prices()` etc.
 /// - Each computation is explicitly added to `ComputationManager`
+/// - Computations receive `Arc<RwLock<>>` references and acquire locks as needed, allowing early
+///   release and granular locking strategies
 ///
 /// # Example
 ///
@@ -65,19 +69,23 @@ impl ComputationRequirements {
 ///     gas_token: Address,
 /// }
 ///
+/// #[async_trait]
 /// impl DerivedComputation for TokenPriceComputation {
 ///     type Output = TokenPrices;
 ///     const ID: ComputationId = "token_prices";
 ///
-///     fn compute(
+///     async fn compute(
 ///         &self,
-///         market: &SharedMarketData,
-///         store: &DerivedDataStore,
+///         market: &SharedMarketDataRef,
+///         store: &SharedDerivedDataStore,
 ///     ) -> Result<Self::Output, ComputationError> {
-///         // BFS from gas token through pools to compute prices
+///         let market_guard = market.read().await;
+///         // Use market_guard...
+///         // Lock is released when guard is dropped
 ///     }
 /// }
 /// ```
+#[async_trait]
 pub trait DerivedComputation: Send + Sync + 'static {
     /// The output type produced by this computation.
     ///
@@ -93,16 +101,21 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `market` - Read access to raw market data (components, tokens, topology)
-    /// * `store` - Read access to previously computed derived data
+    /// * `market` - Reference to shared market data (computation acquires lock as needed)
+    /// * `store` - Reference to derived data store (computation acquires lock as needed)
     ///
     /// # Returns
     ///
     /// The computed output, or an error if computation failed.
+    ///
+    /// # Lock Management
+    ///
+    /// Computations should acquire locks only when needed and release them as early
+    /// as possible to minimize contention. Use `.read().await` for async lock acquisition.
     // TODO: Support Partial Failures, including IDs for which computation failed.
-    fn compute(
+    async fn compute(
         &self,
-        market: &SharedMarketData,
-        store: &DerivedDataStore,
+        market: &SharedMarketDataRef,
+        store: &SharedDerivedDataRef,
     ) -> Result<Self::Output, ComputationError>;
 }

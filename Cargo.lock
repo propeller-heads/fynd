@@ -7055,6 +7055,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "async-channel",
+ "async-trait",
  "chrono",
  "clap",
  "criterion",

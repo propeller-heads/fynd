@@ -11,6 +11,7 @@
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
+use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
@@ -28,10 +29,10 @@ use crate::{
         computation::{ComputationId, DerivedComputation},
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
-        store::DerivedDataStore,
+        manager::SharedDerivedDataRef,
         types::{PoolDepths, SpotPriceKey},
     },
-    feed::market_data::SharedMarketData,
+    feed::market_data::SharedMarketDataRef,
     types::ComponentId,
 };
 
@@ -141,17 +142,21 @@ impl PoolDepthComputation {
     }
 }
 
+#[async_trait]
 impl DerivedComputation for PoolDepthComputation {
     type Output = PoolDepths;
 
     const ID: ComputationId = "pool_depths";
 
     #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_pool_depths))]
-    fn compute(
+    async fn compute(
         &self,
-        market: &SharedMarketData,
-        store: &DerivedDataStore,
+        market: &SharedMarketDataRef,
+        store: &SharedDerivedDataRef,
     ) -> Result<Self::Output, ComputationError> {
+        let market = market.read().await;
+        let store = store.read().await;
+
         // Get precomputed spot prices (required dependency)
         let spot_prices = store
             .spot_prices()
@@ -261,11 +266,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{market_read, setup_market, token, MockProtocolSim},
-        derived::{
-            computations::spot_price::SpotPriceComputation,
-            types::{PoolDepthKey, SpotPrices},
-        },
+        algorithm::test_utils::{setup_market, token, MockProtocolSim},
+        derived::manager::wrap_derived,
+        feed::market_data::{wrap_market, SharedMarketData},
+        DerivedData, PoolDepthKey, SpotPrices,
     };
 
     #[test]
@@ -304,30 +308,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_handles_empty_market() {
-        let market = SharedMarketData::new();
-        let mut store = DerivedDataStore::new();
-        store.set_spot_prices(SpotPrices::new(), None);
+    #[tokio::test]
+    async fn test_compute_handles_empty_market() {
+        let market = wrap_market(SharedMarketData::new());
+        let derived = wrap_derived(DerivedData::new());
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(SpotPrices::new(), 0);
 
         let output = PoolDepthComputation::default()
-            .compute(&market, &store)
+            .compute(&market, &derived)
+            .await
             .unwrap();
 
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_compute_missing_spot_prices_returns_error() {
+    #[tokio::test]
+    async fn test_compute_missing_spot_prices_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let (market_lock, _) =
-            setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
-        let market = market_read(&market_lock);
-        let store = DerivedDataStore::new(); // No spot prices
+        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+        let derived = wrap_derived(DerivedData::new()); // No spot prices
 
-        let result = PoolDepthComputation::default().compute(&market, &store);
+        let result = PoolDepthComputation::default()
+            .compute(&market, &derived)
+            .await;
 
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
@@ -365,8 +373,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_integration() {
+    #[tokio::test]
+    async fn test_compute_integration() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -377,15 +385,20 @@ mod tests {
             &usdc,
             MockProtocolSim::new(1).with_liquidity(1_000_000),
         )]);
-        let mut store = DerivedDataStore::new();
+        let derived = wrap_derived(DerivedData::new());
         let spot_comp = SpotPriceComputation::new();
         let spot_prices = spot_comp
-            .compute(&market_read(&market), &store)
+            .compute(&market, &derived)
+            .await
             .expect("spot price computation should succeed");
-        store.set_spot_prices(spot_prices, None);
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_prices, 0);
 
         let pool_depths = PoolDepthComputation::default()
-            .compute(&market_read(&market), &store)
+            .compute(&market, &derived)
+            .await
             .expect("computation should succeed");
 
         // Should have depths for both directions: ETH→USDC and USDC→ETH

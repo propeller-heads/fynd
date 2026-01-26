@@ -576,10 +576,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::collections::HashSet;
 
     use rstest::rstest;
-    use tokio::sync::RwLock;
     use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
     use super::*;
@@ -589,10 +588,10 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
+        feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
-
     // ==================== try_score_path Tests ====================
 
     #[test]
@@ -1098,6 +1097,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1167,9 +1167,9 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1213,10 +1213,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(matches!(
             result,
@@ -1320,10 +1320,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity
