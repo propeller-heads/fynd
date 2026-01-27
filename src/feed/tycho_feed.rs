@@ -105,10 +105,16 @@ impl TychoFeed {
             "Starting Data Feed..."
         );
 
+        let tycho_api_key = self
+            .config
+            .tycho_api_key
+            .clone()
+            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
+
         let all_tokens = load_all_tokens(
             self.config.tycho_url.as_str(),
             !self.config.use_tls,
-            self.config.tycho_api_key.as_deref(),
+            tycho_api_key.as_deref(),
             true,
             self.config.chain,
             Some(self.config.min_token_quality),
