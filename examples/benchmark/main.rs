@@ -8,38 +8,18 @@ use clap::Parser;
 use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
 use runner::run_benchmark;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
-use tycho_solver::{parse_chain, HealthStatus, TychoSolverBuilder, WorkerPoolsConfig};
+use tycho_solver::HealthStatus;
 
 /// Benchmark tool for measuring tycho-solver performance
 #[derive(Parser, Debug)]
 #[command(name = "benchmark")]
 #[command(about = "Benchmark tycho-solver with various parallelization strategies", long_about = None)]
 struct Cli {
-    /// RPC endpoint URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
-
-    /// Tycho indexer URL
-    #[arg(long, env = "TYCHO_URL")]
-    tycho_url: String,
-
-    /// Blockchain network
-    #[arg(long, env = "CHAIN", default_value = "Ethereum")]
-    chain: String,
-
-    /// Comma-separated protocol list
-    #[arg(long, env = "PROTOCOLS", default_value = "uniswap_v2,uniswap_v3")]
-    protocols: String,
-
-    /// HTTP server port
-    #[arg(long, env = "HTTP_PORT", default_value = "3000")]
-    http_port: u16,
-
-    /// Worker pool configuration file
-    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
-    worker_pools_config: String,
+    /// Solver URL to benchmark against
+    #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]
+    solver_url: String,
 
     /// Number of requests to benchmark
     #[arg(long, short = 'n', env = "NUM_REQUESTS", default_value = "1")]
@@ -69,54 +49,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    let chain = parse_chain(&cli.chain)?;
-    let protocols: Vec<String> = cli
-        .protocols
-        .split(',')
-        .map(|s| s.to_string())
-        .collect();
     let parallelization_mode = ParallelizationMode::from_str(&cli.parallelization_mode)?;
 
     // Print configuration
-    info!("Chain: {}", cli.chain);
-    info!("Tycho URL: {}", cli.tycho_url);
-    info!("Protocols: {}", cli.protocols);
-    info!("HTTP Port: {}", cli.http_port);
-    info!("Worker pools config: {}", cli.worker_pools_config);
+    info!("Solver URL: {}", cli.solver_url);
     info!("Number of requests: {}", cli.num_requests);
     info!("Parallelization mode: {:?}", parallelization_mode);
 
-    // Load worker pools configuration
-    let pools_config = WorkerPoolsConfig::load_from_file(&cli.worker_pools_config)?;
-    let worker_pools_config_content = std::fs::read_to_string(&cli.worker_pools_config)?;
-    info!("Loaded {} worker pool(s)", pools_config.pools.len());
-
-    // Build and spawn the solver
-    info!("Starting tycho-solver...");
-    let solver = TychoSolverBuilder::new(
-        chain,
-        pools_config.pools,
-        cli.tycho_url.clone(),
-        cli.rpc_url.clone(),
-        protocols.clone(),
-    )
-    .http_port(cli.http_port)
-    .build()?;
-
-    let server_handle = solver.server_handle();
-    let solver_task = tokio::spawn(async move {
-        if let Err(e) = solver.run().await {
-            error!("Solver error: {}", e);
-        }
-    });
-
-    // Wait for solver to be ready
-    let solver_url = format!("http://localhost:{}", cli.http_port);
-    if let Err(e) = wait_for_solver_ready(&solver_url).await {
-        error!("Failed to start solver: {}", e);
-        server_handle.stop(true).await;
-        return Err(e);
-    }
+    // Check if solver is ready
+    check_solver_health(&cli.solver_url).await?;
     info!("Solver is ready");
 
     // Load requests
@@ -126,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let benchmark_start = Instant::now();
     let (round_trip_times, solve_times, successful_requests) =
-        run_benchmark(client, &solver_url, &requests, cli.num_requests, &parallelization_mode)
+        run_benchmark(client, &cli.solver_url, &requests, cli.num_requests, &parallelization_mode)
             .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
@@ -163,17 +104,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(output_file) = cli.output_file {
             let config = BenchmarkConfig {
-                chain: cli.chain,
-                rpc_url: cli.rpc_url,
-                tycho_url: cli.tycho_url,
-                protocols,
-                http_port: cli.http_port,
+                solver_url: cli.solver_url.clone(),
                 num_requests: cli.num_requests,
                 parallelization_mode,
-                worker_pools_config_path: cli.worker_pools_config,
-                worker_pools_config: worker_pools_config_content,
                 requests_file,
                 num_request_templates: requests.len(),
+                chain: None,
+                rpc_url: None,
+                tycho_url: None,
+                protocols: Vec::new(),
+                worker_pools_config_path: None,
+                worker_pools_config: None,
             };
 
             let results = BenchmarkResults::new(
@@ -194,50 +135,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("No successful requests!");
     }
 
-    // Shutdown
-    tracing::info!("Shutting down solver...");
-    server_handle.stop(true).await;
-    solver_task.await?;
-    tracing::info!("Solver stopped");
-
     Ok(())
 }
 
-async fn wait_for_solver_ready(solver_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn check_solver_health(solver_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let health_url = format!("{}/v1/health", solver_url);
-    let max_attempts = 120;
-    let mut attempts = 0;
 
-    info!("Waiting for market data to load");
-    std::io::Write::flush(&mut std::io::stdout()).ok();
+    info!("Checking solver health...");
 
-    loop {
-        attempts += 1;
-        if attempts > max_attempts {
-            return Err(
-                "Solver failed to become ready within timeout. Market data may not have loaded."
-                    .into(),
-            );
-        }
-
-        match client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(health) = resp.json::<HealthStatus>().await {
-                    if health.healthy {
-                        tracing::info!(
-                            "Market data age: {}ms, Solver pools: {}",
-                            health.last_update_ms,
-                            health.num_solver_pools
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let resp = client.get(&health_url).send().await?;
+    if !resp.status().is_success() {
+        return Err(format!("Solver health check failed with status: {}", resp.status()).into());
     }
+
+    let health = resp.json::<HealthStatus>().await?;
+    if !health.healthy {
+        return Err("Solver is not healthy".into());
+    }
+
+    info!(
+        "Market data age: {}ms, Solver pools: {}",
+        health.last_update_ms, health.num_solver_pools
+    );
+
+    Ok(())
 }

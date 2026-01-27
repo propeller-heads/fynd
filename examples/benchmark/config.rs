@@ -53,17 +53,24 @@ impl ParallelizationMode {
 
 #[derive(Debug, Serialize)]
 pub struct BenchmarkConfig {
-    pub chain: String,
-    pub rpc_url: String,
-    pub tycho_url: String,
-    pub protocols: Vec<String>,
-    pub http_port: u16,
+    pub solver_url: String,
     pub num_requests: usize,
     pub parallelization_mode: ParallelizationMode,
-    pub worker_pools_config_path: String,
-    pub worker_pools_config: String,
     pub requests_file: Option<String>,
     pub num_request_templates: usize,
+    // Optional solver metadata (may not be available when benchmarking remote solvers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tycho_url: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_pools_config_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_pools_config: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

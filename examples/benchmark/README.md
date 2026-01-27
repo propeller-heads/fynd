@@ -1,27 +1,25 @@
-# Tycho Solver Benchmark Tool
+# Tycho Solver Benchmark
 
 Benchmark tool for measuring tycho-solver performance with various parallelization strategies.
+
+**Prerequisites:** This benchmark requires a running solver. See [examples/README.md](../README.md) for instructions on starting the solver.
 
 ## Usage
 
 ```bash
-export TYCHO_API_KEY=<your-key>
-cargo run --example benchmark -- --rpc-url <RPC_URL> --tycho-url <TYCHO_URL> [OPTIONS]
+cargo run --example benchmark --release -- [OPTIONS]
 ```
 
-### Options
+**Important:** Always use `--release` for accurate performance measurements!
+
+## Options
 
 ```
---rpc-url <RPC_URL>              RPC endpoint URL (required) [env: RPC_URL]
---tycho-url <TYCHO_URL>          Tycho indexer URL (required) [env: TYCHO_URL]
---chain <CHAIN>                  Blockchain network [env: CHAIN] [default: Ethereum]
---protocols <PROTOCOLS>          Comma-separated protocol list [env: PROTOCOLS] [default: uniswap_v2,uniswap_v3]
---http-port <PORT>               HTTP server port [env: HTTP_PORT] [default: 3000]
---worker-pools-config <FILE>     Worker pool configuration file [env: WORKER_POOLS_CONFIG] [default: worker_pools.toml]
+--solver-url <URL>               Solver URL to benchmark against [env: SOLVER_URL] [default: http://localhost:3000]
 -n, --num-requests <NUM>         Number of requests to benchmark [env: NUM_REQUESTS] [default: 1]
 -m, --parallelization-mode <MODE> Parallelization mode [env: PARALLELIZATION_MODE] [default: sequential]
 --requests-file <FILE>           Path to JSON file with request templates [env: REQUESTS_FILE]
---output-file <FILE>             Output file for results (optional, not exported if omitted) [env: OUTPUT_FILE]
+--output-file <FILE>             Output file for results (optional) [env: OUTPUT_FILE]
 -h, --help                       Print help
 ```
 
@@ -39,21 +37,19 @@ By default, uses a WETH→USDC swap. To use custom requests, create a JSON file 
 
 ## Examples
 
-### Sequential benchmark
+### Sequential benchmark (10 requests)
 
 ```bash
-cargo run --example benchmark -- \
-  --rpc-url https://node-provider.com/v2/YOUR_KEY \
-  --tycho-url tycho-dev.propellerheads.xyz \
+cargo run --example benchmark --release -- \
+  --solver-url http://localhost:3000 \
   -n 10
 ```
 
 ### Fixed concurrency with 10 parallel requests
 
 ```bash
-cargo run --example benchmark -- \
-  --rpc-url https://node-provider.com/v2/YOUR_KEY \
-  --tycho-url tycho-dev.propellerheads.xyz \
+cargo run --example benchmark --release -- \
+  --solver-url http://localhost:3000 \
   -m fixed:10 \
   -n 100
 ```
@@ -61,12 +57,21 @@ cargo run --example benchmark -- \
 ### Rate-based with custom requests
 
 ```bash
-cargo run --example benchmark -- \
-  --rpc-url https://node-provider.com/v2/YOUR_KEY \
-  --tycho-url tycho-dev.propellerheads.xyz \
+cargo run --example benchmark --release -- \
+  --solver-url http://localhost:3000 \
   -m rate:50 \
   -n 100 \
   --requests-file examples/benchmark/example_requests.json
+```
+
+### Export results to file
+
+```bash
+cargo run --example benchmark --release -- \
+  --solver-url http://localhost:3000 \
+  -m fixed:10 \
+  -n 1000 \
+  --output-file results.json
 ```
 
 ## Output
