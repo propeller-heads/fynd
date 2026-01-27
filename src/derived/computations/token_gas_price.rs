@@ -223,7 +223,7 @@ impl TokenGasPriceComputation {
     ) -> Result<(f64, Price), ComputationError> {
         // Forward: gas_token → target_token
         let buy_route =
-            MostLiquidAlgorithm::simulate_path(&path, market, self.simulation_amount.clone())
+            MostLiquidAlgorithm::simulate_path(&path, market, None, self.simulation_amount.clone())
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
                 })?;
@@ -240,7 +240,8 @@ impl TokenGasPriceComputation {
         let reversed_path = path.reversed();
 
         let sell_route =
-            MostLiquidAlgorithm::simulate_path(&reversed_path, market, buy_out.clone()).map_err(
+            MostLiquidAlgorithm::simulate_path(&reversed_path, market, None, buy_out.clone())
+                .map_err(
                 |e| ComputationError::SimulationFailed(format!("sell simulation failed: {}", e)),
             )?;
         let sell_gas_units = sell_route.total_gas();

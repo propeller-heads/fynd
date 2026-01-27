@@ -14,15 +14,35 @@ pub type ComputationId = &'static str;
 
 /// Requirements for derived data computations.
 ///
-/// Each algorithm declares which computations it needs:
-/// - `required`: Must wait for these before solving (blocks)
-/// - `optional`: Best-effort, use if available (non-blocking)
+/// Each algorithm declares which computations it needs and their freshness requirements:
+///
+/// - `require_fresh`: Data must be from the current block (same block as SharedMarketData).
+///   Workers wait for these computations to complete for the current block before solving.
+///
+/// - `allow_stale`: Data can be from any past block, as long as it has been computed at least once.
+///   Workers only check that the data exists, not that it's from the current block.
+///
+///
+/// # Example
+///
+/// ```ignore
+/// // Token prices don't change much block-to-block, stale is fine
+/// ComputationRequirements::none()
+///     .with_stale("token_prices")
+///
+/// // Spot prices must be fresh for accurate routing
+/// ComputationRequirements::none()
+///     .with_fresh("spot_prices")
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
-    /// Computations that must complete before solving.
-    pub required: HashSet<ComputationId>,
-    /// Computations that are useful but not required.
-    pub optional: HashSet<ComputationId>,
+    /// Computations that must be from the current block.
+    pub require_fresh: HashSet<ComputationId>,
+    /// Computations that can use data from any past block.
+    ///
+    /// TODO: Stale data can be dangerous if stale for too long. In the future, associate staleness
+    /// to a block limit might be implemented.
+    pub allow_stale: HashSet<ComputationId>,
 }
 
 impl ComputationRequirements {
@@ -31,21 +51,31 @@ impl ComputationRequirements {
         Self::default()
     }
 
-    /// Creates requirements with only required computations.
-    pub fn required(ids: impl IntoIterator<Item = ComputationId>) -> Self {
-        Self { required: ids.into_iter().collect(), optional: HashSet::new() }
+    /// Creates requirements with fresh computations only.
+    pub fn fresh(ids: impl IntoIterator<Item = ComputationId>) -> Self {
+        Self { require_fresh: ids.into_iter().collect(), allow_stale: HashSet::new() }
     }
 
-    /// Builder method to add a required computation.
-    pub fn with_required(mut self, id: ComputationId) -> Self {
-        self.required.insert(id);
+    /// Creates requirements with stale-allowed computations only.
+    pub fn stale(ids: impl IntoIterator<Item = ComputationId>) -> Self {
+        Self { require_fresh: HashSet::new(), allow_stale: ids.into_iter().collect() }
+    }
+
+    /// Builder method to add a computation that requires fresh data (current block).
+    pub fn with_fresh(mut self, id: ComputationId) -> Self {
+        self.require_fresh.insert(id);
         self
     }
 
-    /// Builder method to add an optional computation.
-    pub fn with_optional(mut self, id: ComputationId) -> Self {
-        self.optional.insert(id);
+    /// Builder method to add a computation that allows stale data (any past block).
+    pub fn with_stale(mut self, id: ComputationId) -> Self {
+        self.allow_stale.insert(id);
         self
+    }
+
+    /// Returns true if there are any requirements.
+    pub fn has_requirements(&self) -> bool {
+        !self.require_fresh.is_empty() || !self.allow_stale.is_empty()
     }
 }
 

@@ -87,9 +87,11 @@ pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
 pub use derived::{
     ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,
-    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
+    DerivedDataEvent, PoolDepthKey, PoolDepths, ReadinessTracker, SpotPriceKey, SpotPrices,
+    TokenGasPriceKey, TokenGasPrices,
 };
 pub use types::{
+    native_token, UnsupportedChainError,
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
     SolveError, Swap,

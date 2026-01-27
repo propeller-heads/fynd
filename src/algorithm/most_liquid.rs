@@ -25,6 +25,7 @@ use tycho_simulation::{
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
+    derived::{ComputationRequirements, SharedDerivedDataRef, TokenGasPrices},
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route},
@@ -225,11 +226,13 @@ impl MostLiquidAlgorithm {
     /// * `path` - The edge path to simulate
     /// * `graph` - The graph containing edge and node data
     /// * `market` - Market data for token/component lookups and gas price
+    /// * `token_prices` - Optional token prices for gas cost conversion
     /// * `amount_in` - The input amount to simulate
-    #[instrument(level = "trace", skip(path, market), fields(hop_count = path.len()))]
+    #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
     pub(crate) fn simulate_path<D>(
         path: &Path<D>,
         market: &SharedMarketData,
+        token_prices: Option<&TokenGasPrices>,
         amount_in: BigUint,
     ) -> Result<Route, AlgorithmError> {
         let mut current_amount = amount_in.clone();
@@ -323,31 +326,40 @@ impl MostLiquidAlgorithm {
             current_amount = result.amount;
         }
 
-        // Calculate net amount out (output - gas cost in wei)
-        // TODO: Convert gas cost to output token terms for proper ranking.
-        // Currently subtracting raw wei from output amount, which is incorrect when
-        // token_out != ETH. Need to:
-        // 1. Store ETH price per token (token/ETH rate) - likely in SharedMarketData
-        // 2. Look up ETH price for the output token of this path
-        // 3. Convert: gas_cost_in_token_out = gas_cost_wei * eth_price_in_token_out
+        // Calculate net amount out (output - gas cost in output token terms)
         let output_amount = swaps
             .last()
             .map(|s| s.amount_out.clone())
             .unwrap_or_else(|| BigUint::ZERO);
-        let total_gas: BigUint = swaps
-            .iter()
-            .map(|s| &s.gas_estimate)
-            .sum();
-        let gas_price = market
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price();
-        let gas_cost_wei = total_gas * gas_price;
-        let gas_cost_out = gas_cost_wei * 1u32; // Placeholder until conversion is implemented
 
-        // Use BigInt to allow negative values when gas exceeds output
-        // (can happen due to inaccurate gas estimation or price conversion)
-        let net_amount_out = BigInt::from(output_amount) - BigInt::from(gas_cost_out);
+        let net_amount_out = if let Some(last_swap) = swaps.last() {
+            let total_gas: BigUint = swaps.iter().map(|s| &s.gas_estimate).sum();
+            let gas_price = market
+                .gas_price()
+                .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+                .effective_gas_price();
+            let gas_cost_wei = &total_gas * gas_price;
+
+            // Convert gas cost to output token terms using token prices
+            let gas_cost_in_output_token: Option<BigUint> = token_prices
+                .and_then(|prices| prices.get(&last_swap.token_out))
+                .map(|price| {
+                    // gas_cost_in_token = gas_cost_wei * numerator / denominator
+                    // where numerator = tokens per ETH, denominator = 10^18 + path_gas
+                    &gas_cost_wei * &price.numerator / &price.denominator
+                });
+
+            match gas_cost_in_output_token {
+                Some(gas_cost) => BigInt::from(output_amount) - BigInt::from(gas_cost),
+                None => {
+                    // No token price available - use output amount as-is
+                    // This happens if derived data hasn't been computed yet
+                    BigInt::from(output_amount)
+                }
+            }
+        } else {
+            BigInt::from(output_amount)
+        };
 
         Ok(Route::new(swaps, net_amount_out))
     }
@@ -373,6 +385,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         graph: &Self::GraphType,
         market: SharedMarketDataRef,
+        derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<Route, AlgorithmError> {
         let start = Instant::now();
@@ -381,6 +394,13 @@ impl Algorithm for MostLiquidAlgorithm {
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
+
+        // Extract token prices from derived data (if available)
+        let token_prices = if let Some(ref derived) = derived {
+            derived.read().await.token_prices().cloned()
+        } else {
+            None
+        };
 
         let amount_in = order.amount.clone();
 
@@ -467,7 +487,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let route = match Self::simulate_path(&edge_path, &market, amount_in.clone()) {
+            let route = match Self::simulate_path(&edge_path, &market, token_prices.as_ref(), amount_in.clone()) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -571,6 +591,16 @@ impl Algorithm for MostLiquidAlgorithm {
 
     fn supports_exact_out(&self) -> bool {
         false // TODO: Implement exact-out support
+    }
+
+    fn computation_requirements(&self) -> ComputationRequirements {
+        // MostLiquidAlgorithm uses token prices to convert gas costs from wei
+        // to output token terms for accurate amount_out_net_gas calculation.
+        //
+        // Token prices are marked as `allow_stale` since they don't change much
+        // block-to-block and having slightly stale prices is acceptable for
+        // gas cost estimation.
+        ComputationRequirements::none().with_stale("token_prices")
     }
 }
 

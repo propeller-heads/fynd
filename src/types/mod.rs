@@ -5,6 +5,7 @@
 //! - [`primitives`] - Basic types like ComponentId, ProtocolSystem, GasPrice
 //! - [`api`] - HTTP API types (health check)
 //! - [`internal`] - Internal task and error types
+//! - [`constants`] - Protocol gas costs and native token addresses
 
 pub mod api;
 pub mod constants;
@@ -14,6 +15,8 @@ pub mod solution;
 
 // Re-export API types
 pub use api::HealthStatus;
+// Re-export constants
+pub use constants::{native_token, UnsupportedChainError};
 // Re-export error types (needed for API responses)
 pub use internal::SolveError;
 pub use primitives::*;

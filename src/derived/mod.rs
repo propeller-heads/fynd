@@ -50,15 +50,19 @@
 mod computation;
 mod computations;
 mod error;
+mod events;
 mod manager;
 mod store;
+mod tracker;
 mod types;
 
 pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
 pub use computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation};
 pub use error::ComputationError;
-pub use manager::{ComputationManager, ComputationManagerConfig};
+pub use events::DerivedDataEvent;
+pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
+pub use tracker::ReadinessTracker;
 pub use types::{
     PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
 };

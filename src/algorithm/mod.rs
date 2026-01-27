@@ -23,6 +23,7 @@ pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
+    derived::{ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
     types::{solution::Order, Route},
@@ -120,6 +121,7 @@ pub(crate) trait Algorithm: Send + Sync {
     /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
     /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
     ///   locks)
+    /// * `derived` - Optional shared reference to derived data (token prices, etc.)
     /// * `order` - The order to solve
     ///
     /// # Returns
@@ -129,12 +131,25 @@ pub(crate) trait Algorithm: Send + Sync {
         &self,
         graph: &Self::GraphType,
         market: SharedMarketDataRef,
+        derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<Route, AlgorithmError>;
 
     /// Returns whether this algorithm supports exact-out orders.
     #[allow(dead_code)]
     fn supports_exact_out(&self) -> bool;
+
+    /// Returns the derived data computation requirements for this algorithm.
+    ///
+    /// Algorithms declare freshness requirements for derived data:
+    /// - `require_fresh`: Data must be from the current block (same as SharedMarketData)
+    /// - `allow_stale`: Data can be from any past block, as long as it exists
+    ///
+    /// Workers use this to determine when they can safely solve.
+    ///
+    /// Default implementation returns no requirements - algorithm works without
+    /// any derived data.
+    fn computation_requirements(&self) -> ComputationRequirements;
 }
 
 /// Errors that can occur during route finding.
