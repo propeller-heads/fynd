@@ -8,11 +8,10 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 100
 
-# [pools.most_liquid_3_hops]
-# algorithm = "most_liquid"
-# num_workers = 1
-# max_hops = 3
-# timeout_ms = 10000
+[pools.most_liquid_3_hops]
+algorithm = "most_liquid"
+num_workers = 1
+max_hops = 3
 
 # Add more pools by adding entries under [pools.*], e.g.:
 # [pools.dijkstra]
