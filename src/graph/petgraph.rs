@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
 use tycho_simulation::tycho_common::models::Address;
@@ -328,8 +329,9 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
     }
 }
 
-impl<D: Clone> MarketEventHandler for PetgraphStableDiGraphManager<D> {
-    fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
+#[async_trait]
+impl<D: Clone + Send> MarketEventHandler for PetgraphStableDiGraphManager<D> {
+    async fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError> {
         match event {
             MarketEvent::MarketUpdated { added_components, removed_components, .. } => {
                 // Process both operations and collect all errors
@@ -668,8 +670,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_event_propagates_errors() {
+    #[tokio::test]
+    async fn test_handle_event_propagates_errors() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
         use std::collections::HashMap;
 
@@ -682,7 +684,7 @@ mod tests {
             updated_components: vec![],
         };
 
-        let result = manager.handle_event(&event);
+        let result = manager.handle_event(&event).await;
 
         // Should return multiple errors
         assert!(result.is_err());

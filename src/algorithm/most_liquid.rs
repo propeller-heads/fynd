@@ -227,8 +227,8 @@ impl MostLiquidAlgorithm {
     /// * `market` - Market data for token/component lookups and gas price
     /// * `amount_in` - The input amount to simulate
     #[instrument(level = "trace", skip(path, market), fields(hop_count = path.len()))]
-    fn simulate_path<D>(
-        path: Path<D>,
+    pub(crate) fn simulate_path<D>(
+        path: &Path<D>,
         market: &SharedMarketData,
         amount_in: BigUint,
     ) -> Result<Route, AlgorithmError> {
@@ -467,7 +467,7 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let route = match Self::simulate_path(edge_path, &market, amount_in.clone()) {
+            let route = match Self::simulate_path(&edge_path, &market, amount_in.clone()) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -576,10 +576,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::collections::HashSet;
 
     use rstest::rstest;
-    use tokio::sync::RwLock;
     use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
     use super::*;
@@ -589,10 +588,10 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
+        feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
-
     // ==================== try_score_path Tests ====================
 
     #[test]
@@ -873,7 +872,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 1);
@@ -904,7 +903,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
@@ -941,7 +940,7 @@ mod tests {
         let path = paths[0].clone();
 
         let route =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(10u64))
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
                 .unwrap();
 
         assert_eq!(route.swaps.len(), 2);
@@ -974,7 +973,7 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result = MostLiquidAlgorithm::simulate_path(path, &market, BigUint::from(100u64));
+        let result = MostLiquidAlgorithm::simulate_path(&path, &market, BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
@@ -997,7 +996,7 @@ mod tests {
         let path = paths.into_iter().next().unwrap();
 
         let result =
-            MostLiquidAlgorithm::simulate_path(path, &market_read(&market), BigUint::from(100u64));
+            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 
@@ -1029,20 +1028,22 @@ mod tests {
     #[tokio::test]
     async fn find_best_route_ranks_by_net_amount_out() {
         // Tests that route selection is based on net_amount_out (output - gas cost),
-        // not just gross output. Four parallel pools with different spot_price/gas combos:
+        // not just gross output. Three parallel pools with different spot_price/gas combos:
         //
-        // | Pool      | spot_price | gas  | Output (1000 in) | Gas Cost | Net   |
-        // |-----------|------------|------|------------------|----------|-------|
-        // | best      | 3          | 1000 | 3000             | 1500     | 2000  |
-        // | low_out   | 2          | 500  | 2000             | 500      | 1500  |
-        // | high_gas  | 4          | 3000 | 4000             | 3000     | 1000  |
+        // Gas price = 100 wei/gas (set by setup_market)
+        //
+        // | Pool      | spot_price | gas | Output (1000 in) | Gas Cost (gas*100) | Net   |
+        // |-----------|------------|-----|------------------|-------------------|-------|
+        // | best      | 3          | 10  | 3000             | 1000              | 2000  |
+        // | low_out   | 2          | 5   | 2000             | 500               | 1500  |
+        // | high_gas  | 4          | 30  | 4000             | 3000              | 1000  |
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market(vec![
-            ("best", &token_a, &token_b, MockProtocolSim::new(3).with_gas(1000)),
-            ("low_out", &token_a, &token_b, MockProtocolSim::new(2).with_gas(500)),
-            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(3000)),
+            ("best", &token_a, &token_b, MockProtocolSim::new(3).with_gas(10)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2).with_gas(5)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4).with_gas(30)),
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -1096,6 +1097,7 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
+
         let route = algorithm
             .find_best_route(manager.graph(), market, &order)
             .await
@@ -1165,9 +1167,9 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
         let route = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await
             .unwrap();
 
@@ -1211,10 +1213,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
         assert!(matches!(
             result,
@@ -1318,10 +1320,10 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let market_ref = Arc::new(RwLock::new(market));
+        let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market_ref, &order)
+            .find_best_route(manager.graph(), market, &order)
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity

@@ -1,79 +1,48 @@
 //! Data types for derived computations.
 
+use std::collections::HashMap;
+
 use num_bigint::BigUint;
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 
 use crate::types::ComponentId;
 
-/// Price of a token relative to the gas token (e.g., ETH).
+// =============================================================================
+// Spot Price Types
+// =============================================================================
+
+/// Key for spot price lookups: (component_id, token_in, token_out).
 ///
-/// Used for gas cost estimation in output token terms.
-#[derive(Debug, Clone)]
-pub struct TokenGasPrice {
-    /// Token address.
-    pub token: Address,
-    /// Price in gas token units (e.g., 2000 USDC = 1 ETH).
-    /// Represented as a ratio: price = numerator / denominator.
-    pub numerator: BigUint,
-    // TODO: This was included here to have the denominator always clear to the user, but maybe
-    // this could be moved a layer up.
-    pub denominator: BigUint,
-}
+/// Uniquely identifies a directional price within a specific pool.
+pub type SpotPriceKey = (ComponentId, Address, Address);
 
-impl TokenGasPrice {
-    pub fn new(token: Address, numerator: BigUint, denominator: BigUint) -> Self {
-        Self { token, numerator, denominator }
-    }
-}
-
-/// Liquidity depth for a pool at a specific price level.
+/// Spot prices map: key -> spot price as f64.
 ///
-/// Represents how much can be traded before significant price impact.
-#[derive(Debug, Clone)]
-pub struct PoolDepth {
-    /// Component (pool) identifier.
-    pub component_id: ComponentId,
-    /// Token being sold.
-    pub token_in: Address,
-    /// Token being bought.
-    pub token_out: Address,
-    /// Amount available at current price level.
-    pub available_amount: BigUint,
-}
+/// Represents: 1 token_in = spot_price token_out.
+pub type SpotPrices = HashMap<SpotPriceKey, f64>;
 
-impl PoolDepth {
-    pub fn new(
-        component_id: ComponentId,
-        token_in: Address,
-        token_out: Address,
-        available_amount: BigUint,
-    ) -> Self {
-        Self { component_id, token_in, token_out, available_amount }
-    }
-}
+// =============================================================================
+// Pool Depth Types
+// =============================================================================
 
-/// Spot price for a specific pool and token pair.
+/// Key for pool depth lookups: (component_id, token_in, token_out).
 ///
-/// The instantaneous exchange rate without price impact.
-#[derive(Debug, Clone)]
-pub struct SpotPrice {
-    /// Component (pool) identifier.
-    pub component_id: ComponentId,
-    /// Token being sold.
-    pub token_in: Address,
-    /// Token being bought.
-    pub token_out: Address,
-    /// Spot price
-    pub price: f64,
-}
+/// Uniquely identifies a directional liquidity depth within a specific pool.
+pub type PoolDepthKey = (ComponentId, Address, Address);
 
-impl SpotPrice {
-    pub fn new(
-        component_id: ComponentId,
-        token_in: Address,
-        token_out: Address,
-        price: f64,
-    ) -> Self {
-        Self { component_id, token_in, token_out, price }
-    }
-}
+/// Pool depths map: key -> maximum input amount at the configured slippage threshold.
+///
+/// Represents how much can be traded before the specified price impact.
+pub type PoolDepths = HashMap<PoolDepthKey, BigUint>;
+
+// =============================================================================
+// Token Gas Price Types
+// =============================================================================
+
+/// Key for token price lookups: token address.
+pub type TokenGasPriceKey = Address;
+
+/// Token prices map: token address -> it's mid-price relative to gas token.
+pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;

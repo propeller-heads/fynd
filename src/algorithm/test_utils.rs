@@ -23,7 +23,7 @@ use crate::{
     algorithm::most_liquid::DepthAndPrice,
     feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
-    types::{solution::OrderSide, Order},
+    types::{solution::OrderSide, BlockInfo, Order},
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -45,7 +45,7 @@ pub struct MockProtocolSim {
     /// Gas to report for each swap
     pub gas: u64,
     /// Liquidity limit
-    pub liquidity: u64,
+    pub liquidity: u128,
     /// Fee percentage
     pub fee: f64,
 }
@@ -65,7 +65,7 @@ impl MockProtocolSim {
         self
     }
 
-    pub fn with_liquidity(mut self, liquidity: u64) -> Self {
+    pub fn with_liquidity(mut self, liquidity: u128) -> Self {
         self.liquidity = liquidity;
         self
     }
@@ -78,7 +78,7 @@ impl MockProtocolSim {
 
 impl Default for MockProtocolSim {
     fn default() -> Self {
-        Self { spot_price: 2, gas: 50_000, liquidity: u64::MAX, fee: 0.0 }
+        Self { spot_price: 2, gas: 50_000, liquidity: u128::MAX, fee: 0.0 }
     }
 }
 
@@ -251,8 +251,9 @@ pub(crate) fn setup_market(
         block_number: 1,
         block_hash: Default::default(),
         block_timestamp: 0,
-        pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
     });
+    market.update_last_updated(BlockInfo { number: 1, hash: "0x00".into(), timestamp: 0 });
 
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];
@@ -375,12 +376,12 @@ mod tests {
     // ==================== Builder & Default Tests ====================
 
     #[test]
-    fn default_values_are_sensible() {
+    fn default_values_are_as_expected() {
         let sim = MockProtocolSim::default();
 
         assert_eq!(sim.spot_price, 2);
         assert_eq!(sim.gas, 50_000);
-        assert_eq!(sim.liquidity, u64::MAX);
+        assert_eq!(sim.liquidity, u128::MAX);
         assert_eq!(sim.fee, 0.0);
     }
 
@@ -390,7 +391,7 @@ mod tests {
 
         assert_eq!(sim.spot_price, 10);
         assert_eq!(sim.gas, 50_000); // default
-        assert_eq!(sim.liquidity, u64::MAX); // default
+        assert_eq!(sim.liquidity, u128::MAX); // default
         assert_eq!(sim.fee, 0.0); // default
     }
 

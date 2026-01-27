@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use thiserror::Error;
 use tycho_simulation::tycho_common::models::Address;
 
@@ -36,11 +37,12 @@ pub(crate) enum EventError {
 }
 
 /// Trait for components that can receive market events.
-pub(crate) trait MarketEventHandler {
+#[async_trait]
+pub(crate) trait MarketEventHandler: Send {
     /// Handle a market event.
     ///
     /// # Errors
     ///
     /// Returns an error if the event could not be processed.
-    fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError>;
+    async fn handle_event(&mut self, event: &MarketEvent) -> Result<(), EventError>;
 }
