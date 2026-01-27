@@ -21,7 +21,7 @@ pub struct OrderManagerConfig {
 impl Default for OrderManagerConfig {
     fn default() -> Self {
         Self {
-            default_timeout: Duration::from_millis(100),
+            default_timeout: Duration::from_millis(10000),
             min_responses: 0, // Wait for all by default
         }
     }

@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = OrderManagerConfig::default();
-        assert_eq!(config.default_timeout, Duration::from_millis(100));
+        assert_eq!(config.default_timeout, Duration::from_secs(10));
         assert_eq!(config.min_responses, 0);
     }
 

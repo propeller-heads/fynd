@@ -8,16 +8,36 @@
 //! useful for optimising the graph manager's performance by allowing for O(1) edge and node
 //! lookups.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
+use tracing::debug;
 use tycho_simulation::tycho_common::models::Address;
 
-use super::GraphManager;
+/// Components that are blacklisted from routing due to simulation issues.
+///
+/// These pools are excluded from the routing graph because they have known
+/// issues with the simulation (e.g., rebasing tokens that don't work correctly
+/// with certain protocols).
+static BLACKLISTED_COMPONENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        // UniswapV3 AMPL pool - AMPL is a rebasing token that doesn't work correctly
+        // with UniswapV3 simulation
+        "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
+    ])
+});
+
+use super::{EdgeWeightFromSim, EdgeWeightUpdater, GraphManager};
 use crate::{
-    feed::events::{EventError, MarketEvent, MarketEventHandler},
+    feed::{
+        events::{EventError, MarketEvent, MarketEventHandler},
+        market_data::SharedMarketData,
+    },
     graph::GraphError,
     types::ComponentId,
 };
@@ -160,6 +180,12 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         let mut invalid_components = Vec::new();
 
         for (comp_id, tokens) in components {
+            // Skip blacklisted components
+            if BLACKLISTED_COMPONENTS.contains(comp_id.as_str()) {
+                debug!(component_id = %comp_id, "skipping blacklisted component");
+                continue;
+            }
+
             if tokens.len() < 2 {
                 invalid_components.push(comp_id.clone());
                 continue;
@@ -289,6 +315,62 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     }
 }
 
+impl<D: Clone + EdgeWeightFromSim> PetgraphStableDiGraphManager<D> {
+    /// Updates edge weights for all components using data from the market.
+    ///
+    /// For each edge in the graph, computes the weight using `D::from_sim()`
+    /// with the simulation state from the market data.
+    ///
+    /// # Arguments
+    ///
+    /// * `market` - The market data containing simulation states and tokens
+    ///
+    /// # Returns
+    ///
+    /// The number of edges successfully updated.
+    pub fn update_edge_weights(&mut self, market: &SharedMarketData) -> usize {
+        let tokens = market.token_registry_ref();
+
+        // First pass: collect edge info and compute weights (immutable borrow)
+        let updates: Vec<_> = self
+            .graph
+            .edge_indices()
+            .filter_map(|edge_idx| {
+                let edge_data = self.graph.edge_weight(edge_idx)?;
+                let component_id = &edge_data.component_id;
+
+                let sim_state = market.get_simulation_state(component_id)?;
+
+                let (source_idx, target_idx) = self.graph.edge_endpoints(edge_idx)?;
+                let source_addr = &self.graph[source_idx];
+                let target_addr = &self.graph[target_idx];
+
+                let token_in = tokens.get(source_addr)?;
+                let token_out = tokens.get(target_addr)?;
+
+                let weight = D::from_sim(sim_state, token_in, token_out)?;
+                Some((edge_idx, weight))
+            })
+            .collect();
+
+        // Second pass: apply updates (mutable borrow)
+        let updated = updates.len();
+        for (edge_idx, weight) in updates {
+            if let Some(edge_data) = self.graph.edge_weight_mut(edge_idx) {
+                edge_data.data = Some(weight);
+            }
+        }
+
+        updated
+    }
+}
+
+impl<D: Clone + EdgeWeightFromSim> EdgeWeightUpdater for PetgraphStableDiGraphManager<D> {
+    fn update_edge_weights(&mut self, market: &SharedMarketData) -> usize {
+        self.update_edge_weights(market)
+    }
+}
+
 impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
     fn default() -> Self {
         Self::new()
@@ -302,9 +384,21 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         self.edge_map.clear();
         self.node_map.clear();
 
-        let unique_tokens: HashSet<Address> = component_topology
+        // Filter out blacklisted components
+        let filtered_topology: HashMap<_, _> = component_topology
+            .iter()
+            .filter(|(comp_id, _)| {
+                let is_blacklisted = BLACKLISTED_COMPONENTS.contains(comp_id.as_str());
+                if is_blacklisted {
+                    debug!(component_id = %comp_id, "skipping blacklisted component");
+                }
+                !is_blacklisted
+            })
+            .collect();
+
+        let unique_tokens: HashSet<Address> = filtered_topology
             .values()
-            .flatten()
+            .flat_map(|v| v.iter())
             .cloned()
             .collect();
 
@@ -315,7 +409,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         }
 
         // Add edges between all tokens in each component
-        for (comp_id, tokens) in component_topology {
+        for (comp_id, tokens) in filtered_topology {
             let node_indices: Vec<NodeIndex> = tokens
                 .iter()
                 .map(|token| self.node_map[token])

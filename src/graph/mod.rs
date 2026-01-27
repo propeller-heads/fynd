@@ -10,9 +10,31 @@ use std::collections::HashMap;
 
 pub use petgraph::{EdgeData, EdgeIndex, PetgraphStableDiGraphManager};
 use thiserror::Error;
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
+    tycho_core::models::token::Token,
+};
 
 use crate::types::ComponentId;
+
+/// Trait for edge weight types that can be computed from a ProtocolSim.
+///
+/// Implement this trait for edge data types that need to be populated
+/// from pool simulation state (e.g., spot prices, liquidity depth).
+pub trait EdgeWeightFromSim: Sized {
+    /// Computes edge weight data from a ProtocolSim for the given token pair.
+    ///
+    /// # Arguments
+    ///
+    /// * `sim` - The protocol simulation state
+    /// * `token_in` - The input token
+    /// * `token_out` - The output token
+    ///
+    /// # Returns
+    ///
+    /// The computed edge weight, or `None` if it cannot be computed.
+    fn from_sim(sim: &dyn ProtocolSim, token_in: &Token, token_out: &Token) -> Option<Self>;
+}
 
 /// A path through the graph as a sequence of edge indices.
 ///
@@ -109,4 +131,17 @@ where
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
+}
+
+use crate::feed::market_data::SharedMarketData;
+
+/// Trait for graph managers that support edge weight updates from market data.
+///
+/// Implement this trait for graph managers whose edge data can be computed
+/// from simulation state.
+pub trait EdgeWeightUpdater {
+    /// Updates edge weights using simulation states from the market.
+    ///
+    /// Returns the number of edges successfully updated.
+    fn update_edge_weights(&mut self, market: &SharedMarketData) -> usize;
 }
