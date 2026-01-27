@@ -80,6 +80,44 @@ pub struct BenchmarkResults {
     pub statistics: BenchmarkStatistics,
 }
 
+impl BenchmarkResults {
+    /// Creates a new BenchmarkResults from configuration and raw measurements.
+    /// Calculates statistics automatically from the timing data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: BenchmarkConfig,
+        requests: Vec<SolutionRequest>,
+        successful_requests: usize,
+        failed_requests: usize,
+        total_duration_ms: u64,
+        throughput_rps: f64,
+        round_trip_times: Vec<u64>,
+        solve_times: Vec<u64>,
+        overheads: Vec<u64>,
+    ) -> Self {
+        let round_trip_stats = TimingStats::from_measurements(&round_trip_times).unwrap();
+        let solve_time_stats = TimingStats::from_measurements(&solve_times).unwrap();
+        let overhead_stats = TimingStats::from_measurements(&overheads).unwrap();
+
+        Self {
+            config,
+            request_templates: requests,
+            successful_requests,
+            failed_requests,
+            total_duration_ms,
+            throughput_rps,
+            round_trip_times_ms: round_trip_times,
+            solve_times_ms: solve_times,
+            overhead_times_ms: overheads,
+            statistics: BenchmarkStatistics {
+                round_trip: round_trip_stats,
+                solve_time: solve_time_stats,
+                overhead: overhead_stats,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct BenchmarkStatistics {
     pub round_trip: TimingStats,

@@ -1,8 +1,4 @@
-use tycho_solver::SolutionRequest;
-
-use crate::config::{
-    BenchmarkConfig, BenchmarkResults, BenchmarkStatistics, ParallelizationMode, TimingStats,
-};
+use crate::config::{BenchmarkResults, TimingStats};
 
 impl TimingStats {
     /// Calculates comprehensive statistics from timing measurements.
@@ -107,63 +103,10 @@ pub fn print_histogram(times: &[u64], label: &str, width: usize) {
 
 /// Exports benchmark results to a JSON file with complete configuration and statistics.
 /// The output includes worker pool configuration content and all timing measurements.
-#[allow(clippy::too_many_arguments)]
 pub fn export_results(
-    chain_str: String,
-    rpc_url: String,
-    tycho_url: String,
-    protocols: Vec<String>,
-    http_port: u16,
-    num_requests: usize,
-    parallelization_mode: ParallelizationMode,
-    worker_pools_config_path: String,
-    worker_pools_config_content: String,
+    results: BenchmarkResults,
     output_file: String,
-    requests_file: Option<String>,
-    requests: Vec<SolutionRequest>,
-    successful_requests: usize,
-    failed_requests: usize,
-    total_duration_ms: u64,
-    throughput_rps: f64,
-    round_trip_times: Vec<u64>,
-    solve_times: Vec<u64>,
-    overheads: Vec<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let benchmark_config = BenchmarkConfig {
-        chain: chain_str,
-        rpc_url,
-        tycho_url,
-        protocols,
-        http_port,
-        num_requests,
-        parallelization_mode,
-        worker_pools_config_path,
-        worker_pools_config: worker_pools_config_content,
-        requests_file,
-        num_request_templates: requests.len(),
-    };
-
-    let round_trip_stats = TimingStats::from_measurements(&round_trip_times).unwrap();
-    let solve_time_stats = TimingStats::from_measurements(&solve_times).unwrap();
-    let overhead_stats = TimingStats::from_measurements(&overheads).unwrap();
-
-    let results = BenchmarkResults {
-        config: benchmark_config,
-        request_templates: requests,
-        successful_requests,
-        failed_requests,
-        total_duration_ms,
-        throughput_rps,
-        round_trip_times_ms: round_trip_times,
-        solve_times_ms: solve_times,
-        overhead_times_ms: overheads,
-        statistics: BenchmarkStatistics {
-            round_trip: round_trip_stats,
-            solve_time: solve_time_stats,
-            overhead: overhead_stats,
-        },
-    };
-
     let json = serde_json::to_string_pretty(&results)?;
     std::fs::write(&output_file, json)?;
     tracing::info!("Results exported to: {}", output_file);

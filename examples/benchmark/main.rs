@@ -5,7 +5,7 @@ mod runner;
 use std::time::Instant;
 
 use clap::Parser;
-use config::{load_requests, ParallelizationMode};
+use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
 use runner::run_benchmark;
 use tracing::{error, info};
@@ -162,18 +162,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_histogram(&overheads, "Overhead", 50);
 
         if let Some(output_file) = cli.output_file {
-            export_results(
-                cli.chain,
-                cli.rpc_url,
-                cli.tycho_url,
+            let config = BenchmarkConfig {
+                chain: cli.chain,
+                rpc_url: cli.rpc_url,
+                tycho_url: cli.tycho_url,
                 protocols,
-                cli.http_port,
-                cli.num_requests,
+                http_port: cli.http_port,
+                num_requests: cli.num_requests,
                 parallelization_mode,
-                cli.worker_pools_config,
-                worker_pools_config_content,
-                output_file,
+                worker_pools_config_path: cli.worker_pools_config,
+                worker_pools_config: worker_pools_config_content,
                 requests_file,
+                num_request_templates: requests.len(),
+            };
+
+            let results = BenchmarkResults::new(
+                config,
                 requests,
                 successful_requests,
                 failed_requests,
@@ -182,7 +186,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 round_trip_times,
                 solve_times,
                 overheads,
-            )?;
+            );
+
+            export_results(results, output_file)?;
         }
     } else {
         tracing::warn!("No successful requests!");
