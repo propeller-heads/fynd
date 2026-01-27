@@ -12,6 +12,13 @@ impl TimingStats {
             return None;
         }
 
+        if times.len() < 50 {
+            tracing::warn!(
+                "Calculating timing statistics from {} measurements, results may be unreliable",
+                times.len()
+            );
+        }
+
         let mut sorted = times.to_vec();
         sorted.sort();
 
