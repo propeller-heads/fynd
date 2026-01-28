@@ -430,8 +430,8 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = OrderManagerConfig::default();
-        assert_eq!(config.default_timeout, Duration::from_secs(10));
-        assert_eq!(config.min_responses, 0);
+        assert_eq!(config.default_timeout, Duration::from_secs(1));
+        assert_eq!(config.min_responses, 1);
     }
 
     #[test]
@@ -480,7 +480,9 @@ mod tests {
         // Pool B: better solution (net gas = 950)
         let (pool_b, worker_b) = create_mock_pool("pool_b", Ok(make_single_solution(950)), 0);
 
-        let manager = OrderManager::new(vec![pool_a, pool_b], OrderManagerConfig::default());
+        // Wait for both responses to test best selection logic
+        let config = OrderManagerConfig::default().with_min_responses(2);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 

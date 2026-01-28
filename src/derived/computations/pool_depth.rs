@@ -225,12 +225,24 @@ impl DerivedComputation for PoolDepthComputation {
                     },
                 );
 
-                // Try query_pool_swap first, fall back to binary search if not implemented
+                // Try query_pool_swap first, fall back to binary search if not supported
                 let pool_depth = match sim_state.query_pool_swap(&params) {
                     Ok(swap) => swap.amount_in().clone(),
                     Err(SimulationError::FatalError(msg))
                         if msg == "query_pool_swap not implemented" =>
                     {
+                        self.find_depth_binary_search(
+                            sim_state,
+                            token_in,
+                            token_out,
+                            min_price,
+                            component_id,
+                        )?
+                    }
+                    Err(SimulationError::InvalidInput(msg, _))
+                        if msg.contains("does not support TradeLimitPrice") =>
+                    {
+                        // Pool doesn't support TradeLimitPrice constraint, use binary search
                         self.find_depth_binary_search(
                             sim_state,
                             token_in,

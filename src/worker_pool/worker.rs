@@ -14,11 +14,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     algorithm::Algorithm,
+    derived::{
+        events::DerivedDataEvent, DerivedComputation, PoolDepthComputation, SharedDerivedDataRef,
+    },
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::SharedMarketDataRef,
     },
-    graph::GraphManager,
+    graph::{EdgeWeightUpdaterWithDepths, GraphManager},
     types::{
         internal::SolveTask, BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus,
         SolveError,
@@ -38,6 +41,8 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
+    /// Reference to shared derived data (pool depths, token prices).
+    derived_data: SharedDerivedDataRef,
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
@@ -57,13 +62,20 @@ where
     /// # Arguments
     ///
     /// * `market_data` - Shared reference to market data
+    /// * `derived_data` - Shared reference to derived data (pool depths, token prices)
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
-    pub fn new(market_data: SharedMarketDataRef, algorithm: A, worker_id: usize) -> Self {
+    pub fn new(
+        market_data: SharedMarketDataRef,
+        derived_data: SharedDerivedDataRef,
+        algorithm: A,
+        worker_id: usize,
+    ) -> Self {
         Self {
             algorithm,
             graph_manager: A::GraphManager::default(),
             market_data,
+            derived_data,
             initialized: false,
             worker_id,
         }
@@ -239,19 +251,23 @@ where
     /// # Arguments
     ///
     /// * `event_rx` - Receiver for market events
+    /// * `derived_event_rx` - Receiver for derived data events (pool depths, etc.)
     /// * `task_rx` - Shared receiver for solve tasks
     /// * `shutdown_rx` - Receiver for shutdown signals
     pub async fn run(
         &mut self,
         mut event_rx: broadcast::Receiver<MarketEvent>,
+        mut derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
         task_rx: async_channel::Receiver<SolveTask>,
         mut shutdown_rx: broadcast::Receiver<()>,
-    ) {
+    ) where
+        A::GraphManager: EdgeWeightUpdaterWithDepths,
+    {
         info!(self.worker_id, "worker started");
 
         loop {
             tokio::select! {
-                biased; // prioritize events in this order: shutdown, market update, solve task
+                biased; // prioritize events in this order: shutdown, market update, derived data, solve task
 
                 // Check for shutdown
                 _ = shutdown_rx.recv() => {
@@ -278,6 +294,54 @@ where
                             );
                             // Reinitialize the graph from the current market state to recover from the missed events.
                             self.initialize_graph().await;
+                        }
+                    }
+                }
+
+                // Process derived data events (pool depths, token prices)
+                derived_result = derived_event_rx.recv() => {
+                    match derived_result {
+                        Ok(DerivedDataEvent::ComputationComplete { computation_id, block }) => {
+                            if computation_id == PoolDepthComputation::ID {
+                                // Update edge weights with pool depths
+                                let market = self.market_data.read().await;
+                                let derived = self.derived_data.read().await;
+                                if let Some(pool_depths) = derived.pool_depths() {
+                                    let updated = self.graph_manager.update_edge_weights_with_depths(&market, pool_depths);
+                                    debug!(
+                                        self.worker_id,
+                                        block,
+                                        updated,
+                                        "updated edge weights with pool depths"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Other derived events (NewBlock, AllComplete) - ignore for now
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!(self.worker_id, "derived event receiver closed");
+                            // Continue running - derived data won't update but we can still solve
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                self.worker_id,
+                                skipped,
+                                "derived event receiver lagged, skipped {} events",
+                                skipped
+                            );
+                            // Try to update with current derived data
+                            let market = self.market_data.read().await;
+                            let derived = self.derived_data.read().await;
+                            if let Some(pool_depths) = derived.pool_depths() {
+                                let updated = self.graph_manager.update_edge_weights_with_depths(&market, pool_depths);
+                                debug!(
+                                    self.worker_id,
+                                    updated,
+                                    "recovered edge weights after lag"
+                                );
+                            }
                         }
                     }
                 }

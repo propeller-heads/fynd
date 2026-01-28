@@ -50,7 +50,7 @@
 mod computation;
 mod computations;
 mod error;
-mod events;
+pub mod events;
 mod manager;
 mod store;
 mod tracker;

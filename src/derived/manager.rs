@@ -6,11 +6,11 @@
 //! - Updates DerivedDataStore (exclusive write access)
 //! - Provides read access to workers via shared store reference
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
@@ -194,6 +194,8 @@ impl ComputationManager {
     /// 2. `TokenGasPriceComputation` - depends on spot_prices in store
     /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
     async fn compute_all(&self) {
+        let total_start = Instant::now();
+
         // Get block info for tracking
         let Some(block) = self
             .market_data
@@ -210,10 +212,12 @@ impl ComputationManager {
         let _ = self.event_tx.send(DerivedDataEvent::NewBlock { block });
 
         // Phase 1: Compute spot prices first (no dependencies)
+        let spot_start = Instant::now();
         let spot_prices_result = self
             .spot_price_computation
             .compute(&self.market_data, &self.store)
             .await;
+        let spot_elapsed = spot_start.elapsed();
 
         // Write spot prices to store before dependent computations
         match spot_prices_result {
@@ -223,26 +227,28 @@ impl ComputationManager {
                     .write()
                     .await
                     .set_spot_prices(prices, block);
-                debug!(count, "updated spot prices");
+                info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
                 let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
                     computation_id: SpotPriceComputation::ID,
                     block,
                 });
             }
             Err(e) => {
-                warn!(error = ?e, "spot price computation failed");
+                warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
         }
 
         // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
+        let phase2_start = Instant::now();
         let (token_prices_result, pool_depths_result) = tokio::join!(
             self.token_price_computation
                 .compute(&self.market_data, &self.store),
             self.pool_depth_computation
                 .compute(&self.market_data, &self.store)
         );
+        let phase2_elapsed = phase2_start.elapsed();
 
         // Update store with remaining results
         let mut store_write = self.store.write().await;
@@ -251,7 +257,7 @@ impl ComputationManager {
             Ok(prices) => {
                 let count = prices.len();
                 store_write.set_token_prices(prices, block);
-                debug!(count, "updated token prices");
+                info!(count, elapsed_ms = phase2_elapsed.as_millis(), "token prices computed");
                 let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
                     computation_id: TokenGasPriceComputation::ID,
                     block,
@@ -266,7 +272,7 @@ impl ComputationManager {
             Ok(depths) => {
                 let count = depths.len();
                 store_write.set_pool_depths(depths, block);
-                debug!(count, "updated pool depths");
+                info!(count, elapsed_ms = phase2_elapsed.as_millis(), "pool depths computed");
                 let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
                     computation_id: PoolDepthComputation::ID,
                     block,
@@ -279,6 +285,13 @@ impl ComputationManager {
 
         // Broadcast all complete event
         let _ = self.event_tx.send(DerivedDataEvent::AllComplete { block });
+
+        let total_elapsed = total_start.elapsed();
+        info!(
+            block,
+            total_ms = total_elapsed.as_millis(),
+            "all derived computations complete"
+        );
     }
 }
 

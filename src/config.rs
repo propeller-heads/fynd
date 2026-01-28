@@ -65,4 +65,6 @@ pub(crate) mod defaults {
     pub const RECONNECT_DELAY_SECS: u64 = 5;
     pub const ORDER_MANAGER_TIMEOUT_MS: u64 = 100;
     pub const ORDER_MANAGER_MIN_RESPONSES: usize = 0;
+    /// Slippage threshold for pool depth computation (1%)
+    pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 }

@@ -118,7 +118,7 @@ impl crate::graph::EdgeWeightFromSimAndDepths for DepthAndPrice {
 impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {
-        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(50) }
+        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(500) }
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
@@ -1595,7 +1595,7 @@ mod tests {
         let algorithm = MostLiquidAlgorithm::new();
 
         assert_eq!(algorithm.max_hops, 3);
-        assert_eq!(algorithm.timeout, Duration::from_millis(50));
+        assert_eq!(algorithm.timeout, Duration::from_millis(500));
         assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
     }

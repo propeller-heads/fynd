@@ -19,7 +19,9 @@ use tracing::info;
 
 use crate::{
     algorithm::{AlgorithmConfig, MostLiquidAlgorithm},
+    derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    graph::EdgeWeightUpdaterWithDepths,
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
 };
@@ -48,8 +50,12 @@ pub(crate) struct SpawnWorkersParams {
     pub task_rx: async_channel::Receiver<SolveTask>,
     /// Shared market data reference.
     pub market_data: SharedMarketDataRef,
+    /// Shared derived data reference (pool depths, token prices).
+    pub derived_data: SharedDerivedDataRef,
     /// Broadcast receiver for market events.
     pub event_rx: broadcast::Receiver<MarketEvent>,
+    /// Broadcast sender for derived data events.
+    pub derived_event_tx: broadcast::Sender<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
 }
@@ -95,7 +101,7 @@ fn spawn_workers_generic<A, F>(
 ) -> Vec<JoinHandle<()>>
 where
     A: crate::algorithm::Algorithm + 'static,
-    A::GraphManager: crate::feed::events::MarketEventHandler,
+    A::GraphManager: crate::feed::events::MarketEventHandler + EdgeWeightUpdaterWithDepths,
     F: Fn(&AlgorithmConfig) -> A + Send + Sync + Clone + 'static,
 {
     let mut workers = Vec::with_capacity(params.num_workers);
@@ -103,7 +109,9 @@ where
     for worker_id in 0..params.num_workers {
         let task_rx = params.task_rx.clone();
         let market_data = Arc::clone(&params.market_data);
+        let derived_data = Arc::clone(&params.derived_data);
         let event_rx = params.event_rx.resubscribe();
+        let derived_event_rx = params.derived_event_tx.subscribe();
         let algorithm_config = params.algorithm_config.clone();
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
@@ -120,11 +128,12 @@ where
                 rt.block_on(async move {
                     let algorithm = create_algorithm(&algorithm_config);
 
-                    let mut worker = SolverWorker::new(market_data, algorithm, worker_id);
+                    let mut worker =
+                        SolverWorker::new(market_data, derived_data, algorithm, worker_id);
 
                     worker.initialize_graph().await;
                     worker
-                        .run(event_rx, task_rx, shutdown_rx)
+                        .run(event_rx, derived_event_rx, task_rx, shutdown_rx)
                         .await;
                 });
             })
@@ -157,7 +166,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::*;
-    use crate::feed::market_data::SharedMarketData;
+    use crate::{derived::DerivedData, feed::market_data::SharedMarketData};
 
     #[test]
     fn test_list_algorithms() {
@@ -169,7 +178,9 @@ mod tests {
     fn test_spawn_workers_unknown_algorithm_returns_error() {
         let (task_tx, task_rx) = async_channel::bounded(10);
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+        let derived_data = Arc::new(RwLock::new(DerivedData::new()));
         let (event_tx, event_rx) = broadcast::channel(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let params = SpawnWorkersParams {
@@ -178,7 +189,9 @@ mod tests {
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
             market_data,
+            derived_data,
             event_rx,
+            derived_event_tx,
             shutdown_tx,
         };
 
@@ -201,7 +214,9 @@ mod tests {
     fn test_spawn_workers_creates_correct_number_of_workers() {
         let (_task_tx, task_rx) = async_channel::bounded(10);
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+        let derived_data = Arc::new(RwLock::new(DerivedData::new()));
         let (event_tx, event_rx) = broadcast::channel(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let params = SpawnWorkersParams {
@@ -210,7 +225,9 @@ mod tests {
             algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50)).unwrap(),
             task_rx,
             market_data,
+            derived_data,
             event_rx,
+            derived_event_tx,
             shutdown_tx: shutdown_tx.clone(),
         };
 

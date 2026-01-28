@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
-use tracing::{debug, instrument, trace, warn, Span};
+use tracing::{debug, instrument, trace, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
@@ -271,6 +271,13 @@ impl TokenGasPriceComputation {
             .to_f64()
             .ok_or(ComputationError::Internal("overflow computing simulation_amount".into()))?;
 
+        // Guard: if gas cost exceeds sell output, this path is not viable
+        if sell_gas_cost >= sell_out {
+            return Err(ComputationError::SimulationFailed(
+                "gas cost exceeds sell output - path not viable".into(),
+            ));
+        }
+
         // buy_price: tokens received per (gas_token spent + gas cost)
         let buy_price = buy_out_f / (sim_amount_f + buy_gas_cost_f);
 
@@ -282,12 +289,10 @@ impl TokenGasPriceComputation {
         // Compute mid_price in numerator/denominator form (precise BigUint arithmetic)
         // numerator = buy_out * (sell_out - sell_gas_cost) + buy_out * (sim_amount + buy_gas_cost)
         // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
+        let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
-            numerator: &buy_out * (&sell_out - &sell_gas_cost) +
-                &buy_out * (&self.simulation_amount + &buy_gas_cost),
-            denominator: BigUint::from(2u8) *
-                (&self.simulation_amount + &buy_gas_cost) *
-                (&sell_out - &sell_gas_cost),
+            numerator: &buy_out * &sell_out_net + &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8) * (&self.simulation_amount + &buy_gas_cost) * sell_out_net,
         };
 
         Ok((spread, buy_price_precise))
@@ -333,6 +338,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         // Phase 3: Run round-robin and process paths in order of increasing spot-spread score,
         // keeping the best mid-price (based on the lowest spread) per token.
         let mut best_prices = HashMap::new();
+        let mut simulation_failures = 0usize;
 
         // Flag to indicate there are no more candidates to evaluate for any token.
         let mut candidates_exhausted = false;
@@ -365,10 +371,10 @@ impl DerivedComputation for TokenGasPriceComputation {
                             best_prices.insert(token.clone(), (spread_ratio, buy_price));
                         }
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // Failures are expected as we are simulating with a fixed amount that may
                         // not be suitable for all paths (low liquidity, min/max trade sizes, etc)
-                        warn!(token = ?token, error = ?e, "simulation failed");
+                        simulation_failures += 1;
                     }
                 }
             }
@@ -392,7 +398,12 @@ impl DerivedComputation for TokenGasPriceComputation {
         // Report success rate
         let reachable = paths_by_token.len();
         let priced = best_prices.len() - 1; // Exclude gas token itself
-        debug!(priced = priced, reachable = reachable, "token price computation complete");
+        debug!(
+            priced = priced,
+            reachable = reachable,
+            simulation_failures = simulation_failures,
+            "token price computation complete"
+        );
 
         Span::current().record("updated_token_prices", best_prices.len());
 
