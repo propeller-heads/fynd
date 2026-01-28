@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use super::{error::ComputationError, manager::SharedDerivedDataRef};
+use super::{error::ComputationError, manager::{ChangedComponents, SharedDerivedDataRef}};
 use crate::feed::market_data::SharedMarketDataRef;
 
 /// Unique identifier for a computation type.
@@ -107,11 +107,14 @@ impl ComputationRequirements {
 ///     async fn compute(
 ///         &self,
 ///         market: &SharedMarketDataRef,
-///         store: &SharedDerivedDataStore,
+///         store: &SharedDerivedDataRef,
+///         changed: &ChangedComponents,
 ///     ) -> Result<Self::Output, ComputationError> {
-///         let market_guard = market.read().await;
-///         // Use market_guard...
-///         // Lock is released when guard is dropped
+///         if changed.is_full_recompute {
+///             // Full recompute: process all components
+///         } else {
+///             // Incremental: only process changed components
+///         }
 ///     }
 /// }
 /// ```
@@ -133,10 +136,19 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// * `market` - Reference to shared market data (computation acquires lock as needed)
     /// * `store` - Reference to derived data store (computation acquires lock as needed)
+    /// * `changed` - Information about which components changed, enabling incremental computation
     ///
     /// # Returns
     ///
     /// The computed output, or an error if computation failed.
+    ///
+    /// # Incremental Computation
+    ///
+    /// Implementations should use `changed` to only recompute data affected by the changes:
+    /// - `changed.is_full_recompute` - If true, recompute everything (startup/lag recovery)
+    /// - `changed.added` - New components to compute
+    /// - `changed.removed` - Components to remove from results
+    /// - `changed.updated` - Components whose state changed
     ///
     /// # Lock Management
     ///
@@ -147,5 +159,6 @@ pub trait DerivedComputation: Send + Sync + 'static {
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError>;
 }

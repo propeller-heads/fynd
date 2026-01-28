@@ -46,7 +46,7 @@ use crate::{
         computation::{ComputationId, DerivedComputation},
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
-        manager::SharedDerivedDataRef,
+        manager::{ChangedComponents, SharedDerivedDataRef},
         types::{SpotPriceKey, SpotPrices, TokenGasPrices},
     },
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
@@ -305,12 +305,18 @@ impl DerivedComputation for TokenGasPriceComputation {
 
     const ID: ComputationId = "token_prices";
 
-    #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_token_prices))]
+    #[instrument(level = "debug", skip(market, store, _changed), fields(computation_id = Self::ID, updated_token_prices))]
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
+        _changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
+        // TODO: Implement incremental computation with path tracking.
+        // For now, we do a full recompute on every change since token prices
+        // have transitive dependencies through intermediate pools.
+        // Path tracking will be implemented in a follow-up to only recompute
+        // tokens whose paths intersect with changed components.
         let market = market.read().await;
         let store = store.read().await;
         // Get spot prices (required dependency)
@@ -437,12 +443,21 @@ mod tests {
     async fn setup_test_env(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (SharedMarketDataRef, SharedDerivedDataRef) {
-        let (wrapped_market, _) = setup_market(pools);
+        let (wrapped_market, _) = setup_market(pools.clone());
 
         let wrapped_store = wrap_derived(DerivedData::new());
         let spot_comp = SpotPriceComputation::new();
+        let changed = ChangedComponents {
+            added: pools
+                .iter()
+                .map(|(id, t1, t2, _)| (id.to_string(), vec![t1.address.clone(), t2.address.clone()]))
+                .collect(),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
         let spot_prices = spot_comp
-            .compute(&wrapped_market, &wrapped_store)
+            .compute(&wrapped_market, &wrapped_store, &changed)
             .await
             .expect("spot price computation should succeed");
         wrapped_store
@@ -709,10 +724,11 @@ mod tests {
             MockProtocolSim::new(spot_price).with_gas(gas_units),
         )])
         .await;
+        let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .unwrap();
 
@@ -795,10 +811,11 @@ mod tests {
             ("b_c", &b, &c, MockProtocolSim::new(2).with_gas(0)),
         ])
         .await;
+        let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .unwrap();
 
@@ -859,10 +876,11 @@ mod tests {
         // Create market without spot prices set
         let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
         let derived = wrap_derived(DerivedData::new()); // No spot prices
+        let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
         let result = computation
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await;
 
         assert!(
@@ -880,10 +898,11 @@ mod tests {
         // Create a pool that doesn't include ETH (gas token)
         let (market, derived) =
             setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1))]).await;
+        let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
         let prices = computation
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .unwrap();
 
@@ -913,10 +932,19 @@ mod tests {
 
         // Compute spot prices
         let derived = wrap_derived(DerivedData::new());
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
 
         let spot_comp = SpotPriceComputation::new();
         let spot_prices = spot_comp
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .unwrap();
         derived
@@ -926,7 +954,7 @@ mod tests {
 
         let computation = computation_for(&eth.address);
         let result = computation
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await;
 
         assert!(

@@ -11,7 +11,7 @@ use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
         error::ComputationError,
-        manager::SharedDerivedDataRef,
+        manager::{ChangedComponents, SharedDerivedDataRef},
         types::SpotPrices,
     },
     feed::market_data::SharedMarketDataRef,
@@ -39,19 +39,57 @@ impl DerivedComputation for SpotPriceComputation {
 
     const ID: ComputationId = "spot_prices";
 
-    #[instrument(level = "debug", skip(market, _store), fields(computation_id = Self::ID, updated_spot_prices))]
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_spot_prices))]
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
-        _store: &SharedDerivedDataRef,
+        store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
         let market = market.read().await;
-        let mut spot_prices = SpotPrices::new();
+
+        // Start with existing prices (or empty for full recompute)
+        let mut spot_prices = if changed.is_full_recompute {
+            SpotPrices::new()
+        } else {
+            store
+                .read()
+                .await
+                .spot_prices()
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Remove spot prices for removed components
+        for component_id in &changed.removed {
+            spot_prices.retain(|key, _| &key.0 != component_id);
+        }
 
         let topology = market.component_topology();
         let tokens = market.token_registry_ref();
 
-        for (component_id, token_addresses) in topology.iter() {
+        // Determine which components to compute
+        let components_to_compute: Vec<_> = if changed.is_full_recompute {
+            topology.keys().collect()
+        } else {
+            changed
+                .added
+                .keys()
+                .chain(changed.updated.iter())
+                .collect()
+        };
+
+        for component_id in components_to_compute {
+            // Get token addresses - from changed.added for new components, from topology for updates
+            let token_addresses = changed
+                .added
+                .get(component_id)
+                .or_else(|| topology.get(component_id));
+
+            let Some(token_addresses) = token_addresses else {
+                continue; // Component might have been removed in the meantime
+            };
+
             let sim_state = market
                 .get_simulation_state(component_id)
                 .ok_or(ComputationError::InvalidDependencyData {
@@ -123,9 +161,10 @@ mod tests {
     async fn handles_empty_market() {
         let market_ref = wrap_market(SharedMarketData::new());
         let derived_ref = new_shared_derived_data();
+        let changed = ChangedComponents::default();
 
         let output = SpotPriceComputation::new()
-            .compute(&market_ref, &derived_ref)
+            .compute(&market_ref, &derived_ref, &changed)
             .await
             .unwrap();
 

@@ -29,7 +29,7 @@ use crate::{
         computation::{ComputationId, DerivedComputation},
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
-        manager::SharedDerivedDataRef,
+        manager::{ChangedComponents, SharedDerivedDataRef},
         types::{PoolDepths, SpotPriceKey},
     },
     feed::market_data::SharedMarketDataRef,
@@ -148,26 +148,60 @@ impl DerivedComputation for PoolDepthComputation {
 
     const ID: ComputationId = "pool_depths";
 
-    #[instrument(level = "debug", skip(market, store), fields(computation_id = Self::ID, updated_pool_depths))]
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_pool_depths))]
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
         let market = market.read().await;
-        let store = store.read().await;
+        let store_guard = store.read().await;
 
         // Get precomputed spot prices (required dependency)
-        let spot_prices = store
+        let spot_prices = store_guard
             .spot_prices()
             .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?;
 
-        let mut pool_depths = PoolDepths::new();
+        // Start with existing depths (or empty for full recompute)
+        let mut pool_depths = if changed.is_full_recompute {
+            PoolDepths::new()
+        } else {
+            store_guard
+                .pool_depths()
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Remove pool depths for removed components
+        for component_id in &changed.removed {
+            pool_depths.retain(|key, _| &key.0 != component_id);
+        }
 
         let topology = market.component_topology();
         let tokens = market.token_registry_ref();
 
-        for (component_id, token_addresses) in topology.iter() {
+        // Determine which components to compute
+        let components_to_compute: Vec<_> = if changed.is_full_recompute {
+            topology.keys().collect()
+        } else {
+            changed
+                .added
+                .keys()
+                .chain(changed.updated.iter())
+                .collect()
+        };
+
+        for component_id in components_to_compute {
+            // Get token addresses - from changed.added for new components, from topology for updates
+            let token_addresses = changed
+                .added
+                .get(component_id)
+                .or_else(|| topology.get(component_id));
+
+            let Some(token_addresses) = token_addresses else {
+                continue; // Component might have been removed in the meantime
+            };
             let sim_state = market
                 .get_simulation_state(component_id)
                 .ok_or(ComputationError::InvalidDependencyData {
@@ -328,9 +362,10 @@ mod tests {
             .try_write()
             .unwrap()
             .set_spot_prices(SpotPrices::new(), 0);
+        let changed = ChangedComponents::default();
 
         let output = PoolDepthComputation::default()
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .unwrap();
 
@@ -344,9 +379,10 @@ mod tests {
 
         let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
         let derived = wrap_derived(DerivedData::new()); // No spot prices
+        let changed = ChangedComponents::default();
 
         let result = PoolDepthComputation::default()
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await;
 
         assert!(
@@ -399,8 +435,17 @@ mod tests {
         )]);
         let derived = wrap_derived(DerivedData::new());
         let spot_comp = SpotPriceComputation::new();
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
         let spot_prices = spot_comp
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .expect("spot price computation should succeed");
         derived
@@ -409,7 +454,7 @@ mod tests {
             .set_spot_prices(spot_prices, 0);
 
         let pool_depths = PoolDepthComputation::default()
-            .compute(&market, &derived)
+            .compute(&market, &derived, &changed)
             .await
             .expect("computation should succeed");
 

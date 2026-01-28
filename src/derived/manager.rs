@@ -6,12 +6,62 @@
 //! - Updates DerivedDataStore (exclusive write access)
 //! - Provides read access to workers via shared store reference
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
+
+use crate::{feed::market_data::SharedMarketData, types::ComponentId};
+
+/// Information about which components changed in a market update.
+///
+/// Used to enable incremental computation - only recomputing derived data
+/// for components that actually changed.
+#[derive(Debug, Clone, Default)]
+pub struct ChangedComponents {
+    /// Newly added components with their token addresses.
+    pub added: HashMap<ComponentId, Vec<Address>>,
+    /// Components that were removed.
+    pub removed: Vec<ComponentId>,
+    /// Components whose state was updated (but not added/removed).
+    pub updated: Vec<ComponentId>,
+    /// If true, this represents a full recompute (startup/lag recovery).
+    pub is_full_recompute: bool,
+}
+
+impl ChangedComponents {
+    /// Creates a marker for full recompute where all components are considered changed.
+    ///
+    /// Used for startup and lag recovery scenarios.
+    pub fn all(market: &SharedMarketData) -> Self {
+        Self {
+            added: market.component_topology().clone(),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        }
+    }
+
+    /// Returns true if this update changes the graph topology (adds or removes components).
+    pub fn is_topology_change(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty()
+    }
+
+    /// Returns a HashSet of all changed component IDs.
+    pub fn all_changed_ids(&self) -> HashSet<ComponentId> {
+        let mut all = HashSet::new();
+        all.extend(self.added.keys().cloned());
+        all.extend(self.removed.iter().cloned());
+        all.extend(self.updated.iter().cloned());
+        all
+    }
+}
 
 use super::{
     computation::DerivedComputation,
@@ -176,7 +226,10 @@ impl ComputationManager {
                                 "computation manager lagged, skipped {} events. Recomputing from current state.",
                                 skipped
                             );
-                            self.compute_all().await;
+                            let market = self.market_data.read().await;
+                            let changed = ChangedComponents::all(&market);
+                            drop(market);
+                            self.compute_all(&changed).await;
                         }
                     }
                 }
@@ -193,7 +246,7 @@ impl ComputationManager {
     /// 1. `SpotPriceComputation` - no dependencies
     /// 2. `TokenGasPriceComputation` - depends on spot_prices in store
     /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
-    async fn compute_all(&self) {
+    async fn compute_all(&self, changed: &ChangedComponents) {
         let total_start = Instant::now();
 
         // Get block info for tracking
@@ -215,7 +268,7 @@ impl ComputationManager {
         let spot_start = Instant::now();
         let spot_prices_result = self
             .spot_price_computation
-            .compute(&self.market_data, &self.store)
+            .compute(&self.market_data, &self.store, changed)
             .await;
         let spot_elapsed = spot_start.elapsed();
 
@@ -244,9 +297,9 @@ impl ComputationManager {
         let phase2_start = Instant::now();
         let (token_prices_result, pool_depths_result) = tokio::join!(
             self.token_price_computation
-                .compute(&self.market_data, &self.store),
+                .compute(&self.market_data, &self.store, changed),
             self.pool_depth_computation
-                .compute(&self.market_data, &self.store)
+                .compute(&self.market_data, &self.store, changed)
         );
         let phase2_elapsed = phase2_start.elapsed();
 
@@ -311,11 +364,16 @@ impl MarketEventHandler for ComputationManager {
                     added = added_components.len(),
                     removed = removed_components.len(),
                     updated = updated_components.len(),
-                    "market updated, running all computations"
+                    "market updated, running incremental computations"
                 );
 
-                // TODO: only recompute affected computations based on changed components
-                self.compute_all().await;
+                let changed = ChangedComponents {
+                    added: added_components.clone(),
+                    removed: removed_components.clone(),
+                    updated: updated_components.clone(),
+                    is_full_recompute: false,
+                };
+                self.compute_all(&changed).await;
             }
             _ => {
                 trace!("empty market update, skipping computations");
