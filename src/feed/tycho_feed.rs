@@ -201,8 +201,10 @@ impl TychoFeed {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
                             let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
+                            // Refresh gas price before broadcasting the event so that
+                            // ComputationManager has gas price available when it starts computing.
                             self.refresh_gas_price().await?;
+                            self.handle_tycho_message(msg).await?;
                             self.health_tracker.update();
                         }
                         None => {
