@@ -95,6 +95,26 @@ impl DepthAndPrice {
     }
 }
 
+impl crate::graph::EdgeWeightFromSimAndDepths for DepthAndPrice {
+    fn from_sim_and_depths(
+        sim: &dyn ProtocolSim,
+        component_id: &ComponentId,
+        token_in: &Token,
+        token_out: &Token,
+        pool_depths: &crate::derived::PoolDepths,
+    ) -> Option<Self> {
+        let spot_price = sim.spot_price(token_in, token_out).ok()?;
+
+        // Look up pre-computed depth from derived data
+        let depth_key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+        let depth = pool_depths
+            .get(&depth_key)?
+            .to_f64()?;
+
+        Some(Self { spot_price, depth })
+    }
+}
+
 impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {

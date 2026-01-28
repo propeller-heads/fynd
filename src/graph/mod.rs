@@ -17,25 +17,6 @@ use tycho_simulation::{
 
 use crate::types::ComponentId;
 
-/// Trait for edge weight types that can be computed from a ProtocolSim.
-///
-/// Implement this trait for edge data types that need to be populated
-/// from pool simulation state (e.g., spot prices, liquidity depth).
-pub trait EdgeWeightFromSim: Sized {
-    /// Computes edge weight data from a ProtocolSim for the given token pair.
-    ///
-    /// # Arguments
-    ///
-    /// * `sim` - The protocol simulation state
-    /// * `token_in` - The input token
-    /// * `token_out` - The output token
-    ///
-    /// # Returns
-    ///
-    /// The computed edge weight, or `None` if it cannot be computed.
-    fn from_sim(sim: &dyn ProtocolSim, token_in: &Token, token_out: &Token) -> Option<Self>;
-}
-
 /// A path through the graph as a sequence of edge indices.
 ///
 /// Each edge index points to an edge in the graph containing the component ID and weight.
@@ -133,15 +114,43 @@ where
     fn graph(&self) -> &G;
 }
 
-use crate::feed::market_data::SharedMarketData;
+use crate::{derived::PoolDepths, feed::market_data::SharedMarketData};
 
-/// Trait for graph managers that support edge weight updates from market data.
+/// Trait for edge weight types that can be computed from a ProtocolSim and derived PoolDepths.
 ///
-/// Implement this trait for graph managers whose edge data can be computed
-/// from simulation state.
-pub trait EdgeWeightUpdater {
-    /// Updates edge weights using simulation states from the market.
+/// Implement this trait for edge data types that should use pre-computed pool depths
+/// from derived data instead of computing them from scratch.
+pub trait EdgeWeightFromSimAndDepths: Sized {
+    /// Computes edge weight data using spot price from ProtocolSim and depth from PoolDepths.
+    ///
+    /// # Arguments
+    ///
+    /// * `sim` - The protocol simulation state (used for spot price)
+    /// * `component_id` - The component ID for pool depth lookup
+    /// * `token_in` - The input token
+    /// * `token_out` - The output token
+    /// * `pool_depths` - Pre-computed pool depths from derived data
+    ///
+    /// # Returns
+    ///
+    /// The computed edge weight, or `None` if it cannot be computed.
+    fn from_sim_and_depths(
+        sim: &dyn ProtocolSim,
+        component_id: &ComponentId,
+        token_in: &Token,
+        token_out: &Token,
+        pool_depths: &PoolDepths,
+    ) -> Option<Self>;
+}
+
+/// Trait for graph managers that support edge weight updates with derived data.
+pub trait EdgeWeightUpdaterWithDepths {
+    /// Updates edge weights using simulation states and pre-computed pool depths.
     ///
     /// Returns the number of edges successfully updated.
-    fn update_edge_weights(&mut self, market: &SharedMarketData) -> usize;
+    fn update_edge_weights_with_depths(
+        &mut self,
+        market: &SharedMarketData,
+        pool_depths: &PoolDepths,
+    ) -> usize;
 }
