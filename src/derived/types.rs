@@ -1,6 +1,6 @@
 //! Data types for derived computations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use num_bigint::BigUint;
 use tycho_simulation::{
@@ -46,3 +46,23 @@ pub type TokenGasPriceKey = Address;
 
 /// Token prices map: token address -> it's mid-price relative to gas token.
 pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;
+
+/// Token price with path dependency tracking for incremental computation.
+///
+/// Tracks which components (pools) were used in the selected path,
+/// enabling selective recomputation when only specific pools change.
+#[derive(Debug, Clone)]
+pub struct TokenPriceEntry {
+    /// The computed mid-price relative to gas token.
+    pub price: Price,
+    /// Components (pool IDs) used in the selected path.
+    ///
+    /// Used for invalidation: if any of these components change,
+    /// this token's price needs recomputation.
+    pub path_components: HashSet<ComponentId>,
+}
+
+/// Token prices with path dependency tracking.
+///
+/// Used internally by `TokenGasPriceComputation` to enable incremental updates.
+pub type TokenPricesWithDeps = HashMap<Address, TokenPriceEntry>;

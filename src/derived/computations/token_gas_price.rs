@@ -30,7 +30,7 @@
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -47,10 +47,11 @@ use crate::{
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
-        types::{SpotPriceKey, SpotPrices, TokenGasPrices},
+        types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{GraphManager, Path, PetgraphStableDiGraphManager},
+    types::ComponentId,
     MostLiquidAlgorithm,
 };
 
@@ -212,15 +213,22 @@ impl TokenGasPriceComputation {
 
     /// Compute the spread and mid_price for a given path by simulating both directions.
     ///
-    /// Returns (spread_ratio, mid_price) where:
+    /// Returns (spread_ratio, mid_price, path_components) where:
     /// - spread_ratio: |sell - buy|, lower = more reliable
     /// - mid_price: precise Price struct
+    /// - path_components: component IDs used in this path (for incremental invalidation)
     fn compute_spread_and_mid_price(
         &self,
         path: Path<()>,
         market: &SharedMarketData,
         gas_price: &BigUint,
-    ) -> Result<(f64, Price), ComputationError> {
+    ) -> Result<(f64, Price, HashSet<ComponentId>), ComputationError> {
+        // Extract component IDs from path edges for dependency tracking
+        let path_components: HashSet<ComponentId> = path
+            .edge_data
+            .iter()
+            .map(|edge| edge.component_id.clone())
+            .collect();
         // Forward: gas_token → target_token
         let buy_route =
             MostLiquidAlgorithm::simulate_path(&path, market, None, self.simulation_amount.clone())
@@ -295,7 +303,155 @@ impl TokenGasPriceComputation {
             denominator: BigUint::from(2u8) * (&self.simulation_amount + &buy_gas_cost) * sell_out_net,
         };
 
-        Ok((spread, buy_price_precise))
+        Ok((spread, buy_price_precise, path_components))
+    }
+
+    /// Core simulation logic: discovers paths, runs round-robin simulation,
+    /// returns best prices with dependency tracking.
+    ///
+    /// If `filter_tokens` is `Some`, only simulates those tokens (incremental mode).
+    /// If `None`, simulates all discovered tokens (full mode).
+    fn simulate_token_prices(
+        &self,
+        market: &SharedMarketData,
+        spot_prices: &SpotPrices,
+        gas_price: &BigUint,
+        filter_tokens: Option<&HashSet<Address>>,
+    ) -> Result<HashMap<Address, (f64, Price, HashSet<ComponentId>)>, ComputationError> {
+        let mut graph_manager = PetgraphStableDiGraphManager::new();
+        graph_manager.initialize_graph(&market.component_topology());
+
+        let mut paths_by_token = self.discover_paths(&graph_manager, &spot_prices)?;
+
+        // Optionally filter to only requested tokens
+        if let Some(tokens) = filter_tokens {
+            paths_by_token.retain(|token, _| tokens.contains(token));
+        }
+
+        // Sort each token's paths: lowest spread last (for popping)
+        for paths in paths_by_token.values_mut() {
+            paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        }
+
+        // Round-robin: pop one candidate per token each round, keep best by spread
+        let mut best_prices: HashMap<Address, (f64, Price, HashSet<ComponentId>)> = HashMap::new();
+        let mut candidates_exhausted = false;
+
+        while !candidates_exhausted {
+            candidates_exhausted = true;
+
+            for (token, candidate_paths) in paths_by_token.iter_mut() {
+                let Some(candidate) = candidate_paths.pop() else {
+                    continue;
+                };
+                candidates_exhausted = false;
+
+                match self.compute_spread_and_mid_price(candidate.path, market, gas_price) {
+                    Ok((spread, price, components)) => {
+                        let is_better = best_prices
+                            .get(token)
+                            .map(|(existing_spread, _, _)| spread < *existing_spread)
+                            .unwrap_or(true);
+                        if is_better {
+                            trace!(
+                                token = ?token,
+                                spread_ratio = spread,
+                                "found better price (lower spread)"
+                            );
+                            best_prices.insert(token.clone(), (spread, price, components));
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        Ok(best_prices)
+    }
+
+    /// Attempts incremental computation for state-only changes.
+    ///
+    /// Returns `Ok(Some(prices))` if incremental computation succeeded,
+    /// `Ok(None)` if we should fall through to full computation (e.g., no deps stored yet),
+    /// or `Err` on failure.
+    async fn try_incremental_compute(
+        &self,
+        market: &SharedMarketDataRef,
+        store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
+    ) -> Result<Option<TokenGasPrices>, ComputationError> {
+        let store_guard = store.read().await;
+
+        // Need existing deps to do incremental computation
+        let Some(existing_deps) = store_guard.token_prices_deps() else {
+            return Ok(None); // No deps stored yet, need full compute
+        };
+        let Some(existing_prices) = store_guard.token_prices() else {
+            return Ok(None);
+        };
+
+        let changed_components = changed.all_changed_ids();
+
+        // Find tokens whose paths intersect with changed components
+        let tokens_to_recompute: HashSet<Address> = existing_deps
+            .iter()
+            .filter(|(_, entry)| !entry.path_components.is_disjoint(&changed_components))
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        if tokens_to_recompute.is_empty() {
+            return Ok(Some(existing_prices.clone()));
+        }
+
+        let existing_prices = existing_prices.clone();
+        let existing_deps = existing_deps.clone();
+        drop(store_guard);
+
+        debug!(
+            affected_tokens = tokens_to_recompute.len(),
+            total_tokens = existing_prices.len(),
+            "incremental token price recomputation"
+        );
+
+        let market = market.read().await;
+        let block = market.last_updated().map(|b| b.number).unwrap_or(0);
+
+        let store_guard = store.read().await;
+        let spot_prices = store_guard
+            .spot_prices()
+            .ok_or(ComputationError::MissingDependency("spot_prices"))?
+            .clone();
+        drop(store_guard);
+
+        let gas_price = market
+            .gas_price()
+            .ok_or(ComputationError::MissingDependency("gas_price"))?
+            .effective_gas_price();
+
+        let best_prices =
+            self.simulate_token_prices(&market, &spot_prices, &gas_price, Some(&tokens_to_recompute))?;
+
+        // Merge results into existing prices and deps
+        let mut result = existing_prices;
+        let mut new_deps = existing_deps;
+
+        for token in &tokens_to_recompute {
+            if let Some((_, price, components)) = best_prices.get(token) {
+                new_deps.insert(token.clone(), TokenPriceEntry {
+                    price: price.clone(),
+                    path_components: components.clone(),
+                });
+                result.insert(token.clone(), price.clone());
+            } else {
+                result.remove(token);
+                new_deps.remove(token);
+            }
+        }
+
+        store.write().await.set_token_prices_deps(new_deps, block);
+        Span::current().record("updated_token_prices", result.len());
+
+        Ok(Some(result))
     }
 }
 
@@ -305,115 +461,74 @@ impl DerivedComputation for TokenGasPriceComputation {
 
     const ID: ComputationId = "token_prices";
 
-    #[instrument(level = "debug", skip(market, store, _changed), fields(computation_id = Self::ID, updated_token_prices))]
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
-        _changed: &ChangedComponents,
+        changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
-        // TODO: Implement incremental computation with path tracking.
-        // For now, we do a full recompute on every change since token prices
-        // have transitive dependencies through intermediate pools.
-        // Path tracking will be implemented in a follow-up to only recompute
-        // tokens whose paths intersect with changed components.
-        let market = market.read().await;
-        let store = store.read().await;
-        // Get spot prices (required dependency)
-        let spot_prices = store
-            .spot_prices()
-            .ok_or(ComputationError::MissingDependency("spot_prices"))?;
+        // For topology changes or full recompute, do a full computation
+        // For state-only changes, use incremental computation
+        if !changed.is_full_recompute && !changed.is_topology_change() {
+            // Try incremental computation if we have existing path dependencies
+            if let Some(result) = self.try_incremental_compute(market, store, changed).await? {
+                return Ok(result);
+            }
+            // Fall through to full compute if incremental is not possible
+        }
 
-        // Get gas price for converting gas units to actual cost
+        let market = market.read().await;
+        let store_guard = store.read().await;
+
+        let block = market.last_updated().map(|b| b.number).unwrap_or(0);
+
+        let spot_prices = store_guard
+            .spot_prices()
+            .ok_or(ComputationError::MissingDependency("spot_prices"))?
+            .clone();
+        drop(store_guard);
+
         let gas_price = market
             .gas_price()
             .ok_or(ComputationError::MissingDependency("gas_price"))?
             .effective_gas_price();
 
-        let mut graph_manager = PetgraphStableDiGraphManager::new();
-        graph_manager.initialize_graph(&market.component_topology());
+        let best_prices = self.simulate_token_prices(&market, &spot_prices, &gas_price, None)?;
 
-        // Phase 1: Discover all paths using DFS
-        let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
+        // Build token prices with dependencies for incremental computation
+        let mut token_prices_with_deps = TokenPricesWithDeps::new();
+        let mut token_prices = TokenGasPrices::new();
 
-        // Phase 2: Sort token's paths such that the lowest spread is last (for popping later)
-        for paths in paths_by_token.values_mut() {
-            paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        for (token, (_, price, path_components)) in best_prices {
+            token_prices_with_deps.insert(token.clone(), TokenPriceEntry {
+                price: price.clone(),
+                path_components,
+            });
+            token_prices.insert(token, price);
         }
 
-        // Phase 3: Run round-robin and process paths in order of increasing spot-spread score,
-        // keeping the best mid-price (based on the lowest spread) per token.
-        let mut best_prices = HashMap::new();
-        let mut simulation_failures = 0usize;
+        // Add the gas token itself with price 1:1 (no path dependencies since it's the root)
+        let gas_token_price = Price {
+            numerator: self.simulation_amount.clone(),
+            denominator: self.simulation_amount.clone(),
+        };
+        token_prices_with_deps.insert(self.gas_token.clone(), TokenPriceEntry {
+            price: gas_token_price.clone(),
+            path_components: HashSet::new(),
+        });
+        token_prices.insert(self.gas_token.clone(), gas_token_price);
 
-        // Flag to indicate there are no more candidates to evaluate for any token.
-        let mut candidates_exhausted = false;
+        store.write().await.set_token_prices_deps(token_prices_with_deps, block);
 
-        while !candidates_exhausted {
-            // Unset at the start of each round
-            candidates_exhausted = true;
-
-            for (token, candidate_paths) in paths_by_token.iter_mut() {
-                // Skip if no more candidate paths left to evaluate for this token
-                let Some(candidate) = candidate_paths.pop() else {
-                    continue;
-                };
-                candidates_exhausted = false; // Found at least one candidate
-
-                match self.compute_spread_and_mid_price(candidate.path, &market, &gas_price) {
-                    Ok((spread_ratio, buy_price)) => {
-                        // Update if better (lower spread = tighter bid/ask = more reliable price)
-                        let is_better = best_prices
-                            .get(token)
-                            .map(|&(existing_spread, _)| spread_ratio < existing_spread)
-                            .unwrap_or(true);
-
-                        if is_better {
-                            trace!(
-                                token = ?token,
-                                spread_ratio = spread_ratio,
-                                "found better price (lower spread)"
-                            );
-                            best_prices.insert(token.clone(), (spread_ratio, buy_price));
-                        }
-                    }
-                    Err(_) => {
-                        // Failures are expected as we are simulating with a fixed amount that may
-                        // not be suitable for all paths (low liquidity, min/max trade sizes, etc)
-                        simulation_failures += 1;
-                    }
-                }
-            }
-        }
-
-        // Remove the spread_ratio from the output
-        let mut best_prices: TokenGasPrices = best_prices
-            .into_iter()
-            .map(|(k, (_, price))| (k, price))
-            .collect();
-
-        // Add the gas token itself with price 1:1
-        best_prices.insert(
-            self.gas_token.clone(),
-            Price {
-                numerator: self.simulation_amount.clone(),
-                denominator: self.simulation_amount.clone(),
-            },
-        );
-
-        // Report success rate
-        let reachable = paths_by_token.len();
-        let priced = best_prices.len() - 1; // Exclude gas token itself
         debug!(
-            priced = priced,
-            reachable = reachable,
-            simulation_failures = simulation_failures,
+            priced = token_prices.len() - 1,
             "token price computation complete"
         );
 
-        Span::current().record("updated_token_prices", best_prices.len());
+        Span::current().record("updated_token_prices", token_prices.len());
 
-        Ok(best_prices)
+        Ok(token_prices)
     }
 }
 
@@ -685,7 +800,7 @@ mod tests {
 
         let gas_price = BigUint::from(GAS_PRICE);
         let computation = computation_for(&eth.address);
-        let (spread, mid_price) = computation
+        let (spread, mid_price, _path_components) = computation
             .compute_spread_and_mid_price(path, &market, &gas_price)
             .unwrap();
 

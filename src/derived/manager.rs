@@ -131,7 +131,7 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 3, depth_slippage_threshold: 0.05 }
+        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
     }
 }
 
