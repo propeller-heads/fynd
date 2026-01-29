@@ -178,26 +178,13 @@ impl TokenGasPriceComputation {
                 let rev_key: SpotPriceKey =
                     (component_id.clone(), next_token.clone(), token_reached.clone());
 
-                let &fwd_spot =
-                    spot_prices
-                        .get(&fwd_key)
-                        .ok_or(ComputationError::InvalidDependencyData {
-                            dependency: SpotPriceComputation::ID,
-                            reason: format!(
-                                "missing forward spot price for pool {} {}/{}",
-                                component_id, token_reached, next_token
-                            ),
-                        })?;
-                let &rev_spot =
-                    spot_prices
-                        .get(&rev_key)
-                        .ok_or(ComputationError::InvalidDependencyData {
-                            dependency: SpotPriceComputation::ID,
-                            reason: format!(
-                                "missing reverse spot price for pool {} {}/{}",
-                                component_id, next_token, token_reached
-                            ),
-                        })?;
+                // Skip edges with missing spot prices (pool may have failed spot price computation)
+                let Some(&fwd_spot) = spot_prices.get(&fwd_key) else {
+                    continue;
+                };
+                let Some(&rev_spot) = spot_prices.get(&rev_key) else {
+                    continue;
+                };
 
                 stack.push(DfsFrame {
                     token_node: next_node,

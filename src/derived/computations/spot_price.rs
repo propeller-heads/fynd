@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use itertools::Itertools;
-use tracing::{instrument, Span};
+use tracing::{debug, instrument, warn, Span};
 
 use crate::{
     derived::{
@@ -79,6 +79,9 @@ impl DerivedComputation for SpotPriceComputation {
                 .collect()
         };
 
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+
         for component_id in components_to_compute {
             // Get token addresses - from changed.added for new components, from topology for updates
             let token_addresses = changed
@@ -90,50 +93,51 @@ impl DerivedComputation for SpotPriceComputation {
                 continue; // Component might have been removed in the meantime
             };
 
-            let sim_state = market
-                .get_simulation_state(component_id)
-                .ok_or(ComputationError::InvalidDependencyData {
-                    dependency: "market_data::simulation_states",
-                    reason: format!("missing simulation state for {component_id}"),
-                })?;
+            let Some(sim_state) = market.get_simulation_state(component_id) else {
+                warn!(component_id, "missing simulation state, skipping pool");
+                spot_prices.retain(|key, _| &key.0 != component_id);
+                continue;
+            };
 
-            let pool_tokens: Vec<_> = token_addresses
+            let pool_tokens: Result<Vec<_>, _> = token_addresses
                 .iter()
-                .map(|addr| {
-                    tokens
-                        .get(addr)
-                        .ok_or_else(|| ComputationError::InvalidDependencyData {
-                            dependency: "market_data::tokens",
-                            reason: format!(
-                                "missing token metadata for {addr} in pool {component_id}"
-                            ),
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|addr| tokens.get(addr).ok_or(addr))
+                .collect();
+            let Ok(pool_tokens) = pool_tokens else {
+                warn!(component_id, "missing token metadata, skipping pool");
+                spot_prices.retain(|key, _| &key.0 != component_id);
+                continue;
+            };
 
             for perm in pool_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
+                let key = (
+                    component_id.clone(),
+                    token_in.address.clone(),
+                    token_out.address.clone(),
+                );
 
                 match sim_state.spot_price(token_in, token_out) {
                     Ok(price) => {
-                        let key = (
-                            component_id.clone(),
-                            token_in.address.clone(),
-                            token_out.address.clone(),
-                        );
                         spot_prices.insert(key, price);
+                        succeeded += 1;
                     }
                     Err(e) => {
-                        Err(ComputationError::SimulationFailed(format!(
-                            "failed to compute spot price for pool {component_id} \
-                                 {}/{}: {e}",
-                            token_in.address, token_out.address
-                        )))?;
+                        warn!(
+                            component_id,
+                            token_in = %token_in.address,
+                            token_out = %token_out.address,
+                            error = %e,
+                            "spot price failed, skipping pair"
+                        );
+                        spot_prices.remove(&key);
+                        failed += 1;
                     }
                 }
             }
         }
 
+        debug!(succeeded, failed, total = spot_prices.len(), "spot price computation complete");
         Span::current().record("updated_spot_prices", spot_prices.len());
 
         Ok(spot_prices)
