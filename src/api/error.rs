@@ -65,6 +65,7 @@ impl ResponseError for ApiError {
                 SolveError::MarketDataStale { .. } => "STALE_DATA",
                 SolveError::InvalidOrder(_) => "INVALID_ORDER",
                 SolveError::Internal(_) => "INTERNAL_ERROR",
+                SolveError::NotReady(_) => "NOT_READY",
             },
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::Internal(_) => "INTERNAL_ERROR",

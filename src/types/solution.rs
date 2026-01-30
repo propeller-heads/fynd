@@ -224,6 +224,8 @@ pub enum SolutionStatus {
     InsufficientLiquidity,
     /// The solver timed out before finding a route.
     Timeout,
+    /// No solver workers are ready (e.g., market data not yet initialized).
+    NotReady,
 }
 
 impl From<AlgorithmError> for SolutionStatus {

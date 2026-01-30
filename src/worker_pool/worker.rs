@@ -143,7 +143,7 @@ where
             let market = self.market_data.read().await;
             let last_block = market
                 .last_updated()
-                .ok_or(SolveError::Internal("No block info".to_string()))?;
+                .ok_or(SolveError::NotReady("No block info".to_string()))?;
             BlockInfo {
                 number: last_block.number,
                 hash: format!("{:?}", last_block.hash),

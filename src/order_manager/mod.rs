@@ -323,8 +323,14 @@ impl OrderManager {
                     .failed_solvers
                     .iter()
                     .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
+                let all_not_ready = responses
+                    .failed_solvers
+                    .iter()
+                    .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
                 if all_timeouts {
                     SolutionStatus::Timeout
+                } else if all_not_ready {
+                    SolutionStatus::NotReady
                 } else {
                     SolutionStatus::NoRouteFound
                 }
@@ -333,6 +339,7 @@ impl OrderManager {
             // Record status metric
             let status_label = match status {
                 SolutionStatus::Timeout => "timeout",
+                SolutionStatus::NotReady => "not_ready",
                 _ => "no_route",
             };
             counter!("order_manager_orders_total", "status" => status_label).increment(1);
