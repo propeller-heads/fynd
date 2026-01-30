@@ -153,7 +153,7 @@ where
 
         let result = self
             .algorithm
-            .find_best_route(graph, self.market_data.clone(), None, order)
+            .find_best_route(graph, self.market_data.clone(), Some(self.derived_data.clone()), order)
             .await;
 
         let order_solution = match result {

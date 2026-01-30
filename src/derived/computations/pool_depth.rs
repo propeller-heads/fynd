@@ -14,8 +14,8 @@
 use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
-use num_traits::{One, ToPrimitive, Zero};
-use tracing::{debug, instrument, trace, warn, Span};
+use num_traits::{One, Zero};
+use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     tycho_common::{
         models::token::Token,
@@ -70,7 +70,10 @@ impl PoolDepthComputation {
 
     /// Binary search to find the maximum amount_in with acceptable slippage.
     ///
-    /// Finds the largest amount where `effective_price >= spot_price * (1 - threshold)`.
+    /// Measures price impact by comparing the post-swap spot price against the initial spot price.
+    /// Both prices are on the same basis (buy-side), avoiding fee mismatches that occur when
+    /// comparing effective price (amount_out/amount_in) against spot price.
+    ///
     /// Uses `get_limits()` for the upper bound and assumes that it returns a simulatable input
     /// amount.
     ///
@@ -80,13 +83,12 @@ impl PoolDepthComputation {
     ///
     /// # Behavior
     /// - Simulation errors indicate we're outside valid range → adjust bounds accordingly
-    /// - Conversion errors (to_f64) are unexpected → terminate with error
+    /// - Spot price errors are propagated as `SimulationFailed`
     fn find_depth_binary_search(
         &self,
         sim_state: &dyn ProtocolSim,
         token_in: &Token,
         token_out: &Token,
-        min_price: f64,
         component_id: &ComponentId,
     ) -> Result<BigUint, ComputationError> {
         let (max_input, _) = sim_state
@@ -102,19 +104,25 @@ impl PoolDepthComputation {
             return Ok(BigUint::zero());
         }
 
+        let initial_price = sim_state.spot_price(token_in, token_out).map_err(|e| {
+            ComputationError::SimulationFailed(format!(
+                "spot_price failed for pool {component_id} {}/{}: {e}",
+                token_in.address, token_out.address
+            ))
+        })?;
+
         // Check if the limit itself doesn't exceed slippage — if so, depth is the limit
         if let Ok(result) = sim_state.get_amount_out(max_input.clone(), token_in, token_out) {
-            if let (Some(amount_out), Some(amount_in)) =
-                (result.amount.to_f64(), max_input.to_f64())
-            {
-                if amount_in > 0.0 && amount_out / amount_in >= min_price {
+            if let Ok(new_price) = result.new_state.spot_price(token_in, token_out) {
+                let price_impact = ((new_price - initial_price) / initial_price).abs();
+                if price_impact <= self.slippage_threshold {
                     return Ok(max_input);
                 }
             }
         }
 
         let mut low = BigUint::one();
-        let mut high = max_input.clone();
+        let mut high = max_input;
         let mut best_valid = None;
 
         while low < high {
@@ -122,16 +130,20 @@ impl PoolDepthComputation {
 
             match sim_state.get_amount_out(mid.clone(), token_in, token_out) {
                 Ok(result) => {
-                    let amount_out = result.amount.to_f64().ok_or_else(|| {
-                        ComputationError::Internal("amount_out to_f64 overflow".into())
-                    })?;
-                    let amount_in = mid.to_f64().ok_or_else(|| {
-                        ComputationError::Internal("amount_in to_f64 overflow".into())
-                    })?;
+                    let new_price =
+                        result
+                            .new_state
+                            .spot_price(token_in, token_out)
+                            .map_err(|e| {
+                                ComputationError::SimulationFailed(format!(
+                                    "post-swap spot_price failed for pool {component_id} {}/{}: \
+                                     {e}",
+                                    token_in.address, token_out.address
+                                ))
+                            })?;
+                    let price_impact = ((new_price - initial_price) / initial_price).abs();
 
-                    let effective_price = amount_out / amount_in;
-
-                    if effective_price >= min_price {
+                    if price_impact <= self.slippage_threshold {
                         best_valid = Some(mid.clone());
                         low = mid + BigUint::one();
                     } else {
@@ -296,7 +308,6 @@ impl DerivedComputation for PoolDepthComputation {
                             sim_state,
                             token_in,
                             token_out,
-                            min_price,
                             component_id,
                         )
                     }
@@ -307,7 +318,6 @@ impl DerivedComputation for PoolDepthComputation {
                             sim_state,
                             token_in,
                             token_out,
-                            min_price,
                             component_id,
                         )
                     }
@@ -445,12 +455,14 @@ mod tests {
         );
     }
 
-    /// MockProtocolSim has constant price (no slippage), so depth equals sell_limit
-    /// (the limit itself doesn't exceed slippage).
+    /// MockProtocolSim increments spot_price by 1 on each swap.
+    /// With spot_price=100 (no fee), price impact = 1/100 = 1% which equals the default
+    /// threshold, so the limit itself passes → depth = sell_limit.
+    /// With zero liquidity, depth is zero.
     #[rstest]
-    #[case::normal(2, 1_000_000, 500_000)]
-    #[case::zero_for_zero_liquidity(2, 0, 0)]
-    fn test_binary_search_finds_exact_depth_for_constant_price_pool(
+    #[case::within_threshold(100, 1_000_000, 10_000)]
+    #[case::zero_for_zero_liquidity(100, 0, 0)]
+    fn test_binary_search_finds_depth_within_threshold(
         #[case] spot_price: u32,
         #[case] liquidity: u128,
         #[case] expected_depth: u64,
@@ -460,13 +472,9 @@ mod tests {
 
         let sim = MockProtocolSim::new(spot_price).with_liquidity(liquidity);
         let comp = PoolDepthComputation::default();
-        let spot = sim
-            .spot_price(&token_a, &token_b)
-            .unwrap();
-        let min_price = spot * (1.0 - comp.slippage_threshold);
 
         let depth = comp
-            .find_depth_binary_search(&sim, &token_a, &token_b, min_price, &"mock_pool".into())
+            .find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into())
             .unwrap();
 
         assert_eq!(
@@ -476,17 +484,78 @@ mod tests {
         );
     }
 
+    /// When price impact always exceeds the threshold (spot_price=1, impact=100%),
+    /// binary search returns NoValidResult.
+    #[test]
+    fn test_binary_search_returns_error_when_all_amounts_exceed_threshold() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let sim = MockProtocolSim::new(1).with_liquidity(1_000_000);
+        let comp = PoolDepthComputation::default();
+
+        let result = comp.find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into());
+
+        assert!(
+            matches!(result, Err(ComputationError::NoValidResult { .. })),
+            "expected NoValidResult when price impact always exceeds threshold, got {result:?}"
+        );
+    }
+
+    /// With a higher slippage threshold (50%), spot_price=1 (impact=100%) still fails,
+    /// but spot_price=2 (impact=50%) passes.
+    #[test]
+    fn test_binary_search_respects_custom_slippage_threshold() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let comp = PoolDepthComputation::new(0.5).unwrap();
+
+        // spot_price=2: new_state has spot_price=3, impact = |1/3 - 1/2| / (1/2) = 1/3 ≈ 33% <= 50%
+        let sim = MockProtocolSim::new(2).with_liquidity(1_000_000);
+        let depth = comp
+            .find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into())
+            .unwrap();
+
+        // sell_limit = liquidity / spot_price = 1_000_000 / 2 = 500_000
+        assert_eq!(depth, BigUint::from(500_000u64));
+    }
+
+    /// Verify that the binary search uses spot price impact (not effective price).
+    /// With a fee, effective price differs from spot price, but the binary search
+    /// should only consider spot price changes.
+    #[test]
+    fn test_binary_search_uses_spot_price_not_effective_price() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        // spot_price=100, fee=1%. The mock's spot_price() includes fee markup: raw/(1-fee).
+        // After swap: new spot_price=101. Price impact based on spot prices:
+        // initial = 1/(100/0.99), new = 1/(101/0.99) → impact = |new-initial|/initial = 1/100 = 1%
+        // With default threshold 1%, this should pass (impact <= threshold).
+        let sim = MockProtocolSim::new(100).with_liquidity(1_000_000).with_fee(0.01);
+        let comp = PoolDepthComputation::default();
+
+        let depth = comp
+            .find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into())
+            .unwrap();
+
+        // Should find a valid depth (the limit itself passes)
+        assert!(depth > BigUint::zero(), "should find valid depth for high-fee pool");
+    }
+
     #[tokio::test]
     async fn test_compute_integration() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        // Use spot_price=1 for symmetric behavior in both directions
+        // Use spot_price=100 so price impact (1/100 = 1%) equals the default threshold.
+        // The mock increments spot_price by 1 on each swap, so new_state.spot_price=101.
         let (market, _) = setup_market(vec![(
             "pool",
             &eth,
             &usdc,
-            MockProtocolSim::new(1).with_liquidity(1_000_000),
+            MockProtocolSim::new(100).with_liquidity(1_000_000),
         )]);
         let derived = wrap_derived(DerivedData::new());
         let spot_comp = SpotPriceComputation::new();
@@ -522,11 +591,12 @@ mod tests {
         assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
         assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
 
-        // With spot_price=1 and no fee, effective_price = 1.0 for all amounts.
-        // min_price = 1.0 * 0.99 = 0.99, so all amounts satisfy effective_price >= min_price.
-        // The limit itself doesn't exceed slippage, so depth = sell_limit = liquidity.
-        let expected_depth = BigUint::from(1_000_000u64);
+        // With spot_price=100, price impact = 1% which equals threshold → limit passes.
+        // sell_limit = liquidity / spot_price = 1_000_000 / 100 = 10_000
+        let expected_depth = BigUint::from(10_000u64);
         assert_eq!(pool_depths.get(&key_eth_usdc).unwrap(), &expected_depth, "ETH→USDC depth");
+        // For USDC→ETH (addr 0x01 > addr 0x00): sell_limit = liquidity * spot_price (inverted)
+        // Actually get_limits is direction-agnostic in the mock, so same sell_limit
         assert_eq!(pool_depths.get(&key_usdc_eth).unwrap(), &expected_depth, "USDC→ETH depth");
     }
 }

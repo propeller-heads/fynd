@@ -225,7 +225,7 @@ impl MostLiquidAlgorithm {
 
         for edge in path.edge_iter() {
             let Some(data) = edge.data.as_ref() else {
-                trace!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
+                debug!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
                 return None;
             };
 
@@ -449,6 +449,18 @@ impl Algorithm for MostLiquidAlgorithm {
         if market.gas_price().is_none() {
             return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
         }
+
+        // Debug: log edge weight status
+        let total_edges = graph.edge_count();
+        let edges_with_weights = graph.edge_indices()
+            .filter(|&idx| graph.edge_weight(idx).map_or(false, |e| e.data.is_some()))
+            .count();
+        debug!(
+            total_edges,
+            edges_with_weights,
+            paths_candidates,
+            "graph edge weight status before scoring"
+        );
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
