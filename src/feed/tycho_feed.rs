@@ -134,7 +134,8 @@ impl TychoFeed {
             // Spawn protocol stream
             Some(
                 register_exchanges(
-                    ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain),
+                    ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                        .skip_state_decode_failures(true),
                     ComponentFilter::with_tvl_range(
                         self.config.min_tvl,
                         self.config.min_tvl * self.config.tvl_buffer_multiplier,
@@ -345,9 +346,9 @@ impl TychoFeed {
         trace!("Market data updated");
 
         // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
-            !removed_components.is_empty() ||
-            !updated_components_ids.is_empty()
+        if !added_components.is_empty()
+            || !removed_components.is_empty()
+            || !updated_components_ids.is_empty()
         {
             let market_update_event = MarketEvent::MarketUpdated {
                 added_components: added_components

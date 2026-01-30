@@ -294,14 +294,24 @@ impl ComputationManager {
         }
 
         // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
-        let phase2_start = Instant::now();
         let (token_prices_result, pool_depths_result) = tokio::join!(
-            self.token_price_computation
-                .compute(&self.market_data, &self.store, changed),
-            self.pool_depth_computation
-                .compute(&self.market_data, &self.store, changed)
+            async {
+                let start = Instant::now();
+                let result = self.token_price_computation
+                    .compute(&self.market_data, &self.store, changed)
+                    .await;
+                (result, start.elapsed())
+            },
+            async {
+                let start = Instant::now();
+                let result = self.pool_depth_computation
+                    .compute(&self.market_data, &self.store, changed)
+                    .await;
+                (result, start.elapsed())
+            }
         );
-        let phase2_elapsed = phase2_start.elapsed();
+        let (token_prices_result, token_elapsed) = token_prices_result;
+        let (pool_depths_result, depth_elapsed) = pool_depths_result;
 
         // Update store with remaining results
         let mut store_write = self.store.write().await;
@@ -310,7 +320,7 @@ impl ComputationManager {
             Ok(prices) => {
                 let count = prices.len();
                 store_write.set_token_prices(prices, block);
-                info!(count, elapsed_ms = phase2_elapsed.as_millis(), "token prices computed");
+                info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
                 let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
                     computation_id: TokenGasPriceComputation::ID,
                     block,
@@ -325,7 +335,7 @@ impl ComputationManager {
             Ok(depths) => {
                 let count = depths.len();
                 store_write.set_pool_depths(depths, block);
-                info!(count, elapsed_ms = phase2_elapsed.as_millis(), "pool depths computed");
+                info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
                 let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
                     computation_id: PoolDepthComputation::ID,
                     block,

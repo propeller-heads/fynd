@@ -7004,9 +7004,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.232.0"
+version = "0.234.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25882dac1b8130876d70e853c07336899d6dc977ae5eddd4e9ec5fb8861b2953"
+checksum = "6db88c8dade9f0c7d9866d5847f00a1d89b4d19a74bc427fed0e7170e622b45e"
 dependencies = [
  "alloy",
  "alloy-chains",
