@@ -26,7 +26,7 @@ use crate::{
     derived::{ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
-    types::{solution::Order, Route},
+    types::{solution::Order, RouteResult},
 };
 
 /// Configuration for an Algorithm instance.
@@ -126,14 +126,15 @@ pub(crate) trait Algorithm: Send + Sync {
     ///
     /// # Returns
     ///
-    /// The best route found, or an error if no route could be found.
+    /// The best route and its gas-adjusted net output amount, or an error if no route could be
+    /// found.
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
         market: SharedMarketDataRef,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
-    ) -> Result<Route, AlgorithmError>;
+    ) -> Result<RouteResult, AlgorithmError>;
 
     /// Returns whether this algorithm supports exact-out orders.
     #[allow(dead_code)]

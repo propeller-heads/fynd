@@ -9,6 +9,7 @@
 
 use std::time::Instant;
 
+use num_bigint::BigUint;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -157,7 +158,8 @@ where
             .await;
 
         let order_solution = match result {
-            Ok(route) => {
+            Ok(result) => {
+                let route = result.route;
                 let gas_estimate = route.total_gas();
                 let amount_in = if order.is_sell() {
                     order.amount.clone()
@@ -190,9 +192,11 @@ where
                     order.amount.clone()
                 };
 
-                // TODO: Calculate amount_out_net_gas properly using gas price and token price
-                // For now, use amount_out as a placeholder
-                let amount_out_net_gas = amount_out.clone();
+                // Convert net_amount_out (BigInt) to BigUint for amount_out_net_gas.
+                // If net_amount_out is negative (gas > output), clamp to zero.
+                let amount_out_net_gas = result.net_amount_out
+                    .to_biguint()
+                    .unwrap_or(BigUint::ZERO);
 
                 OrderSolution {
                     order_id: order.id.clone(),

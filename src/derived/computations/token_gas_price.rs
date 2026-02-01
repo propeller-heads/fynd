@@ -217,14 +217,15 @@ impl TokenGasPriceComputation {
             .map(|edge| edge.component_id.clone())
             .collect();
         // Forward: gas_token → target_token
-        let buy_route =
+        let buy_result =
             MostLiquidAlgorithm::simulate_path(&path, market, None, self.simulation_amount.clone())
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
                 })?;
-        let buy_gas_units = buy_route.total_gas();
+        let buy_gas_units = buy_result.route.total_gas();
         let buy_gas_cost = &buy_gas_units * gas_price; // Convert gas units to actual cost
-        let buy_out = buy_route
+        let buy_out = buy_result
+            .route
             .swaps
             .into_iter()
             .last()
@@ -234,14 +235,15 @@ impl TokenGasPriceComputation {
         // Reverse: target_token → gas_token
         let reversed_path = path.reversed();
 
-        let sell_route =
+        let sell_result =
             MostLiquidAlgorithm::simulate_path(&reversed_path, market, None, buy_out.clone())
                 .map_err(
                 |e| ComputationError::SimulationFailed(format!("sell simulation failed: {}", e)),
             )?;
-        let sell_gas_units = sell_route.total_gas();
+        let sell_gas_units = sell_result.route.total_gas();
         let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
-        let sell_out = sell_route
+        let sell_out = sell_result
+            .route
             .swaps
             .into_iter()
             .last()

@@ -30,6 +30,7 @@ pub use solution::{
     OrderSolution,
     OrderValidationError,
     Route,
+    RouteResult,
     RouteValidationError,
     SingleOrderSolution,
     Solution,

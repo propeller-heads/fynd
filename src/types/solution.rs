@@ -265,29 +265,30 @@ pub struct BlockInfo {
 ///
 /// A route describes the path through liquidity pools to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     pub swaps: Vec<Swap>,
-    /// Net amount out after accounting for gas costs in output token terms.
-    ///
-    /// This is NOT equal to the last swap's `amount_out` - it subtracts the gas cost
-    /// converted to output token units. Used for comparing routes.
-    ///
-    /// Can be negative if gas cost exceeds output (e.g., due to inaccurate gas estimation
-    /// or pricing). Routes with negative net_amount_out will rank lower but are still valid.
-    #[serde_as(as = "DisplayFromStr")]
-    pub net_amount_out: BigInt,
 }
 
 impl Route {
-    /// Creates a new route from swaps and pre-calculated net amount out.
-    ///
-    /// Use this when you've already calculated the net output accounting for gas.
-    pub fn new(swaps: Vec<Swap>, net_amount_out: BigInt) -> Self {
-        Self { swaps, net_amount_out }
+    /// Creates a new route from an ordered sequence of swaps.
+    pub fn new(swaps: Vec<Swap>) -> Self {
+        Self { swaps }
     }
+}
+
+/// The result of a route-finding algorithm: a route plus its gas-adjusted net output.
+///
+/// `net_amount_out` is the output amount after subtracting gas costs converted to output token
+/// units. It can be negative if gas exceeds output (e.g., tiny swaps or inaccurate gas
+/// estimation). Used by the worker to populate `amount_out_net_gas` on `OrderSolution`.
+#[derive(Debug, Clone)]
+pub struct RouteResult {
+    /// The route (sequence of swaps) to execute.
+    pub route: Route,
+    /// Net amount out after accounting for gas costs in output token terms.
+    pub net_amount_out: BigInt,
 }
 
 impl Route {
@@ -531,12 +532,7 @@ mod tests {
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        // Use last swap's amount_out as net_amount_out for test purposes
-        let net: BigInt = swaps
-            .last()
-            .map(|s| BigInt::from(s.amount_out.clone()))
-            .unwrap_or_default();
-        Route::new(swaps, net)
+        Route::new(swaps)
     }
 
     #[rstest]
@@ -593,11 +589,7 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let net: BigInt = swaps
-            .last()
-            .map(|s| BigInt::from(s.amount_out.clone()))
-            .unwrap_or_default();
-        let route = Route::new(swaps, net);
+        let route = Route::new(swaps);
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 
