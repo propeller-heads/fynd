@@ -44,7 +44,6 @@ use tycho_simulation::{
 use crate::{
     derived::{
         computation::{ComputationId, DerivedComputation},
-        computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
@@ -303,6 +302,7 @@ impl TokenGasPriceComputation {
     ///
     /// If `filter_tokens` is `Some`, only simulates those tokens (incremental mode).
     /// If `None`, simulates all discovered tokens (full mode).
+    #[allow(clippy::type_complexity)]
     fn simulate_token_prices(
         &self,
         market: &SharedMarketData,
@@ -313,7 +313,7 @@ impl TokenGasPriceComputation {
         let mut graph_manager = PetgraphStableDiGraphManager::new();
         graph_manager.initialize_graph(&market.component_topology());
 
-        let mut paths_by_token = self.discover_paths(&graph_manager, &spot_prices)?;
+        let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
 
         // Optionally filter to only requested tokens
         if let Some(tokens) = filter_tokens {

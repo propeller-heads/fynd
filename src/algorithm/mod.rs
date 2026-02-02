@@ -150,6 +150,7 @@ pub(crate) trait Algorithm: Send + Sync {
     ///
     /// Default implementation returns no requirements - algorithm works without
     /// any derived data.
+    #[allow(dead_code)]
     fn computation_requirements(&self) -> ComputationRequirements;
 }
 

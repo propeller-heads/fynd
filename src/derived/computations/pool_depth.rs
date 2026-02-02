@@ -365,7 +365,6 @@ impl DerivedComputation for PoolDepthComputation {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
     use crate::{

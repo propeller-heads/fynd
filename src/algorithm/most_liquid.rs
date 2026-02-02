@@ -464,7 +464,7 @@ impl Algorithm for MostLiquidAlgorithm {
             .filter(|&idx| {
                 graph
                     .edge_weight(idx)
-                    .map_or(false, |e| e.data.is_some())
+                    .is_some_and(|e| e.data.is_some())
             })
             .count();
         debug!(
@@ -1172,7 +1172,7 @@ mod tests {
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         // Set up derived data with token prices so gas can be deducted
-        let derived = setup_derived_with_token_prices(&[token_b.address.clone()]);
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
             .find_best_route(manager.graph(), market, Some(derived), &order)
@@ -1373,7 +1373,7 @@ mod tests {
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
 
         // Set up derived data with token prices so gas can be deducted
-        let derived = setup_derived_with_token_prices(&[token_b.address.clone()]);
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         // Route should still be returned, but with negative net_amount_out
         let result = algorithm
@@ -1521,7 +1521,7 @@ mod tests {
 
         // Set up derived data with token prices so gas can be deducted
         // This ensures shorter paths are preferred due to lower gas cost
-        let derived = setup_derived_with_token_prices(&[token_b.address.clone()]);
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
             .find_best_route(manager.graph(), market, Some(derived), &order)

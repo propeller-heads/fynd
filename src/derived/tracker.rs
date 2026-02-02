@@ -18,6 +18,7 @@ use super::{
 ///
 /// - **Fresh requirements**: Must be computed for the current block
 /// - **Stale requirements**: Can use data from any past block (just needs to exist)
+///
 /// TODO: Make staleness configurable by adding a max-block staleness param.
 ///
 /// # Example
@@ -80,7 +81,7 @@ impl ReadinessTracker {
                 self.on_new_block(*block);
             }
             DerivedDataEvent::ComputationComplete { computation_id, block } => {
-                self.on_computation_complete(*computation_id, *block);
+                self.on_computation_complete(computation_id, *block);
             }
             DerivedDataEvent::AllComplete { .. } => {
                 // No action needed - individual ComputationComplete events
@@ -94,7 +95,7 @@ impl ReadinessTracker {
         // Only reset if this is actually a new block
         if self
             .current_block
-            .map_or(true, |b| block > b)
+            .is_none_or(|b| block > b)
         {
             self.current_block = Some(block);
             self.ready_for_block.clear();
@@ -112,7 +113,7 @@ impl ReadinessTracker {
         // Ignore events for blocks older than current
         if self
             .current_block
-            .map_or(false, |b| block < b)
+            .is_some_and(|b| block < b)
         {
             return;
         }
@@ -120,7 +121,7 @@ impl ReadinessTracker {
         // If this is a newer block, reset per-block state first
         if self
             .current_block
-            .map_or(true, |b| block > b)
+            .is_none_or(|b| block > b)
         {
             self.on_new_block(block);
         }
