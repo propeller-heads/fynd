@@ -104,16 +104,21 @@ impl PoolDepthComputation {
             return Ok(BigUint::zero());
         }
 
-        let initial_price = sim_state.spot_price(token_in, token_out).map_err(|e| {
-            ComputationError::SimulationFailed(format!(
-                "spot_price failed for pool {component_id} {}/{}: {e}",
-                token_in.address, token_out.address
-            ))
-        })?;
+        let initial_price = sim_state
+            .spot_price(token_in, token_out)
+            .map_err(|e| {
+                ComputationError::SimulationFailed(format!(
+                    "spot_price failed for pool {component_id} {}/{}: {e}",
+                    token_in.address, token_out.address
+                ))
+            })?;
 
         // Check if the limit itself doesn't exceed slippage — if so, depth is the limit
         if let Ok(result) = sim_state.get_amount_out(max_input.clone(), token_in, token_out) {
-            if let Ok(new_price) = result.new_state.spot_price(token_in, token_out) {
+            if let Ok(new_price) = result
+                .new_state
+                .spot_price(token_in, token_out)
+            {
                 let price_impact = ((new_price - initial_price) / initial_price).abs();
                 if price_impact <= self.slippage_threshold {
                     return Ok(max_input);
@@ -130,17 +135,16 @@ impl PoolDepthComputation {
 
             match sim_state.get_amount_out(mid.clone(), token_in, token_out) {
                 Ok(result) => {
-                    let new_price =
-                        result
-                            .new_state
-                            .spot_price(token_in, token_out)
-                            .map_err(|e| {
-                                ComputationError::SimulationFailed(format!(
-                                    "post-swap spot_price failed for pool {component_id} {}/{}: \
+                    let new_price = result
+                        .new_state
+                        .spot_price(token_in, token_out)
+                        .map_err(|e| {
+                            ComputationError::SimulationFailed(format!(
+                                "post-swap spot_price failed for pool {component_id} {}/{}: \
                                      {e}",
-                                    token_in.address, token_out.address
-                                ))
-                            })?;
+                                token_in.address, token_out.address
+                            ))
+                        })?;
                     let price_impact = ((new_price - initial_price) / initial_price).abs();
 
                     if price_impact <= self.slippage_threshold {
@@ -219,7 +223,8 @@ impl DerivedComputation for PoolDepthComputation {
         let mut failed = 0usize;
 
         for component_id in components_to_compute {
-            // Get token addresses - from changed.added for new components, from topology for updates
+            // Get token addresses - from changed.added for new components, from topology for
+            // updates
             let token_addresses = changed
                 .added
                 .get(component_id)
@@ -304,22 +309,12 @@ impl DerivedComputation for PoolDepthComputation {
                     Err(SimulationError::FatalError(msg))
                         if msg == "query_pool_swap not implemented" =>
                     {
-                        self.find_depth_binary_search(
-                            sim_state,
-                            token_in,
-                            token_out,
-                            component_id,
-                        )
+                        self.find_depth_binary_search(sim_state, token_in, token_out, component_id)
                     }
                     Err(SimulationError::InvalidInput(msg, _))
                         if msg.contains("does not support TradeLimitPrice") =>
                     {
-                        self.find_depth_binary_search(
-                            sim_state,
-                            token_in,
-                            token_out,
-                            component_id,
-                        )
+                        self.find_depth_binary_search(sim_state, token_in, token_out, component_id)
                     }
                     Err(e) => Err(ComputationError::SimulationFailed(format!(
                         "query_pool_swap failed for {}/{}: {e}",
@@ -340,9 +335,7 @@ impl DerivedComputation for PoolDepthComputation {
                             .unwrap_or_else(|e| format!("sim_error={e}"));
                         let limits_info = sim_state
                             .get_limits(token_in.address.clone(), token_out.address.clone())
-                            .map(|(max_in, max_out)| {
-                                format!("max_in={max_in}, max_out={max_out}")
-                            })
+                            .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
                             .unwrap_or_else(|e| format!("limits_error={e}"));
                         debug!(
                             component_id,
@@ -533,7 +526,9 @@ mod tests {
         // After swap: new spot_price=101. Price impact based on spot prices:
         // initial = 1/(100/0.99), new = 1/(101/0.99) → impact = |new-initial|/initial = 1/100 = 1%
         // With default threshold 1%, this should pass (impact <= threshold).
-        let sim = MockProtocolSim::new(100).with_liquidity(1_000_000).with_fee(0.01);
+        let sim = MockProtocolSim::new(100)
+            .with_liquidity(1_000_000)
+            .with_fee(0.01);
         let comp = PoolDepthComputation::default();
 
         let depth = comp

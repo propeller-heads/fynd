@@ -366,8 +366,13 @@ impl<D: Clone + super::EdgeWeightFromSimAndDepths> PetgraphStableDiGraphManager<
                 let token_in = tokens.get(source_addr)?;
                 let token_out = tokens.get(target_addr)?;
 
-                let weight =
-                    D::from_sim_and_depths(sim_state, component_id, token_in, token_out, pool_depths)?;
+                let weight = D::from_sim_and_depths(
+                    sim_state,
+                    component_id,
+                    token_in,
+                    token_out,
+                    pool_depths,
+                )?;
                 Some((edge_idx, weight))
             })
             .collect();
@@ -833,12 +838,16 @@ mod tests {
         let mut components = HashMap::new();
         components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
 
-        manager.add_components(&components).unwrap();
+        manager
+            .add_components(&components)
+            .unwrap();
         let edge_count_after_first = manager.graph().edge_count();
         assert_eq!(edge_count_after_first, 2); // A->B and B->A
 
         // Add the same component again
-        manager.add_components(&components).unwrap();
+        manager
+            .add_components(&components)
+            .unwrap();
         let edge_count_after_second = manager.graph().edge_count();
         assert_eq!(
             edge_count_after_first, edge_count_after_second,

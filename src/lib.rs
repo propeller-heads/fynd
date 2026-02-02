@@ -91,8 +91,8 @@ pub use derived::{
     TokenGasPriceKey, TokenGasPrices,
 };
 pub use types::{
-    native_token, UnsupportedChainError,
+    native_token,
     solution::{Order, SolutionOptions, SolutionRequest},
     ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
-    SolveError, Swap,
+    SolveError, Swap, UnsupportedChainError,
 };

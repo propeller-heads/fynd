@@ -262,7 +262,9 @@ impl ComputationManager {
         };
 
         // Broadcast new block event
-        let _ = self.event_tx.send(DerivedDataEvent::NewBlock { block });
+        let _ = self
+            .event_tx
+            .send(DerivedDataEvent::NewBlock { block });
 
         // Phase 1: Compute spot prices first (no dependencies)
         let spot_start = Instant::now();
@@ -281,10 +283,12 @@ impl ComputationManager {
                     .await
                     .set_spot_prices(prices, block);
                 info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
-                let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
-                    computation_id: SpotPriceComputation::ID,
-                    block,
-                });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: SpotPriceComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
                 warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
@@ -297,14 +301,16 @@ impl ComputationManager {
         let (token_prices_result, pool_depths_result) = tokio::join!(
             async {
                 let start = Instant::now();
-                let result = self.token_price_computation
+                let result = self
+                    .token_price_computation
                     .compute(&self.market_data, &self.store, changed)
                     .await;
                 (result, start.elapsed())
             },
             async {
                 let start = Instant::now();
-                let result = self.pool_depth_computation
+                let result = self
+                    .pool_depth_computation
                     .compute(&self.market_data, &self.store, changed)
                     .await;
                 (result, start.elapsed())
@@ -321,10 +327,12 @@ impl ComputationManager {
                 let count = prices.len();
                 store_write.set_token_prices(prices, block);
                 info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
-                let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
-                    computation_id: TokenGasPriceComputation::ID,
-                    block,
-                });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
                 warn!(error = ?e, "token price computation failed");
@@ -336,10 +344,12 @@ impl ComputationManager {
                 let count = depths.len();
                 store_write.set_pool_depths(depths, block);
                 info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
-                let _ = self.event_tx.send(DerivedDataEvent::ComputationComplete {
-                    computation_id: PoolDepthComputation::ID,
-                    block,
-                });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
                 warn!(error = ?e, "pool depth computation failed");
@@ -347,14 +357,12 @@ impl ComputationManager {
         }
 
         // Broadcast all complete event
-        let _ = self.event_tx.send(DerivedDataEvent::AllComplete { block });
+        let _ = self
+            .event_tx
+            .send(DerivedDataEvent::AllComplete { block });
 
         let total_elapsed = total_start.elapsed();
-        info!(
-            block,
-            total_ms = total_elapsed.as_millis(),
-            "all derived computations complete"
-        );
+        info!(block, total_ms = total_elapsed.as_millis(), "all derived computations complete");
     }
 }
 

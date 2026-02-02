@@ -237,9 +237,9 @@ impl TokenGasPriceComputation {
 
         let sell_result =
             MostLiquidAlgorithm::simulate_path(&reversed_path, market, None, buy_out.clone())
-                .map_err(
-                |e| ComputationError::SimulationFailed(format!("sell simulation failed: {}", e)),
-            )?;
+                .map_err(|e| {
+                    ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
+                })?;
         let sell_gas_units = sell_result.route.total_gas();
         let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
         let sell_out = sell_result
@@ -288,8 +288,11 @@ impl TokenGasPriceComputation {
         // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
         let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
-            numerator: &buy_out * &sell_out_net + &buy_out * (&self.simulation_amount + &buy_gas_cost),
-            denominator: BigUint::from(2u8) * (&self.simulation_amount + &buy_gas_cost) * sell_out_net,
+            numerator: &buy_out * &sell_out_net +
+                &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8) *
+                (&self.simulation_amount + &buy_gas_cost) *
+                sell_out_net,
         };
 
         Ok((spread, buy_price_precise, path_components))
@@ -384,7 +387,11 @@ impl TokenGasPriceComputation {
         // Find tokens whose paths intersect with changed components
         let tokens_to_recompute: HashSet<Address> = existing_deps
             .iter()
-            .filter(|(_, entry)| !entry.path_components.is_disjoint(&changed_components))
+            .filter(|(_, entry)| {
+                !entry
+                    .path_components
+                    .is_disjoint(&changed_components)
+            })
             .map(|(addr, _)| addr.clone())
             .collect();
 
@@ -403,7 +410,10 @@ impl TokenGasPriceComputation {
         );
 
         let market = market.read().await;
-        let block = market.last_updated().map(|b| b.number).unwrap_or(0);
+        let block = market
+            .last_updated()
+            .map(|b| b.number)
+            .unwrap_or(0);
 
         let store_guard = store.read().await;
         let spot_prices = store_guard
@@ -417,8 +427,12 @@ impl TokenGasPriceComputation {
             .ok_or(ComputationError::MissingDependency("gas_price"))?
             .effective_gas_price();
 
-        let best_prices =
-            self.simulate_token_prices(&market, &spot_prices, &gas_price, Some(&tokens_to_recompute))?;
+        let best_prices = self.simulate_token_prices(
+            &market,
+            &spot_prices,
+            &gas_price,
+            Some(&tokens_to_recompute),
+        )?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
@@ -426,10 +440,10 @@ impl TokenGasPriceComputation {
 
         for token in &tokens_to_recompute {
             if let Some((_, price, components)) = best_prices.get(token) {
-                new_deps.insert(token.clone(), TokenPriceEntry {
-                    price: price.clone(),
-                    path_components: components.clone(),
-                });
+                new_deps.insert(
+                    token.clone(),
+                    TokenPriceEntry { price: price.clone(), path_components: components.clone() },
+                );
                 result.insert(token.clone(), price.clone());
             } else {
                 result.remove(token);
@@ -437,7 +451,10 @@ impl TokenGasPriceComputation {
             }
         }
 
-        store.write().await.set_token_prices_deps(new_deps, block);
+        store
+            .write()
+            .await
+            .set_token_prices_deps(new_deps, block);
         Span::current().record("updated_token_prices", result.len());
 
         Ok(Some(result))
@@ -461,7 +478,10 @@ impl DerivedComputation for TokenGasPriceComputation {
         // For state-only changes, use incremental computation
         if !changed.is_full_recompute && !changed.is_topology_change() {
             // Try incremental computation if we have existing path dependencies
-            if let Some(result) = self.try_incremental_compute(market, store, changed).await? {
+            if let Some(result) = self
+                .try_incremental_compute(market, store, changed)
+                .await?
+            {
                 return Ok(result);
             }
             // Fall through to full compute if incremental is not possible
@@ -470,7 +490,10 @@ impl DerivedComputation for TokenGasPriceComputation {
         let market = market.read().await;
         let store_guard = store.read().await;
 
-        let block = market.last_updated().map(|b| b.number).unwrap_or(0);
+        let block = market
+            .last_updated()
+            .map(|b| b.number)
+            .unwrap_or(0);
 
         let spot_prices = store_guard
             .spot_prices()
@@ -490,10 +513,8 @@ impl DerivedComputation for TokenGasPriceComputation {
         let mut token_prices = TokenGasPrices::new();
 
         for (token, (_, price, path_components)) in best_prices {
-            token_prices_with_deps.insert(token.clone(), TokenPriceEntry {
-                price: price.clone(),
-                path_components,
-            });
+            token_prices_with_deps
+                .insert(token.clone(), TokenPriceEntry { price: price.clone(), path_components });
             token_prices.insert(token, price);
         }
 
@@ -502,18 +523,18 @@ impl DerivedComputation for TokenGasPriceComputation {
             numerator: self.simulation_amount.clone(),
             denominator: self.simulation_amount.clone(),
         };
-        token_prices_with_deps.insert(self.gas_token.clone(), TokenPriceEntry {
-            price: gas_token_price.clone(),
-            path_components: HashSet::new(),
-        });
+        token_prices_with_deps.insert(
+            self.gas_token.clone(),
+            TokenPriceEntry { price: gas_token_price.clone(), path_components: HashSet::new() },
+        );
         token_prices.insert(self.gas_token.clone(), gas_token_price);
 
-        store.write().await.set_token_prices_deps(token_prices_with_deps, block);
+        store
+            .write()
+            .await
+            .set_token_prices_deps(token_prices_with_deps, block);
 
-        debug!(
-            priced = token_prices.len() - 1,
-            "token price computation complete"
-        );
+        debug!(priced = token_prices.len() - 1, "token price computation complete");
 
         Span::current().record("updated_token_prices", token_prices.len());
 
@@ -554,7 +575,9 @@ mod tests {
         let changed = ChangedComponents {
             added: pools
                 .iter()
-                .map(|(id, t1, t2, _)| (id.to_string(), vec![t1.address.clone(), t2.address.clone()]))
+                .map(|(id, t1, t2, _)| {
+                    (id.to_string(), vec![t1.address.clone(), t2.address.clone()])
+                })
                 .collect(),
             removed: vec![],
             updated: vec![],

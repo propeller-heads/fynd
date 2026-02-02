@@ -198,7 +198,14 @@ impl WorkerPoolBuilder {
         event_rx: broadcast::Receiver<MarketEvent>,
         derived_event_tx: broadcast::Sender<DerivedDataEvent>,
     ) -> Result<WorkerPool, UnknownAlgorithmError> {
-        WorkerPool::spawn(self.config, task_rx, market_data, derived_data, event_rx, derived_event_tx)
+        WorkerPool::spawn(
+            self.config,
+            task_rx,
+            market_data,
+            derived_data,
+            event_rx,
+            derived_event_tx,
+        )
     }
 }
 

@@ -4,7 +4,10 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use super::{error::ComputationError, manager::{ChangedComponents, SharedDerivedDataRef}};
+use super::{
+    error::ComputationError,
+    manager::{ChangedComponents, SharedDerivedDataRef},
+};
 use crate::feed::market_data::SharedMarketDataRef;
 
 /// Unique identifier for a computation type.
@@ -16,8 +19,8 @@ pub type ComputationId = &'static str;
 ///
 /// Each algorithm declares which computations it needs and their freshness requirements:
 ///
-/// - `require_fresh`: Data must be from the current block (same block as SharedMarketData).
-///   Workers wait for these computations to complete for the current block before solving.
+/// - `require_fresh`: Data must be from the current block (same block as SharedMarketData). Workers
+///   wait for these computations to complete for the current block before solving.
 ///
 /// - `allow_stale`: Data can be from any past block, as long as it has been computed at least once.
 ///   Workers only check that the data exists, not that it's from the current block.

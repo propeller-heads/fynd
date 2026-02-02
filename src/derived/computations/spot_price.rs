@@ -83,7 +83,8 @@ impl DerivedComputation for SpotPriceComputation {
         let mut failed = 0usize;
 
         for component_id in components_to_compute {
-            // Get token addresses - from changed.added for new components, from topology for updates
+            // Get token addresses - from changed.added for new components, from topology for
+            // updates
             let token_addresses = changed
                 .added
                 .get(component_id)
@@ -111,11 +112,8 @@ impl DerivedComputation for SpotPriceComputation {
 
             for perm in pool_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
-                let key = (
-                    component_id.clone(),
-                    token_in.address.clone(),
-                    token_out.address.clone(),
-                );
+                let key =
+                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
                 match sim_state.spot_price(token_in, token_out) {
                     Ok(price) => {

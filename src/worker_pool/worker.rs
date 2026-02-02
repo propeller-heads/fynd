@@ -154,7 +154,12 @@ where
 
         let result = self
             .algorithm
-            .find_best_route(graph, self.market_data.clone(), Some(self.derived_data.clone()), order)
+            .find_best_route(
+                graph,
+                self.market_data.clone(),
+                Some(self.derived_data.clone()),
+                order,
+            )
             .await;
 
         let order_solution = match result {
@@ -194,7 +199,8 @@ where
 
                 // Convert net_amount_out (BigInt) to BigUint for amount_out_net_gas.
                 // If net_amount_out is negative (gas > output), clamp to zero.
-                let amount_out_net_gas = result.net_amount_out
+                let amount_out_net_gas = result
+                    .net_amount_out
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
 

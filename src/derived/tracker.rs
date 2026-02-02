@@ -6,8 +6,10 @@
 
 use std::collections::HashSet;
 
-use super::computation::{ComputationId, ComputationRequirements};
-use super::events::DerivedDataEvent;
+use super::{
+    computation::{ComputationId, ComputationRequirements},
+    events::DerivedDataEvent,
+};
 
 /// Tracks which derived data computations are ready based on freshness requirements.
 ///
@@ -90,7 +92,10 @@ impl ReadinessTracker {
     /// Handles a new block event, clearing per-block readiness state.
     fn on_new_block(&mut self, block: u64) {
         // Only reset if this is actually a new block
-        if self.current_block.map_or(true, |b| block > b) {
+        if self
+            .current_block
+            .map_or(true, |b| block > b)
+        {
             self.current_block = Some(block);
             self.ready_for_block.clear();
             // Note: ever_computed is NOT cleared - stale data persists
@@ -100,20 +105,28 @@ impl ReadinessTracker {
     /// Handles a computation completion event.
     fn on_computation_complete(&mut self, computation_id: ComputationId, block: u64) {
         // Always record in ever_computed (for stale requirements)
-        self.ever_computed.insert(computation_id);
+        self.ever_computed
+            .insert(computation_id);
 
         // For fresh requirements, check block number
         // Ignore events for blocks older than current
-        if self.current_block.map_or(false, |b| block < b) {
+        if self
+            .current_block
+            .map_or(false, |b| block < b)
+        {
             return;
         }
 
         // If this is a newer block, reset per-block state first
-        if self.current_block.map_or(true, |b| block > b) {
+        if self
+            .current_block
+            .map_or(true, |b| block > b)
+        {
             self.on_new_block(block);
         }
 
-        self.ready_for_block.insert(computation_id);
+        self.ready_for_block
+            .insert(computation_id);
     }
 
     /// Returns true if all requirements are satisfied:
@@ -159,7 +172,10 @@ impl ReadinessTracker {
             .copied()
             .collect();
 
-        missing_fresh.union(&missing_stale).copied().collect()
+        missing_fresh
+            .union(&missing_stale)
+            .copied()
+            .collect()
     }
 
     /// Returns the current block being tracked.
@@ -238,7 +254,8 @@ mod tests {
 
     #[test]
     fn fresh_requirement_multiple_computations() {
-        let mut tracker = ReadinessTracker::new(fresh_requirements(&["token_prices", "spot_prices"]));
+        let mut tracker =
+            ReadinessTracker::new(fresh_requirements(&["token_prices", "spot_prices"]));
 
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
@@ -255,7 +272,8 @@ mod tests {
 
     #[test]
     fn fresh_requirement_newer_block_resets() {
-        let mut tracker = ReadinessTracker::new(fresh_requirements(&["token_prices", "spot_prices"]));
+        let mut tracker =
+            ReadinessTracker::new(fresh_requirements(&["token_prices", "spot_prices"]));
 
         // Complete token_prices for block 100
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
@@ -272,8 +290,12 @@ mod tests {
 
         assert!(!tracker.is_ready()); // token_prices not ready for block 101
         assert_eq!(tracker.current_block(), Some(101));
-        assert!(tracker.ready_for_block.contains(&"spot_prices"));
-        assert!(!tracker.ready_for_block.contains(&"token_prices"));
+        assert!(tracker
+            .ready_for_block
+            .contains(&"spot_prices"));
+        assert!(!tracker
+            .ready_for_block
+            .contains(&"token_prices"));
     }
 
     #[test]
@@ -334,14 +356,16 @@ mod tests {
         }
 
         // ever_computed should still contain token_prices
-        assert!(tracker.ever_computed.contains(&"token_prices"));
+        assert!(tracker
+            .ever_computed
+            .contains(&"token_prices"));
     }
 
     #[test]
     fn mixed_fresh_and_stale_requirements() {
         let requirements = ComputationRequirements::none()
-            .with_fresh("spot_prices")    // Must be current block
-            .with_stale("token_prices");  // Any block is fine
+            .with_fresh("spot_prices") // Must be current block
+            .with_stale("token_prices"); // Any block is fine
 
         let mut tracker = ReadinessTracker::new(requirements);
 

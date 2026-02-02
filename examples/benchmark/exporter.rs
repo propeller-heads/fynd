@@ -101,8 +101,14 @@ pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     }
 
     // Trim leading/trailing empty buckets
-    let first_non_empty = buckets.iter().position(|&c| c > 0).unwrap_or(0);
-    let last_non_empty = buckets.iter().rposition(|&c| c > 0).unwrap_or(0);
+    let first_non_empty = buckets
+        .iter()
+        .position(|&c| c > 0)
+        .unwrap_or(0);
+    let last_non_empty = buckets
+        .iter()
+        .rposition(|&c| c > 0)
+        .unwrap_or(0);
 
     println!("\n{} Distribution:", label);
 

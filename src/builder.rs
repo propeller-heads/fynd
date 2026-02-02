@@ -184,8 +184,7 @@ impl TychoSolverBuilder {
         tycho_feed = tycho_feed.with_gas_price_worker_signal_tx(gas_price_worker_signal_tx);
 
         // Computation manager for derived data (token prices, pool depths)
-        let gas_token = native_token(&self.chain)
-            .context("gas token not configured for chain")?;
+        let gas_token = native_token(&self.chain).context("gas token not configured for chain")?;
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);

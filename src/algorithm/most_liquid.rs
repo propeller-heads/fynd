@@ -103,13 +103,13 @@ impl crate::graph::EdgeWeightFromSimAndDepths for DepthAndPrice {
         token_out: &Token,
         pool_depths: &crate::derived::PoolDepths,
     ) -> Option<Self> {
-        let spot_price = sim.spot_price(token_in, token_out).ok()?;
+        let spot_price = sim
+            .spot_price(token_in, token_out)
+            .ok()?;
 
         // Look up pre-computed depth from derived data
         let depth_key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
-        let depth = pool_depths
-            .get(&depth_key)?
-            .to_f64()?;
+        let depth = pool_depths.get(&depth_key)?.to_f64()?;
 
         Some(Self { spot_price, depth })
     }
@@ -353,7 +353,10 @@ impl MostLiquidAlgorithm {
             .unwrap_or_else(|| BigUint::ZERO);
 
         let net_amount_out = if let Some(last_swap) = swaps.last() {
-            let total_gas: BigUint = swaps.iter().map(|s| &s.gas_estimate).sum();
+            let total_gas: BigUint = swaps
+                .iter()
+                .map(|s| &s.gas_estimate)
+                .sum();
             let gas_price = market
                 .gas_price()
                 .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
@@ -417,7 +420,11 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Extract token prices from derived data (if available)
         let token_prices = if let Some(ref derived) = derived {
-            derived.read().await.token_prices().cloned()
+            derived
+                .read()
+                .await
+                .token_prices()
+                .cloned()
         } else {
             None
         };
@@ -452,14 +459,17 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Debug: log edge weight status
         let total_edges = graph.edge_count();
-        let edges_with_weights = graph.edge_indices()
-            .filter(|&idx| graph.edge_weight(idx).map_or(false, |e| e.data.is_some()))
+        let edges_with_weights = graph
+            .edge_indices()
+            .filter(|&idx| {
+                graph
+                    .edge_weight(idx)
+                    .map_or(false, |e| e.data.is_some())
+            })
             .count();
         debug!(
             total_edges,
-            edges_with_weights,
-            paths_candidates,
-            "graph edge weight status before scoring"
+            edges_with_weights, paths_candidates, "graph edge weight status before scoring"
         );
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
@@ -519,7 +529,12 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let result = match Self::simulate_path(&edge_path, &market, token_prices.as_ref(), amount_in.clone()) {
+            let result = match Self::simulate_path(
+                &edge_path,
+                &market,
+                token_prices.as_ref(),
+                amount_in.clone(),
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -958,9 +973,13 @@ mod tests {
         .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), None, BigUint::from(100u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(100u64),
+        )
+        .unwrap();
 
         assert_eq!(result.route.swaps.len(), 1);
         assert_eq!(result.route.swaps[0].amount_in, BigUint::from(100u64));
@@ -989,9 +1008,13 @@ mod tests {
         .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), None, BigUint::from(10u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(10u64),
+        )
+        .unwrap();
 
         assert_eq!(result.route.swaps.len(), 2);
         // First hop: 10 * 2 = 20
@@ -1026,9 +1049,13 @@ mod tests {
         assert_eq!(paths.len(), 1);
         let path = paths[0].clone();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), None, BigUint::from(10u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(10u64),
+        )
+        .unwrap();
 
         assert_eq!(result.route.swaps.len(), 2);
         // First: 10 * 2 = 20
@@ -1060,7 +1087,8 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result = MostLiquidAlgorithm::simulate_path(&path, &market, None, BigUint::from(100u64));
+        let result =
+            MostLiquidAlgorithm::simulate_path(&path, &market, None, BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
@@ -1082,8 +1110,12 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), None, BigUint::from(100u64));
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(100u64),
+        );
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 

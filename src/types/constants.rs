@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use lazy_static::lazy_static;
-use tycho_simulation::tycho_common::models::Chain;
-use tycho_simulation::tycho_core::models::Address;
+use tycho_simulation::{tycho_common::models::Chain, tycho_core::models::Address};
 
 use crate::ProtocolSystem;
 
