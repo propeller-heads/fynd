@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
-use tracing::debug;
+use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
 /// Components that are blacklisted from routing due to simulation issues.
@@ -178,11 +178,19 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         components: &HashMap<ComponentId, Vec<Address>>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
+        let mut skipped_blacklisted = 0usize;
+        let mut skipped_duplicates = 0usize;
 
         for (comp_id, tokens) in components {
-            // Skip blacklisted components
             if BLACKLISTED_COMPONENTS.contains(comp_id.as_str()) {
-                debug!(component_id = %comp_id, "skipping blacklisted component");
+                trace!(component_id = %comp_id, "skipping blacklisted component");
+                skipped_blacklisted += 1;
+                continue;
+            }
+
+            if self.edge_map.contains_key(comp_id) {
+                trace!(component_id = %comp_id, "skipping already-tracked component");
+                skipped_duplicates += 1;
                 continue;
             }
 
@@ -197,6 +205,10 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
                 .collect();
             // Add edges for all token pairs in this component
             self.add_component_edges(comp_id, &node_indices);
+        }
+
+        if skipped_blacklisted > 0 || skipped_duplicates > 0 {
+            debug!(skipped_blacklisted, skipped_duplicates, "skipped components during add");
         }
 
         // Return error if any components had too few tokens (less than 2)
@@ -810,5 +822,27 @@ mod tests {
             }
             _ => panic!("Expected GraphErrors with multiple errors"),
         }
+    }
+
+    #[test]
+    fn test_add_components_skips_duplicates() {
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
+        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+
+        let mut components = HashMap::new();
+        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+
+        manager.add_components(&components).unwrap();
+        let edge_count_after_first = manager.graph().edge_count();
+        assert_eq!(edge_count_after_first, 2); // A->B and B->A
+
+        // Add the same component again
+        manager.add_components(&components).unwrap();
+        let edge_count_after_second = manager.graph().edge_count();
+        assert_eq!(
+            edge_count_after_first, edge_count_after_second,
+            "Edge count should not change when re-adding the same component"
+        );
     }
 }
