@@ -60,44 +60,63 @@ pub fn print_statistics(times: &[u64], label: &str) {
     }
 }
 
-/// Prints an ASCII histogram showing the distribution of timing values across 10 buckets.
+/// Prints an ASCII histogram with fixed-range buckets:
+/// 0-100ms in 10ms steps, 100ms+ in 50ms steps.
+/// Trims leading/trailing empty buckets but preserves interior gaps.
 pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     if times.is_empty() {
         return;
     }
 
-    let mut sorted = times.to_vec();
-    sorted.sort();
+    let max = *times.iter().max().unwrap();
 
-    let min = sorted[0];
-    let max = sorted[sorted.len() - 1];
-
-    if min == max {
-        println!("\n{} - All values are {}ms", label, min);
-        return;
+    // Build fixed bucket boundaries
+    let mut boundaries: Vec<u64> = Vec::new();
+    // 0..100 in steps of 10
+    let mut edge = 0u64;
+    while edge < 100 && edge <= max {
+        boundaries.push(edge);
+        edge += 10;
     }
+    // 100.. in steps of 50
+    if edge <= max {
+        while edge <= max {
+            boundaries.push(edge);
+            edge += 50;
+        }
+    }
+    // Sentinel upper bound
+    boundaries.push(edge);
+
+    let num_buckets = boundaries.len() - 1;
+    let mut buckets = vec![0usize; num_buckets];
+
+    for &time in times {
+        // Binary search for the right bucket
+        let idx = match boundaries.binary_search(&time) {
+            Ok(i) => i.min(num_buckets - 1),
+            Err(i) => (i - 1).min(num_buckets - 1),
+        };
+        buckets[idx] += 1;
+    }
+
+    // Trim leading/trailing empty buckets
+    let first_non_empty = buckets.iter().position(|&c| c > 0).unwrap_or(0);
+    let last_non_empty = buckets.iter().rposition(|&c| c > 0).unwrap_or(0);
 
     println!("\n{} Distribution:", label);
 
-    let num_buckets = 10;
-    let bucket_size = (max - min).div_ceil(num_buckets);
-    let mut buckets = vec![0usize; num_buckets as usize];
-
-    for &time in times {
-        let bucket_idx = ((time - min) / bucket_size).min(num_buckets - 1) as usize;
-        buckets[bucket_idx] += 1;
-    }
-
-    let max_count = *buckets.iter().max().unwrap();
+    let visible = &buckets[first_non_empty..=last_non_empty];
+    let max_count = *visible.iter().max().unwrap_or(&1);
     let scale = if max_count > width { max_count as f64 / width as f64 } else { 1.0 };
 
-    for (i, &count) in buckets.iter().enumerate() {
-        let bucket_start = min + (i as u64 * bucket_size);
-        let bucket_end = bucket_start + bucket_size - 1;
+    for i in first_non_empty..=last_non_empty {
+        let lo = boundaries[i];
+        let hi = boundaries[i + 1] - 1;
+        let count = buckets[i];
         let bar_length = (count as f64 / scale).round() as usize;
         let bar = "█".repeat(bar_length);
-
-        println!("  {:>5}-{:<5}ms [{:>4}] {}", bucket_start, bucket_end, count, bar);
+        println!("  {:>5}-{:<5}ms [{:>4}] {}", lo, hi, count, bar);
     }
 }
 
