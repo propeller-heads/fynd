@@ -193,7 +193,7 @@ mod tests {
     fn fresh_requirements(ids: &[&'static str]) -> ComputationRequirements {
         ids.iter()
             .fold(ComputationRequirements::none(), |req, id| {
-                req.expect_fresh(*id)
+                req.expect_fresh(id)
                     .expect("test ids should not conflict")
             })
     }
@@ -201,7 +201,7 @@ mod tests {
     fn stale_requirements(ids: &[&'static str]) -> ComputationRequirements {
         ids.iter()
             .fold(ComputationRequirements::none(), |req, id| {
-                req.expect_stale(*id)
+                req.expect_stale(id)
                     .expect("test ids should not conflict")
             })
     }
