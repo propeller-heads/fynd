@@ -9,7 +9,7 @@ use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::Ethereu
 use crate::{
     algorithm::AlgorithmConfig,
     api::{configure_app, AppState, HealthTracker},
-    config::{defaults, PoolConfig},
+    config::{defaults, BlacklistConfig, PoolConfig},
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
@@ -48,6 +48,8 @@ pub struct TychoSolverBuilder {
     reconnect_delay: Duration,
     order_manager_timeout: Duration,
     order_manager_min_responses: usize,
+    /// Blacklist configuration for filtering components and protocols.
+    blacklist: BlacklistConfig,
 }
 
 impl TychoSolverBuilder {
@@ -76,6 +78,7 @@ impl TychoSolverBuilder {
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
             order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
+            blacklist: BlacklistConfig::default(),
         }
     }
 
@@ -145,6 +148,12 @@ impl TychoSolverBuilder {
         self
     }
 
+    /// Sets the blacklist configuration for filtering components.
+    pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
+        self.blacklist = blacklist;
+        self
+    }
+
     pub fn build(self) -> Result<TychoSolver> {
         info!(
             host = %self.http_host,
@@ -170,7 +179,8 @@ impl TychoSolverBuilder {
         .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality);
+        .min_token_quality(self.min_token_quality)
+        .blacklisted_components(self.blacklist.components);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;

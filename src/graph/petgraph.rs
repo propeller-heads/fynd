@@ -8,29 +8,13 @@
 //! useful for optimising the graph manager's performance by allowing for O(1) edge and node
 //! lookups.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::LazyLock,
-};
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
 use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
-
-/// Components that are blacklisted from routing due to simulation issues.
-///
-/// These pools are excluded from the routing graph because they have known
-/// issues with the simulation (e.g., rebasing tokens that don't work correctly
-/// with certain protocols).
-static BLACKLISTED_COMPONENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    HashSet::from([
-        // UniswapV3 AMPL pool - AMPL is a rebasing token that doesn't work correctly
-        // with UniswapV3 simulation
-        "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
-    ])
-});
 
 use super::GraphManager;
 use crate::{
@@ -178,16 +162,9 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         components: &HashMap<ComponentId, Vec<Address>>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
-        let mut skipped_blacklisted = 0usize;
         let mut skipped_duplicates = 0usize;
 
         for (comp_id, tokens) in components {
-            if BLACKLISTED_COMPONENTS.contains(comp_id.as_str()) {
-                trace!(component_id = %comp_id, "skipping blacklisted component");
-                skipped_blacklisted += 1;
-                continue;
-            }
-
             if self.edge_map.contains_key(comp_id) {
                 trace!(component_id = %comp_id, "skipping already-tracked component");
                 skipped_duplicates += 1;
@@ -207,8 +184,8 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
             self.add_component_edges(comp_id, &node_indices);
         }
 
-        if skipped_blacklisted > 0 || skipped_duplicates > 0 {
-            debug!(skipped_blacklisted, skipped_duplicates, "skipped components during add");
+        if skipped_duplicates > 0 {
+            debug!(skipped_duplicates, "skipped duplicate components during add");
         }
 
         // Return error if any components had too few tokens (less than 2)
@@ -414,19 +391,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         self.edge_map.clear();
         self.node_map.clear();
 
-        // Filter out blacklisted components
-        let filtered_topology: HashMap<_, _> = component_topology
-            .iter()
-            .filter(|(comp_id, _)| {
-                let is_blacklisted = BLACKLISTED_COMPONENTS.contains(comp_id.as_str());
-                if is_blacklisted {
-                    debug!(component_id = %comp_id, "skipping blacklisted component");
-                }
-                !is_blacklisted
-            })
-            .collect();
-
-        let unique_tokens: HashSet<Address> = filtered_topology
+        let unique_tokens: HashSet<Address> = component_topology
             .values()
             .flat_map(|v| v.iter())
             .cloned()
@@ -439,7 +404,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         }
 
         // Add edges between all tokens in each component
-        for (comp_id, tokens) in filtered_topology {
+        for (comp_id, tokens) in component_topology {
             let node_indices: Vec<NodeIndex> = tokens
                 .iter()
                 .map(|token| self.node_map[token])
