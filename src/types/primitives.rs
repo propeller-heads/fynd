@@ -55,13 +55,14 @@ impl ProtocolSystem {
 }
 
 impl fmt::Display for ProtocolSystem {
+    /// Returns the raw protocol system name as expected by tycho-execution encoder.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProtocolSystem::UniswapV2 => write!(f, "uniswap_v2"),
             ProtocolSystem::UniswapV3 => write!(f, "uniswap_v3"),
             ProtocolSystem::SushiSwap => write!(f, "sushiswap"),
-            ProtocolSystem::Curve => write!(f, "curve"),
-            ProtocolSystem::Balancer => write!(f, "balancer"),
+            ProtocolSystem::Curve => write!(f, "vm:curve"),
+            ProtocolSystem::Balancer => write!(f, "vm:balancer"),
         }
     }
 }

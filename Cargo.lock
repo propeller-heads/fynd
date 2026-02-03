@@ -247,6 +247,7 @@ dependencies = [
  "alloy-genesis",
  "alloy-json-rpc",
  "alloy-network",
+ "alloy-node-bindings",
  "alloy-provider",
  "alloy-rpc-client",
  "alloy-rpc-types",
@@ -445,6 +446,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-hardforks"
+version = "0.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3165210652f71dfc094b051602bafd691f506c54050a174b1cba18fb5ef706a3"
+dependencies = [
+ "alloy-chains",
+ "alloy-eip2124",
+ "alloy-primitives",
+ "auto_impl",
+ "dyn-clone",
+]
+
+[[package]]
 name = "alloy-json-abi"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -511,6 +525,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-node-bindings"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df1bb59615b0909159329c3966b0490fd63e89f8e2ab0efcea045ae6080a16ed"
+dependencies = [
+ "alloy-genesis",
+ "alloy-hardforks",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-local",
+ "k256",
+ "rand 0.8.5",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "alloy-primitives"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -551,8 +586,10 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-network",
  "alloy-network-primitives",
+ "alloy-node-bindings",
  "alloy-primitives",
  "alloy-rpc-client",
+ "alloy-rpc-types-anvil",
  "alloy-rpc-types-debug",
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
@@ -635,6 +672,18 @@ dependencies = [
  "alloy-rpc-types-debug",
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
+ "alloy-serde",
+ "serde",
+]
+
+[[package]]
+name = "alloy-rpc-types-anvil"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1207e852f30297d6918f91df3e76f758fa7b519ea1e49fbd7d961ce796663f9"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
  "alloy-serde",
  "serde",
 ]
@@ -2582,6 +2631,19 @@ dependencies = [
  "console",
  "shell-words",
  "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "dialoguer"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
+dependencies = [
+ "console",
+ "shell-words",
+ "tempfile",
+ "thiserror 1.0.69",
  "zeroize",
 ]
 
@@ -7003,6 +7065,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-execution"
+version = "0.135.0"
+dependencies = [
+ "alloy",
+ "chrono",
+ "clap",
+ "dotenv",
+ "hex",
+ "lazy_static",
+ "num-bigint",
+ "num-traits",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tycho-common",
+]
+
+[[package]]
 name = "tycho-simulation"
 version = "0.234.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7013,7 +7095,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "chrono",
- "dialoguer",
+ "dialoguer 0.10.4",
  "dotenv",
  "enum_delegate",
  "evm_ekubo_sdk",
@@ -7053,6 +7135,8 @@ version = "0.1.0"
 dependencies = [
  "actix-rt",
  "actix-web",
+ "alloy",
+ "alloy-chains",
  "anyhow",
  "async-channel",
  "async-trait",
@@ -7060,8 +7144,11 @@ dependencies = [
  "clap",
  "criterion",
  "crossbeam-channel",
+ "dialoguer 0.11.0",
+ "dotenv",
  "fastrand",
  "futures 0.3.31",
+ "hex",
  "itertools 0.14.0",
  "lazy_static",
  "metrics 0.24.3",
@@ -7082,6 +7169,7 @@ dependencies = [
  "tracing",
  "tracing-actix-web",
  "tracing-subscriber 0.3.22",
+ "tycho-execution",
  "tycho-simulation",
  "uuid",
 ]
