@@ -152,6 +152,12 @@ pub(crate) trait Algorithm: Send + Sync {
     /// any derived data.
     #[allow(dead_code)]
     fn computation_requirements(&self) -> ComputationRequirements;
+
+    /// Returns the timeout for solving.
+    ///
+    /// Workers use this to set the maximum time to wait for derived data
+    /// before failing a solve request.
+    fn timeout(&self) -> Duration;
 }
 
 /// Errors that can occur during route finding.

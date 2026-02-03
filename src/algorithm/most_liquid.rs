@@ -652,6 +652,10 @@ impl Algorithm for MostLiquidAlgorithm {
             .expect_stale("token_prices")
             .expect("Conflicting Computation Requirements")
     }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 #[cfg(test)]
