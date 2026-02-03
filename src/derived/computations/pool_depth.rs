@@ -223,8 +223,7 @@ impl DerivedComputation for PoolDepthComputation {
         let mut failed = 0usize;
 
         for component_id in components_to_compute {
-            // Get token addresses - from changed.added for new components, from topology for
-            // updates
+            // Get token addresses: changed.added for new components, topology for existing
             let token_addresses = changed
                 .added
                 .get(component_id)

@@ -25,8 +25,8 @@ use super::{
 ///
 /// ```ignore
 /// let requirements = ComputationRequirements::none()
-///     .with_fresh("spot_prices")   // Must be current block
-///     .with_stale("token_prices"); // Any block is fine (current design)
+///     .expect_fresh("spot_prices")?   // Must be current block
+///     .expect_stale("token_prices")?; // Any block is fine (current design)
 ///
 /// let mut tracker = ReadinessTracker::new(requirements);
 ///
@@ -82,10 +82,6 @@ impl ReadinessTracker {
             }
             DerivedDataEvent::ComputationComplete { computation_id, block } => {
                 self.on_computation_complete(computation_id, *block);
-            }
-            DerivedDataEvent::AllComplete { .. } => {
-                // No action needed - individual ComputationComplete events
-                // already updated the ready sets
             }
         }
     }
@@ -195,11 +191,19 @@ mod tests {
     use super::*;
 
     fn fresh_requirements(ids: &[&'static str]) -> ComputationRequirements {
-        ComputationRequirements::fresh(ids.iter().copied())
+        ids.iter()
+            .fold(ComputationRequirements::none(), |req, id| {
+                req.expect_fresh(*id)
+                    .expect("test ids should not conflict")
+            })
     }
 
     fn stale_requirements(ids: &[&'static str]) -> ComputationRequirements {
-        ComputationRequirements::stale(ids.iter().copied())
+        ids.iter()
+            .fold(ComputationRequirements::none(), |req, id| {
+                req.expect_stale(*id)
+                    .expect("test ids should not conflict")
+            })
     }
 
     #[test]
@@ -365,8 +369,10 @@ mod tests {
     #[test]
     fn mixed_fresh_and_stale_requirements() {
         let requirements = ComputationRequirements::none()
-            .with_fresh("spot_prices") // Must be current block
-            .with_stale("token_prices"); // Any block is fine
+            .expect_fresh("spot_prices") // Must be current block
+            .unwrap()
+            .expect_stale("token_prices") // Any block is fine
+            .unwrap();
 
         let mut tracker = ReadinessTracker::new(requirements);
 
@@ -399,8 +405,10 @@ mod tests {
     #[test]
     fn missing_returns_unready_set() {
         let requirements = ComputationRequirements::none()
-            .with_fresh("spot_prices")
-            .with_stale("token_prices");
+            .expect_fresh("spot_prices")
+            .unwrap()
+            .expect_stale("token_prices")
+            .unwrap();
 
         let mut tracker = ReadinessTracker::new(requirements);
 
@@ -419,15 +427,5 @@ mod tests {
         assert_eq!(missing.len(), 1);
         assert!(missing.contains(&"spot_prices"));
         assert!(!missing.contains(&"token_prices"));
-    }
-
-    #[test]
-    fn all_complete_event_is_no_op() {
-        let mut tracker = ReadinessTracker::new(fresh_requirements(&["token_prices"]));
-
-        tracker.handle_event(&DerivedDataEvent::AllComplete { block: 100 });
-
-        // Should not affect readiness
-        assert!(!tracker.is_ready());
     }
 }

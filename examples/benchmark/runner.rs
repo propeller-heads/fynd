@@ -5,6 +5,15 @@ use tycho_solver::{Solution, SolutionRequest, SolutionStatus};
 
 use crate::config::ParallelizationMode;
 
+/// Results from a benchmark run.
+pub struct RunnerResults {
+    pub round_trip_times: Vec<u64>,
+    pub solve_times: Vec<u64>,
+    pub successful_requests: usize,
+    pub orders_found: usize,
+    pub orders_not_found: usize,
+}
+
 impl ParallelizationMode {
     /// Run benchmark with this parallelization mode
     pub async fn run(
@@ -13,7 +22,7 @@ impl ParallelizationMode {
         solver_url: &str,
         requests: &[SolutionRequest],
         num_requests: usize,
-    ) -> (Vec<u64>, Vec<u64>, usize, usize, usize) {
+    ) -> RunnerResults {
         match self {
             Self::Sequential => run_sequential(client, solver_url, requests, num_requests).await,
             Self::FixedConcurrency { concurrency } => {
@@ -34,7 +43,7 @@ pub async fn run_benchmark(
     requests: &[SolutionRequest],
     num_requests: usize,
     mode: &ParallelizationMode,
-) -> (Vec<u64>, Vec<u64>, usize, usize, usize) {
+) -> RunnerResults {
     mode.run(client, solver_url, requests, num_requests)
         .await
 }
@@ -45,7 +54,7 @@ async fn run_sequential(
     solver_url: &str,
     requests: &[SolutionRequest],
     num_requests: usize,
-) -> (Vec<u64>, Vec<u64>, usize, usize, usize) {
+) -> RunnerResults {
     let mut round_trip_times = Vec::new();
     let mut solve_times = Vec::new();
     let mut successful_requests = 0;
@@ -78,7 +87,13 @@ async fn run_sequential(
         }
     }
 
-    (round_trip_times, solve_times, successful_requests, total_orders_found, total_orders_not_found)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found: total_orders_found,
+        orders_not_found: total_orders_not_found,
+    }
 }
 
 /// Fixed concurrency execution: maintain exactly N concurrent requests at all times.
@@ -89,7 +104,7 @@ async fn run_fixed_concurrency(
     requests: &[SolutionRequest],
     num_requests: usize,
     concurrency: usize,
-) -> (Vec<u64>, Vec<u64>, usize, usize, usize) {
+) -> RunnerResults {
     tracing::info!("Running {} requests with fixed concurrency of {}", num_requests, concurrency);
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -188,7 +203,13 @@ async fn run_fixed_concurrency(
         .unwrap()
         .into_inner();
 
-    (round_trip_times, solve_times, successful_requests, orders_found, orders_not_found)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found,
+        orders_not_found,
+    }
 }
 
 /// Rate-based execution: fire requests at a fixed interval regardless of response timing.
@@ -199,7 +220,7 @@ async fn run_rate_based(
     requests: &[SolutionRequest],
     num_requests: usize,
     interval_ms: u64,
-) -> (Vec<u64>, Vec<u64>, usize, usize, usize) {
+) -> RunnerResults {
     tracing::info!(
         "Running {} requests at {}ms intervals (fire-and-forget)",
         num_requests,
@@ -291,7 +312,13 @@ async fn run_rate_based(
         .unwrap()
         .into_inner();
 
-    (round_trip_times, solve_times, successful_requests, orders_found, orders_not_found)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found,
+        orders_not_found,
+    }
 }
 
 /// Handles HTTP response from the solver, extracting timing information and logging results.

@@ -52,18 +52,18 @@ impl DerivedComputation for SpotPriceComputation {
         let mut spot_prices = if changed.is_full_recompute {
             SpotPrices::new()
         } else {
-            store
+            let mut existing_prices = store
                 .read()
                 .await
                 .spot_prices()
                 .cloned()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // Remove spot prices for removed components
+            for component_id in &changed.removed {
+                existing_prices.retain(|key, _| &key.0 != component_id);
+            }
+            existing_prices
         };
-
-        // Remove spot prices for removed components
-        for component_id in &changed.removed {
-            spot_prices.retain(|key, _| &key.0 != component_id);
-        }
 
         let topology = market.component_topology();
         let tokens = market.token_registry_ref();
@@ -81,10 +81,10 @@ impl DerivedComputation for SpotPriceComputation {
 
         let mut succeeded = 0usize;
         let mut failed = 0usize;
+        let num_components_to_compute = components_to_compute.len();
 
         for component_id in components_to_compute {
-            // Get token addresses - from changed.added for new components, from topology for
-            // updates
+            // Get token addresses: changed.added for new components, topology for existing
             let token_addresses = changed
                 .added
                 .get(component_id)
@@ -137,6 +137,15 @@ impl DerivedComputation for SpotPriceComputation {
 
         debug!(succeeded, failed, total = spot_prices.len(), "spot price computation complete");
         Span::current().record("updated_spot_prices", spot_prices.len());
+
+        // Return error if all calculations failed for a full recompute. Partial computations can
+        // fail for a small subset of components.
+        if changed.is_full_recompute && succeeded == 0 && num_components_to_compute > 0 {
+            return Err(ComputationError::TotalFailure {
+                computation_id: Self::ID,
+                attempted: num_components_to_compute,
+            });
+        }
 
         Ok(spot_prices)
     }

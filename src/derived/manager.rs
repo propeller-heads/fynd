@@ -356,11 +356,6 @@ impl ComputationManager {
             }
         }
 
-        // Broadcast all complete event
-        let _ = self
-            .event_tx
-            .send(DerivedDataEvent::AllComplete { block });
-
         let total_elapsed = total_start.elapsed();
         info!(block, total_ms = total_elapsed.as_millis(), "all derived computations complete");
     }

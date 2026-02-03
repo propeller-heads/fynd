@@ -28,13 +28,4 @@ pub enum DerivedDataEvent {
         /// Block number this computation was performed for.
         block: u64,
     },
-
-    /// All computations completed for a block.
-    ///
-    /// This is a convenience event - workers tracking individual computations
-    /// don't need to wait for this, but it can be useful for diagnostics.
-    AllComplete {
-        /// Block number all computations completed for.
-        block: u64,
-    },
 }

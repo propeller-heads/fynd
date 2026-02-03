@@ -361,11 +361,12 @@ impl TokenGasPriceComputation {
         Ok(best_prices)
     }
 
-    /// Attempts incremental computation for state-only changes.
+    /// Attempts incremental recomputation for state-only changes.
     ///
-    /// Returns `Ok(Some(prices))` if incremental computation succeeded,
-    /// `Ok(None)` if we should fall through to full computation (e.g., no deps stored yet),
-    /// or `Err` on failure.
+    /// Only recomputes token prices whose dependency paths intersect with changed components.
+    /// Returns `Ok(Some(prices))` if incremental recomputation succeeded,
+    /// `Ok(None)` if full recomputation is needed (e.g., no dependencies stored yet),
+    /// or `Err` if computation failed.
     async fn try_incremental_compute(
         &self,
         market: &SharedMarketDataRef,

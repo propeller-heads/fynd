@@ -15,6 +15,14 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Used for event discrimination, storage keys, and readiness tracking.
 pub type ComputationId = &'static str;
 
+/// Error when building computation requirements.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("conflicting requirement: '{id}' cannot be both fresh and stale")]
+pub struct RequirementConflict {
+    /// The computation ID that was added with conflicting freshness.
+    pub id: ComputationId,
+}
+
 /// Requirements for derived data computations.
 ///
 /// Each algorithm declares which computations it needs and their freshness requirements:
@@ -31,11 +39,11 @@ pub type ComputationId = &'static str;
 /// ```ignore
 /// // Token prices don't change much block-to-block, stale is fine
 /// ComputationRequirements::none()
-///     .with_stale("token_prices")
+///     .expect_stale("token_prices")?
 ///
 /// // Spot prices must be fresh for accurate routing
 /// ComputationRequirements::none()
-///     .with_fresh("spot_prices")
+///     .expect_fresh("spot_prices")?
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
@@ -54,26 +62,30 @@ impl ComputationRequirements {
         Self::default()
     }
 
-    /// Creates requirements with fresh computations only.
-    pub fn fresh(ids: impl IntoIterator<Item = ComputationId>) -> Self {
-        Self { require_fresh: ids.into_iter().collect(), allow_stale: HashSet::new() }
-    }
-
-    /// Creates requirements with stale-allowed computations only.
-    pub fn stale(ids: impl IntoIterator<Item = ComputationId>) -> Self {
-        Self { require_fresh: HashSet::new(), allow_stale: ids.into_iter().collect() }
-    }
-
     /// Builder method to add a computation that requires fresh data (current block).
-    pub fn with_fresh(mut self, id: ComputationId) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `RequirementConflict` if the same ID is already in `allow_stale`.
+    pub fn expect_fresh(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+        if self.allow_stale.contains(&id) {
+            return Err(RequirementConflict { id });
+        }
         self.require_fresh.insert(id);
-        self
+        Ok(self)
     }
 
     /// Builder method to add a computation that allows stale data (any past block).
-    pub fn with_stale(mut self, id: ComputationId) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `RequirementConflict` if the same ID is already in `require_fresh`.
+    pub fn expect_stale(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+        if self.require_fresh.contains(&id) {
+            return Err(RequirementConflict { id });
+        }
         self.allow_stale.insert(id);
-        self
+        Ok(self)
     }
 
     /// Returns true if there are any requirements.

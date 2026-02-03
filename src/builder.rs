@@ -306,7 +306,6 @@ pub struct TychoSolver {
     feed_handle: JoinHandle<()>,
     gas_price_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
-    #[allow(dead_code)]
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
