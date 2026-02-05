@@ -347,16 +347,15 @@ impl MostLiquidAlgorithm {
         }
 
         // Calculate net amount out (output - gas cost in output token terms)
-        let output_amount = swaps
+        let route = Route::new(swaps);
+        let output_amount = route
+            .swaps
             .last()
             .map(|s| s.amount_out.clone())
             .unwrap_or_else(|| BigUint::ZERO);
 
-        let net_amount_out = if let Some(last_swap) = swaps.last() {
-            let total_gas: BigUint = swaps
-                .iter()
-                .map(|s| &s.gas_estimate)
-                .sum();
+        let net_amount_out = if let Some(last_swap) = route.swaps.last() {
+            let total_gas = route.total_gas();
             let gas_price = market
                 .gas_price()
                 .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
@@ -384,7 +383,7 @@ impl MostLiquidAlgorithm {
             BigInt::from(output_amount)
         };
 
-        Ok(RouteResult { route: Route::new(swaps), net_amount_out })
+        Ok(RouteResult { route, net_amount_out })
     }
 }
 

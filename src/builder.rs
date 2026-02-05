@@ -237,7 +237,7 @@ impl TychoSolverBuilder {
                     Arc::clone(&market_data),
                     Arc::clone(&derived_data),
                     pool_event_rx,
-                    derived_event_tx.clone(),
+                    derived_event_tx.subscribe(),
                 )
                 .context("failed to create worker pool")?;
 

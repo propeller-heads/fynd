@@ -70,7 +70,7 @@ impl WorkerPool {
     /// * `market_data` - Shared market data reference
     /// * `derived_data` - Shared derived data reference (pool depths, token prices)
     /// * `event_rx` - Broadcast receiver for market events (workers subscribe to this)
-    /// * `derived_event_tx` - Broadcast sender for derived data events
+    /// * `derived_event_rx` - Broadcast receiver for derived data events (resubscribed per worker)
     ///
     /// # Errors
     ///
@@ -81,7 +81,7 @@ impl WorkerPool {
         market_data: SharedMarketDataRef,
         derived_data: SharedDerivedDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
-        derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+        derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     ) -> Result<Self, UnknownAlgorithmError> {
         let (shutdown_tx, _) = broadcast::channel(1);
         let name = config.name.clone();
@@ -96,7 +96,7 @@ impl WorkerPool {
             market_data,
             derived_data,
             event_rx,
-            derived_event_tx,
+            derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
         };
         let workers = spawn_workers(params)?;
@@ -196,7 +196,7 @@ impl WorkerPoolBuilder {
         market_data: SharedMarketDataRef,
         derived_data: SharedDerivedDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
-        derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+        derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     ) -> Result<WorkerPool, UnknownAlgorithmError> {
         WorkerPool::spawn(
             self.config,
@@ -204,7 +204,7 @@ impl WorkerPoolBuilder {
             market_data,
             derived_data,
             event_rx,
-            derived_event_tx,
+            derived_event_rx,
         )
     }
 }

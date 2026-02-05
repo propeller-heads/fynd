@@ -6,17 +6,6 @@ use tycho_simulation::{tycho_common::models::Chain, tycho_core::models::Address}
 use crate::ProtocolSystem;
 
 lazy_static! {
-    /// Average gas cost per swap on each protocol systems.
-    pub static ref GAS_COST_PER_SWAP: HashMap<ProtocolSystem, u64> = {
-        let mut map = HashMap::new();
-        map.insert(ProtocolSystem::UniswapV2, 100_000);
-        map.insert(ProtocolSystem::UniswapV3, 150_000);
-        map.insert(ProtocolSystem::SushiSwap, 100_000);
-        map.insert(ProtocolSystem::Curve, 200_000);
-        map.insert(ProtocolSystem::Balancer, 150_000);
-        map
-    };
-
     /// Wrapped native token addresses for each chain.
     ///
     /// These are the ERC-20 wrapped versions of each chain's native gas token

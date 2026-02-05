@@ -59,6 +59,9 @@ pub struct TokenPriceEntry {
     ///
     /// Used for invalidation: if any of these components change,
     /// this token's price needs recomputation.
+    /// TODO: Currently, for optimization, we only consider in path_components the path used to
+    /// calculate the best price. If another path that affects this token suddenly becomes the best
+    /// we will not know until the Solver restarts.
     pub path_components: HashSet<ComponentId>,
 }
 

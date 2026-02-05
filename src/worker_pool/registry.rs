@@ -54,8 +54,8 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_data: SharedDerivedDataRef,
     /// Broadcast receiver for market events.
     pub event_rx: broadcast::Receiver<MarketEvent>,
-    /// Broadcast sender for derived data events.
-    pub derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+    /// Broadcast receiver for derived data events (resubscribed per worker).
+    pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
 }
@@ -111,7 +111,7 @@ where
         let market_data = Arc::clone(&params.market_data);
         let derived_data = Arc::clone(&params.derived_data);
         let event_rx = params.event_rx.resubscribe();
-        let derived_event_rx = params.derived_event_tx.subscribe();
+        let derived_event_rx = params.derived_event_rx.resubscribe();
         let algorithm_config = params.algorithm_config.clone();
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
@@ -180,7 +180,7 @@ mod tests {
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
         let derived_data = Arc::new(RwLock::new(DerivedData::new()));
         let (event_tx, event_rx) = broadcast::channel(10);
-        let (derived_event_tx, _) = broadcast::channel(10);
+        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let params = SpawnWorkersParams {
@@ -191,7 +191,7 @@ mod tests {
             market_data,
             derived_data,
             event_rx,
-            derived_event_tx,
+            derived_event_rx,
             shutdown_tx,
         };
 
@@ -216,7 +216,7 @@ mod tests {
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
         let derived_data = Arc::new(RwLock::new(DerivedData::new()));
         let (event_tx, event_rx) = broadcast::channel(10);
-        let (derived_event_tx, _) = broadcast::channel(10);
+        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let params = SpawnWorkersParams {
@@ -227,7 +227,7 @@ mod tests {
             market_data,
             derived_data,
             event_rx,
-            derived_event_tx,
+            derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
         };
 

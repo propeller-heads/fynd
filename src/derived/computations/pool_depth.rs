@@ -30,7 +30,7 @@ use crate::{
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
-        types::{PoolDepths, SpotPriceKey},
+        types::PoolDepths,
     },
     feed::market_data::SharedMarketDataRef,
     types::ComponentId,
@@ -255,8 +255,7 @@ impl DerivedComputation for PoolDepthComputation {
                     (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
                 // Look up precomputed spot price
-                let spot_price_key: SpotPriceKey = key.clone();
-                let Some(spot_price) = spot_prices.get(&spot_price_key) else {
+                let Some(spot_price) = spot_prices.get(&key) else {
                     warn!(
                         component_id,
                         token_in = %token_in.address,
