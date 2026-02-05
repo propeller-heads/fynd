@@ -114,43 +114,43 @@ where
     fn graph(&self) -> &G;
 }
 
-use crate::{derived::PoolDepths, feed::market_data::SharedMarketData};
+use crate::{derived::DerivedData, feed::market_data::SharedMarketData};
 
-/// Trait for edge weight types that can be computed from a ProtocolSim and derived PoolDepths.
+/// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///
-/// Implement this trait for edge data types that should use pre-computed pool depths
-/// from derived data instead of computing them from scratch.
-pub trait EdgeWeightFromSimAndDepths: Sized {
-    /// Computes edge weight data using spot price from ProtocolSim and depth from PoolDepths.
+/// Implement this trait for edge data types that should use pre-computed derived data
+/// (pool depths, spot prices, etc.) instead of computing them from scratch.
+pub trait EdgeWeightFromSimAndDerived: Sized {
+    /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
     ///
     /// # Arguments
     ///
-    /// * `sim` - The protocol simulation state (used for spot price)
-    /// * `component_id` - The component ID for pool depth lookup
+    /// * `sim` - The protocol simulation state
+    /// * `component_id` - The component ID for derived data lookup
     /// * `token_in` - The input token
     /// * `token_out` - The output token
-    /// * `pool_depths` - Pre-computed pool depths from derived data
+    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
     ///
     /// # Returns
     ///
     /// The computed edge weight, or `None` if it cannot be computed.
-    fn from_sim_and_depths(
+    fn from_sim_and_derived(
         sim: &dyn ProtocolSim,
         component_id: &ComponentId,
         token_in: &Token,
         token_out: &Token,
-        pool_depths: &PoolDepths,
+        derived: &DerivedData,
     ) -> Option<Self>;
 }
 
 /// Trait for graph managers that support edge weight updates with derived data.
-pub trait EdgeWeightUpdaterWithDepths {
-    /// Updates edge weights using simulation states and pre-computed pool depths.
+pub trait EdgeWeightUpdaterWithDerived {
+    /// Updates edge weights using simulation states and pre-computed derived data.
     ///
     /// Returns the number of edges successfully updated.
-    fn update_edge_weights_with_depths(
+    fn update_edge_weights_with_derived(
         &mut self,
         market: &SharedMarketData,
-        pool_depths: &PoolDepths,
+        derived: &DerivedData,
     ) -> usize;
 }

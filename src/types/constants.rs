@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use lazy_static::lazy_static;
 use tycho_simulation::{tycho_common::models::Chain, tycho_core::models::Address};
 
-use crate::ProtocolSystem;
-
 lazy_static! {
     /// Wrapped native token addresses for each chain.
     ///

@@ -95,21 +95,26 @@ impl DepthAndPrice {
     }
 }
 
-impl crate::graph::EdgeWeightFromSimAndDepths for DepthAndPrice {
-    fn from_sim_and_depths(
-        sim: &dyn ProtocolSim,
+impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
+    fn from_sim_and_derived(
+        _sim: &dyn ProtocolSim,
         component_id: &ComponentId,
         token_in: &Token,
         token_out: &Token,
-        pool_depths: &crate::derived::PoolDepths,
+        derived: &crate::derived::DerivedData,
     ) -> Option<Self> {
-        let spot_price = sim
-            .spot_price(token_in, token_out)
-            .ok()?;
+        let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
-        // Look up pre-computed depth from derived data
-        let depth_key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
-        let depth = pool_depths.get(&depth_key)?.to_f64()?;
+        // Use pre-computed spot price
+        let spot_price = derived
+            .spot_prices()
+            .and_then(|prices| prices.get(&key).copied())?;
+
+        // Look up pre-computed depth
+        let depth = derived
+            .pool_depths()
+            .and_then(|depths| depths.get(&key))?
+            .to_f64()?;
 
         Some(Self { spot_price, depth })
     }

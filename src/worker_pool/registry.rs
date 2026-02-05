@@ -21,7 +21,7 @@ use crate::{
     algorithm::{AlgorithmConfig, MostLiquidAlgorithm},
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
-    graph::EdgeWeightUpdaterWithDepths,
+    graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
 };
@@ -101,7 +101,7 @@ fn spawn_workers_generic<A, F>(
 ) -> Vec<JoinHandle<()>>
 where
     A: crate::algorithm::Algorithm + 'static,
-    A::GraphManager: crate::feed::events::MarketEventHandler + EdgeWeightUpdaterWithDepths,
+    A::GraphManager: crate::feed::events::MarketEventHandler + EdgeWeightUpdaterWithDerived,
     F: Fn(&AlgorithmConfig) -> A + Send + Sync + Clone + 'static,
 {
     let mut workers = Vec::with_capacity(params.num_workers);

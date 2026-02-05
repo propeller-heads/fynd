@@ -304,25 +304,25 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     }
 }
 
-impl<D: Clone + super::EdgeWeightFromSimAndDepths> PetgraphStableDiGraphManager<D> {
-    /// Updates edge weights using simulation states and pre-computed pool depths.
+impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager<D> {
+    /// Updates edge weights using simulation states and pre-computed derived data.
     ///
-    /// Uses spot prices from simulation state and depths from derived PoolDepths.
-    /// This is more accurate than `update_edge_weights` as it uses depths computed
-    /// with slippage thresholds via `query_pool_swap` or binary search.
+    /// Uses pre-computed derived data (spot prices, pool depths, etc.) to update
+    /// edge weights. This is more accurate than computing from scratch as it uses
+    /// data computed with slippage thresholds via `query_pool_swap` or binary search.
     ///
     /// # Arguments
     ///
     /// * `market` - The market data containing simulation states and tokens
-    /// * `pool_depths` - Pre-computed pool depths from derived data
+    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
     ///
     /// # Returns
     ///
     /// The number of edges successfully updated.
-    pub fn update_edge_weights_with_depths(
+    pub fn update_edge_weights_with_derived(
         &mut self,
         market: &SharedMarketData,
-        pool_depths: &crate::derived::PoolDepths,
+        derived: &crate::derived::DerivedData,
     ) -> usize {
         let tokens = market.token_registry_ref();
 
@@ -343,13 +343,8 @@ impl<D: Clone + super::EdgeWeightFromSimAndDepths> PetgraphStableDiGraphManager<
                 let token_in = tokens.get(source_addr)?;
                 let token_out = tokens.get(target_addr)?;
 
-                let weight = D::from_sim_and_depths(
-                    sim_state,
-                    component_id,
-                    token_in,
-                    token_out,
-                    pool_depths,
-                )?;
+                let weight =
+                    D::from_sim_and_derived(sim_state, component_id, token_in, token_out, derived)?;
                 Some((edge_idx, weight))
             })
             .collect();
@@ -366,15 +361,15 @@ impl<D: Clone + super::EdgeWeightFromSimAndDepths> PetgraphStableDiGraphManager<
     }
 }
 
-impl<D: Clone + super::EdgeWeightFromSimAndDepths> super::EdgeWeightUpdaterWithDepths
+impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWithDerived
     for PetgraphStableDiGraphManager<D>
 {
-    fn update_edge_weights_with_depths(
+    fn update_edge_weights_with_derived(
         &mut self,
         market: &SharedMarketData,
-        pool_depths: &crate::derived::PoolDepths,
+        derived: &crate::derived::DerivedData,
     ) -> usize {
-        self.update_edge_weights_with_depths(market, pool_depths)
+        self.update_edge_weights_with_derived(market, derived)
     }
 }
 

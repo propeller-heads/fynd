@@ -26,7 +26,7 @@ use crate::{
         events::{MarketEvent, MarketEventHandler},
         market_data::SharedMarketDataRef,
     },
-    graph::{EdgeWeightUpdaterWithDepths, GraphManager},
+    graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::{
         internal::SolveTask, BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus,
         SolveError,
@@ -345,7 +345,7 @@ where
         task_rx: async_channel::Receiver<SolveTask>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) where
-        A::GraphManager: EdgeWeightUpdaterWithDepths,
+        A::GraphManager: EdgeWeightUpdaterWithDerived,
     {
         info!(self.worker_id, "worker started");
 
@@ -392,24 +392,20 @@ where
                             // Signal waiters that readiness may have changed
                             self.ready_notify.notify_waiters();
 
-                            // Then handle specific events
                             // TODO: This handling breaks the worker abstraction, assuming that weights
                             // will always be used, and they will always come from PoolDepth. A refactor
                             // is needed to move this handling to the algorithm.
                             if let DerivedDataEvent::ComputationComplete { computation_id, block } = &event {
                                 if *computation_id == PoolDepthComputation::ID {
-                                    // Update edge weights with pool depths
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
-                                    if let Some(pool_depths) = derived.pool_depths() {
-                                        let updated = self.graph_manager.update_edge_weights_with_depths(&market, pool_depths);
-                                        debug!(
-                                            self.worker_id,
-                                            block,
-                                            updated,
-                                            "updated edge weights with pool depths"
-                                        );
-                                    }
+                                    let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                                    debug!(
+                                        self.worker_id,
+                                        block,
+                                        updated,
+                                        "updated edge weights with derived data"
+                                    );
                                 }
                             }
                         }
@@ -427,8 +423,8 @@ where
                             // Try to update with current derived data
                             let market = self.market_data.read().await;
                             let derived = self.derived_data.read().await;
-                            if let Some(pool_depths) = derived.pool_depths() {
-                                let updated = self.graph_manager.update_edge_weights_with_depths(&market, pool_depths);
+                            if derived.pool_depths().is_some() {
+                                let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
                                 debug!(
                                     self.worker_id,
                                     updated,
