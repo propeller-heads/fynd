@@ -81,7 +81,7 @@ struct Cli {
     solver_url: String,
 
     /// Minimum TVL threshold for pools (denominated in ETH)
-    #[arg(long, default_value_t = 50.0)]
+    #[arg(long, default_value_t = 10.0)]
     tvl_threshold: f64,
 
     /// Only simulate, don't prompt for execution
@@ -97,7 +97,11 @@ struct Cli {
     slippage_bps: u32,
 
     /// Protocol systems to use (comma-separated, e.g., "uniswap_v2,uniswap_v3")
-    #[arg(long, default_value = "uniswap_v2,uniswap_v3,sushiswap_v2")]
+    #[arg(
+        long,
+        default_value = "uniswap_v2,uniswap_v3,uniswap_v4,ekubo_v2,vm:curve,rocketpool,pancakeswap_v3,\
+        vm:maverick_v2,sushiswap_v2,erc4626,uniswap_v4_hooks,fluid_v1,pancakeswap_v2,vm:balancer_v2"
+    )]
     protocols: String,
 
     /// Sender address for simulation (use with --simulate-only to avoid exposing private key).
