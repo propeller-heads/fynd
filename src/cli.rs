@@ -80,7 +80,7 @@ pub struct Cli {
     pub worker_pools_config: PathBuf,
 
     /// Path to blacklist TOML config file (optional)
-    #[arg(long, env)]
+    #[arg(long, env, default_value = "blacklist.toml")]
     pub blacklist_config: Option<PathBuf>,
 }
 
