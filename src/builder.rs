@@ -3,17 +3,19 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use tokio::{sync::RwLock, task::JoinHandle};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
     algorithm::AlgorithmConfig,
     api::{configure_app, AppState, HealthTracker},
-    config::{defaults, PoolConfig},
+    config::{defaults, BlacklistConfig, PoolConfig},
+    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
+    types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
         task_queue::{TaskQueue, TaskQueueConfig},
@@ -46,6 +48,8 @@ pub struct TychoSolverBuilder {
     reconnect_delay: Duration,
     order_manager_timeout: Duration,
     order_manager_min_responses: usize,
+    /// Blacklist configuration for filtering components and protocols.
+    blacklist: BlacklistConfig,
 }
 
 impl TychoSolverBuilder {
@@ -74,6 +78,7 @@ impl TychoSolverBuilder {
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
             order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
+            blacklist: BlacklistConfig::default(),
         }
     }
 
@@ -143,6 +148,12 @@ impl TychoSolverBuilder {
         self
     }
 
+    /// Sets the blacklist configuration for filtering components.
+    pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
+        self.blacklist = blacklist;
+        self
+    }
+
     pub fn build(self) -> Result<TychoSolver> {
         info!(
             host = %self.http_host,
@@ -168,7 +179,8 @@ impl TychoSolverBuilder {
         .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality);
+        .min_token_quality(self.min_token_quality)
+        .blacklisted_components(self.blacklist.components);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;
@@ -181,9 +193,24 @@ impl TychoSolverBuilder {
 
         tycho_feed = tycho_feed.with_gas_price_worker_signal_tx(gas_price_worker_signal_tx);
 
+        // Computation manager for derived data (token prices, pool depths)
+        let gas_token = native_token(&self.chain).context("gas token not configured for chain")?;
+        let computation_config = ComputationManagerConfig::new()
+            .with_gas_token(gas_token)
+            .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
+        let (computation_manager, _derived_event_rx) =
+            ComputationManager::new(computation_config, Arc::clone(&market_data))
+                .map_err(|e| anyhow::anyhow!("failed to create computation manager: {}", e))?;
+        let derived_data: SharedDerivedDataRef = computation_manager.store();
+        let computation_event_rx = tycho_feed.subscribe();
+        let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
+
         // Worker pools (one task queue per pool)
         let mut solver_pool_handles = Vec::new();
         let mut worker_pools = Vec::new();
+
+        // Get the derived event sender for workers to subscribe
+        let derived_event_tx = computation_manager.event_sender();
 
         for (pool_name, pool_cfg) in self.pools.iter() {
             // Each pool gets its own subscription to feed events
@@ -205,7 +232,13 @@ impl TychoSolverBuilder {
                 .algorithm(pool_cfg.algorithm.clone())
                 .algorithm_config(algorithm_config)
                 .num_workers(pool_cfg.num_workers)
-                .build(task_rx, Arc::clone(&market_data), pool_event_rx)
+                .build(
+                    task_rx,
+                    Arc::clone(&market_data),
+                    Arc::clone(&derived_data),
+                    pool_event_rx,
+                    derived_event_tx.subscribe(),
+                )
                 .context("failed to create worker pool")?;
 
             info!(
@@ -231,6 +264,13 @@ impl TychoSolverBuilder {
             if let Err(e) = gas_price_fetcher.run().await {
                 tracing::error!(error = %e, "gas price fetcher error");
             }
+        });
+
+        // Start computation manager in background
+        let computation_manager_handle = tokio::spawn(async move {
+            computation_manager
+                .run(computation_event_rx, computation_shutdown_rx)
+                .await;
         });
 
         let order_manager_config = OrderManagerConfig::default()
@@ -262,6 +302,8 @@ impl TychoSolverBuilder {
             worker_pools,
             feed_handle,
             gas_price_worker_handle,
+            computation_manager_handle,
+            computation_shutdown_tx,
         })
     }
 }
@@ -273,6 +315,8 @@ pub struct TychoSolver {
     worker_pools: Vec<WorkerPool>,
     feed_handle: JoinHandle<()>,
     gas_price_worker_handle: JoinHandle<()>,
+    computation_manager_handle: JoinHandle<()>,
+    computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl TychoSolver {
@@ -289,6 +333,8 @@ impl TychoSolver {
             worker_pools,
             mut feed_handle,
             mut gas_price_worker_handle,
+            mut computation_manager_handle,
+            computation_shutdown_tx,
         } = self;
 
         info!("HTTP server started");
@@ -303,6 +349,8 @@ impl TychoSolver {
                 info!("shutting down...");
                 feed_handle.abort();
                 gas_price_worker_handle.abort();
+                let _ = computation_shutdown_tx.send(());
+                computation_manager_handle.abort();
             }
             _ = &mut feed_handle => {
                 // Feed handle completed, which means it errored (feed.run() only returns on error)
@@ -310,6 +358,8 @@ impl TychoSolver {
                 server_handle.stop(true).await;
                 server_task.await.ok();
                 gas_price_worker_handle.abort();
+                let _ = computation_shutdown_tx.send(());
+                computation_manager_handle.abort();
                 info!("shutting down...");
             }
             _ = &mut gas_price_worker_handle => {
@@ -318,7 +368,14 @@ impl TychoSolver {
                 server_handle.stop(true).await;
                 server_task.await.ok();
                 feed_handle.abort();
+                let _ = computation_shutdown_tx.send(());
+                computation_manager_handle.abort();
                 info!("shutting down...");
+            }
+            _ = &mut computation_manager_handle => {
+                // Computation manager completed unexpectedly
+                warn!("Computation manager stopped unexpectedly");
+                // Continue running - derived data won't be updated but solver can still work
             }
         }
 

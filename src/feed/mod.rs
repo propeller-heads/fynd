@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use tycho_simulation::tycho_common::models::Chain;
 
@@ -46,6 +46,8 @@ pub(crate) struct TychoFeedConfig {
     /// Reconnect delay on connection failure.
     /// Default is 5 seconds.
     pub(crate) reconnect_delay: Duration,
+    /// Component IDs to exclude from routing.
+    pub(crate) blacklisted_components: HashSet<String>,
 }
 
 impl TychoFeedConfig {
@@ -70,6 +72,7 @@ impl TychoFeedConfig {
             rpc_url,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
+            blacklisted_components: HashSet::new(),
         }
     }
 
@@ -90,6 +93,11 @@ impl TychoFeedConfig {
 
     pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
+        self
+    }
+
+    pub fn blacklisted_components(mut self, components: HashSet<String>) -> Self {
+        self.blacklisted_components = components;
         self
     }
 }

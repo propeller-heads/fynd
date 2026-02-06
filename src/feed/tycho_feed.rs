@@ -5,7 +5,10 @@
 //! - Updates SharedMarketData (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
@@ -134,7 +137,8 @@ impl TychoFeed {
             // Spawn protocol stream
             Some(
                 register_exchanges(
-                    ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain),
+                    ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                        .skip_state_decode_failures(true),
                     ComponentFilter::with_tvl_range(
                         self.config.min_tvl,
                         self.config.min_tvl * self.config.tvl_buffer_multiplier,
@@ -201,8 +205,10 @@ impl TychoFeed {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
                             let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
+                            // Refresh gas price before broadcasting the event so that
+                            // ComputationManager has gas price available when it starts computing.
                             self.refresh_gas_price().await?;
+                            self.handle_tycho_message(msg).await?;
                             self.health_tracker.update();
                         }
                         None => {
@@ -269,6 +275,40 @@ impl TychoFeed {
             ..
         } = msg;
 
+        // Filter blacklisted components before processing
+        let original_count = added_components.len();
+        let added_components: HashMap<_, _> = added_components
+            .into_iter()
+            .filter(|(id, _component)| {
+                !self
+                    .config
+                    .blacklisted_components
+                    .contains(&id.to_string())
+            })
+            .collect();
+
+        // Also filter state updates for blacklisted components
+        let updated_or_new_states: HashMap<_, _> = updated_or_new_states
+            .into_iter()
+            .filter(|(id, _)| {
+                !self
+                    .config
+                    .blacklisted_components
+                    .contains(id)
+            })
+            .collect();
+
+        // Filter removed_components to avoid emitting events for components we never tracked
+        let removed_components: HashMap<_, _> = removed_components
+            .into_iter()
+            .filter(|(id, _)| {
+                !self
+                    .config
+                    .blacklisted_components
+                    .contains(id)
+            })
+            .collect();
+
         let updated_components_ids: HashSet<_> = updated_or_new_states
             .keys()
             .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
@@ -295,7 +335,13 @@ impl TychoFeed {
             })
             .max_by_key(|b| b.number);
 
-        debug!("Received message from with {} new components, {} removed components, and {} updated components", added_components.len(), removed_components.len(), updated_or_new_states.len());
+        debug!(
+            "Received message with {} new components ({} after blacklist filter), {} removed, {} updated",
+            original_count,
+            added_components.len(),
+            removed_components.len(),
+            updated_or_new_states.len()
+        );
         trace!("Updating market data");
         // Update market data. We should only hold the write lock inside this code block.
         {
@@ -1108,5 +1154,287 @@ mod tests {
         }
 
         feed_handle.abort();
+    }
+
+    // Helper function to create a test config with blacklisted components
+    fn create_test_config_with_blacklist(blacklisted: Vec<&str>) -> TychoFeedConfig {
+        TychoFeedConfig::new(
+            "ws://test.tycho.io".to_string(),
+            Chain::Ethereum,
+            Some("test_api_key".to_string()),
+            false,
+            vec!["uniswap_v2".to_string()],
+            10.0,
+            "http://test.rpc".to_string(),
+        )
+        .blacklisted_components(
+            blacklisted
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_filters_added_components() {
+        let blacklisted_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let allowed_id = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let config = create_test_config_with_blacklist(vec![blacklisted_id]);
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(config, market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // Add both a blacklisted and an allowed component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            blacklisted_id.to_string(),
+            create_test_component(blacklisted_id, vec![token1.clone(), token2.clone()]),
+        );
+        new_pairs.insert(
+            allowed_id.to_string(),
+            create_test_component(allowed_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+
+        // Verify blacklisted component was NOT added to market data
+        let data = market_data.read().await;
+        assert!(
+            data.get_component(blacklisted_id)
+                .is_none(),
+            "Blacklisted component should NOT be in market data"
+        );
+        assert!(
+            data.get_component(allowed_id).is_some(),
+            "Allowed component should be in market data"
+        );
+        drop(data);
+
+        // Verify event only contains the allowed component
+        let event = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        match event {
+            MarketEvent::MarketUpdated { added_components, .. } => {
+                assert!(
+                    !added_components.contains_key(blacklisted_id),
+                    "Event should NOT contain blacklisted component"
+                );
+                assert!(
+                    added_components.contains_key(allowed_id),
+                    "Event should contain allowed component"
+                );
+                assert_eq!(added_components.len(), 1, "Only one component should be added");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_filters_state_updates() {
+        let blacklisted_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let allowed_id = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let config = create_test_config_with_blacklist(vec![blacklisted_id]);
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(config, market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // First, add the allowed component (blacklisted one should never be added)
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            allowed_id.to_string(),
+            create_test_component(allowed_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let mut initial_states = HashMap::new();
+        initial_states.insert(
+            allowed_id.to_string(),
+            Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+        );
+
+        let update = Update::new(12345, initial_states, new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+
+        // Consume the initial event
+        let _ = event_rx.try_recv();
+
+        // Now send state updates for both blacklisted and allowed components
+        let mut states = HashMap::new();
+        states.insert(
+            blacklisted_id.to_string(),
+            Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+        );
+        states.insert(
+            allowed_id.to_string(),
+            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+        );
+
+        let update = Update::new(12346, states, HashMap::new());
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle state update");
+
+        // Verify blacklisted component state was NOT saved
+        let data = market_data.read().await;
+        assert!(
+            data.get_simulation_state(blacklisted_id)
+                .is_none(),
+            "Blacklisted component state should NOT be in market data"
+        );
+        assert_eq!(
+            data.get_simulation_state(allowed_id)
+                .expect("Allowed component state should exist")
+                .fee(),
+            2.0,
+            "Allowed component state should be updated"
+        );
+        drop(data);
+
+        // Verify event only contains the allowed component update
+        let event = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        match event {
+            MarketEvent::MarketUpdated { updated_components, .. } => {
+                assert!(
+                    !updated_components.contains(&blacklisted_id.to_string()),
+                    "Event should NOT contain blacklisted component update"
+                );
+                assert!(
+                    updated_components.contains(&allowed_id.to_string()),
+                    "Event should contain allowed component update"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_filters_removed_components() {
+        let blacklisted_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let allowed_id = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let config = create_test_config_with_blacklist(vec![blacklisted_id]);
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(config, market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // First, add only the allowed component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            allowed_id.to_string(),
+            create_test_component(allowed_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+
+        // Consume the initial add event
+        let _ = event_rx.try_recv();
+
+        // Now send removal for both (blacklisted was never added, but could come from stream)
+        let mut removed_pairs = HashMap::new();
+        removed_pairs.insert(
+            blacklisted_id.to_string(),
+            create_test_component(blacklisted_id, vec![token1.clone(), token2.clone()]),
+        );
+        removed_pairs.insert(
+            allowed_id.to_string(),
+            create_test_component(allowed_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update =
+            Update::new(12346, HashMap::new(), HashMap::new()).set_removed_pairs(removed_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle removal");
+
+        // Verify the allowed component was removed
+        let data = market_data.read().await;
+        assert!(data.get_component(allowed_id).is_none(), "Allowed component should be removed");
+        drop(data);
+
+        // Verify event only contains the allowed component removal
+        let event = event_rx
+            .try_recv()
+            .expect("Should receive event");
+        match event {
+            MarketEvent::MarketUpdated { removed_components, .. } => {
+                assert!(
+                    !removed_components.contains(&blacklisted_id.to_string()),
+                    "Event should NOT contain blacklisted component removal"
+                );
+                assert!(
+                    removed_components.contains(&allowed_id.to_string()),
+                    "Event should contain allowed component removal"
+                );
+                assert_eq!(
+                    removed_components.len(),
+                    1,
+                    "Only one component should be in removed list"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_no_event_when_all_filtered() {
+        let blacklisted_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let config = create_test_config_with_blacklist(vec![blacklisted_id]);
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(config, market_data.clone(), HealthTracker::new());
+        let mut event_rx = feed.subscribe();
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+
+        // Add only blacklisted component
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            blacklisted_id.to_string(),
+            create_test_component(blacklisted_id, vec![token1.clone(), token2.clone()]),
+        );
+
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+
+        // Verify NO event was broadcast since everything was filtered
+        match event_rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // Expected - no event should be broadcast when all components are filtered
+            }
+            Ok(event) => panic!(
+                "Should NOT broadcast event when all components are blacklisted, got: {:?}",
+                event
+            ),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+
+        // Verify component was NOT added to market data
+        let data = market_data.read().await;
+        assert!(
+            data.get_component(blacklisted_id)
+                .is_none(),
+            "Blacklisted component should NOT be in market data"
+        );
     }
 }

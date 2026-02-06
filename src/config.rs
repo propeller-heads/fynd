@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result};
 use num_cpus;
@@ -44,6 +48,40 @@ impl WorkerPoolsConfig {
     }
 }
 
+/// Blacklist configuration for filtering components.
+///
+/// Components in this config will be excluded from routing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlacklistConfig {
+    /// Component IDs to exclude (e.g., pool addresses with simulation issues).
+    #[serde(default)]
+    pub components: HashSet<String>,
+}
+
+impl BlacklistConfig {
+    /// Load blacklist configuration from a TOML file.
+    ///
+    /// The TOML file should have a `[blacklist]` section:
+    /// ```toml
+    /// [blacklist]
+    /// components = ["0x86d257cdb7bc9c0df10e84c8709697f92770b335"]
+    /// ```
+    pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read blacklist config {}", path.display()))?;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            blacklist: BlacklistConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str(&contents)
+            .with_context(|| format!("failed to parse blacklist config {}", path.display()))?;
+        Ok(wrapper.blacklist)
+    }
+}
+
 // Worker defaults
 
 fn usize_val<const V: usize>() -> usize {
@@ -65,4 +103,6 @@ pub(crate) mod defaults {
     pub const RECONNECT_DELAY_SECS: u64 = 5;
     pub const ORDER_MANAGER_TIMEOUT_MS: u64 = 100;
     pub const ORDER_MANAGER_MIN_RESPONSES: usize = 0;
+    /// Slippage threshold for pool depth computation (1%)
+    pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 }

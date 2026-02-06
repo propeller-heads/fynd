@@ -23,9 +23,10 @@ pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
+    derived::{ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
-    types::{solution::Order, Route},
+    types::{solution::Order, RouteResult},
 };
 
 /// Configuration for an Algorithm instance.
@@ -120,21 +121,43 @@ pub(crate) trait Algorithm: Send + Sync {
     /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
     /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
     ///   locks)
+    /// * `derived` - Optional shared reference to derived data (token prices, etc.)
     /// * `order` - The order to solve
     ///
     /// # Returns
     ///
-    /// The best route found, or an error if no route could be found.
+    /// The best route and its gas-adjusted net output amount, or an error if no route could be
+    /// found.
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
         market: SharedMarketDataRef,
+        derived: Option<SharedDerivedDataRef>,
         order: &Order,
-    ) -> Result<Route, AlgorithmError>;
+    ) -> Result<RouteResult, AlgorithmError>;
 
     /// Returns whether this algorithm supports exact-out orders.
     #[allow(dead_code)]
     fn supports_exact_out(&self) -> bool;
+
+    /// Returns the derived data computation requirements for this algorithm.
+    ///
+    /// Algorithms declare freshness requirements for derived data:
+    /// - `require_fresh`: Data must be from the current block (same as SharedMarketData)
+    /// - `allow_stale`: Data can be from any past block, as long as it exists
+    ///
+    /// Workers use this to determine when they can safely solve.
+    ///
+    /// Default implementation returns no requirements - algorithm works without
+    /// any derived data.
+    #[allow(dead_code)]
+    fn computation_requirements(&self) -> ComputationRequirements;
+
+    /// Returns the timeout for solving.
+    ///
+    /// Workers use this to set the maximum time to wait for derived data
+    /// before failing a solve request.
+    fn timeout(&self) -> Duration;
 }
 
 /// Errors that can occur during route finding.

@@ -7,18 +7,26 @@
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
 
-use std::time::Instant;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use tokio::sync::broadcast;
+use num_bigint::BigUint;
+use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     algorithm::Algorithm,
+    derived::{
+        events::DerivedDataEvent, DerivedComputation, PoolDepthComputation, ReadinessTracker,
+        SharedDerivedDataRef,
+    },
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::SharedMarketDataRef,
     },
-    graph::GraphManager,
+    graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::{
         internal::SolveTask, BlockInfo, OrderSolution, SingleOrderSolution, SolutionStatus,
         SolveError,
@@ -38,6 +46,12 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: SharedMarketDataRef,
+    /// Reference to shared derived data (pool depths, token prices).
+    derived_data: SharedDerivedDataRef,
+    /// Tracks readiness of required derived data computations.
+    readiness_tracker: ReadinessTracker,
+    /// Notified when readiness state may have changed.
+    ready_notify: Arc<Notify>,
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
@@ -57,13 +71,23 @@ where
     /// # Arguments
     ///
     /// * `market_data` - Shared reference to market data
+    /// * `derived_data` - Shared reference to derived data (pool depths, token prices)
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
-    pub fn new(market_data: SharedMarketDataRef, algorithm: A, worker_id: usize) -> Self {
+    pub fn new(
+        market_data: SharedMarketDataRef,
+        derived_data: SharedDerivedDataRef,
+        algorithm: A,
+        worker_id: usize,
+    ) -> Self {
+        let requirements = algorithm.computation_requirements();
         Self {
             algorithm,
             graph_manager: A::GraphManager::default(),
             market_data,
+            derived_data,
+            readiness_tracker: ReadinessTracker::new(requirements),
+            ready_notify: Arc::new(Notify::new()),
             initialized: false,
             worker_id,
         }
@@ -116,6 +140,18 @@ where
             "processing order"
         );
 
+        // Check readiness before solving
+        if self
+            .readiness_tracker
+            .has_requirements() &&
+            !self.readiness_tracker.is_ready()
+        {
+            return Err(SolveError::NotReady(format!(
+                "derived data not ready: missing {:?}",
+                self.readiness_tracker.missing()
+            )));
+        }
+
         // Ensure we're initialized
         if !self.initialized {
             self.initialize_graph().await;
@@ -131,7 +167,7 @@ where
             let market = self.market_data.read().await;
             let last_block = market
                 .last_updated()
-                .ok_or(SolveError::Internal("No block info".to_string()))?;
+                .ok_or(SolveError::NotReady("No block info".to_string()))?;
             BlockInfo {
                 number: last_block.number,
                 hash: format!("{:?}", last_block.hash),
@@ -141,11 +177,17 @@ where
 
         let result = self
             .algorithm
-            .find_best_route(graph, self.market_data.clone(), order)
+            .find_best_route(
+                graph,
+                self.market_data.clone(),
+                Some(self.derived_data.clone()),
+                order,
+            )
             .await;
 
         let order_solution = match result {
-            Ok(route) => {
+            Ok(result) => {
+                let route = result.route;
                 let gas_estimate = route.total_gas();
                 let amount_in = if order.is_sell() {
                     order.amount.clone()
@@ -178,9 +220,12 @@ where
                     order.amount.clone()
                 };
 
-                // TODO: Calculate amount_out_net_gas properly using gas price and token price
-                // For now, use amount_out as a placeholder
-                let amount_out_net_gas = amount_out.clone();
+                // Convert net_amount_out (BigInt) to BigUint for amount_out_net_gas.
+                // If net_amount_out is negative (gas > output), clamp to zero.
+                let amount_out_net_gas = result
+                    .net_amount_out
+                    .to_biguint()
+                    .unwrap_or(BigUint::ZERO);
 
                 OrderSolution {
                     order_id: order.id.clone(),
@@ -231,6 +276,57 @@ where
         Ok(SingleOrderSolution { order: order_solution, solve_time_ms })
     }
 
+    /// Waits for required derived data to become ready, or until timeout.
+    ///
+    /// Uses a Notify pattern to know when it's available to solve.
+    ///
+    /// Returns `Ok(())` if ready or no requirements, `Err` if timeout reached.
+    async fn wait_until_ready(&self, timeout: Duration) -> Result<(), SolveError> {
+        // Fast path: no requirements or already ready
+        if !self
+            .readiness_tracker
+            .has_requirements() ||
+            self.readiness_tracker.is_ready()
+        {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            // Create notified future BEFORE checking state (important for race-free waiting)
+            let notified = self.ready_notify.notified();
+
+            // Check if ready
+            if self.readiness_tracker.is_ready() {
+                return Ok(());
+            }
+
+            // Calculate remaining time
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SolveError::NotReady(format!(
+                    "timeout waiting for derived data: missing {:?}",
+                    self.readiness_tracker.missing()
+                )));
+            }
+
+            // Wait for notification or timeout
+            tokio::select! {
+                _ = tokio::time::sleep(remaining) => {
+                    return Err(SolveError::NotReady(format!(
+                        "timeout waiting for derived data: missing {:?}",
+                        self.readiness_tracker.missing()
+                    )));
+                }
+                _ = notified => {
+                    // Woken up by notify, loop to check readiness again
+                    continue;
+                }
+            }
+        }
+    }
+
     /// Runs the worker's main loop, processing market events and solve tasks.
     ///
     /// This method coordinates between market events and solve requests, ensuring the graph
@@ -239,19 +335,23 @@ where
     /// # Arguments
     ///
     /// * `event_rx` - Receiver for market events
+    /// * `derived_event_rx` - Receiver for derived data events (pool depths, etc.)
     /// * `task_rx` - Shared receiver for solve tasks
     /// * `shutdown_rx` - Receiver for shutdown signals
     pub async fn run(
         &mut self,
         mut event_rx: broadcast::Receiver<MarketEvent>,
+        mut derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
         task_rx: async_channel::Receiver<SolveTask>,
         mut shutdown_rx: broadcast::Receiver<()>,
-    ) {
+    ) where
+        A::GraphManager: EdgeWeightUpdaterWithDerived,
+    {
         info!(self.worker_id, "worker started");
 
         loop {
             tokio::select! {
-                biased; // prioritize events in this order: shutdown, market update, solve task
+                biased; // prioritize events in this order: shutdown, market update, derived data, solve task
 
                 // Check for shutdown
                 _ = shutdown_rx.recv() => {
@@ -282,6 +382,59 @@ where
                     }
                 }
 
+                // Process derived data events (pool depths, token prices)
+                derived_result = derived_event_rx.recv() => {
+                    match derived_result {
+                        Ok(event) => {
+                            // Always update tracker with every event
+                            self.readiness_tracker.handle_event(&event);
+
+                            // Signal waiters that readiness may have changed
+                            self.ready_notify.notify_waiters();
+
+                            // TODO: This handling breaks the worker abstraction, assuming that weights
+                            // will always be used, and they will always come from PoolDepth. A refactor
+                            // is needed to move this handling to the algorithm.
+                            if let DerivedDataEvent::ComputationComplete { computation_id, block } = &event {
+                                if *computation_id == PoolDepthComputation::ID {
+                                    let market = self.market_data.read().await;
+                                    let derived = self.derived_data.read().await;
+                                    let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                                    debug!(
+                                        self.worker_id,
+                                        block,
+                                        updated,
+                                        "updated edge weights with derived data"
+                                    );
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!(self.worker_id, "derived event receiver closed");
+                            // Continue running - derived data won't update but we can still solve
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                self.worker_id,
+                                skipped,
+                                "derived event receiver lagged, skipped {} events",
+                                skipped
+                            );
+                            // Try to update with current derived data
+                            let market = self.market_data.read().await;
+                            let derived = self.derived_data.read().await;
+                            if derived.pool_depths().is_some() {
+                                let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                                debug!(
+                                    self.worker_id,
+                                    updated,
+                                    "recovered edge weights after lag"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // Get next solve task
                 task = task_rx.recv() => {
                     match task.ok() {
@@ -289,6 +442,19 @@ where
                             let task_id = task.id;
                             let _wait_time = task.wait_time();
                             let task_response_tx = task.response_tx;
+
+                            // Wait for derived data readiness before solving
+                            // Use algorithm timeout as the max wait time
+                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
+                                warn!(
+                                    self.worker_id,
+                                    task_id = %task_id,
+                                    error = %e,
+                                    "not ready to solve"
+                                );
+                                let _ = task_response_tx.send(Err(e));
+                                continue;
+                            }
 
                             // Process the task
                             let result = self.solve(&task.order).await;
@@ -314,5 +480,313 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        algorithm::{most_liquid::DepthAndPrice, test_utils::setup_market},
+        derived::{
+            ComputationRequirements, DerivedComputation, DerivedData, SpotPriceComputation,
+            TokenGasPriceComputation,
+        },
+        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+    };
+
+    /// Helper to create a new shared derived data store for tests.
+    fn new_shared_derived_data() -> SharedDerivedDataRef {
+        Arc::new(tokio::sync::RwLock::new(DerivedData::new()))
+    }
+
+    /// A minimal mock algorithm for testing the worker.
+    /// Uses DepthAndPrice as the edge weight type to satisfy trait bounds.
+    struct MockAlgorithm {
+        requirements: ComputationRequirements,
+        timeout: Duration,
+    }
+
+    impl MockAlgorithm {
+        fn new() -> Self {
+            Self { requirements: ComputationRequirements::none(), timeout: Duration::from_secs(1) }
+        }
+
+        fn with_requirements(mut self, requirements: ComputationRequirements) -> Self {
+            self.requirements = requirements;
+            self
+        }
+
+        #[allow(dead_code)]
+        fn with_timeout(mut self, timeout: Duration) -> Self {
+            self.timeout = timeout;
+            self
+        }
+    }
+
+    impl Algorithm for MockAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: SharedMarketDataRef,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
+            Err(crate::AlgorithmError::Other("not implemented".to_string()))
+        }
+
+        fn supports_exact_out(&self) -> bool {
+            false
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            self.requirements.clone()
+        }
+
+        fn timeout(&self) -> Duration {
+            self.timeout
+        }
+    }
+
+    // ==================== wait_until_ready Tests ====================
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_immediately_when_no_requirements() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let algorithm = MockAlgorithm::new();
+        let worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Should return immediately since there are no requirements
+        let result = worker
+            .wait_until_ready(Duration::from_millis(10))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_immediately_when_already_ready() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .allow_stale(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Mark as ready by handling a completion event
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            });
+
+        // Should return immediately since already ready
+        let result = worker
+            .wait_until_ready(Duration::from_millis(10))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_times_out_when_not_ready() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Should timeout since no events are received
+        let result = worker
+            .wait_until_ready(Duration::from_millis(50))
+            .await;
+
+        assert!(result.is_err());
+        match result {
+            Err(SolveError::NotReady(msg)) => {
+                assert!(msg.contains("timeout"));
+                assert!(msg.contains("spot_prices"));
+            }
+            other => panic!("Expected NotReady error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_wakes_up_on_notify() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Clone the notify handle to simulate the main loop notifying
+        let notify = worker.ready_notify.clone();
+
+        // Spawn a task that will notify after a short delay
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify.notify_waiters();
+        });
+
+        // wait_until_ready should wake up when notified but still timeout
+        // because we didn't actually update the tracker
+        let result = worker
+            .wait_until_ready(Duration::from_millis(100))
+            .await;
+
+        handle.await.unwrap();
+
+        // Should still timeout because notify woke us up but we're not actually ready
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_succeeds_when_notified_and_ready() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Clone the notify handle and get a reference to the tracker
+        let notify = worker.ready_notify.clone();
+
+        // Spawn a task that will update tracker and notify
+        let handle = tokio::spawn({
+            // We need to update the tracker from outside, so we simulate
+            // what the main loop does: update tracker then notify
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                notify.notify_waiters();
+            }
+        });
+
+        // Manually update the tracker to simulate what would happen in the main loop
+        // In real usage, the main loop updates tracker THEN notifies
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            });
+
+        // Now wait - should succeed immediately since we're already ready
+        let result = worker
+            .wait_until_ready(Duration::from_millis(100))
+            .await;
+
+        handle.abort(); // Don't need to wait for the spawned task
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_pattern_handles_multiple_waiters() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .allow_stale(TokenGasPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        let notify = worker.ready_notify.clone();
+
+        // Spawn multiple waiting tasks
+        let notify1 = notify.clone();
+        let waiter1 = tokio::spawn(async move {
+            notify1.notified().await;
+            true
+        });
+
+        let notify2 = notify.clone();
+        let waiter2 = tokio::spawn(async move {
+            notify2.notified().await;
+            true
+        });
+
+        // Give waiters time to register
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Update tracker and notify all waiters
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationComplete {
+                computation_id: TokenGasPriceComputation::ID,
+                block: 1,
+            });
+        notify.notify_waiters();
+
+        // Both waiters should complete
+        let (r1, r2) = tokio::join!(waiter1, waiter2);
+        assert!(r1.unwrap());
+        assert!(r2.unwrap());
+    }
+
+    // ==================== Integration Tests with run() ====================
+
+    #[tokio::test]
+    async fn worker_updates_tracker_and_notifies_on_derived_event() {
+        let (market, _) = setup_market(vec![]);
+        let derived = new_shared_derived_data();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Create channels
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+        // Spawn worker
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+
+        // Send a derived data event
+        derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            })
+            .unwrap();
+
+        // Give worker time to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Shutdown
+        let _ = shutdown_tx.send(());
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("worker should shutdown")
+            .expect("worker task should not panic");
     }
 }

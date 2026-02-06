@@ -6,17 +6,68 @@
 //! - Updates DerivedDataStore (exclusive write access)
 //! - Provides read access to workers via shared store reference
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
+
+use crate::{feed::market_data::SharedMarketData, types::ComponentId};
+
+/// Information about which components changed in a market update.
+///
+/// Used to enable incremental computation - only recomputing derived data
+/// for components that actually changed.
+#[derive(Debug, Clone, Default)]
+pub struct ChangedComponents {
+    /// Newly added components with their token addresses.
+    pub added: HashMap<ComponentId, Vec<Address>>,
+    /// Components that were removed.
+    pub removed: Vec<ComponentId>,
+    /// Components whose state was updated (but not added/removed).
+    pub updated: Vec<ComponentId>,
+    /// If true, this represents a full recompute (startup/lag recovery).
+    pub is_full_recompute: bool,
+}
+
+impl ChangedComponents {
+    /// Creates a marker for full recompute where all components are considered changed.
+    ///
+    /// Used for startup and lag recovery scenarios.
+    pub fn all(market: &SharedMarketData) -> Self {
+        Self {
+            added: market.component_topology().clone(),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        }
+    }
+
+    /// Returns true if this update changes the graph topology (adds or removes components).
+    pub fn is_topology_change(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty()
+    }
+
+    /// Returns a HashSet of all changed component IDs.
+    pub fn all_changed_ids(&self) -> HashSet<ComponentId> {
+        let mut all = HashSet::new();
+        all.extend(self.added.keys().cloned());
+        all.extend(self.removed.iter().cloned());
+        all.extend(self.updated.iter().cloned());
+        all
+    }
+}
 
 use super::{
     computation::DerivedComputation,
     computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
+    events::DerivedDataEvent,
     store::DerivedData,
 };
 use crate::feed::{
@@ -80,7 +131,7 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 3, depth_slippage_threshold: 0.05 }
+        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
     }
 }
 
@@ -96,30 +147,46 @@ pub struct ComputationManager {
     spot_price_computation: SpotPriceComputation,
     /// Pool depth computation.
     pool_depth_computation: PoolDepthComputation,
+    /// Event broadcaster for derived data updates.
+    event_tx: broadcast::Sender<DerivedDataEvent>,
 }
 
 impl ComputationManager {
     /// Creates a new ComputationManager.
+    ///
+    /// Returns the manager and a receiver for derived data events.
+    /// Workers can subscribe to the event sender via `event_sender()` to track
+    /// computation readiness.
     pub fn new(
         config: ComputationManagerConfig,
         market_data: SharedMarketDataRef,
-    ) -> Result<Self, ComputationError> {
+    ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let pool_depth_computation = PoolDepthComputation::new(config.depth_slippage_threshold)?;
+        let (event_tx, event_rx) = broadcast::channel(64);
 
-        Ok(Self {
-            market_data,
-            store: wrap_derived(DerivedData::new()),
-            token_price_computation: TokenGasPriceComputation::default()
-                .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token),
-            spot_price_computation: SpotPriceComputation::new(),
-            pool_depth_computation,
-        })
+        Ok((
+            Self {
+                market_data,
+                store: wrap_derived(DerivedData::new()),
+                token_price_computation: TokenGasPriceComputation::default()
+                    .with_max_hops(config.max_hop)
+                    .with_gas_token(config.gas_token),
+                spot_price_computation: SpotPriceComputation::new(),
+                pool_depth_computation,
+                event_tx,
+            },
+            event_rx,
+        ))
     }
 
     /// Returns a reference to the shared derived data store.
     pub fn store(&self) -> SharedDerivedDataRef {
         Arc::clone(&self.store)
+    }
+
+    /// Returns the event sender for workers to subscribe.
+    pub fn event_sender(&self) -> broadcast::Sender<DerivedDataEvent> {
+        self.event_tx.clone()
     }
 
     /// Runs the main loop until shutdown or channel close.
@@ -159,7 +226,10 @@ impl ComputationManager {
                                 "computation manager lagged, skipped {} events. Recomputing from current state.",
                                 skipped
                             );
-                            self.compute_all().await;
+                            let market = self.market_data.read().await;
+                            let changed = ChangedComponents::all(&market);
+                            drop(market);
+                            self.compute_all(&changed).await;
                         }
                     }
                 }
@@ -170,12 +240,15 @@ impl ComputationManager {
     /// Runs all computations and updates the store.
     ///
     /// This is called on market updates and lag recovery.
+    /// Broadcasts `DerivedDataEvent` for each computation that completes.
     ///
     /// **Dependency order**:
     /// 1. `SpotPriceComputation` - no dependencies
     /// 2. `TokenGasPriceComputation` - depends on spot_prices in store
     /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
-    async fn compute_all(&self) {
+    async fn compute_all(&self, changed: &ChangedComponents) {
+        let total_start = Instant::now();
+
         // Get block info for tracking
         let Some(block) = self
             .market_data
@@ -188,11 +261,18 @@ impl ComputationManager {
             return;
         };
 
+        // Broadcast new block event
+        let _ = self
+            .event_tx
+            .send(DerivedDataEvent::NewBlock { block });
+
         // Phase 1: Compute spot prices first (no dependencies)
+        let spot_start = Instant::now();
         let spot_prices_result = self
             .spot_price_computation
-            .compute(&self.market_data, &self.store)
+            .compute(&self.market_data, &self.store, changed)
             .await;
+        let spot_elapsed = spot_start.elapsed();
 
         // Write spot prices to store before dependent computations
         match spot_prices_result {
@@ -202,10 +282,16 @@ impl ComputationManager {
                     .write()
                     .await
                     .set_spot_prices(prices, block);
-                debug!(count, "updated spot prices");
+                info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: SpotPriceComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
-                warn!(error = ?e, "spot price computation failed");
+                warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
@@ -213,11 +299,25 @@ impl ComputationManager {
 
         // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
         let (token_prices_result, pool_depths_result) = tokio::join!(
-            self.token_price_computation
-                .compute(&self.market_data, &self.store),
-            self.pool_depth_computation
-                .compute(&self.market_data, &self.store)
+            async {
+                let start = Instant::now();
+                let result = self
+                    .token_price_computation
+                    .compute(&self.market_data, &self.store, changed)
+                    .await;
+                (result, start.elapsed())
+            },
+            async {
+                let start = Instant::now();
+                let result = self
+                    .pool_depth_computation
+                    .compute(&self.market_data, &self.store, changed)
+                    .await;
+                (result, start.elapsed())
+            }
         );
+        let (token_prices_result, token_elapsed) = token_prices_result;
+        let (pool_depths_result, depth_elapsed) = pool_depths_result;
 
         // Update store with remaining results
         let mut store_write = self.store.write().await;
@@ -226,7 +326,13 @@ impl ComputationManager {
             Ok(prices) => {
                 let count = prices.len();
                 store_write.set_token_prices(prices, block);
-                debug!(count, "updated token prices");
+                info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
                 warn!(error = ?e, "token price computation failed");
@@ -237,12 +343,21 @@ impl ComputationManager {
             Ok(depths) => {
                 let count = depths.len();
                 store_write.set_pool_depths(depths, block);
-                debug!(count, "updated pool depths");
+                info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
             }
             Err(e) => {
                 warn!(error = ?e, "pool depth computation failed");
             }
         }
+
+        let total_elapsed = total_start.elapsed();
+        info!(block, total_ms = total_elapsed.as_millis(), "all derived computations complete");
     }
 }
 
@@ -262,11 +377,16 @@ impl MarketEventHandler for ComputationManager {
                     added = added_components.len(),
                     removed = removed_components.len(),
                     updated = updated_components.len(),
-                    "market updated, running all computations"
+                    "market updated, running incremental computations"
                 );
 
-                // TODO: only recompute affected computations based on changed components
-                self.compute_all().await;
+                let changed = ChangedComponents {
+                    added: added_components.clone(),
+                    removed: removed_components.clone(),
+                    updated: updated_components.clone(),
+                    is_full_recompute: false,
+                };
+                self.compute_all(&changed).await;
             }
             _ => {
                 trace!("empty market update, skipping computations");
@@ -304,7 +424,7 @@ mod tests {
             setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
 
         let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
-        let mut manager = ComputationManager::new(config, market).unwrap();
+        let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::from([(
@@ -330,7 +450,7 @@ mod tests {
     async fn handle_event_skips_empty_update() {
         let (market, _) = setup_market(vec![]);
         let config = ComputationManagerConfig::new();
-        let mut manager = ComputationManager::new(config, market).unwrap();
+        let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::new(),
@@ -352,7 +472,7 @@ mod tests {
     async fn run_shuts_down_on_signal() {
         let (market, _) = setup_market(vec![]);
         let config = ComputationManagerConfig::new();
-        let manager = ComputationManager::new(config, market).unwrap();
+        let (manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -373,7 +493,7 @@ mod tests {
     async fn run_shuts_down_on_channel_close() {
         let (market, _) = setup_market(vec![]);
         let config = ComputationManagerConfig::new();
-        let manager = ComputationManager::new(config, market).unwrap();
+        let (manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let (event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);

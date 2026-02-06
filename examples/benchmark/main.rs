@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::Parser;
 use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
-use runner::run_benchmark;
+use runner::{run_benchmark, RunnerResults};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tycho_solver::HealthStatus;
@@ -66,9 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run benchmark
     let client = reqwest::Client::new();
     let benchmark_start = Instant::now();
-    let (round_trip_times, solve_times, successful_requests) =
-        run_benchmark(client, &cli.solver_url, &requests, cli.num_requests, &parallelization_mode)
-            .await;
+    let RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found: orders_solved,
+        orders_not_found: orders_not_solved,
+    } = run_benchmark(client, &cli.solver_url, &requests, cli.num_requests, &parallelization_mode)
+        .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
     // Calculate overhead
@@ -88,8 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         println!("\n=== Results ===");
-        println!("Successful requests: {}/{}", successful_requests, cli.num_requests);
-        println!("Failed requests:     {}", failed_requests);
+        println!("Successful HTTP requests: {}/{}", successful_requests, cli.num_requests);
+        println!("Failed HTTP requests:     {}", failed_requests);
+        println!("Orders solved:            {}", orders_solved);
+        println!("Orders not solved:        {}", orders_not_solved);
         println!("Total duration:      {:.2}s", total_duration_ms as f64 / 1000.0);
         println!("Throughput:          {:.2} req/s", throughput_rps);
 
@@ -122,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 requests,
                 successful_requests,
                 failed_requests,
+                orders_solved,
+                orders_not_solved,
                 total_duration_ms,
                 throughput_rps,
                 round_trip_times,

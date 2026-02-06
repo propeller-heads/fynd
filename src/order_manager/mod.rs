@@ -323,8 +323,14 @@ impl OrderManager {
                     .failed_solvers
                     .iter()
                     .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
+                let all_not_ready = responses
+                    .failed_solvers
+                    .iter()
+                    .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
                 if all_timeouts {
                     SolutionStatus::Timeout
+                } else if all_not_ready {
+                    SolutionStatus::NotReady
                 } else {
                     SolutionStatus::NoRouteFound
                 }
@@ -333,6 +339,7 @@ impl OrderManager {
             // Record status metric
             let status_label = match status {
                 SolutionStatus::Timeout => "timeout",
+                SolutionStatus::NotReady => "not_ready",
                 _ => "no_route",
             };
             counter!("order_manager_orders_total", "status" => status_label).increment(1);
@@ -430,8 +437,8 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = OrderManagerConfig::default();
-        assert_eq!(config.default_timeout, Duration::from_millis(100));
-        assert_eq!(config.min_responses, 0);
+        assert_eq!(config.default_timeout, Duration::from_secs(1));
+        assert_eq!(config.min_responses, 1);
     }
 
     #[test]
@@ -480,7 +487,9 @@ mod tests {
         // Pool B: better solution (net gas = 950)
         let (pool_b, worker_b) = create_mock_pool("pool_b", Ok(make_single_solution(950)), 0);
 
-        let manager = OrderManager::new(vec![pool_a, pool_b], OrderManagerConfig::default());
+        // Wait for both responses to test best selection logic
+        let config = OrderManagerConfig::default().with_min_responses(2);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 

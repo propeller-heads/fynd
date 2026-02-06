@@ -11,7 +11,12 @@ use tokio::{
 };
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig, TychoSolverBuilder};
+use tycho_solver::{
+    builder::parse_chain,
+    cli::Cli,
+    config::{BlacklistConfig, WorkerPoolsConfig},
+    TychoSolverBuilder,
+};
 
 fn main() -> Result<(), anyhow::Error> {
     create_tracing_subscriber();
@@ -121,6 +126,12 @@ async fn setup_solver(cli: &Cli) -> Result<tycho_solver::builder::TychoSolver, S
     }
     if let Some(api_key) = &cli.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
+    }
+    if let Some(blacklist_path) = &cli.blacklist_config {
+        let blacklist = BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
+            SolverError::SetupError(format!("failed to load blacklist config: {}", e))
+        })?;
+        builder = builder.blacklist(blacklist);
     }
 
     // Build and start solver

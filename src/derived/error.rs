@@ -47,4 +47,13 @@ pub enum ComputationError {
     /// Invalid configuration provided.
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
+
+    /// All computations failed for a batch.
+    #[error("all {attempted} computations failed for {computation_id}")]
+    TotalFailure {
+        /// Which computation experienced total failure.
+        computation_id: ComputationId,
+        /// Number of items attempted.
+        attempted: usize,
+    },
 }

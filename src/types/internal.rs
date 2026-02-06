@@ -79,6 +79,10 @@ pub enum SolveError {
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// No workers are ready to solve.
+    #[error("no workers ready: {0}")]
+    NotReady(String),
 }
 
 impl SolveError {

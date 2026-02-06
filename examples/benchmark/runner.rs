@@ -1,9 +1,18 @@
 use std::{sync::Arc, time::Instant};
 
 use tokio::sync::{Mutex, Semaphore};
-use tycho_solver::{Solution, SolutionRequest};
+use tycho_solver::{Solution, SolutionRequest, SolutionStatus};
 
 use crate::config::ParallelizationMode;
+
+/// Results from a benchmark run.
+pub struct RunnerResults {
+    pub round_trip_times: Vec<u64>,
+    pub solve_times: Vec<u64>,
+    pub successful_requests: usize,
+    pub orders_found: usize,
+    pub orders_not_found: usize,
+}
 
 impl ParallelizationMode {
     /// Run benchmark with this parallelization mode
@@ -13,7 +22,7 @@ impl ParallelizationMode {
         solver_url: &str,
         requests: &[SolutionRequest],
         num_requests: usize,
-    ) -> (Vec<u64>, Vec<u64>, usize) {
+    ) -> RunnerResults {
         match self {
             Self::Sequential => run_sequential(client, solver_url, requests, num_requests).await,
             Self::FixedConcurrency { concurrency } => {
@@ -34,7 +43,7 @@ pub async fn run_benchmark(
     requests: &[SolutionRequest],
     num_requests: usize,
     mode: &ParallelizationMode,
-) -> (Vec<u64>, Vec<u64>, usize) {
+) -> RunnerResults {
     mode.run(client, solver_url, requests, num_requests)
         .await
 }
@@ -45,10 +54,12 @@ async fn run_sequential(
     solver_url: &str,
     requests: &[SolutionRequest],
     num_requests: usize,
-) -> (Vec<u64>, Vec<u64>, usize) {
+) -> RunnerResults {
     let mut round_trip_times = Vec::new();
     let mut solve_times = Vec::new();
     let mut successful_requests = 0;
+    let mut total_orders_found = 0usize;
+    let mut total_orders_not_found = 0usize;
 
     tracing::info!("Running {} requests sequentially...", num_requests);
 
@@ -65,16 +76,24 @@ async fn run_sequential(
             .await;
         let round_trip_ms = start.elapsed().as_millis() as u64;
 
-        if let Some((solve_time, _is_first)) =
+        if let Some((solve_time, _is_first, found, not_found)) =
             handle_response(response, round_trip_ms, i == 1).await
         {
             successful_requests += 1;
             round_trip_times.push(round_trip_ms);
             solve_times.push(solve_time);
+            total_orders_found += found;
+            total_orders_not_found += not_found;
         }
     }
 
-    (round_trip_times, solve_times, successful_requests)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found: total_orders_found,
+        orders_not_found: total_orders_not_found,
+    }
 }
 
 /// Fixed concurrency execution: maintain exactly N concurrent requests at all times.
@@ -85,7 +104,7 @@ async fn run_fixed_concurrency(
     requests: &[SolutionRequest],
     num_requests: usize,
     concurrency: usize,
-) -> (Vec<u64>, Vec<u64>, usize) {
+) -> RunnerResults {
     tracing::info!("Running {} requests with fixed concurrency of {}", num_requests, concurrency);
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -93,6 +112,8 @@ async fn run_fixed_concurrency(
     let round_trip_times = Arc::new(Mutex::new(Vec::new()));
     let solve_times = Arc::new(Mutex::new(Vec::new()));
     let successful_requests = Arc::new(Mutex::new(0usize));
+    let orders_found = Arc::new(Mutex::new(0usize));
+    let orders_not_found = Arc::new(Mutex::new(0usize));
     let completed_count = Arc::new(Mutex::new(0usize));
     let first_response_printed = Arc::new(Mutex::new(false));
 
@@ -110,6 +131,8 @@ async fn run_fixed_concurrency(
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
         let successful_requests = successful_requests.clone();
+        let orders_found = orders_found.clone();
+        let orders_not_found = orders_not_found.clone();
         let completed_count = completed_count.clone();
         let first_response_printed = first_response_printed.clone();
 
@@ -138,7 +161,7 @@ async fn run_fixed_concurrency(
             print!("Request {}/{}: ", current_count, num_requests);
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
-            if let Some((solve_time, _printed_first)) =
+            if let Some((solve_time, _printed_first, found, not_found)) =
                 handle_response(response, round_trip_ms, is_first).await
             {
                 round_trip_times
@@ -150,6 +173,8 @@ async fn run_fixed_concurrency(
                     .await
                     .push(solve_time);
                 *successful_requests.lock().await += 1;
+                *orders_found.lock().await += found;
+                *orders_not_found.lock().await += not_found;
             }
 
             drop(permit);
@@ -171,8 +196,20 @@ async fn run_fixed_concurrency(
     let successful_requests = Arc::try_unwrap(successful_requests)
         .unwrap()
         .into_inner();
+    let orders_found = Arc::try_unwrap(orders_found)
+        .unwrap()
+        .into_inner();
+    let orders_not_found = Arc::try_unwrap(orders_not_found)
+        .unwrap()
+        .into_inner();
 
-    (round_trip_times, solve_times, successful_requests)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found,
+        orders_not_found,
+    }
 }
 
 /// Rate-based execution: fire requests at a fixed interval regardless of response timing.
@@ -183,7 +220,7 @@ async fn run_rate_based(
     requests: &[SolutionRequest],
     num_requests: usize,
     interval_ms: u64,
-) -> (Vec<u64>, Vec<u64>, usize) {
+) -> RunnerResults {
     tracing::info!(
         "Running {} requests at {}ms intervals (fire-and-forget)",
         num_requests,
@@ -194,6 +231,8 @@ async fn run_rate_based(
     let round_trip_times = Arc::new(Mutex::new(Vec::new()));
     let solve_times = Arc::new(Mutex::new(Vec::new()));
     let successful_requests = Arc::new(Mutex::new(0usize));
+    let orders_found = Arc::new(Mutex::new(0usize));
+    let orders_not_found = Arc::new(Mutex::new(0usize));
     let first_response_printed = Arc::new(Mutex::new(false));
 
     let mut tasks = Vec::new();
@@ -209,6 +248,8 @@ async fn run_rate_based(
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
         let successful_requests = successful_requests.clone();
+        let orders_found = orders_found.clone();
+        let orders_not_found = orders_not_found.clone();
         let first_response_printed = first_response_printed.clone();
 
         let task = tokio::spawn(async move {
@@ -231,7 +272,7 @@ async fn run_rate_based(
             print!("Request {}: ", i);
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
-            if let Some((solve_time, _printed_first)) =
+            if let Some((solve_time, _printed_first, found, not_found)) =
                 handle_response(response, round_trip_ms, is_first).await
             {
                 round_trip_times
@@ -243,6 +284,8 @@ async fn run_rate_based(
                     .await
                     .push(solve_time);
                 *successful_requests.lock().await += 1;
+                *orders_found.lock().await += found;
+                *orders_not_found.lock().await += not_found;
             }
         });
 
@@ -262,27 +305,49 @@ async fn run_rate_based(
     let successful_requests = Arc::try_unwrap(successful_requests)
         .unwrap()
         .into_inner();
+    let orders_found = Arc::try_unwrap(orders_found)
+        .unwrap()
+        .into_inner();
+    let orders_not_found = Arc::try_unwrap(orders_not_found)
+        .unwrap()
+        .into_inner();
 
-    (round_trip_times, solve_times, successful_requests)
+    RunnerResults {
+        round_trip_times,
+        solve_times,
+        successful_requests,
+        orders_found,
+        orders_not_found,
+    }
 }
 
 /// Handles HTTP response from the solver, extracting timing information and logging results.
-/// Returns Some((solve_time, is_first)) on success, None on failure.
+/// Returns Some((solve_time, is_first, orders_found, orders_not_found)) on success, None on
+/// failure.
 async fn handle_response(
     response: Result<reqwest::Response, reqwest::Error>,
     round_trip_ms: u64,
     is_first: bool,
-) -> Option<(u64, bool)> {
+) -> Option<(u64, bool, usize, usize)> {
     match response {
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
                 match resp.json::<Solution>().await {
                     Ok(solution) => {
+                        let orders_found = solution
+                            .orders
+                            .iter()
+                            .filter(|o| o.status == SolutionStatus::Success)
+                            .count();
+                        let orders_not_found = solution.orders.len() - orders_found;
+
                         tracing::info!(
-                            "✓ Round-trip: {}ms, Server solve time: {}ms",
+                            "✓ Round-trip: {}ms, Server solve time: {}ms, Orders solved: {}/{}",
                             round_trip_ms,
-                            solution.solve_time_ms
+                            solution.solve_time_ms,
+                            orders_found,
+                            solution.orders.len()
                         );
 
                         if is_first {
@@ -298,7 +363,12 @@ async fn handle_response(
                             }
                         }
 
-                        return Some((solution.solve_time_ms, is_first));
+                        return Some((
+                            solution.solve_time_ms,
+                            is_first,
+                            orders_found,
+                            orders_not_found,
+                        ));
                     }
                     Err(e) => tracing::error!("✗ Failed to parse response: {}", e),
                 }

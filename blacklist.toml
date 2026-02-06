@@ -1,0 +1,9 @@
+# Component blacklist configuration
+# Exclude specific pools from routing due to simulation issues
+
+[blacklist]
+# Component IDs to exclude (pool addresses)
+# UniswapV3 AMPL pool - AMPL is a rebasing token that doesn't work correctly
+components = [
+    "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
+]

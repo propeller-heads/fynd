@@ -4,7 +4,10 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use super::{error::ComputationError, manager::SharedDerivedDataRef};
+use super::{
+    error::ComputationError,
+    manager::{ChangedComponents, SharedDerivedDataRef},
+};
 use crate::feed::market_data::SharedMarketDataRef;
 
 /// Unique identifier for a computation type.
@@ -12,17 +15,45 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Used for event discrimination, storage keys, and readiness tracking.
 pub type ComputationId = &'static str;
 
+/// Error when building computation requirements.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("conflicting requirement: '{id}' cannot be both fresh and stale")]
+pub struct RequirementConflict {
+    /// The computation ID that was added with conflicting freshness.
+    pub id: ComputationId,
+}
+
 /// Requirements for derived data computations.
 ///
-/// Each algorithm declares which computations it needs:
-/// - `required`: Must wait for these before solving (blocks)
-/// - `optional`: Best-effort, use if available (non-blocking)
+/// Each algorithm declares which computations it needs and their freshness requirements:
+///
+/// - `require_fresh`: Data must be from the current block (same block as SharedMarketData). Workers
+///   wait for these computations to complete for the current block before solving.
+///
+/// - `allow_stale`: Data can be from any past block, as long as it has been computed at least once.
+///   Workers only check that the data exists, not that it's from the current block.
+///
+///
+/// # Example
+///
+/// ```ignore
+/// // Token prices don't change much block-to-block, stale is fine
+/// ComputationRequirements::none()
+///     .expect_stale("token_prices")?
+///
+/// // Spot prices must be fresh for accurate routing
+/// ComputationRequirements::none()
+///     .expect_fresh("spot_prices")?
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
-    /// Computations that must complete before solving.
-    pub required: HashSet<ComputationId>,
-    /// Computations that are useful but not required.
-    pub optional: HashSet<ComputationId>,
+    /// Computations that must be from the current block.
+    pub require_fresh: HashSet<ComputationId>,
+    /// Computations that can use data from any past block.
+    ///
+    /// TODO: Stale data can be dangerous if stale for too long. In the future, associate staleness
+    /// to a block limit might be implemented.
+    pub allow_stale: HashSet<ComputationId>,
 }
 
 impl ComputationRequirements {
@@ -31,21 +62,35 @@ impl ComputationRequirements {
         Self::default()
     }
 
-    /// Creates requirements with only required computations.
-    pub fn required(ids: impl IntoIterator<Item = ComputationId>) -> Self {
-        Self { required: ids.into_iter().collect(), optional: HashSet::new() }
+    /// Builder method to add a computation that requires fresh data (current block).
+    ///
+    /// # Errors
+    ///
+    /// Returns `RequirementConflict` if the same ID is already in `allow_stale`.
+    pub fn require_fresh(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+        if self.allow_stale.contains(&id) {
+            return Err(RequirementConflict { id });
+        }
+        self.require_fresh.insert(id);
+        Ok(self)
     }
 
-    /// Builder method to add a required computation.
-    pub fn with_required(mut self, id: ComputationId) -> Self {
-        self.required.insert(id);
-        self
+    /// Builder method to add a computation that allows stale data (any past block).
+    ///
+    /// # Errors
+    ///
+    /// Returns `RequirementConflict` if the same ID is already in `require_fresh`.
+    pub fn allow_stale(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+        if self.require_fresh.contains(&id) {
+            return Err(RequirementConflict { id });
+        }
+        self.allow_stale.insert(id);
+        Ok(self)
     }
 
-    /// Builder method to add an optional computation.
-    pub fn with_optional(mut self, id: ComputationId) -> Self {
-        self.optional.insert(id);
-        self
+    /// Returns true if there are any requirements.
+    pub fn has_requirements(&self) -> bool {
+        !self.require_fresh.is_empty() || !self.allow_stale.is_empty()
     }
 }
 
@@ -77,11 +122,14 @@ impl ComputationRequirements {
 ///     async fn compute(
 ///         &self,
 ///         market: &SharedMarketDataRef,
-///         store: &SharedDerivedDataStore,
+///         store: &SharedDerivedDataRef,
+///         changed: &ChangedComponents,
 ///     ) -> Result<Self::Output, ComputationError> {
-///         let market_guard = market.read().await;
-///         // Use market_guard...
-///         // Lock is released when guard is dropped
+///         if changed.is_full_recompute {
+///             // Full recompute: process all components
+///         } else {
+///             // Incremental: only process changed components
+///         }
 ///     }
 /// }
 /// ```
@@ -103,10 +151,19 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// * `market` - Reference to shared market data (computation acquires lock as needed)
     /// * `store` - Reference to derived data store (computation acquires lock as needed)
+    /// * `changed` - Information about which components changed, enabling incremental computation
     ///
     /// # Returns
     ///
     /// The computed output, or an error if computation failed.
+    ///
+    /// # Incremental Computation
+    ///
+    /// Implementations should use `changed` to only recompute data affected by the changes:
+    /// - `changed.is_full_recompute` - If true, recompute everything (startup/lag recovery)
+    /// - `changed.added` - New components to compute
+    /// - `changed.removed` - Components to remove from results
+    /// - `changed.updated` - Components whose state changed
     ///
     /// # Lock Management
     ///
@@ -117,5 +174,6 @@ pub trait DerivedComputation: Send + Sync + 'static {
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError>;
 }

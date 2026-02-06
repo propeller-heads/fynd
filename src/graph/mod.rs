@@ -10,7 +10,10 @@ use std::collections::HashMap;
 
 pub use petgraph::{EdgeData, EdgeIndex, PetgraphStableDiGraphManager};
 use thiserror::Error;
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
+    tycho_core::models::token::Token,
+};
 
 use crate::types::ComponentId;
 
@@ -109,4 +112,45 @@ where
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
+}
+
+use crate::{derived::DerivedData, feed::market_data::SharedMarketData};
+
+/// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
+///
+/// Implement this trait for edge data types that should use pre-computed derived data
+/// (pool depths, spot prices, etc.) instead of computing them from scratch.
+pub trait EdgeWeightFromSimAndDerived: Sized {
+    /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
+    ///
+    /// # Arguments
+    ///
+    /// * `sim` - The protocol simulation state
+    /// * `component_id` - The component ID for derived data lookup
+    /// * `token_in` - The input token
+    /// * `token_out` - The output token
+    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
+    ///
+    /// # Returns
+    ///
+    /// The computed edge weight, or `None` if it cannot be computed.
+    fn from_sim_and_derived(
+        sim: &dyn ProtocolSim,
+        component_id: &ComponentId,
+        token_in: &Token,
+        token_out: &Token,
+        derived: &DerivedData,
+    ) -> Option<Self>;
+}
+
+/// Trait for graph managers that support edge weight updates with derived data.
+pub trait EdgeWeightUpdaterWithDerived {
+    /// Updates edge weights using simulation states and pre-computed derived data.
+    ///
+    /// Returns the number of edges successfully updated.
+    fn update_edge_weights_with_derived(
+        &mut self,
+        market: &SharedMarketData,
+        derived: &DerivedData,
+    ) -> usize;
 }

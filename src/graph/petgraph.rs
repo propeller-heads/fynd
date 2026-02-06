@@ -13,11 +13,15 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
+use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::GraphManager;
 use crate::{
-    feed::events::{EventError, MarketEvent, MarketEventHandler},
+    feed::{
+        events::{EventError, MarketEvent, MarketEventHandler},
+        market_data::SharedMarketData,
+    },
     graph::GraphError,
     types::ComponentId,
 };
@@ -158,8 +162,15 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         components: &HashMap<ComponentId, Vec<Address>>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
+        let mut skipped_duplicates = 0usize;
 
         for (comp_id, tokens) in components {
+            if self.edge_map.contains_key(comp_id) {
+                trace!(component_id = %comp_id, "skipping already-tracked component");
+                skipped_duplicates += 1;
+                continue;
+            }
+
             if tokens.len() < 2 {
                 invalid_components.push(comp_id.clone());
                 continue;
@@ -171,6 +182,10 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
                 .collect();
             // Add edges for all token pairs in this component
             self.add_component_edges(comp_id, &node_indices);
+        }
+
+        if skipped_duplicates > 0 {
+            debug!(skipped_duplicates, "skipped duplicate components during add");
         }
 
         // Return error if any components had too few tokens (less than 2)
@@ -289,6 +304,75 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     }
 }
 
+impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager<D> {
+    /// Updates edge weights using simulation states and pre-computed derived data.
+    ///
+    /// Uses pre-computed derived data (spot prices, pool depths, etc.) to update
+    /// edge weights. This is more accurate than computing from scratch as it uses
+    /// data computed with slippage thresholds via `query_pool_swap` or binary search.
+    ///
+    /// # Arguments
+    ///
+    /// * `market` - The market data containing simulation states and tokens
+    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
+    ///
+    /// # Returns
+    ///
+    /// The number of edges successfully updated.
+    pub fn update_edge_weights_with_derived(
+        &mut self,
+        market: &SharedMarketData,
+        derived: &crate::derived::DerivedData,
+    ) -> usize {
+        let tokens = market.token_registry_ref();
+
+        // First pass: collect edge info and compute weights (immutable borrow)
+        let updates: Vec<_> = self
+            .graph
+            .edge_indices()
+            .filter_map(|edge_idx| {
+                let edge_data = self.graph.edge_weight(edge_idx)?;
+                let component_id = &edge_data.component_id;
+
+                let sim_state = market.get_simulation_state(component_id)?;
+
+                let (source_idx, target_idx) = self.graph.edge_endpoints(edge_idx)?;
+                let source_addr = &self.graph[source_idx];
+                let target_addr = &self.graph[target_idx];
+
+                let token_in = tokens.get(source_addr)?;
+                let token_out = tokens.get(target_addr)?;
+
+                let weight =
+                    D::from_sim_and_derived(sim_state, component_id, token_in, token_out, derived)?;
+                Some((edge_idx, weight))
+            })
+            .collect();
+
+        // Second pass: apply updates (mutable borrow)
+        let updated = updates.len();
+        for (edge_idx, weight) in updates {
+            if let Some(edge_data) = self.graph.edge_weight_mut(edge_idx) {
+                edge_data.data = Some(weight);
+            }
+        }
+
+        updated
+    }
+}
+
+impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWithDerived
+    for PetgraphStableDiGraphManager<D>
+{
+    fn update_edge_weights_with_derived(
+        &mut self,
+        market: &SharedMarketData,
+        derived: &crate::derived::DerivedData,
+    ) -> usize {
+        self.update_edge_weights_with_derived(market, derived)
+    }
+}
+
 impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
     fn default() -> Self {
         Self::new()
@@ -304,7 +388,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
 
         let unique_tokens: HashSet<Address> = component_topology
             .values()
-            .flatten()
+            .flat_map(|v| v.iter())
             .cloned()
             .collect();
 
@@ -703,5 +787,31 @@ mod tests {
             }
             _ => panic!("Expected GraphErrors with multiple errors"),
         }
+    }
+
+    #[test]
+    fn test_add_components_skips_duplicates() {
+        let mut manager = PetgraphStableDiGraphManager::<()>::new();
+        let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+
+        let mut components = HashMap::new();
+        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+
+        manager
+            .add_components(&components)
+            .unwrap();
+        let edge_count_after_first = manager.graph().edge_count();
+        assert_eq!(edge_count_after_first, 2); // A->B and B->A
+
+        // Add the same component again
+        manager
+            .add_components(&components)
+            .unwrap();
+        let edge_count_after_second = manager.graph().edge_count();
+        assert_eq!(
+            edge_count_after_first, edge_count_after_second,
+            "Edge count should not change when re-adding the same component"
+        );
     }
 }

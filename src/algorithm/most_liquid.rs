@@ -25,9 +25,10 @@ use tycho_simulation::{
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
+    derived::{ComputationRequirements, SharedDerivedDataRef, TokenGasPrices},
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, Route},
+    types::{ComponentId, Order, Route, RouteResult},
     AlgorithmError, ProtocolSystem, Swap,
 };
 /// Algorithm that selects routes based on expected output after gas.
@@ -94,10 +95,35 @@ impl DepthAndPrice {
     }
 }
 
+impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
+    fn from_sim_and_derived(
+        _sim: &dyn ProtocolSim,
+        component_id: &ComponentId,
+        token_in: &Token,
+        token_out: &Token,
+        derived: &crate::derived::DerivedData,
+    ) -> Option<Self> {
+        let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+
+        // Use pre-computed spot price
+        let spot_price = derived
+            .spot_prices()
+            .and_then(|prices| prices.get(&key).copied())?;
+
+        // Look up pre-computed depth
+        let depth = derived
+            .pool_depths()
+            .and_then(|depths| depths.get(&key))?
+            .to_f64()?;
+
+        Some(Self { spot_price, depth })
+    }
+}
+
 impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {
-        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(50) }
+        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(500) }
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
@@ -204,7 +230,7 @@ impl MostLiquidAlgorithm {
 
         for edge in path.edge_iter() {
             let Some(data) = edge.data.as_ref() else {
-                trace!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
+                debug!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
                 return None;
             };
 
@@ -225,13 +251,15 @@ impl MostLiquidAlgorithm {
     /// * `path` - The edge path to simulate
     /// * `graph` - The graph containing edge and node data
     /// * `market` - Market data for token/component lookups and gas price
+    /// * `token_prices` - Optional token prices for gas cost conversion
     /// * `amount_in` - The input amount to simulate
-    #[instrument(level = "trace", skip(path, market), fields(hop_count = path.len()))]
+    #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
     pub(crate) fn simulate_path<D>(
         path: &Path<D>,
         market: &SharedMarketData,
+        token_prices: Option<&TokenGasPrices>,
         amount_in: BigUint,
-    ) -> Result<Route, AlgorithmError> {
+    ) -> Result<RouteResult, AlgorithmError> {
         let mut current_amount = amount_in.clone();
         let mut swaps = Vec::with_capacity(path.len());
 
@@ -323,33 +351,44 @@ impl MostLiquidAlgorithm {
             current_amount = result.amount;
         }
 
-        // Calculate net amount out (output - gas cost in wei)
-        // TODO: Convert gas cost to output token terms for proper ranking.
-        // Currently subtracting raw wei from output amount, which is incorrect when
-        // token_out != ETH. Need to:
-        // 1. Store ETH price per token (token/ETH rate) - likely in SharedMarketData
-        // 2. Look up ETH price for the output token of this path
-        // 3. Convert: gas_cost_in_token_out = gas_cost_wei * eth_price_in_token_out
-        let output_amount = swaps
+        // Calculate net amount out (output - gas cost in output token terms)
+        let route = Route::new(swaps);
+        let output_amount = route
+            .swaps
             .last()
             .map(|s| s.amount_out.clone())
             .unwrap_or_else(|| BigUint::ZERO);
-        let total_gas: BigUint = swaps
-            .iter()
-            .map(|s| &s.gas_estimate)
-            .sum();
-        let gas_price = market
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price();
-        let gas_cost_wei = total_gas * gas_price;
-        let gas_cost_out = gas_cost_wei * 1u32; // Placeholder until conversion is implemented
 
-        // Use BigInt to allow negative values when gas exceeds output
-        // (can happen due to inaccurate gas estimation or price conversion)
-        let net_amount_out = BigInt::from(output_amount) - BigInt::from(gas_cost_out);
+        let net_amount_out = if let Some(last_swap) = route.swaps.last() {
+            let total_gas = route.total_gas();
+            let gas_price = market
+                .gas_price()
+                .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+                .effective_gas_price();
+            let gas_cost_wei = &total_gas * gas_price;
 
-        Ok(Route::new(swaps, net_amount_out))
+            // Convert gas cost to output token terms using token prices
+            let gas_cost_in_output_token: Option<BigUint> = token_prices
+                .and_then(|prices| prices.get(&last_swap.token_out))
+                .map(|price| {
+                    // gas_cost_in_token = gas_cost_wei * numerator / denominator
+                    // where numerator = tokens per ETH, denominator = 10^18 + path_gas
+                    &gas_cost_wei * &price.numerator / &price.denominator
+                });
+
+            match gas_cost_in_output_token {
+                Some(gas_cost) => BigInt::from(output_amount) - BigInt::from(gas_cost),
+                None => {
+                    // No token price available - use output amount as-is
+                    // This happens if derived data hasn't been computed yet
+                    BigInt::from(output_amount)
+                }
+            }
+        } else {
+            BigInt::from(output_amount)
+        };
+
+        Ok(RouteResult { route, net_amount_out })
     }
 }
 
@@ -373,14 +412,26 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         graph: &Self::GraphType,
         market: SharedMarketDataRef,
+        derived: Option<SharedDerivedDataRef>,
         order: &Order,
-    ) -> Result<Route, AlgorithmError> {
+    ) -> Result<RouteResult, AlgorithmError> {
         let start = Instant::now();
 
         // Exact-out isn't supported yet
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
+
+        // Extract token prices from derived data (if available)
+        let token_prices = if let Some(ref derived) = derived {
+            derived
+                .read()
+                .await
+                .token_prices()
+                .cloned()
+        } else {
+            None
+        };
 
         let amount_in = order.amount.clone();
 
@@ -409,6 +460,21 @@ impl Algorithm for MostLiquidAlgorithm {
         if market.gas_price().is_none() {
             return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
         }
+
+        // Debug: log edge weight status
+        let total_edges = graph.edge_count();
+        let edges_with_weights = graph
+            .edge_indices()
+            .filter(|&idx| {
+                graph
+                    .edge_weight(idx)
+                    .is_some_and(|e| e.data.is_some())
+            })
+            .count();
+        debug!(
+            total_edges,
+            edges_with_weights, paths_candidates, "graph edge weight status before scoring"
+        );
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
@@ -457,7 +523,7 @@ impl Algorithm for MostLiquidAlgorithm {
         let mut simulation_failures = 0usize;
 
         // Step 5: Simulate all paths in score order using the local market subset
-        let mut best: Option<Route> = None;
+        let mut best: Option<RouteResult> = None;
         let timeout_ms = self.timeout.as_millis() as u64;
 
         for (edge_path, _) in scored_paths {
@@ -467,7 +533,12 @@ impl Algorithm for MostLiquidAlgorithm {
                 break;
             }
 
-            let route = match Self::simulate_path(&edge_path, &market, amount_in.clone()) {
+            let result = match Self::simulate_path(
+                &edge_path,
+                &market,
+                token_prices.as_ref(),
+                amount_in.clone(),
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     trace!(error = %e, "simulation failed for path");
@@ -479,10 +550,10 @@ impl Algorithm for MostLiquidAlgorithm {
             // Check if this is the best result so far
             if best
                 .as_ref()
-                .map(|best| route.net_amount_out > best.net_amount_out)
+                .map(|best| result.net_amount_out > best.net_amount_out)
                 .unwrap_or(true)
             {
-                best = Some(route);
+                best = Some(result);
             }
 
             paths_simulated += 1;
@@ -504,10 +575,11 @@ impl Algorithm for MostLiquidAlgorithm {
         histogram!("algorithm.simulation_coverage_pct").record(coverage_pct);
 
         match &best {
-            Some(route) => {
+            Some(result) => {
                 let tokens = market.token_registry_ref();
-                let path_desc = route.path_description(tokens);
-                let protocols = route
+                let path_desc = result.route.path_description(tokens);
+                let protocols = result
+                    .route
                     .swaps
                     .as_slice()
                     .iter()
@@ -518,7 +590,7 @@ impl Algorithm for MostLiquidAlgorithm {
                     .to_f64()
                     .filter(|&v| v > 0.0)
                     .and_then(|amt_in| {
-                        route
+                        result
                             .net_amount_out
                             .to_f64()
                             .map(|amt_out| amt_out / amt_in)
@@ -537,9 +609,9 @@ impl Algorithm for MostLiquidAlgorithm {
                     tokens_considered = market.token_registry_ref().len(),
                     path = %path_desc,
                     amount_in = %amount_in,
-                    net_amount_out = %route.net_amount_out,
+                    net_amount_out = %result.net_amount_out,
                     price_out_per_in = price,
-                    hop_count = route.swaps.len(),
+                    hop_count = result.route.swaps.len(),
                     protocols = ?protocols,
                     "route found"
                 );
@@ -572,14 +644,34 @@ impl Algorithm for MostLiquidAlgorithm {
     fn supports_exact_out(&self) -> bool {
         false // TODO: Implement exact-out support
     }
+
+    fn computation_requirements(&self) -> ComputationRequirements {
+        // MostLiquidAlgorithm uses token prices to convert gas costs from wei
+        // to output token terms for accurate amount_out_net_gas calculation.
+        //
+        // Token prices are marked as `allow_stale` since they don't change much
+        // block-to-block and having slightly stale prices is acceptable for
+        // gas cost estimation.
+        ComputationRequirements::none()
+            .allow_stale("token_prices")
+            .expect("Conflicting Computation Requirements")
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, sync::Arc};
 
     use rstest::rstest;
-    use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
+    use tokio::sync::RwLock;
+    use tycho_simulation::{
+        tycho_core::simulation::protocol_sim::Price,
+        tycho_ethereum::gas::{BlockGasPrice, GasPrice},
+    };
 
     use super::*;
     use crate::{
@@ -588,10 +680,30 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
+        derived::{DerivedData, TokenGasPrices},
         feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
+
+    /// Creates a SharedDerivedDataRef with token prices set for testing.
+    ///
+    /// The price is set to numerator=1, denominator=1, which means:
+    /// gas_cost_in_token = gas_cost_wei * 1 / 1 = gas_cost_wei
+    fn setup_derived_with_token_prices(token_addresses: &[Address]) -> SharedDerivedDataRef {
+        let mut token_prices: TokenGasPrices = HashMap::new();
+        for addr in token_addresses {
+            // Price where 1 wei of gas = 1 unit of token
+            token_prices.insert(
+                addr.clone(),
+                Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+            );
+        }
+
+        let mut derived_data = DerivedData::new();
+        derived_data.set_token_prices(token_prices, 1);
+        Arc::new(RwLock::new(derived_data))
+    }
     // ==================== try_score_path Tests ====================
 
     #[test]
@@ -871,14 +983,18 @@ mod tests {
         .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let route =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(100u64),
+        )
+        .unwrap();
 
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].amount_in, BigUint::from(100u64));
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(200u64)); // 100 * 2
-        assert_eq!(route.swaps[0].component_id, "pool1");
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].amount_in, BigUint::from(100u64));
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(200u64)); // 100 * 2
+        assert_eq!(result.route.swaps[0].component_id, "pool1");
     }
 
     #[test]
@@ -902,16 +1018,20 @@ mod tests {
         .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let route =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(10u64),
+        )
+        .unwrap();
 
-        assert_eq!(route.swaps.len(), 2);
+        assert_eq!(result.route.swaps.len(), 2);
         // First hop: 10 * 2 = 20
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(20u64));
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(20u64));
         // Second hop: 20 * 3 = 60
-        assert_eq!(route.swaps[1].amount_in, BigUint::from(20u64));
-        assert_eq!(route.swaps[1].amount_out, BigUint::from(60u64));
+        assert_eq!(result.route.swaps[1].amount_in, BigUint::from(20u64));
+        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(60u64));
     }
 
     #[test]
@@ -939,15 +1059,19 @@ mod tests {
         assert_eq!(paths.len(), 1);
         let path = paths[0].clone();
 
-        let route =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(10u64))
-                .unwrap();
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(10u64),
+        )
+        .unwrap();
 
-        assert_eq!(route.swaps.len(), 2);
+        assert_eq!(result.route.swaps.len(), 2);
         // First: 10 * 2 = 20
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(20u64));
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(20u64));
         // Second: 20 / 3 = 6 (state updated, multiplier incremented)
-        assert_eq!(route.swaps[1].amount_out, BigUint::from(6u64));
+        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(6u64));
     }
 
     #[test]
@@ -973,7 +1097,8 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result = MostLiquidAlgorithm::simulate_path(&path, &market, BigUint::from(100u64));
+        let result =
+            MostLiquidAlgorithm::simulate_path(&path, &market, None, BigUint::from(100u64));
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
@@ -995,8 +1120,12 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market_read(&market), BigUint::from(100u64));
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            &market_read(&market),
+            None,
+            BigUint::from(100u64),
+        );
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
     }
 
@@ -1015,14 +1144,14 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
             .await
             .unwrap();
 
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].amount_in, BigUint::from(ONE_ETH));
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].amount_in, BigUint::from(ONE_ETH));
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
     }
 
     #[tokio::test]
@@ -1051,16 +1180,20 @@ mod tests {
         )
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+
+        // Set up derived data with token prices so gas can be deducted
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, Some(derived), &order)
             .await
             .unwrap();
 
         // Should select "best" pool for highest net_amount_out (2000)
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].component_id, "best");
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(3000u64));
-        assert_eq!(route.net_amount_out, BigInt::from(2000)); // 3000 - 1000
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].component_id, "best");
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(3000u64));
+        assert_eq!(result.net_amount_out, BigInt::from(2000)); // 3000 - 1000
     }
 
     #[tokio::test]
@@ -1076,7 +1209,7 @@ mod tests {
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -1098,17 +1231,17 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
             .await
             .unwrap();
 
         // A->B: ONE_ETH*2, B->C: (ONE_ETH*2)*3
-        assert_eq!(route.swaps.len(), 2);
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
-        assert_eq!(route.swaps[0].component_id, "pool1".to_string());
-        assert_eq!(route.swaps[1].amount_out, BigUint::from(ONE_ETH * 2 * 3));
-        assert_eq!(route.swaps[1].component_id, "pool2".to_string());
+        assert_eq!(result.route.swaps.len(), 2);
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route.swaps[0].component_id, "pool1".to_string());
+        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(ONE_ETH * 2 * 3));
+        assert_eq!(result.route.swaps[1].component_id, "pool2".to_string());
     }
 
     #[tokio::test]
@@ -1168,15 +1301,15 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let market = wrap_market(market);
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
             .await
             .unwrap();
 
         // Should use pool1 (only scoreable path), despite pool2 having better multiplier
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].component_id, "pool1");
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].component_id, "pool1");
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
     }
 
     #[tokio::test]
@@ -1216,7 +1349,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
         assert!(matches!(
             result,
@@ -1249,19 +1382,22 @@ mod tests {
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_b, 1, OrderSide::Sell); // 1 wei input -> 2 wei output
 
+        // Set up derived data with token prices so gas can be deducted
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
+
         // Route should still be returned, but with negative net_amount_out
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        let result = algorithm
+            .find_best_route(manager.graph(), market, Some(derived), &order)
             .await
             .expect("should return route even with negative net_amount_out");
 
         // Verify the route has swaps
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(2u64)); // 1 * 2 = 2 wei
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(2u64)); // 1 * 2 = 2 wei
 
         // Verify it's: 2 - 200_000_000_000 = -199_999_999_998
         let expected_net = BigInt::from(2) - BigInt::from(100_000_000_000u64);
-        assert_eq!(route.net_amount_out, expected_net);
+        assert_eq!(result.net_amount_out, expected_net);
     }
 
     #[tokio::test]
@@ -1281,7 +1417,7 @@ mod tests {
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
@@ -1323,7 +1459,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity
@@ -1349,26 +1485,26 @@ mod tests {
         // Order: swap A for A (circular)
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
 
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
             .await
             .unwrap();
 
         // Should have 2 swaps forming a circle
-        assert_eq!(route.swaps.len(), 2, "Should have 2 swaps for circular route");
+        assert_eq!(result.route.swaps.len(), 2, "Should have 2 swaps for circular route");
 
         // First swap: A -> B (100 * 2 = 200)
-        assert_eq!(route.swaps[0].token_in, token_a.address);
-        assert_eq!(route.swaps[0].token_out, token_b.address);
-        assert_eq!(route.swaps[0].amount_out, BigUint::from(200u64));
+        assert_eq!(result.route.swaps[0].token_in, token_a.address);
+        assert_eq!(result.route.swaps[0].token_out, token_b.address);
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(200u64));
 
         // Second swap: B -> A (200 / 3 = 66, spot_price incremented to 3)
-        assert_eq!(route.swaps[1].token_in, token_b.address);
-        assert_eq!(route.swaps[1].token_out, token_a.address);
-        assert_eq!(route.swaps[1].amount_out, BigUint::from(66u64));
+        assert_eq!(result.route.swaps[1].token_in, token_b.address);
+        assert_eq!(result.route.swaps[1].token_out, token_a.address);
+        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(66u64));
 
         // Verify the route starts and ends with the same token
-        assert_eq!(route.swaps[0].token_in, route.swaps[1].token_out);
+        assert_eq!(result.route.swaps[0].token_in, result.route.swaps[1].token_out);
     }
 
     #[tokio::test]
@@ -1393,15 +1529,19 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
-        let route = algorithm
-            .find_best_route(manager.graph(), market, &order)
+        // Set up derived data with token prices so gas can be deducted
+        // This ensures shorter paths are preferred due to lower gas cost
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, Some(derived), &order)
             .await
             .unwrap();
 
         // Should use 2-hop path (A->C->B), not the direct 1-hop path
-        assert_eq!(route.swaps.len(), 2, "Should use 2-hop path due to min_hops=2");
-        assert_eq!(route.swaps[0].component_id, "pool_ac");
-        assert_eq!(route.swaps[1].component_id, "pool_cb");
+        assert_eq!(result.route.swaps.len(), 2, "Should use 2-hop path due to min_hops=2");
+        assert_eq!(result.route.swaps[0].component_id, "pool_ac");
+        assert_eq!(result.route.swaps[1].component_id, "pool_cb");
     }
 
     #[tokio::test]
@@ -1425,7 +1565,7 @@ mod tests {
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1458,7 +1598,7 @@ mod tests {
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, &order)
+            .find_best_route(manager.graph(), market, None, &order)
             .await;
 
         // With 0ms timeout, we either get:
@@ -1466,9 +1606,9 @@ mod tests {
         // - Timeout error (if no path completed)
         // Both are valid outcomes - the key is we don't hang
         match result {
-            Ok(route) => {
+            Ok(r) => {
                 // If we got a route, verify it's valid
-                assert_eq!(route.swaps.len(), 1);
+                assert_eq!(r.route.swaps.len(), 1);
             }
             Err(AlgorithmError::Timeout { .. }) => {
                 // Timeout is also acceptable
@@ -1510,7 +1650,7 @@ mod tests {
         let algorithm = MostLiquidAlgorithm::new();
 
         assert_eq!(algorithm.max_hops, 3);
-        assert_eq!(algorithm.timeout, Duration::from_millis(50));
+        assert_eq!(algorithm.timeout, Duration::from_millis(500));
         assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
     }

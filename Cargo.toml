@@ -38,7 +38,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.12"
 
 # Tycho
-tycho-simulation = ">=0.226.1"
+tycho-simulation = ">=0.234.0"
 
 # Graph algorithms
 petgraph = "0.6"
