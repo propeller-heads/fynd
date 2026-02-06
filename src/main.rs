@@ -4,10 +4,9 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use fynd::{
-    builder::parse_chain,
+    builder::{parse_chain, FyndBuilder},
     cli::Cli,
     config::{BlacklistConfig, WorkerPoolsConfig},
-    FyndBuilder,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
@@ -20,7 +19,6 @@ use tokio::{
 };
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tycho_solver::{builder::parse_chain, cli::Cli, config::WorkerPoolsConfig, TychoSolverBuilder};
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
