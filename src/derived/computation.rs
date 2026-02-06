@@ -67,7 +67,7 @@ impl ComputationRequirements {
     /// # Errors
     ///
     /// Returns `RequirementConflict` if the same ID is already in `allow_stale`.
-    pub fn expect_fresh(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+    pub fn require_fresh(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
         if self.allow_stale.contains(&id) {
             return Err(RequirementConflict { id });
         }
@@ -80,7 +80,7 @@ impl ComputationRequirements {
     /// # Errors
     ///
     /// Returns `RequirementConflict` if the same ID is already in `require_fresh`.
-    pub fn expect_stale(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
+    pub fn allow_stale(mut self, id: ComputationId) -> Result<Self, RequirementConflict> {
         if self.require_fresh.contains(&id) {
             return Err(RequirementConflict { id });
         }

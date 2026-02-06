@@ -193,7 +193,7 @@ mod tests {
     fn fresh_requirements(ids: &[&'static str]) -> ComputationRequirements {
         ids.iter()
             .fold(ComputationRequirements::none(), |req, id| {
-                req.expect_fresh(id)
+                req.require_fresh(id)
                     .expect("test ids should not conflict")
             })
     }
@@ -201,7 +201,7 @@ mod tests {
     fn stale_requirements(ids: &[&'static str]) -> ComputationRequirements {
         ids.iter()
             .fold(ComputationRequirements::none(), |req, id| {
-                req.expect_stale(id)
+                req.allow_stale(id)
                     .expect("test ids should not conflict")
             })
     }
@@ -369,9 +369,9 @@ mod tests {
     #[test]
     fn mixed_fresh_and_stale_requirements() {
         let requirements = ComputationRequirements::none()
-            .expect_fresh("spot_prices") // Must be current block
+            .require_fresh("spot_prices") // Must be current block
             .unwrap()
-            .expect_stale("token_prices") // Any block is fine
+            .allow_stale("token_prices") // Any block is fine
             .unwrap();
 
         let mut tracker = ReadinessTracker::new(requirements);
@@ -405,9 +405,9 @@ mod tests {
     #[test]
     fn missing_returns_unready_set() {
         let requirements = ComputationRequirements::none()
-            .expect_fresh("spot_prices")
+            .require_fresh("spot_prices")
             .unwrap()
-            .expect_stale("token_prices")
+            .allow_stale("token_prices")
             .unwrap();
 
         let mut tracker = ReadinessTracker::new(requirements);

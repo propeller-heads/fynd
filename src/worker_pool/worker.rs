@@ -580,7 +580,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_stale(SpotPriceComputation::ID)
+            .allow_stale(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -606,7 +606,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_fresh(SpotPriceComputation::ID)
+            .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -632,7 +632,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_fresh(SpotPriceComputation::ID)
+            .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -664,7 +664,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_fresh(SpotPriceComputation::ID)
+            .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -706,7 +706,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_stale(TokenGasPriceComputation::ID)
+            .allow_stale(TokenGasPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -752,7 +752,7 @@ mod tests {
         let derived = new_shared_derived_data();
 
         let requirements = ComputationRequirements::none()
-            .expect_fresh(SpotPriceComputation::ID)
+            .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0);

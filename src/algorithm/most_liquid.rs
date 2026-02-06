@@ -653,7 +653,7 @@ impl Algorithm for MostLiquidAlgorithm {
         // block-to-block and having slightly stale prices is acceptable for
         // gas cost estimation.
         ComputationRequirements::none()
-            .expect_stale("token_prices")
+            .allow_stale("token_prices")
             .expect("Conflicting Computation Requirements")
     }
 

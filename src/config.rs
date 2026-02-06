@@ -65,7 +65,6 @@ impl BlacklistConfig {
     /// ```toml
     /// [blacklist]
     /// components = ["0x86d257cdb7bc9c0df10e84c8709697f92770b335"]
-    /// protocol_systems = []
     /// ```
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
