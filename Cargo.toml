@@ -50,6 +50,7 @@ async-channel = "2.5.0"
 async-trait = "0.1"
 chrono = "0.4"
 itertools = "0.14.0"
+time = ">=0.3.47"  # Fix RUSTSEC-2026-0009
 
 [dev-dependencies]
 rstest = "0.18"
