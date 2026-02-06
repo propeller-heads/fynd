@@ -8,14 +8,10 @@ license = "MIT"
 [dependencies]
 # HTTP
 actix-web = "4"
-actix-rt = "2"
 
 # Async
 tokio = { version = "1", features = ["full", "sync"] }
 futures = "0.3"
-
-# Channels
-crossbeam-channel = "0.5"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -56,12 +52,11 @@ chrono = "0.4"
 itertools = "0.14.0"
 
 [dev-dependencies]
-criterion = "0.5"
 rstest = "0.18"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 fastrand = "2.3.0"
-tycho-execution = { path = "../tycho-execution", features = ["evm"] }
+tycho-execution = { version = ">=0.155.0", features = ["evm"] }
 alloy = { version = "1.0", features = ["providers", "signer-local", "rpc-types-eth", "eip712", "node-bindings"] }
 alloy-chains = "0.2"
 dialoguer = "0.11"

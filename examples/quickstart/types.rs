@@ -80,15 +80,11 @@ impl SwapToExecution for tycho_solver::Swap {
         &self,
         component: &ProtocolComponent,
     ) -> tycho_execution::encoding::models::Swap {
-        tycho_execution::encoding::models::Swap {
-            component: component.clone(),
-            token_in: Bytes::from(self.token_in.as_ref()),
-            token_out: Bytes::from(self.token_out.as_ref()),
-            split: 0.0,
-            user_data: None,
-            protocol_state: None,
-            estimated_amount_in: None,
-        }
+        tycho_execution::encoding::models::Swap::new(
+            component.clone(),
+            Bytes::from(self.token_in.as_ref()),
+            Bytes::from(self.token_out.as_ref()),
+        )
     }
 }
 
