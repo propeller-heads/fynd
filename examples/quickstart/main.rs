@@ -32,7 +32,10 @@ use num_traits::ToPrimitive;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tycho_execution::encoding::{
-    evm::{approvals::permit2::PermitSingle, encoder_builders::TychoRouterEncoderBuilder},
+    evm::{
+        approvals::permit2::PermitSingle, encoder_builders::TychoRouterEncoderBuilder,
+        swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+    },
     models::{EncodedSolution, Solution as ExecutionSolution, Transaction, UserTransferType},
 };
 use tycho_simulation::{
@@ -269,10 +272,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chain,
     )?;
 
+    let swap_encoder_registry = SwapEncoderRegistry::new(chain)
+        .add_default_encoders(None)
+        .expect("Failed to get default SwapEncoderRegistry");
+
     // Encode via TychoRouterEncoderBuilder
     let encoder = TychoRouterEncoderBuilder::new()
         .chain(chain)
         .user_transfer_type(transfer_type.clone())
+        .swap_encoder_registry(swap_encoder_registry)
         .build()?;
 
     let encoded_solutions = encoder.encode_solutions(vec![execution_solution.clone()])?;
