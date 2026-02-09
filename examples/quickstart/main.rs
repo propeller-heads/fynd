@@ -38,10 +38,12 @@ use tycho_execution::encoding::{
     },
     models::{EncodedSolution, Solution as ExecutionSolution, Transaction, UserTransferType},
 };
+use tycho_simulation::tycho_client::rpc::HttpRPCClientOptions;
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256,
+    tycho_client::rpc::{HttpRPCClient, RPCClient},
     tycho_common::{
-        dto::ProtocolComponent as ProtocolComponentDto,
+        dto::{PaginationParams, ProtocolComponentsRequestBody},
         models::{protocol::ProtocolComponent, token::Token, Chain},
         Bytes,
     },
@@ -54,8 +56,7 @@ use tycho_solver::{
 };
 // Import quickstart-specific types
 use types::{
-    create_minimal_component, PaginationRequest, ProtocolComponentsRequest, SwapToExecution,
-    TenderlySimulation, TenderlySimulationRequest, TenderlySimulationResponse,
+    SwapToExecution, TenderlySimulation, TenderlySimulationRequest, TenderlySimulationResponse,
 };
 
 /// Quickstart CLI: Quote, simulate, and execute swaps via tycho-router
@@ -63,16 +64,16 @@ use types::{
 #[command(name = "quickstart")]
 #[command(about = "Get quotes from tycho-router and optionally simulate/execute swaps")]
 struct Cli {
-    /// Sell token address (defaults to USDC on the selected chain)
+    /// Sell token address (defaults to USDC on the mainnet)
     #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     sell_token: String,
 
-    /// Buy token address (defaults to WETH on the selected chain)
+    /// Buy token address (defaults to WETH on the mainnet)
     #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
     buy_token: String,
 
-    /// Amount to sell (in human-readable units, e.g., 10.0 for 10 USDC)
-    #[arg(long, default_value_t = 10.0)]
+    /// Amount to sell (in decimal units, e.g., 1000.0 for 10 USDC)
+    #[arg(long, default_value_t = 1000.0)]
     sell_amount: f64,
 
     /// Blockchain network
@@ -99,13 +100,10 @@ struct Cli {
     #[arg(long, default_value_t = 50)]
     slippage_bps: u32,
 
-    /// Protocol systems to use (comma-separated, e.g., "uniswap_v2,uniswap_v3")
-    #[arg(
-        long,
-        default_value = "uniswap_v2,uniswap_v3,uniswap_v4,ekubo_v2,vm:curve,rocketpool,pancakeswap_v3,\
-        vm:maverick_v2,sushiswap_v2,erc4626,uniswap_v4_hooks,fluid_v1,pancakeswap_v2,vm:balancer_v2"
-    )]
-    protocols: String,
+    /// Protocol systems to use (comma-separated, e.g., "uniswap_v2,uniswap_v3").
+    /// If not specified, all available protocol systems will be fetched from the API.
+    #[arg(long)]
+    protocols: Option<String>,
 
     /// Sender address for simulation (use with --simulate-only to avoid exposing private key).
     /// If the sender lacks funds/approvals, the simulation will fail as expected.
@@ -134,12 +132,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = env::var("RPC_URL").ok();
     let private_key = env::var("PRIVATE_KEY").ok();
 
-    // Parse protocol systems
-    let protocol_systems: Vec<String> = cli
-        .protocols
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
+    // Create tycho-client RPC client
+    let rpc_options = HttpRPCClientOptions::new().with_auth_key(tycho_api_key.clone());
+
+    let tycho_rpc = HttpRPCClient::new(&format!("https://{}", tycho_url), rpc_options)
+        .map_err(|e| format!("Failed to create Tycho RPC client: {}", e))?;
+
+    // Determine protocol systems to use
+    let protocol_systems = match &cli.protocols {
+        Some(protocols) => {
+            // User specified protocols
+            protocols
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect()
+        }
+        None => {
+            // Fetch all available protocol systems from the API
+            info!("No protocols specified, fetching all available protocol systems...");
+            fetch_protocol_systems(&tycho_rpc, chain).await?
+        }
+    };
+    info!("Using {} protocol systems", protocol_systems.len());
 
     // Check solver health
     info!("Checking solver health at {}...", solver_url);
@@ -187,17 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Getting quote: {} {} -> {}", cli.sell_amount, sell_token.symbol, buy_token.symbol);
 
-    // Fetch protocol components via REST API
-    info!("Fetching protocol components via REST API...");
-    let components = fetch_amm_components(
-        &client,
-        &tycho_url,
-        tycho_api_key.as_deref(),
-        chain,
-        &protocol_systems,
-        cli.tvl_threshold,
-    )
-    .await?;
+    // Fetch protocol components via tycho-client
+    info!("Fetching protocol components via Tycho API...");
+    let components =
+        fetch_amm_components(&tycho_rpc, chain, &protocol_systems, cli.tvl_threshold).await?;
     info!("Fetched {} protocol components", components.len());
 
     // Determine user address for the quote
@@ -229,9 +236,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Determine if we can proceed with simulation/execution
     let can_simulate_only = cli.simulate_only && cli.sender.is_some();
     if private_key.is_none() && !can_simulate_only {
-        println!("\nNo PRIVATE_KEY set. Set it to simulate or execute swaps.");
-        println!("Tip: Use --simulate-only --sender <address> to simulate without a private key.");
-        return Ok(());
+        return Err("No PRIVATE_KEY set. Set it to simulate or execute swaps, \
+            or use --simulate-only --sender <address> to simulate without a private key."
+            .into());
     }
 
     let rpc_url =
@@ -269,7 +276,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &amount_in,
         Bytes::from(simulation_address.to_vec()),
         cli.slippage_bps,
-        chain,
     )?;
 
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -348,26 +354,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show options
     if cli.simulate_only {
         // Run simulation directly
-        if cli.use_tenderly {
-            run_tenderly_simulation(
-                &tx,
-                &sell_token_address,
-                &amount_in,
-                signer.address(),
-                chain.id(),
-            )
-            .await?;
-        } else {
-            run_eth_simulation(
-                &provider,
-                &tx,
-                &sell_token_address,
-                &amount_in,
-                signer.address(),
-                chain.id(),
-            )
-            .await?;
-        }
+        run_simulation(
+            &provider,
+            &tx,
+            &sell_token_address,
+            &amount_in,
+            signer.address(),
+            chain.id(),
+            cli.use_tenderly,
+        )
+        .await?;
     } else {
         // Interactive prompt
         println!("\nWhat would you like to do?");
@@ -380,27 +376,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match selection {
             0 => {
-                // Simulate
-                if cli.use_tenderly {
-                    run_tenderly_simulation(
-                        &tx,
-                        &sell_token_address,
-                        &amount_in,
-                        signer.address(),
-                        chain.id(),
-                    )
-                    .await?;
-                } else {
-                    run_eth_simulation(
-                        &provider,
-                        &tx,
-                        &sell_token_address,
-                        &amount_in,
-                        signer.address(),
-                        chain.id(),
-                    )
-                    .await?;
-                }
+                run_simulation(
+                    &provider,
+                    &tx,
+                    &sell_token_address,
+                    &amount_in,
+                    signer.address(),
+                    chain.id(),
+                    cli.use_tenderly,
+                )
+                .await?;
             }
             1 => {
                 // Execute
@@ -437,11 +422,50 @@ async fn check_solver_health(
     Ok(resp.json().await?)
 }
 
-/// Fetch AMM protocol components via Tycho REST API (paginated).
+/// Fetch all available protocol systems from the Tycho API.
+async fn fetch_protocol_systems(
+    tycho_rpc: &HttpRPCClient,
+    chain: Chain,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use tycho_simulation::tycho_common::dto::ProtocolSystemsRequestBody;
+
+    const PAGE_SIZE: i64 = 100;
+    let mut all_protocols = Vec::new();
+    let mut page = 0;
+
+    loop {
+        let request = ProtocolSystemsRequestBody {
+            chain: chain.into(),
+            pagination: PaginationParams { page, page_size: PAGE_SIZE },
+        };
+
+        let response = tycho_rpc
+            .get_protocol_systems(&request)
+            .await
+            .map_err(|e| format!("Failed to fetch protocol systems: {}", e))?;
+
+        let count = response.protocol_systems.len();
+        all_protocols.extend(response.protocol_systems);
+
+        if (count as i64) < PAGE_SIZE {
+            break;
+        }
+        page += 1;
+    }
+
+    // Filter out RFQ protocols (they start with "rfq:")
+    let amm_protocols: Vec<String> = all_protocols
+        .into_iter()
+        .filter(|p| !p.starts_with("rfq:"))
+        .collect();
+
+    info!("Found {} AMM protocol systems", amm_protocols.len());
+    Ok(amm_protocols)
+}
+
+/// Fetch AMM protocol components via tycho-client (paginated).
 async fn fetch_amm_components(
-    client: &reqwest::Client,
-    tycho_url: &str,
-    tycho_api_key: Option<&str>,
+    tycho_rpc: &HttpRPCClient,
     chain: Chain,
     protocol_systems: &[String],
     tvl_threshold: f64,
@@ -449,76 +473,41 @@ async fn fetch_amm_components(
     let mut all_components = HashMap::new();
 
     // Filter out RFQ protocols (they start with "rfq:")
+    // TODO: Remove balancerv3 filtering
     let amm_protocols: Vec<_> = protocol_systems
         .iter()
-        .filter(|p| !p.starts_with("rfq:"))
+        .filter(|p| !p.starts_with("rfq:") && !p.contains("balancer_v3"))
+        .cloned()
         .collect();
 
     for protocol in amm_protocols {
-        let mut page = 0;
-        let page_size = 1000;
+        let request = ProtocolComponentsRequestBody {
+            protocol_system: protocol.clone(),
+            component_ids: None,
+            tvl_gt: Some(tvl_threshold),
+            chain: chain.into(),
+            pagination: PaginationParams { page: 0, page_size: 1000 },
+        };
 
-        loop {
-            let request = ProtocolComponentsRequest {
-                protocol_system: protocol.clone(),
-                chain: chain.to_string().to_lowercase(),
-                tvl_gt: Some(tvl_threshold),
-                pagination: PaginationRequest { page, page_size },
+        let response = tycho_rpc
+            .get_protocol_components_paginated(&request, Some(1000), 4)
+            .await
+            .map_err(|e| format!("Failed to fetch components for {}: {}", protocol, e))?;
+
+        for dto in response.protocol_components {
+            let pc = ProtocolComponent {
+                id: dto.id.clone(),
+                protocol_system: dto.protocol_system,
+                protocol_type_name: dto.protocol_type_name,
+                chain,
+                tokens: dto.tokens,
+                contract_addresses: dto.contract_ids,
+                static_attributes: dto.static_attributes,
+                change: Default::default(),
+                creation_tx: dto.creation_tx,
+                created_at: dto.created_at,
             };
-
-            let mut req_builder =
-                client.post(format!("https://{}/v1/protocol_components", tycho_url));
-
-            if let Some(api_key) = tycho_api_key {
-                req_builder = req_builder.header("Authorization", api_key);
-            }
-
-            let resp: serde_json::Value = req_builder
-                .json(&request)
-                .send()
-                .await?
-                .json()
-                .await?;
-
-            let components = resp["protocol_components"]
-                .as_array()
-                .map(|arr| arr.to_vec())
-                .unwrap_or_default();
-
-            let components_count = components.len();
-
-            for comp in components {
-                match serde_json::from_value::<ProtocolComponentDto>(comp.clone()) {
-                    Ok(dto) => {
-                        // Convert DTO to model type
-                        let pc = ProtocolComponent {
-                            id: dto.id.clone(),
-                            protocol_system: dto.protocol_system,
-                            protocol_type_name: dto.protocol_type_name,
-                            chain,
-                            tokens: dto.tokens,
-                            contract_addresses: dto.contract_ids,
-                            static_attributes: dto.static_attributes,
-                            change: Default::default(),
-                            creation_tx: dto.creation_tx,
-                            created_at: dto.created_at,
-                        };
-                        all_components.insert(pc.id.clone(), pc);
-                    }
-                    Err(e) => {
-                        // Log parsing error for debugging
-                        if all_components.is_empty() {
-                            eprintln!("Warning: Failed to parse component: {}", e);
-                            eprintln!("Raw component: {}", comp);
-                        }
-                    }
-                }
-            }
-
-            if components_count < page_size {
-                break;
-            }
-            page += 1;
+            all_components.insert(pc.id.clone(), pc);
         }
     }
 
@@ -605,7 +594,7 @@ fn display_quote(
             println!("\nRoute ({} hops):", route.swaps.len());
             for (i, swap) in route.swaps.iter().enumerate() {
                 println!(
-                    "  {}. {} via {:?} ({} -> {})",
+                    "  {}. {} via {} ({} -> {})",
                     i + 1,
                     swap.component_id,
                     swap.protocol,
@@ -653,7 +642,6 @@ fn map_route_to_execution_solution(
     amount_in: &BigUint,
     user_address: Bytes,
     slippage_bps: u32,
-    chain: Chain,
 ) -> Result<ExecutionSolution, Box<dyn std::error::Error>> {
     let mut swaps = Vec::new();
 
@@ -661,18 +649,16 @@ fn map_route_to_execution_solution(
         // Look up the component from our fetched data
         let component = components
             .get(&solver_swap.component_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                // If not found, create a minimal component
-                create_minimal_component(
-                    &solver_swap.component_id,
-                    &solver_swap.protocol.to_string(),
-                    chain,
-                )
-            });
+            .ok_or_else(|| {
+                format!(
+                "Component not found: {}. This component may not have been fetched from the API. \
+                Try adjusting --tvl-threshold or ensuring the protocol is included in --protocols.",
+                solver_swap.component_id
+            )
+            })?;
 
         // Use the conversion trait
-        let execution_swap = solver_swap.to_execution_swap(&component);
+        let execution_swap = solver_swap.to_execution_swap(component);
         swaps.push(execution_swap);
     }
 
@@ -806,6 +792,7 @@ fn sign_permit(
     permit_single: &tycho_execution::encoding::models::PermitSingle,
     signer: PrivateKeySigner,
 ) -> Result<Signature, Box<dyn std::error::Error>> {
+    // Permit2 is deployed at the same address on all supported chains
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")?;
     let domain = eip712_domain! {
         name: "Permit2",
@@ -828,9 +815,9 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     let mut call_data = selector_bytes.to_vec();
 
     // Remove extra prefix if present
-    if encoded_args.len() > 32 &&
-        encoded_args[..32] ==
-            [0u8; 31]
+    if encoded_args.len() > 32
+        && encoded_args[..32]
+            == [0u8; 31]
                 .into_iter()
                 .chain([32].to_vec())
                 .collect::<Vec<u8>>()
@@ -840,6 +827,27 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
 
     call_data.extend(encoded_args);
     call_data
+}
+
+/// Run simulation with either eth_simulate or Tenderly.
+async fn run_simulation(
+    provider: &FillProvider<
+        JoinFill<Identity, WalletFiller<EthereumWallet>>,
+        RootProvider<Ethereum>,
+    >,
+    tx: &Transaction,
+    sell_token_address: &Bytes,
+    amount_in: &BigUint,
+    user_address: Address,
+    chain_id: u64,
+    use_tenderly: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if use_tenderly {
+        run_tenderly_simulation(tx, sell_token_address, amount_in, user_address, chain_id).await
+    } else {
+        run_eth_simulation(provider, tx, sell_token_address, amount_in, user_address, chain_id)
+            .await
+    }
 }
 
 async fn run_eth_simulation(
@@ -1072,6 +1080,7 @@ async fn run_tenderly_simulation(
 }
 
 fn build_approval_calldata(amount: &BigUint) -> Vec<u8> {
+    // Permit2 is deployed at the same address on all supported chains
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3").unwrap();
     build_approval_calldata_for(amount, permit2_address)
 }

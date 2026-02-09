@@ -68,8 +68,3 @@ hex = "0.4"
 [[example]]
 name = "quickstart"
 path = "examples/quickstart/main.rs"
-
-# Benchmarks (uncomment when ready)
-# [[bench]]
-# name = "solve_benchmark"
-# harness = false

@@ -4,13 +4,8 @@
 //! - Tenderly simulation types
 //! - Conversion trait for solver to execution swaps
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
-use tycho_simulation::tycho_common::{
-    models::{protocol::ProtocolComponent, Chain},
-    Bytes,
-};
+use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
 // ============================================================================
 // Tenderly Simulation Types
@@ -85,49 +80,5 @@ impl SwapToExecution for tycho_solver::Swap {
             Bytes::from(self.token_in.as_ref()),
             Bytes::from(self.token_out.as_ref()),
         )
-    }
-}
-
-// ============================================================================
-// REST API Helper Types
-// ============================================================================
-
-/// Request for fetching protocol components via REST API.
-#[derive(Debug, Serialize)]
-pub struct ProtocolComponentsRequest {
-    pub protocol_system: String,
-    pub chain: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tvl_gt: Option<f64>,
-    pub pagination: PaginationRequest,
-}
-
-/// Pagination parameters for REST API requests.
-#[derive(Debug, Serialize)]
-pub struct PaginationRequest {
-    pub page: usize,
-    pub page_size: usize,
-}
-
-/// Creates a minimal ProtocolComponent when one isn't found in the cache.
-///
-/// This is a fallback for when the solver returns a component ID that wasn't
-/// fetched via the REST API (e.g., if the component was created after our fetch).
-pub fn create_minimal_component(
-    component_id: &str,
-    protocol: &str,
-    chain: Chain,
-) -> ProtocolComponent {
-    ProtocolComponent {
-        id: component_id.to_string(),
-        protocol_system: protocol.to_string(),
-        protocol_type_name: String::new(),
-        chain,
-        tokens: Vec::new(),
-        contract_addresses: Vec::new(),
-        static_attributes: HashMap::new(),
-        change: Default::default(),
-        creation_tx: Bytes::default(),
-        created_at: chrono::NaiveDateTime::default(),
     }
 }

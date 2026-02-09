@@ -35,7 +35,7 @@ In one terminal:
 ```bash
 export TYCHO_URL=tycho-beta.propellerheads.xyz
 export TYCHO_API_KEY=your_api_key
-export RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your_key
+export RPC_URL=https://your-rpc-provider.com/v1/your_key
 cargo run --example solver
 ```
 
@@ -57,7 +57,7 @@ This will display a quote for swapping 100 USDC to WETH (default tokens). You ca
 
 Use `--sender` to simulate as any address without exposing a private key:
 ```bash
-export RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your_key
+export RPC_URL=https://your-rpc-provider.com/v1/your_key
 cargo run --example quickstart -- \
   --sell-amount 100 \
   --simulate-only \
@@ -71,7 +71,7 @@ This simulates using standard ERC-20 `transferFrom` (not Permit2). The simulatio
 For full Permit2 simulation with signature:
 ```bash
 export PRIVATE_KEY=your_private_key_hex
-export RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your_key
+export RPC_URL=https://your-rpc-provider.com/v1/your_key
 cargo run --example quickstart -- \
   --sell-amount 100 \
   --simulate-only
@@ -117,11 +117,11 @@ cargo run --example quickstart -- \
 | `--sell-amount` | 10.0                                  | Amount to sell (human readable)                          |
 | `--chain` | ethereum                              | Blockchain (currently only ethereum is available)        |
 | `--solver-url` | http://localhost:3000                 | Solver API URL                                           |
-| `--tvl-threshold` | 50.0                                  | Min pool TVL in ETH                                      |
+| `--tvl-threshold` | 10.0                                  | Min pool TVL in ETH                                      |
 | `--simulate-only` | false                                 | Only simulate, don't prompt for execution                |
 | `--use-tenderly` | false                                 | Use Tenderly instead of eth_simulate                     |
 | `--slippage-bps` | 50                                    | Slippage tolerance (50 = 0.5%)                           |
-| `--protocols` | uniswap_v2,uniswap_v3,sushiswap_v2... | Comma-separated protocol systems                         |
+| `--protocols` | (all available)                       | Comma-separated protocol systems (fetched from API if not specified) |
 | `--sender` | -                                     | Sender address for simulation (use with --simulate-only) |
 
 ## Security Notes
