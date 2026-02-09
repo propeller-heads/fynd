@@ -93,6 +93,6 @@ pub use derived::{
 pub use types::{
     native_token,
     solution::{Order, SolutionOptions, SolutionRequest},
-    ComponentId, HealthStatus, OrderSolution, ProtocolSystem, Route, Solution, SolutionStatus,
-    SolveError, Swap, UnsupportedChainError,
+    ComponentId, HealthStatus, OrderSolution, Route, Solution, SolutionStatus, SolveError, Swap,
+    UnsupportedChainError,
 };

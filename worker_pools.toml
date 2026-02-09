@@ -14,7 +14,7 @@ num_workers = 3
 task_queue_capacity = 1000
 min_hops = 2
 max_hops = 3
-timeout_ms = 2000
+timeout_ms = 5000
 
 # Add more pools by adding entries under [pools.*], e.g.:
 # [pools.dijkstra]
