@@ -2,6 +2,7 @@
 
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::types::SolveError;
 
@@ -30,7 +31,7 @@ pub enum ApiError {
 }
 
 /// Error response body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
     pub code: String,

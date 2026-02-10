@@ -4,7 +4,9 @@ use actix_web::{web, HttpResponse};
 use tracing::{info, instrument};
 
 use super::{ApiError, AppState};
-use crate::types::{solution::SolutionRequest, HealthStatus};
+use crate::api::error::ErrorResponse;
+use crate::types::solution::{Solution, SolutionRequest};
+use crate::types::HealthStatus;
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -26,8 +28,21 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
 /// - 504 Gateway Timeout: Solve timeout
+#[utoipa::path(
+    post,
+    path = "/v1/solve",
+    tag = "solver",
+    request_body = SolutionRequest,
+    responses(
+        (status = 200, description = "Solve completed", body = Solution),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 422, description = "No route found", body = ErrorResponse),
+        (status = 503, description = "Service unavailable", body = ErrorResponse),
+        (status = 504, description = "Solve timeout", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
-async fn solve(
+pub async fn solve(
     state: web::Data<AppState>,
     request: web::Json<SolutionRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -62,7 +77,16 @@ async fn solve(
 /// GET /v1/health - Health check endpoint.
 ///
 /// Returns the current health status of the service.
-async fn health(state: web::Data<AppState>) -> HttpResponse {
+#[utoipa::path(
+    get,
+    path = "/v1/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Service healthy", body = HealthStatus),
+        (status = 503, description = "Data stale", body = HealthStatus),
+    )
+)]
+pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker.age_ms();
     let is_healthy = age_ms < 60_000; // Healthy if data less than 60s old
 
