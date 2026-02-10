@@ -42,6 +42,23 @@ cargo run --release -- \
 
 The solver starts on `http://localhost:3000` by default.
 
+### Including RFQ Protocols
+
+You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
+
+```bash
+cargo run --release -- \
+  --tycho-url tycho-beta.propellerheads.xyz \
+  --rpc-url $RPC_URL \
+  --protocols uniswap_v2,uniswap_v3,rfq:bebop
+```
+
+**Limitations:**
+- RFQ protocols cannot run alone — at least one on-chain protocol is required. 
+
+**Environment variables:**
+- RFQ protocols typically require API keys, which are passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
+
 ### Make a Solve Request
 
 ```bash
