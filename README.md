@@ -24,7 +24,7 @@ A high-performance DeFi route-finding engine built on [Tycho](https://www.propel
 
 ```bash
 # Clone and build
-git clone <repo-url>
+git clone https://github.com/propeller-heads/tycho-solver.git
 cd tycho-solver
 cargo build --release
 
