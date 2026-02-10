@@ -16,7 +16,7 @@ A high-performance DeFi route-finding engine built on [Tycho](https://www.propel
 
 ### Prerequisites
 
-- Rust 1.75+ (2021 edition)
+- Rust 1.92+
 - A Tycho API key ([get one here](https://www.propellerheads.xyz/tycho))
 - An Ethereum RPC endpoint for the target chain
 
