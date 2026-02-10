@@ -38,10 +38,9 @@ use tycho_execution::encoding::{
     },
     models::{EncodedSolution, Solution as ExecutionSolution, Transaction, UserTransferType},
 };
-use tycho_simulation::tycho_client::rpc::HttpRPCClientOptions;
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256,
-    tycho_client::rpc::{HttpRPCClient, RPCClient},
+    tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
     tycho_common::{
         dto::{PaginationParams, ProtocolComponentsRequestBody},
         models::{protocol::ProtocolComponent, token::Token, Chain},
@@ -231,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // Display quote
-    display_quote(&quote, &sell_token, &buy_token, &amount_in)?;
+    display_quote(&quote, &sell_token, &buy_token, &amount_in, &all_tokens)?;
 
     // Determine if we can proceed with simulation/execution
     let can_simulate_only = cli.simulate_only && cli.sender.is_some();
@@ -311,6 +310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
+                &order_solution.amount_out,
+                &buy_token,
             )
             .await?;
         } else {
@@ -325,6 +326,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
+                &order_solution.amount_out,
+                &buy_token,
             )
             .await?;
         }
@@ -362,6 +365,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signer.address(),
             chain.id(),
             cli.use_tenderly,
+            &order_solution.amount_out,
+            &buy_token,
         )
         .await?;
     } else {
@@ -384,6 +389,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signer.address(),
                     chain.id(),
                     cli.use_tenderly,
+                    &order_solution.amount_out,
+                    &buy_token,
                 )
                 .await?;
             }
@@ -557,6 +564,7 @@ fn display_quote(
     sell_token: &Token,
     buy_token: &Token,
     amount_in: &BigUint,
+    all_tokens: &HashMap<Bytes, Token>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========== Quote ==========");
 
@@ -589,17 +597,23 @@ fn display_quote(
             println!("Price impact: {:.2}%", impact_percent);
         }
 
-        // Route details
+        // Route details with token symbols
         if let Some(route) = &order.route {
             println!("\nRoute ({} hops):", route.swaps.len());
             for (i, swap) in route.swaps.iter().enumerate() {
+                let token_in = all_tokens
+                    .get(&swap.token_in)
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_in))?;
+                let token_out = all_tokens
+                    .get(&swap.token_out)
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_out))?;
                 println!(
-                    "  {}. {} via {} ({} -> {})",
+                    "  {}. {} -> {} via {} (pool: {})",
                     i + 1,
-                    swap.component_id,
+                    token_in.symbol,
+                    token_out.symbol,
                     swap.protocol,
-                    swap.amount_in,
-                    swap.amount_out
+                    swap.component_id.clone()
                 );
             }
         }
@@ -615,6 +629,63 @@ fn display_quote(
 fn format_token_amount(amount: &BigUint, token: &Token) -> String {
     let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powi(token.decimals as i32);
     format!("{:.6}", decimal_amount)
+}
+
+fn format_u256_amount(amount: U256, token: &Token) -> String {
+    let amount_f64 = amount
+        .to_be_bytes::<32>()
+        .iter()
+        .fold(0f64, |acc, &b| acc * 256.0 + b as f64);
+    let decimal_amount = amount_f64 / 10f64.powi(token.decimals as i32);
+    format!("{:.6}", decimal_amount)
+}
+
+fn display_simulation_output(return_data: &[u8], expected_amount_out: &BigUint, buy_token: &Token) {
+    // TychoRouter swap functions return uint256 amountOut (32 bytes ABI-encoded)
+    let actual_amount = U256::from_be_slice(&return_data[..32]);
+    let expected = biguint_to_u256(expected_amount_out);
+
+    println!(
+        "\n  Simulation output: {} {}",
+        format_u256_amount(actual_amount, buy_token),
+        buy_token.symbol
+    );
+    println!(
+        "  Solver expected:   {} {}",
+        format_token_amount(expected_amount_out, buy_token),
+        buy_token.symbol
+    );
+
+    if actual_amount != expected {
+        // Calculate difference in basis points
+        let diff_bps = calculate_diff_bps(actual_amount, expected);
+        println!("  Difference: {:.2}%", diff_bps / 100.0);
+    } else {
+        println!("  Difference: 0% (exact match)");
+    }
+}
+
+fn calculate_diff_bps(actual: U256, expected: U256) -> f64 {
+    if expected.is_zero() {
+        return 0.0;
+    }
+
+    let actual_f64 = actual
+        .to_be_bytes::<32>()
+        .iter()
+        .fold(0f64, |acc, &b| acc * 256.0 + b as f64);
+    let expected_f64 = expected
+        .to_be_bytes::<32>()
+        .iter()
+        .fold(0f64, |acc, &b| acc * 256.0 + b as f64);
+
+    let diff = if actual_f64 > expected_f64 {
+        actual_f64 - expected_f64
+    } else {
+        expected_f64 - actual_f64
+    };
+
+    (diff / expected_f64) * 10_000.0 // basis points
 }
 
 fn calculate_price(
@@ -815,9 +886,9 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     let mut call_data = selector_bytes.to_vec();
 
     // Remove extra prefix if present
-    if encoded_args.len() > 32
-        && encoded_args[..32]
-            == [0u8; 31]
+    if encoded_args.len() > 32 &&
+        encoded_args[..32] ==
+            [0u8; 31]
                 .into_iter()
                 .chain([32].to_vec())
                 .collect::<Vec<u8>>()
@@ -830,6 +901,7 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
 }
 
 /// Run simulation with either eth_simulate or Tenderly.
+#[allow(clippy::too_many_arguments)]
 async fn run_simulation(
     provider: &FillProvider<
         JoinFill<Identity, WalletFiller<EthereumWallet>>,
@@ -841,15 +913,36 @@ async fn run_simulation(
     user_address: Address,
     chain_id: u64,
     use_tenderly: bool,
+    expected_amount_out: &BigUint,
+    buy_token: &Token,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if use_tenderly {
-        run_tenderly_simulation(tx, sell_token_address, amount_in, user_address, chain_id).await
+        run_tenderly_simulation(
+            tx,
+            sell_token_address,
+            amount_in,
+            user_address,
+            chain_id,
+            expected_amount_out,
+            buy_token,
+        )
+        .await
     } else {
-        run_eth_simulation(provider, tx, sell_token_address, amount_in, user_address, chain_id)
-            .await
+        run_eth_simulation(
+            provider,
+            tx,
+            sell_token_address,
+            amount_in,
+            user_address,
+            chain_id,
+            expected_amount_out,
+            buy_token,
+        )
+        .await
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_eth_simulation(
     provider: &FillProvider<
         JoinFill<Identity, WalletFiller<EthereumWallet>>,
@@ -860,6 +953,8 @@ async fn run_eth_simulation(
     amount_in: &BigUint,
     user_address: Address,
     chain_id: u64,
+    expected_amount_out: &BigUint,
+    buy_token: &Token,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSimulating via eth_simulate...");
 
@@ -902,6 +997,15 @@ async fn run_eth_simulation(
                         if status_ok { "Success" } else { "FAILED" },
                         transaction.gas_used
                     );
+
+                    // Decode and display return data for successful swap
+                    if j == 1 && status_ok && transaction.return_data.len() >= 32 {
+                        display_simulation_output(
+                            &transaction.return_data,
+                            expected_amount_out,
+                            buy_token,
+                        );
+                    }
                 }
             }
             if all_success {
@@ -922,6 +1026,7 @@ async fn run_eth_simulation(
 }
 
 /// Run eth_simulate without a wallet provider (for --sender without private key).
+#[allow(clippy::too_many_arguments)]
 async fn run_eth_simulation_no_wallet(
     provider: &RootProvider<Ethereum>,
     tx: &Transaction,
@@ -929,6 +1034,8 @@ async fn run_eth_simulation_no_wallet(
     amount_in: &BigUint,
     user_address: Address,
     chain_id: u64,
+    expected_amount_out: &BigUint,
+    buy_token: &Token,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSimulating via eth_simulate (no wallet)...");
     println!("  Router address: 0x{}", hex::encode(&tx.to));
@@ -984,6 +1091,15 @@ async fn run_eth_simulation_no_wallet(
                     if !status_ok {
                         println!("    Return data: 0x{}", hex::encode(&transaction.return_data));
                     }
+
+                    // Decode and display return data for successful swap
+                    if j == 1 && status_ok && transaction.return_data.len() >= 32 {
+                        display_simulation_output(
+                            &transaction.return_data,
+                            expected_amount_out,
+                            buy_token,
+                        );
+                    }
                 }
             }
             if all_success {
@@ -1009,6 +1125,8 @@ async fn run_tenderly_simulation(
     amount_in: &BigUint,
     user_address: Address,
     chain_id: u64,
+    expected_amount_out: &BigUint,
+    buy_token: &Token,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSimulating via Tenderly...");
 
@@ -1073,6 +1191,18 @@ async fn run_tenderly_simulation(
         println!("  {}: Status={}, Gas Used={}", tx_name, status, sim_result.simulation.gas_used);
         if let Some(ref err) = sim_result.simulation.error_message {
             println!("    Error: {}", err);
+        }
+
+        // Decode and display return data for successful swap
+        if i == 1 && sim_result.simulation.status {
+            if let Some(ref return_value) = sim_result.transaction.output {
+                // Tenderly returns hex string, decode it
+                let return_data =
+                    hex::decode(return_value.trim_start_matches("0x")).unwrap_or_default();
+                if return_data.len() >= 32 {
+                    display_simulation_output(&return_data, expected_amount_out, buy_token);
+                }
+            }
         }
     }
 

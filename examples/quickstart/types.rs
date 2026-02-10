@@ -39,6 +39,7 @@ pub struct TenderlySimulationResponse {
 #[derive(Debug, Deserialize)]
 pub struct TenderlySimulationResult {
     pub simulation: TenderlySimulationDetails,
+    pub transaction: TenderlyTransactionDetails,
 }
 
 /// Details of a single simulation result.
@@ -48,6 +49,14 @@ pub struct TenderlySimulationDetails {
     pub gas_used: u64,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+/// Transaction details from Tenderly simulation.
+#[derive(Debug, Deserialize)]
+pub struct TenderlyTransactionDetails {
+    /// The return value (output) of the transaction as hex string.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 // ============================================================================
