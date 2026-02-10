@@ -11,7 +11,6 @@ A high-performance DeFi route-finding engine built on [Tycho](https://www.propel
 - **Sub-100ms solves** - Dedicated OS threads for CPU-bound route finding, separate from the async I/O runtime
 - **Production-ready** - Prometheus metrics, structured logging, health endpoints, graceful shutdown
 - **Extensible** - Implement the `Algorithm` trait to add new routing strategies with zero framework changes
-- **Multi-chain** - Supports Ethereum, Base, and Unichain
 
 ## Quick Start
 
@@ -19,7 +18,7 @@ A high-performance DeFi route-finding engine built on [Tycho](https://www.propel
 
 - Rust 1.75+ (2021 edition)
 - A Tycho API key ([get one here](https://www.propellerheads.xyz/tycho))
-- An Ethereum RPC endpoint
+- An Ethereum RPC endpoint for the target chain
 
 ### Run the Solver
 
@@ -32,10 +31,11 @@ cargo build --release
 # Set required environment variables
 export TYCHO_API_KEY=your-api-key
 export RPC_URL=https://eth.llamarpc.com
+export RUST_LOG=info
 
 # Run
 cargo run --release -- \
-  --tycho-url tycho.propellerheads.xyz \
+  --tycho-url tycho-beta.propellerheads.xyz \
   --rpc-url $RPC_URL \
   --protocols uniswap_v2,uniswap_v3
 ```
@@ -130,18 +130,18 @@ Returns service health status. HTTP 200 if healthy, 503 if stale.
 
 ### CLI / Environment Variables
 
-| Flag | Env Var | Default | Description |
-|------|---------|---------|-------------|
-| `--rpc-url` | `RPC_URL` | (required) | Ethereum RPC endpoint |
-| `--tycho-url` | `TYCHO_URL` | `localhost:4242` | Tycho WebSocket URL |
-| `--tycho-api-key` | `TYCHO_API_KEY` | - | Tycho API key |
-| `--chain` | - | `Ethereum` | Target chain |
-| `-p, --protocols` | - | - | Protocols to index (comma-separated) |
-| `--http-port` | `HTTP_PORT` | `3000` | API port |
-| `--min-tvl` | - | `10.0` | Minimum pool TVL in native token |
-| `--order-manager-timeout-ms` | - | `100` | Default solve timeout |
-| `-w, --worker-pools-config` | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config |
-| `--blacklist-config` | `BLACKLIST_CONFIG` | `blacklist.toml` | Blacklist config |
+| Flag | Env Var | Default | Description                                |
+|------|---------|---------|--------------------------------------------|
+| `--rpc-url` | `RPC_URL` | (required) | Ethereum RPC endpoint for the target chain |
+| `--tycho-url` | `TYCHO_URL` | `localhost:4242` | Tycho WebSocket URL                        |
+| `--tycho-api-key` | `TYCHO_API_KEY` | - | Tycho API key                              |
+| `--chain` | - | `Ethereum` | Target chain                               |
+| `-p, --protocols` | - | - | Protocols to index (comma-separated)       |
+| `--http-port` | `HTTP_PORT` | `3000` | API port                                   |
+| `--min-tvl` | - | `10.0` | Minimum pool TVL in native token           |
+| `--order-manager-timeout-ms` | - | `100` | Default solve timeout                      |
+| `-w, --worker-pools-config` | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
+| `--blacklist-config` | `BLACKLIST_CONFIG` | `blacklist.toml` | Blacklist config                           |
 
 See `--help` for the full list.
 
