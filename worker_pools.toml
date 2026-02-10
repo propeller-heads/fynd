@@ -1,18 +1,20 @@
 # Worker pools configuration file
 
 # Worker pools
-[pools.most_liquid_2_hops]
+[pools.most_liquid_2_hops_fast]
 algorithm = "most_liquid"
-num_workers = 10
+num_workers = 5
 task_queue_capacity = 1000
 max_hops = 2
-timeout_ms = 1000
+timeout_ms = 100
 
-#[pools.most_liquid_3_hops]
-#algorithm = "most_liquid"
-#num_workers = 1
-#min_hops = 2
-#max_hops = 3
+[pools.most_liquid_3_hops]
+algorithm = "most_liquid"
+num_workers = 3
+task_queue_capacity = 1000
+min_hops = 2
+max_hops = 3
+timeout_ms = 5000
 
 # Add more pools by adding entries under [pools.*], e.g.:
 # [pools.dijkstra]

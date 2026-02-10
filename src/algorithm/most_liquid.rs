@@ -28,8 +28,8 @@ use crate::{
     derived::{ComputationRequirements, SharedDerivedDataRef, TokenGasPrices},
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, Route, RouteResult},
-    AlgorithmError, ProtocolSystem, Swap,
+    types::{ComponentId, Order, Route, RouteResult, Swap},
+    AlgorithmError,
 };
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
@@ -319,22 +319,10 @@ impl MostLiquidAlgorithm {
                 .get_amount_out(current_amount.clone(), token_in, token_out)
                 .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
 
-            // Get protocol for the swap
-            let protocol: ProtocolSystem = component
-                .protocol_system
-                .as_str()
-                .try_into()
-                .map_err(|e| {
-                    AlgorithmError::Other(format!(
-                        "invalid protocol system: {} ({})",
-                        component.protocol_system, e
-                    ))
-                })?;
-
             // Record the swap
             swaps.push(Swap {
                 component_id: component_id.clone(),
-                protocol,
+                protocol: component.protocol_system.clone(),
                 token_in: token_in.address.clone(),
                 token_out: token_out.address.clone(),
                 amount_in: current_amount.clone(),
@@ -583,7 +571,7 @@ impl Algorithm for MostLiquidAlgorithm {
                     .swaps
                     .as_slice()
                     .iter()
-                    .map(|s| s.protocol)
+                    .map(|s| s.protocol.as_str())
                     .collect::<Vec<_>>();
 
                 let price = amount_in

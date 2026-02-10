@@ -23,7 +23,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use uuid::Uuid;
 
-use super::primitives::{ComponentId, ProtocolSystem};
+use super::primitives::ComponentId;
 use crate::AlgorithmError;
 
 // ============================================================================
@@ -397,8 +397,8 @@ pub enum RouteValidationError {
 pub struct Swap {
     /// Identifier of the liquidity pool component.
     pub component_id: ComponentId,
-    /// Protocol system (e.g., Uniswap V2, Uniswap V3, Balancer).
-    pub protocol: ProtocolSystem,
+    /// Protocol system identifier (e.g., "uniswap_v2", "uniswap_v3", "vm:balancer").
+    pub protocol: String,
     /// Input token address.
     pub token_in: Address,
     /// Output token address.
@@ -418,13 +418,13 @@ impl Swap {
     /// Creates a new swap with an auto-calculated gas estimate.
     pub fn new(
         component_id: ComponentId,
-        protocol: ProtocolSystem,
+        protocol: String,
         token_in: Address,
         token_out: Address,
         amount_in: BigUint,
         amount_out: BigUint,
+        gas_estimate: BigUint,
     ) -> Self {
-        let gas_estimate = BigUint::from(protocol.typical_gas_cost());
         Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
     }
 }
@@ -463,7 +463,7 @@ mod tests {
     fn make_swap(token_in_byte: u8, token_out_byte: u8, amount_in: u64, amount_out: u64) -> Swap {
         Swap {
             component_id: "pool-1".to_string(),
-            protocol: ProtocolSystem::UniswapV2,
+            protocol: "uniswap_v2".to_string(),
             token_in: make_address(token_in_byte),
             token_out: make_address(token_out_byte),
             amount_in: BigUint::from(amount_in),
