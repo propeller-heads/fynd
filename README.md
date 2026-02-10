@@ -165,8 +165,16 @@ min_hops = 2
 max_hops = 3
 timeout_ms = 5000
 ```
+A Worker Pool runs a configurable number of Worker threads, all using the same algorithm and pulling tasks from a shared queue. Each worker handles one order at a time — so a pool with 5 workers can solve up to 5 orders concurrently.
 
-Multiple pools with the same algorithm but different configurations compete in parallel - the best result within the timeout limit wins.
+Multiple pools run in parallel, each producing its own solution per order. The system then picks the best result across pools within the timeout.
+
+**Example**: Given the config above and 3 incoming orders:
+
+- `fast_2hop` assigns 1 worker per order (3/5 workers busy)
+- `deep_3hop` assigns 1 worker per order (3/3 workers busy)
+
+Each order gets 2 candidate solutions — one from each pool — and the best is selected.
 
 ### Blacklist (blacklist.toml)
 
