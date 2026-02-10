@@ -16,26 +16,39 @@ use std::{
 };
 
 use actix_web::web;
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 pub use error::ApiError;
 use handlers::configure_routes;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::api::error::ErrorResponse;
-use crate::order_manager::OrderManager;
-use crate::types::solution::{
-    BlockInfo, Order, OrderSide, OrderSolution, Route, Solution, SolutionOptions,
-    SolutionRequest, SolutionStatus, Swap,
+use crate::{
+    api::error::ErrorResponse,
+    order_manager::OrderManager,
+    types::{
+        solution::{
+            BlockInfo, Order, OrderSide, OrderSolution, Route, Solution, SolutionOptions,
+            SolutionRequest, SolutionStatus, Swap,
+        },
+        HealthStatus,
+    },
 };
-use crate::types::HealthStatus;
 
 #[derive(OpenApi)]
 #[openapi(
     paths(handlers::solve, handlers::health),
     components(schemas(
-        SolutionRequest, Order, OrderSide, SolutionOptions,
-        Solution, OrderSolution, SolutionStatus, Route, Swap, BlockInfo,
-        HealthStatus, ErrorResponse,
+        SolutionRequest,
+        Order,
+        OrderSide,
+        SolutionOptions,
+        Solution,
+        OrderSolution,
+        SolutionStatus,
+        Route,
+        Swap,
+        BlockInfo,
+        HealthStatus,
+        ErrorResponse,
     ))
 )]
 pub struct ApiDoc;
@@ -109,8 +122,5 @@ impl AppState {
 pub fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
     cfg.app_data(web::Data::new(state))
         .configure(configure_routes)
-        .service(
-            SwaggerUi::new("/docs/{_:.*}")
-                .url("/api-docs/openapi.json", ApiDoc::openapi()),
-        );
+        .service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", ApiDoc::openapi()));
 }

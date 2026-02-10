@@ -4,9 +4,13 @@ use actix_web::{web, HttpResponse};
 use tracing::{info, instrument};
 
 use super::{ApiError, AppState};
-use crate::api::error::ErrorResponse;
-use crate::types::solution::{Solution, SolutionRequest};
-use crate::types::HealthStatus;
+use crate::{
+    api::error::ErrorResponse,
+    types::{
+        solution::{Solution, SolutionRequest},
+        HealthStatus,
+    },
+};
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
