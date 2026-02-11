@@ -23,9 +23,9 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           HTTP Layer (Actix Web)                            │
 │                         Async I/O - Non-blocking                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                           RouterApi                                  │   │
-│  │    POST /v1/solve            GET /v1/health          GET /metrics   │   │
+│  │    POST /v1/solve            GET /v1/health          GET /metrics    │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
@@ -65,11 +65,11 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
 │                         SharedMarketData (Arc<RwLock<>>)                           │
 │  ┌────────────────────────────────────────────────────────────────────────────┐    │
 │  │  components: HashMap<ComponentId, ProtocolComponent>                       │    │
-│  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>            │    │
-│  │  tokens: HashMap<Address, Token>                                          │    │
-│  │  gas_price: Option<BlockGasPrice>                                         │    │
-│  │  protocol_sync_status: HashMap<String, SynchronizerState>                 │    │
-│  │  last_updated: Option<BlockInfo>                                          │    │
+│  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>             │    │
+│  │  tokens: HashMap<Address, Token>                                           │    │
+│  │  gas_price: Option<BlockGasPrice>                                          │    │
+│  │  protocol_sync_status: HashMap<String, SynchronizerState>                  │    │
+│  │  last_updated: Option<BlockInfo>                                           │    │
 │  └────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────▲─────────────────────────────────────────────────┘
                                    │ WRITE lock
@@ -77,9 +77,9 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
 ┌──────────────────────────────────┴──────────────────────────────────────────┐
 │                              TychoFeed                                      │
 │                     Background task (single instance)                       │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
 │                                   │                                         │
 │                                   ▼ broadcast::Sender<MarketEvent>          │
 └──────────────────────────────────┬──────────────────────────────────────────┘
@@ -97,18 +97,18 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
 ┌──────────────────────────────────────────────────────────────────┐
 │                     Derived Data Pipeline                        │
 │                                                                  │
-│  TychoFeed events ──► ComputationManager                        │
+│  TychoFeed events ──► ComputationManager                         │
 │                          │                                       │
 │                          ├─ SpotPriceComputation                 │
 │                          ├─ PoolDepthComputation (needs spots)   │
-│                          ├─ TokenGasPriceComputation (needs spots)│
+│                          ├─ TokenGasPriceComputation(needs spots)│
 │                          │                                       │
 │                          ▼                                       │
 │                     DerivedData Store ──► broadcast events       │
 │                                              │                   │
 │                                    ┌─────────┼──────────┐        │
 │                                    ▼         ▼          ▼        │
-│                              Worker 1  Worker 2  Worker N       │
+│                              Worker 1  Worker 2  Worker N        │
 │                              (update edge weights on graph)      │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -124,6 +124,7 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
 Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns JSON responses.
 
 **Endpoints:**
+
 - `POST /v1/solve` -- Submit solve requests
 - `GET /v1/health` -- Health check (data freshness + pool count)
 - `GET /metrics` -- Prometheus metrics (separate server, port 9898)
@@ -135,6 +136,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 **Location:** `src/order_manager/`
 
 Orchestrates solve requests across multiple worker pools:
+
 1. Fans out each order to all pools in parallel
 2. Manages per-request timeouts with optional early return
 3. Selects the best solution by `amount_out_net_gas`
@@ -147,6 +149,7 @@ Orchestrates solve requests across multiple worker pools:
 **Location:** `src/worker_pool/`
 
 Manages dedicated OS threads for CPU-bound route finding. Each pool has:
+
 - A name and algorithm assignment
 - A bounded `TaskQueue` (via `async_channel`)
 - N `SolverWorker` instances on separate threads
@@ -160,6 +163,7 @@ Pools are configured via `worker_pools.toml`. Multiple pools can use the same al
 **Location:** `src/worker_pool/worker.rs`
 
 Each worker:
+
 1. Initializes a graph from market topology
 2. Runs a prioritized `select!` loop: shutdown > market events > derived events > solve tasks
 3. Maintains a `ReadinessTracker` for derived data requirements
@@ -172,6 +176,7 @@ Each worker:
 **Location:** `src/algorithm/`
 
 Pluggable interface for route-finding algorithms:
+
 - Specifies preferred graph type and graph manager via associated types
 - Stateless: receives graph as parameter
 - Declares derived data requirements (fresh vs stale)
@@ -185,6 +190,7 @@ Pluggable interface for route-finding algorithms:
 **Location:** `src/graph/`
 
 Graph management infrastructure:
+
 - `GraphManager` trait: initialize + incremental updates from events
 - `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
 - `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (pool depths)
@@ -215,6 +221,7 @@ Background task that connects to Tycho's WebSocket API, processes component/stat
 **Location:** `src/derived/`
 
 Pre-computes analytics from raw market data:
+
 - `SpotPriceComputation`: Spot prices for all pool pairs
 - `PoolDepthComputation`: Liquidity depth at configured slippage
 - `TokenGasPriceComputation`: Token prices relative to gas token
@@ -254,6 +261,7 @@ OrderManager (fan-out to all pools)
     │
     ├──► Pool A Queue ──► Worker ──► Algorithm ──► Solution
     ├──► Pool B Queue ──► Worker ──► Algorithm ──► Solution
+    ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
     │
     ▼
 OrderManager (select best by amount_out_net_gas)
@@ -274,7 +282,7 @@ TychoFeed
     │       ├──► Worker 1 GraphManager (update graph)
     │       ├──► Worker 2 GraphManager (update graph)
     │       └──► Worker N GraphManager (update graph)
-    └──► Signal Gas Price Fetcher
+    └──► Trigger Gas Price Fetcher
     └──► ComputationManager
             ├──► SpotPriceComputation
             ├──► PoolDepthComputation
@@ -306,88 +314,10 @@ Worker Pool B (dedicated OS threads)
 ```
 
 **Communication channels:**
+
 - HTTP -> OrderManager: direct call (same async runtime)
 - OrderManager -> Workers: `async_channel` per pool (bounded, backpressure)
 - Workers -> OrderManager: `oneshot` channel (single response)
 - TychoFeed -> Workers: `broadcast` channel (MarketEvent)
 - ComputationManager -> Workers: `broadcast` channel (DerivedDataEvent)
 - All -> SharedMarketData: `Arc<RwLock<>>` (read-heavy)
-
----
-
-## File Structure
-
-```
-src/
-├── lib.rs                    # Library root, re-exports
-├── main.rs                   # Binary entry point
-├── builder.rs                # TychoSolverBuilder, TychoSolver
-├── cli.rs                    # CLI argument definitions (clap)
-├── config.rs                 # Configuration types (WorkerPoolsConfig, BlacklistConfig)
-│
-├── api/                      # HTTP Layer
-│   ├── mod.rs                # AppState, HealthTracker, configure_app
-│   ├── handlers.rs           # Actix handlers (solve, health)
-│   └── error.rs              # ApiError -> HTTP response mapping
-│
-├── order_manager/            # Multi-solver orchestration
-│   ├── mod.rs                # OrderManager, SolverPoolHandle, fan-out logic
-│   └── config.rs             # OrderManagerConfig
-│
-├── types/                    # Shared type definitions
-│   ├── mod.rs                # Re-exports
-│   ├── api.rs                # HealthStatus
-│   ├── solution.rs           # Solution, Route, Swap, Order, etc.
-│   ├── internal.rs           # SolveTask, SolveError
-│   ├── primitives.rs         # ComponentId
-│   └── constants.rs          # Native token addresses per chain
-│
-├── feed/                     # Market data feed
-│   ├── mod.rs                # TychoFeedConfig, DataFeedError
-│   ├── market_data.rs        # SharedMarketData
-│   ├── events.rs             # MarketEvent enum, MarketEventHandler trait
-│   ├── tycho_feed.rs         # TychoFeed (WebSocket client)
-│   ├── gas.rs                # GasPriceFetcher
-│   └── protocol_registry.rs  # Protocol stream registration
-│
-├── graph/                    # Graph management
-│   ├── mod.rs                # GraphManager trait, Path, EdgeData
-│   └── petgraph.rs           # PetgraphStableDiGraphManager
-│
-├── derived/                  # Derived data computations
-│   ├── mod.rs                # Module re-exports
-│   ├── computation.rs        # DerivedComputation trait, ComputationRequirements
-│   ├── computations/         # Built-in computations
-│   │   ├── spot_price.rs     # SpotPriceComputation
-│   │   ├── pool_depth.rs     # PoolDepthComputation
-│   │   └── token_gas_price.rs# TokenGasPriceComputation
-│   ├── manager.rs            # ComputationManager
-│   ├── store.rs              # DerivedData (typed storage)
-│   ├── tracker.rs            # ReadinessTracker
-│   ├── events.rs             # DerivedDataEvent
-│   ├── error.rs              # ComputationError
-│   └── types.rs              # SpotPrices, PoolDepths, TokenGasPrices
-│
-├── worker_pool/              # Worker pool management
-│   ├── mod.rs                # Re-exports
-│   ├── pool.rs               # WorkerPool, WorkerPoolBuilder
-│   ├── registry.rs           # Algorithm registry, spawn_workers
-│   ├── task_queue.rs         # TaskQueue, TaskQueueHandle
-│   └── worker.rs             # SolverWorker
-│
-└── algorithm/                # Algorithm implementations
-    ├── mod.rs                # Algorithm trait, AlgorithmConfig, AlgorithmError
-    ├── most_liquid.rs        # MostLiquidAlgorithm
-    └── test_utils.rs         # Test utilities
-```
-
----
-
-## Success Criteria
-
-1. **Performance**: 95% of solves < 50ms, 99% < 100ms
-2. **Scalability**: Linear scaling with worker count
-3. **Memory**: Single copy of ProtocolSim states (not duplicated per solver)
-4. **Reliability**: No panics, graceful error handling
-5. **Observability**: Prometheus metrics for latency, queue depth, solve outcomes
-6. **Extensibility**: New algorithm = implement trait, register, configure pool
