@@ -550,7 +550,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, market_read, setup_market, token, MockProtocolSim},
-        derived::{computations::spot_price::SpotPriceComputation, manager::wrap_derived},
+        derived::computations::spot_price::SpotPriceComputation,
         feed::market_data::wrap_market,
         DerivedData,
     };
@@ -571,7 +571,7 @@ mod tests {
     ) -> (SharedMarketDataRef, SharedDerivedDataRef) {
         let (wrapped_market, _) = setup_market(pools.clone());
 
-        let wrapped_store = wrap_derived(DerivedData::new());
+        let wrapped_store = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
             added: pools
@@ -1003,7 +1003,7 @@ mod tests {
 
         // Create market without spot prices set
         let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
-        let derived = wrap_derived(DerivedData::new()); // No spot prices
+        let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
@@ -1059,7 +1059,7 @@ mod tests {
         let market = wrap_market(market);
 
         // Compute spot prices
-        let derived = wrap_derived(DerivedData::new());
+        let derived = DerivedData::new_shared();
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
                 "pool".to_string(),

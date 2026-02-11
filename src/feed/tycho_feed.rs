@@ -52,7 +52,7 @@ pub(crate) struct TychoFeed {
     market_data: Arc<RwLock<SharedMarketData>>,
     /// Event broadcaster.
     event_tx: broadcast::Sender<MarketEvent>,
-    #[allow(dead_code)]
+
     /// Health tracker for API health checks.
     health_tracker: HealthTracker,
     /// Signal channel to notify the gas price worker to refresh gas price.
@@ -556,7 +556,6 @@ mod tests {
             false, // no TLS for test
             vec!["uniswap_v2".to_string()],
             10.0,
-            "http://test.rpc".to_string(),
         )
     }
 
@@ -1033,7 +1032,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
     #[ignore]
     async fn test_real_protocol_feed() {
-        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
         let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
         let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
         let config = TychoFeedConfig::new(
@@ -1043,7 +1041,6 @@ mod tests {
             true, // Use TLS for real feed test
             vec!["uniswap_v2".to_string()],
             100.0,
-            rpc_url,
         );
 
         let mut message_count = 5;
@@ -1075,7 +1072,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
     #[ignore]
     async fn test_real_rfq_feed() {
-        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
         let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
         let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
         let config = TychoFeedConfig::new(
@@ -1085,7 +1081,6 @@ mod tests {
             true, // Use TLS for real feed test
             vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string()],
             100.0,
-            rpc_url,
         );
 
         let mut message_count = 5;
@@ -1117,7 +1112,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
     #[ignore]
     async fn test_real_combined_feed() {
-        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
         let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY must be set");
         let tycho_url = env::var("TYCHO_URL").expect("TYCHO_URL must be set");
         let config = TychoFeedConfig::new(
@@ -1127,7 +1121,6 @@ mod tests {
             true, // Use TLS for real feed test
             vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string(), "uniswap_v2".to_string()],
             100.0,
-            rpc_url,
         );
 
         let mut message_count = 5;
@@ -1165,7 +1158,6 @@ mod tests {
             false,
             vec!["uniswap_v2".to_string()],
             10.0,
-            "http://test.rpc".to_string(),
         )
         .blacklisted_components(
             blacklisted

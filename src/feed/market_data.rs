@@ -71,7 +71,6 @@ impl SharedMarketData {
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
-    #[allow(dead_code)]
     pub fn get_protocol_sync_status(&self, protocol_system: &String) -> Option<&SynchronizerState> {
         self.protocol_sync_status
             .get(protocol_system)

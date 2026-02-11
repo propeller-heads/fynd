@@ -51,25 +51,14 @@ pub(crate) struct DepthAndPrice {
     pub depth: f64,
 }
 
-#[allow(dead_code)]
 impl DepthAndPrice {
     /// Creates a new DepthAndPrice with all fields set.
+    #[cfg(test)]
     pub fn new(spot_price: f64, depth: f64) -> Self {
         Self { spot_price, depth }
     }
 
-    /// Builder method to set spot price.
-    pub fn with_spot_price(mut self, spot_price: f64) -> Self {
-        self.spot_price = spot_price;
-        self
-    }
-
-    /// Builder method to set depth.
-    pub fn with_depth(mut self, depth: f64) -> Self {
-        self.depth = depth;
-        self
-    }
-
+    #[cfg(test)]
     pub fn from_protocol_sim(
         sim: &impl ProtocolSim,
         token_in: &Token,

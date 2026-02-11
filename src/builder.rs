@@ -174,7 +174,6 @@ impl TychoSolverBuilder {
             self.tycho_use_tls,
             self.protocols.clone(),
             self.min_tvl,
-            self.rpc_url.clone(),
         )
         .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
         .gas_refresh_interval(self.gas_refresh_interval)
