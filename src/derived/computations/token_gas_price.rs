@@ -551,7 +551,6 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, market_read, setup_market, token, MockProtocolSim},
         derived::computations::spot_price::SpotPriceComputation,
-        feed::market_data::wrap_market,
         DerivedData,
     };
     // ==================== Constants ====================
@@ -1056,7 +1055,7 @@ mod tests {
         market.upsert_components(std::iter::once(comp));
         market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000)) as _)]);
         market.upsert_tokens([eth.clone(), usdc.clone()]);
-        let market = wrap_market(market);
+        let market = SharedMarketData::new_shared();
 
         // Compute spot prices
         let derived = DerivedData::new_shared();

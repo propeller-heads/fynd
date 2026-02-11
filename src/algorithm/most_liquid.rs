@@ -658,10 +658,13 @@ mod tests {
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
         derived::{DerivedData, TokenGasPrices},
-        feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
+
+    fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
+        Arc::new(RwLock::new(market))
+    }
 
     /// Creates a SharedDerivedDataRef with token prices set for testing.
     ///
