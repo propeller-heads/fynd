@@ -618,10 +618,6 @@ impl Algorithm for MostLiquidAlgorithm {
         })
     }
 
-    fn supports_exact_out(&self) -> bool {
-        false // TODO: Implement exact-out support
-    }
-
     fn computation_requirements(&self) -> ComputationRequirements {
         // MostLiquidAlgorithm uses token prices to convert gas costs from wei
         // to output token terms for accurate amount_out_net_gas calculation.
@@ -1619,7 +1615,6 @@ mod tests {
 
         assert_eq!(algorithm.max_hops, max_hops);
         assert_eq!(algorithm.timeout, Duration::from_millis(timeout_ms));
-        assert!(!algorithm.supports_exact_out()); // Currently always false
         assert_eq!(algorithm.name(), "most_liquid");
     }
 
@@ -1631,7 +1626,6 @@ mod tests {
 
         assert_eq!(algorithm.max_hops, 3);
         assert_eq!(algorithm.timeout, Duration::from_millis(500));
-        assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
     }
 

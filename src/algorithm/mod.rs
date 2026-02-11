@@ -136,10 +136,6 @@ pub(crate) trait Algorithm: Send + Sync {
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError>;
 
-    /// Returns whether this algorithm supports exact-out orders.
-    #[allow(dead_code)]
-    fn supports_exact_out(&self) -> bool;
-
     /// Returns the derived data computation requirements for this algorithm.
     ///
     /// Algorithms declare freshness requirements for derived data:

@@ -533,10 +533,6 @@ mod tests {
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
 
-        fn supports_exact_out(&self) -> bool {
-            false
-        }
-
         fn computation_requirements(&self) -> ComputationRequirements {
             self.requirements.clone()
         }
