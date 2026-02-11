@@ -1,8 +1,10 @@
 //! API request and response types.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
 /// Health check response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HealthStatus {
     /// Whether the service is healthy.
     pub healthy: bool,
