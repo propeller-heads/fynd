@@ -3061,6 +3061,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
+name = "fynd"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "alloy",
+ "alloy-chains",
+ "anyhow",
+ "async-channel",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dialoguer 0.11.0",
+ "dotenv",
+ "fastrand",
+ "futures 0.3.31",
+ "hex",
+ "itertools 0.14.0",
+ "lazy_static",
+ "metrics 0.24.3",
+ "metrics-exporter-prometheus",
+ "num-bigint",
+ "num-traits",
+ "num_cpus",
+ "petgraph",
+ "reqwest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tracing",
+ "tracing-actix-web",
+ "tracing-subscriber 0.3.22",
+ "tycho-execution",
+ "tycho-simulation",
+ "utoipa 5.4.0",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
 name = "gcloud-sdk"
 version = "0.27.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7022,51 +7067,6 @@ dependencies = [
  "tycho-client",
  "tycho-common",
  "tycho-ethereum",
- "uuid",
-]
-
-[[package]]
-name = "tycho-solver"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "alloy",
- "alloy-chains",
- "anyhow",
- "async-channel",
- "async-trait",
- "chrono",
- "clap",
- "dialoguer 0.11.0",
- "dotenv",
- "fastrand",
- "futures 0.3.31",
- "hex",
- "itertools 0.14.0",
- "lazy_static",
- "metrics 0.24.3",
- "metrics-exporter-prometheus",
- "num-bigint",
- "num-traits",
- "num_cpus",
- "petgraph",
- "reqwest",
- "rstest",
- "serde",
- "serde_json",
- "serde_with",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tokio-stream",
- "toml",
- "tracing",
- "tracing-actix-web",
- "tracing-subscriber 0.3.22",
- "tycho-execution",
- "tycho-simulation",
- "utoipa 5.4.0",
- "utoipa-swagger-ui",
  "uuid",
 ]
 

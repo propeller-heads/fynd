@@ -1,12 +1,12 @@
 use clap::Parser;
+use fynd::{parse_chain, FyndBuilder, HealthStatus, WorkerPoolsConfig};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use tycho_solver::{parse_chain, HealthStatus, TychoSolverBuilder, WorkerPoolsConfig};
 
-/// Tycho Solver HTTP server
+/// Fynd HTTP server
 #[derive(Parser, Debug)]
 #[command(name = "solver")]
-#[command(about = "Run the Tycho Solver HTTP server", long_about = None)]
+#[command(about = "Run Fynd HTTP server", long_about = None)]
 struct Cli {
     /// RPC endpoint URL
     #[arg(long, env = "RPC_URL")]
@@ -63,8 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Loaded {} worker pool(s)", pools_config.pools.len());
 
     // Build and spawn the solver
-    info!("Starting tycho-solver...");
-    let solver = TychoSolverBuilder::new(
+    info!("Starting fynd...");
+    let solver = FyndBuilder::new(
         chain,
         pools_config.pools,
         cli.tycho_url.clone(),

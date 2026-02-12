@@ -27,6 +27,9 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
+use fynd::types::solution::OrderSide;
+// Import solver types directly
+use fynd::{parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
@@ -47,11 +50,6 @@ use tycho_simulation::{
         Bytes,
     },
     utils::load_all_tokens,
-};
-use tycho_solver::types::solution::OrderSide;
-// Import solver types directly
-use tycho_solver::{
-    parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest,
 };
 // Import quickstart-specific types
 use types::{
@@ -571,7 +569,7 @@ fn display_quote(
     for order in &quote.orders {
         println!("Status: {:?}", order.status);
 
-        if !matches!(order.status, tycho_solver::SolutionStatus::Success) {
+        if !matches!(order.status, fynd::SolutionStatus::Success) {
             println!("No route found for this order.");
             continue;
         }

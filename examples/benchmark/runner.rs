@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
+use fynd::{Solution, SolutionRequest, SolutionStatus};
 use tokio::sync::{Mutex, Semaphore};
-use tycho_solver::{Solution, SolutionRequest, SolutionStatus};
 
 use crate::config::ParallelizationMode;
 

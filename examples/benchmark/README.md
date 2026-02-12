@@ -1,6 +1,6 @@
-# Tycho Solver Benchmark
+# Fynd Benchmark
 
-Benchmark tool for measuring tycho-solver performance with various parallelization strategies.
+Benchmark tool for measuring Fynd's performance with various parallelization strategies.
 
 **Prerequisites:** This benchmark requires a running solver. See [examples/README.md](../README.md) for instructions on starting the solver.
 

@@ -1,4 +1,4 @@
-//! Core type definitions for the Tycho Solver.
+//! Core type definitions for Fynd.
 //!
 //! This module contains all shared types used across the solver:
 //! - [`solution`] - Public API types (requests, responses, routes, swaps)

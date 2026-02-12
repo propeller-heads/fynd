@@ -335,8 +335,9 @@ impl TychoFeed {
             })
             .max_by_key(|b| b.number);
 
-        debug!(
-            "Received message with {} new components ({} after blacklist filter), {} removed, {} updated",
+        info!(
+            "received block/timestamp {} with {} new components ({} after blacklist filter), {} removed, {} updated",
+            msg.block_number_or_timestamp,
             original_count,
             added_components.len(),
             removed_components.len(),

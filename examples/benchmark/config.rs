@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
+use fynd::{types::OrderSide, Order, SolutionOptions, SolutionRequest};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::models::Address;
-use tycho_solver::{types::OrderSide, Order, SolutionOptions, SolutionRequest};
 
 /// Parallelization mode for benchmark execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
