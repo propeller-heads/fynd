@@ -1,5 +1,5 @@
 [package]
-name = "tycho-solver"
+name = "fynd"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance DEX router built on Tycho"

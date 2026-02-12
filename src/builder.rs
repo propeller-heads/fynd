@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-/// Builder that assembles the Tycho solver and returns a running server handle.
+/// Builder that assembles Fynd and returns a running server handle.
 ///
 /// The builder does the following:
 /// - Creates a new Tycho feed
@@ -30,7 +30,7 @@ use crate::{
 /// - Creates a new order manager
 /// - Creates a new HTTP server
 /// - Returns a running server handle
-pub struct TychoSolverBuilder {
+pub struct FyndBuilder {
     chain: Chain,
     http_host: String,
     http_port: u16,
@@ -52,7 +52,7 @@ pub struct TychoSolverBuilder {
     blacklist: BlacklistConfig,
 }
 
-impl TychoSolverBuilder {
+impl FyndBuilder {
     /// Creates a new builder with required fields.
     pub fn new(
         chain: Chain,
@@ -154,12 +154,12 @@ impl TychoSolverBuilder {
         self
     }
 
-    pub fn build(self) -> Result<TychoSolver> {
+    pub fn build(self) -> Result<Fynd> {
         info!(
             host = %self.http_host,
             port = self.http_port,
             pools = self.pools.len(),
-            "starting tycho solver"
+            "starting fynd"
         );
 
         // Shared state
@@ -296,7 +296,7 @@ impl TychoSolverBuilder {
             }
         });
 
-        Ok(TychoSolver {
+        Ok(Fynd {
             server_handle,
             server_task,
             worker_pools,
@@ -308,8 +308,8 @@ impl TychoSolverBuilder {
     }
 }
 
-/// Running Tycho solver. Call `run` to block until shutdown and perform cleanup.
-pub struct TychoSolver {
+/// Running Fynd. Call `run` to block until shutdown and perform cleanup.
+pub struct Fynd {
     server_handle: ServerHandle,
     server_task: JoinHandle<()>,
     worker_pools: Vec<WorkerPool>,
@@ -319,7 +319,7 @@ pub struct TychoSolver {
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
-impl TychoSolver {
+impl Fynd {
     /// Returns a handle to the HTTP server for graceful shutdown.
     pub fn server_handle(&self) -> ServerHandle {
         self.server_handle.clone()
@@ -327,7 +327,7 @@ impl TychoSolver {
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
-        let TychoSolver {
+        let Fynd {
             server_handle,
             mut server_task,
             worker_pools,

@@ -1,4 +1,4 @@
-# Tycho PathFinder
+# Fynd
 
 A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap routes across multiple DeFi protocols in real-time.
 
@@ -12,20 +12,18 @@ A high-performance DeFi route-finding engine built on [Tycho](https://www.propel
 - **Production-ready** - Prometheus metrics, structured logging, health endpoints, graceful shutdown
 - **Extensible** - Implement the `Algorithm` trait to add new routing strategies with zero framework changes
 
-## Quick Start
-
-### Prerequisites
+## Prerequisites
 
 - Rust 1.92+
 - A Tycho API key ([get one here](https://www.propellerheads.xyz/tycho))
 - An Ethereum RPC endpoint for the target chain
 
-### Run the Solver
+## Run the Solver
 
 ```bash
 # Clone and build
-git clone https://github.com/propeller-heads/tycho-solver.git
-cd tycho-solver
+git clone https://github.com/propeller-heads/fynd.git
+cd fynd
 cargo build --release
 
 # Set required environment variables
@@ -59,7 +57,7 @@ cargo run --release -- \
 **Environment variables:**
 - RFQ protocols typically require API keys, which are passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
-### Make a Solve Request
+## Make a Solve Request
 
 ```bash
 curl -X POST http://localhost:3000/v1/solve \
@@ -80,7 +78,7 @@ curl -X POST http://localhost:3000/v1/solve \
   }'
 ```
 
-### Check Health
+## Check Health
 
 ```bash
 curl http://localhost:3000/v1/health
@@ -207,7 +205,7 @@ components = [
 ## Observability
 
 - **Metrics**: Prometheus endpoint at `http://localhost:9898/metrics`
-- **Logging**: Structured logging via `RUST_LOG` (e.g., `RUST_LOG=info,tycho_solver=debug`)
+- **Logging**: Structured logging via `RUST_LOG` (e.g., `RUST_LOG=info,fynd=debug`)
 - **Health**: `GET /v1/health` returns data freshness and pool count
 
 ## Extensibility

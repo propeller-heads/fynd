@@ -1,6 +1,6 @@
-# Tycho Solver Server
+# Fynd Server
 
-Runs the Tycho Solver as an HTTP server.
+Runs Fynd as an HTTP server.
 
 ## Usage
 
