@@ -1,4 +1,4 @@
-//! Quickstart Example: Quote, Simulate & Execute Swaps
+//! Tutorial Example: Quote, Simulate & Execute Swaps
 //!
 //! This example demonstrates how to:
 //! 1. Call an already-running tycho-router solver for a swap quote
@@ -51,14 +51,14 @@ use tycho_simulation::{
     },
     utils::load_all_tokens,
 };
-// Import quickstart-specific types
+// Import tutorial-specific types
 use types::{
     SwapToExecution, TenderlySimulation, TenderlySimulationRequest, TenderlySimulationResponse,
 };
 
-/// Quickstart CLI: Quote, simulate, and execute swaps via tycho-router
+/// Tutorial CLI: Quote, simulate, and execute swaps via tycho-router
 #[derive(Parser)]
-#[command(name = "quickstart")]
+#[command(name = "tutorial")]
 #[command(about = "Get quotes from tycho-router and optionally simulate/execute swaps")]
 struct Cli {
     /// Sell token address (defaults to USDC on the mainnet)

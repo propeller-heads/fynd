@@ -1,6 +1,6 @@
-//! Quickstart-specific types and conversion traits.
+//! Tutorial-specific types and conversion traits.
 //!
-//! This module contains types specific to the quickstart example:
+//! This module contains types specific to the tutorial example:
 //! - Tenderly simulation types
 //! - Conversion trait for solver to execution swaps
 

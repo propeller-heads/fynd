@@ -70,5 +70,5 @@ futures = "0.3"
 hex = "0.4"
 
 [[example]]
-name = "quickstart"
-path = "examples/quickstart/main.rs"
+name = "tutorial"
+path = "examples/tutorial/main.rs"
