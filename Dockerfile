@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 # Install system dependencies needed by aws-lc-sys, openssl-sys, etc.
 RUN apt-get update && apt-get install -y \
@@ -22,7 +22,7 @@ RUN mkdir src && \
 
 # Copy real source and rebuild
 COPY src/ src/
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

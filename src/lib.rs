@@ -56,7 +56,7 @@
 //! let solver = FyndBuilder::new(
 //!     chain,
 //!     pools,
-//!     "wss://tycho.propellerheads.xyz".to_string(),
+//!     "wss://tycho-beta.propellerheads.xyz".to_string(),
 //!     "https://eth.llamarpc.com".to_string(),
 //!     vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
 //! )
