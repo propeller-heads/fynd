@@ -16,6 +16,9 @@ services:
       - WORKER_POOLS_CONFIG=/etc/tycho-solver/worker_pools.toml
       - BLACKLIST_CONFIG=/etc/tycho-solver/blacklist.toml
       - RUST_LOG=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+    depends_on:
+      - tempo
     command:
       - "--chain"
       - "${CHAIN:-Ethereum}"
