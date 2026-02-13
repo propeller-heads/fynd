@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+docs/
+.env
+k8s/
+.claude/
+*.pdf
+*.drawio

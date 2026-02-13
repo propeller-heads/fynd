@@ -4,26 +4,25 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use fynd::{
-    builder::parse_chain,
+    builder::{parse_chain, FyndBuilder},
     cli::Cli,
     config::{BlacklistConfig, WorkerPoolsConfig},
-    FyndBuilder,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::TracerProvider;
 use thiserror::Error;
 use tokio::{
     select,
     signal::unix::{signal, SignalKind},
 };
 use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> Result<(), anyhow::Error> {
-    create_tracing_subscriber();
     let cli = Cli::parse();
-
     run_solver(cli).map_err(|e| anyhow!("{}", e))?;
-
     Ok(())
 }
 
@@ -43,16 +42,37 @@ pub enum SolverError {
     ShutdownError(String),
 }
 
-fn create_tracing_subscriber() {
-    // RUST_LOG environment variable controls log level
-    let format = tracing_subscriber::fmt::format()
-        .with_level(true)
-        .with_target(true) // Show module path where log originated
+fn create_tracing_subscriber() -> TracerProvider {
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .expect("Failed to build OTLP exporter");
+
+    let provider = TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+            "service.name",
+            "tycho-solver",
+        )]))
+        .build();
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
         .compact();
-    tracing_subscriber::fmt()
-        .event_format(format)
-        .with_env_filter(EnvFilter::from_default_env())
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(otel_layer)
         .init();
+
+    provider
 }
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
@@ -144,6 +164,7 @@ async fn setup_solver(cli: &Cli) -> Result<fynd::builder::Fynd, SolverError> {
 
 #[tokio::main]
 async fn run_solver(cli: Cli) -> Result<(), SolverError> {
+    let provider = create_tracing_subscriber();
     info!("Starting Fynd");
 
     let _metrics_task = create_metrics_exporter();
@@ -195,5 +216,6 @@ async fn run_solver(cli: Cli) -> Result<(), SolverError> {
         }
     }
 
+    let _ = provider.shutdown();
     Ok(())
 }

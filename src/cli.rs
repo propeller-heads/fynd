@@ -22,7 +22,7 @@ pub struct Cli {
     #[arg(long, default_value_t = defaults::HTTP_PORT, env)]
     pub http_port: u16,
 
-    /// Tycho WebSocket URL
+    /// Tycho WebSocket URL (default: tycho-beta.propellerheads.xyz)
     #[arg(long, default_value = "localhost:4242", env)]
     pub tycho_url: String,
 
