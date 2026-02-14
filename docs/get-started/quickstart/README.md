@@ -22,7 +22,7 @@ layout:
 
 ## Run Fynd
 
-Get Fynd running locally and configured for your use case. This guide covers building, running, and tuning the solver - no code changes required.
+Get Fynd running locally. This guide covers building, running, and tuning the solver. No code changes required.
 
 ### Prerequisites
 
@@ -57,7 +57,7 @@ cargo run --release -- \
   --min-tvl 50 
 ```
 
-The full list of available protocols is available [here](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
+See the full [list of available protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
 
 Once running, Fynd:
 
@@ -66,12 +66,12 @@ Once running, Fynd:
 3. Starts the HTTP API on `http://localhost:3000`
 
 {% hint style="info" %}
-Wait for \`[/v1/health](../overview/api-specifications.md#get-v1-health)\` endpoint to confirm its ready before you send orders
+Wait for the [`/v1/health`](../overview/api-specifications.md#get-v1-health) endpoint to return healthy before sending orders.
 {% endhint %}
 
 #### 3.1 Including RFQ Protocols
 
-You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
+Include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
 
 ```bash
 cargo run --release -- \
@@ -82,11 +82,11 @@ cargo run --release -- \
 
 **Limitations:**
 
-* RFQ protocols cannot run alone — at least one on-chain protocol is required.
+* RFQ protocols cannot run alone. At least one on-chain protocol is required.
 
 **Environment variables:**
 
-* RFQ protocols typically require API keys, which are passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
+* RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
 #### 3.2 Check Solver Health
 
@@ -94,11 +94,11 @@ cargo run --release -- \
 curl http://localhost:3000/v1/health
 ```
 
-Returns `"healthy":true` when it's ready to receive requests.&#x20;
+Returns `"healthy":true` when ready to receive requests.&#x20;
 
 ### 4. Submit a solve request
 
-Get the quote for **1** **WETH** -> **USDC** (or any other pair / value you want)
+Get the quote for **1 WETH -> USDC** (or any pair/amount you want):
 
 ```bash
 curl -X POST http://localhost:3000/v1/solve \
@@ -129,11 +129,11 @@ The response includes the optimal route, amounts, gas estimates, and the net out
 </code></pre></td><td>Return early after <strong>N</strong> solver pools respond. If set to <code>null</code> - it will wait for all solver pools respond until timeout. </td></tr><tr><td><pre><code>options.max_gas
 </code></pre></td><td>Discard routes above this gas limit</td></tr></tbody></table>
 
-Read more about the interfaces on: [api-specifications.md](../overview/api-specifications.md "mention")&#x20;
+Full interface details: [api-specifications.md](../overview/api-specifications.md "mention")&#x20;
 
 ### 5. Configuration
 
-You can tune Fynd behavior by using the following flags:
+Tune Fynd with the following flags:
 
 #### Required
 
@@ -147,7 +147,7 @@ Run `cargo run --release -- --help`  for the full list.
 
 #### 5.1 - Worker pools file (`worker_pools.toml`)
 
-Worker pools control how many solver threads run and what routing strategies they use. The default config ships with two pools:
+Worker pools control solver thread count and routing strategies. The default config ships with two pools:
 
 ```toml
 # worker_pools.toml
@@ -167,7 +167,7 @@ max_hops = 3
 timeout_ms = 5000
 ```
 
-Both pools solve every incoming order in parallel. The system picks the best result across pools within the timeout.
+Both pools solve every incoming order in parallel. Fynd picks the best result across pools within the timeout.
 
 **Worker Pool Configuration:**
 
@@ -198,7 +198,7 @@ cargo run --release -- \
 
 #### 5.1 Blacklist (`blacklist.toml`)
 
-Exclude specific components from routing. This is useful for components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)):
+Exclude specific components from routing, useful for components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)):
 
 ```toml
 [blacklist]
@@ -229,8 +229,8 @@ RUST_LOG=info,tycho_solver=trace cargo run --release -- ...
 
 #### Prometheus Metrics
 
-Metrics are exposed at `http://localhost:9898/metrics` (always on). Scrape this endpoint with Prometheus or any compatible monitoring tool. Available metrics include solve duration, response counts, failure types, and pool performance.
+Metrics are exposed at `http://localhost:9898/metrics` (always on). Scrape this endpoint with Prometheus or any compatible tool. Available metrics: solve duration, response counts, failure types, and pool performance.
 
 ### 7. Validating and Executing the Solutions
 
-The repository includes a full end-to-end example at [`examples/quickstart/`](https://github.com/propeller-heads/fynd/tree/main/examples/quickstart) that demonstrates quoting, simulating, and executing swaps against a running solver. The guide on how to run it is available on [executing-the-solutions.md](executing-the-solutions.md "mention")
+The repository includes an end-to-end example at [`examples/quickstart/`](https://github.com/propeller-heads/fynd/tree/main/examples/quickstart) that demonstrates quoting, simulating, and executing swaps against a running solver. See [executing-the-solutions.md](executing-the-solutions.md "mention") for the full walkthrough.

@@ -2,20 +2,20 @@
 
 ## Overview
 
-Fynd is a high-performance solver built on Tycho for finding optimal swap routes across multiple DeFi protocols.
+Fynd is a solver built on Tycho that finds optimal swap routes across DeFi protocols.
 
 ## Design Decisions
 
 - **Concurrency Model**: RwLock upgrade (simpler, sufficient for initial load)
-- **Path-Finding**: Flexible algorithm architecture with generic graph types, originally shipped with MostLiquid algorithm
-- **Graph Management**: Algorithms specify their graph type and graph manager via associated types, allowing different graph crates (petgraph, custom, etc.)
+- **Path-Finding**: Flexible algorithm architecture with generic graph types. Ships with MostLiquid algorithm.
+- **Graph Management**: Algorithms specify their graph type and graph manager via associated types, supporting different graph crates (petgraph, custom, etc.)
 - **Scope**: Production-ready (tracing, metrics, proper error types, token filtering)
 - **Multi-Solver**: Shared data model with stateless algorithms
-- **Output Format**: Structured Solution (not calldata) - encoding is separate concern
-- **Order Manager**: Orchestration layer that fans out orders to multiple solver pools, manages timeouts, and selects the best solution
-- **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime), each pool dedicated to one algorithm type
-- **Event Bus**: Broadcast channel for market updates to Solvers
-- **Market Topology**: Simple HashMap<ComponentId, Vec<Address>> representation, algorithms build their preferred graph structure
+- **Output Format**: Structured Solution (not calldata). Encoding is a separate concern.
+- **Order Manager**: Fans out orders to multiple solver pools, manages timeouts, selects the best solution
+- **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime). Each pool runs one algorithm type.
+- **Event Bus**: Broadcast channel for market updates to solvers
+- **Market Topology**: Simple `HashMap<ComponentId, Vec<Address>>` representation. Algorithms build their preferred graph structure.
 
 ---
 
@@ -106,7 +106,7 @@ Fynd is a high-performance solver built on Tycho for finding optimal swap routes
 
 **File:** `src/api/`
 
-**Responsibility:** Accept HTTP requests, validate input, delegate to OrderManager, return responses.
+**Responsibility:** Accepts HTTP requests, validates input, delegates to OrderManager, returns responses.
 
 **Endpoints:**
 
@@ -120,7 +120,7 @@ Fynd is a high-performance solver built on Tycho for finding optimal swap routes
 
 **File:** `src/order_manager/`
 
-**Responsibility:** Orchestrate multiple solver pools to find the best solution for each order.
+**Responsibility:** Orchestrates multiple solver pools to find the best solution for each order.
 
 ```rust
 pub struct OrderManager {
@@ -142,7 +142,7 @@ pub struct SolverPoolHandle {
 
 **Key Features:**
 
-1. **Fan-out**: Sends each order to ALL solver pools in parallel (V1 simplification; future versions may use smarter distribution)
+1. **Fan-out**: Sends each order to all solver pools in parallel
 2. **Timeout**: Configurable deadline per request (can be overridden via `SolutionOptions`)
 3. **Early Return**: If `min_responses > 0`, returns as soon as N solvers respond
 4. **Best Selection**: Chooses solution with highest `amount_out_net_gas`
@@ -154,9 +154,9 @@ pub struct SolverPoolHandle {
 
 **File:** `src/task_queue.rs`
 
-**Responsibility:** Buffer solve requests, provide backpressure, distribute to workers within a pool.
+**Responsibility:** Buffers solve requests, provides backpressure, distributes to workers within a pool.
 
-Each WorkerPool has its own TaskQueue, providing independent backpressure per algorithm.
+Each WorkerPool has its own TaskQueue for independent backpressure per algorithm.
 
 ```rust
 pub struct TaskQueueHandle {
@@ -174,7 +174,7 @@ impl TaskQueueHandle {
 
 **File:** `src/worker_pool.rs`
 
-**Responsibility:** Manage dedicated compute threads for a single algorithm type. Each pool has its own TaskQueue and SolverWorkers.
+**Responsibility:** Manages dedicated compute threads for a single algorithm type. Each pool has its own TaskQueue and SolverWorkers.
 
 ```rust
 pub struct WorkerPool {
@@ -205,7 +205,7 @@ Algorithms are registered in `src/algorithm/registry.rs`. To add a new algorithm
 
 **File:** `src/feed/market_data.rs`
 
-**Responsibility:** Single source of truth for all market data. Updated by TychoFeed only.
+**Responsibility:** Single source of truth for all market data. Only TychoFeed writes to it.
 
 ```rust
 pub struct SharedMarketData {
@@ -225,7 +225,7 @@ pub struct SharedMarketData {
 }
 ```
 
-The `SharedMarketData::component_topology()` function returns a simple mapping from component IDs to their token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., petgraph::UnGraph).
+`SharedMarketData::component_topology()` returns a mapping from component IDs to token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., `petgraph::UnGraph`).
 
 ---
 
@@ -235,11 +235,9 @@ The `SharedMarketData::component_topology()` function returns a simple mapping f
 
 **Responsibility:** Graph management infrastructure for algorithms.
 
-**Components:**
-
-- **GraphManager trait**: Defines interface for building and updating graphs from component topology
-- **Edge & Path types**: Shared types for representing graph edges and paths
-- **PetgraphStableDiGraphManager**: Implementation for petgraph::stable_graph::StableDiGraph
+- **GraphManager trait**: Interface for building and updating graphs from component topology
+- **Edge & Path types**: Shared types for graph edges and paths
+- **PetgraphStableDiGraphManager**: Implementation for `petgraph::stable_graph::StableDiGraph`
 
 ```rust
 pub trait GraphManager<G>: Send + Sync {
@@ -255,7 +253,7 @@ pub trait GraphManager<G>: Send + Sync {
 }
 ```
 
-Algorithms specify their graph type and graph manager via associated types, allowing them to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms from graph libraries.
+Algorithms specify their graph type and manager via associated types, so they can use different graph crates and their built-in algorithms.
 
 ---
 
@@ -263,7 +261,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 **File:** `src/feed/tycho_feed.rs`
 
-**Responsibility:** Connect to Tycho Stream, update SharedMarketData, broadcast events.
+**Responsibility:** Connects to Tycho Stream, updates SharedMarketData, broadcasts events.
 
 ---
 
@@ -271,7 +269,7 @@ Algorithms specify their graph type and graph manager via associated types, allo
 
 **File:** `src/feed/events.rs`
 
-**Responsibility:** Define events broadcast from TychoFeed to SolverWorkers.
+**Responsibility:** Events broadcast from TychoFeed to SolverWorkers.
 
 ```rust
 pub enum MarketEvent {
@@ -290,9 +288,9 @@ pub enum MarketEvent {
 
 **File:** `src/worker.rs`
 
-**Responsibility:** Initialize graph on startup, subscribe to events, execute algorithm.
+**Responsibility:** Initializes graph on startup, subscribes to events, executes algorithm.
 
-The solver worker is generic over the algorithm type and automatically infers the graph type and graph manager from the algorithm's associated types.
+The solver worker is generic over the algorithm type and infers the graph type and graph manager from the algorithm's associated types.
 
 ```rust
 pub struct SolverWorker<A>
@@ -309,7 +307,7 @@ where
 }
 ```
 
-The solver worker initializes the graph on startup by reading the component topology from SharedMarketData and calling `graph_manager.initialize_graph()`. The graph manager then maintains the graph internally and updates it based on market events. When solving, the solver worker gets the graph from the graph manager via `graph_manager.graph()`.
+On startup, the solver worker reads the component topology from SharedMarketData and calls `graph_manager.initialize_graph()`. The graph manager maintains the graph and updates it on market events. When solving, the worker reads the graph via `graph_manager.graph()`.
 
 ---
 
@@ -317,9 +315,9 @@ The solver worker initializes the graph on startup by reading the component topo
 
 **File:** `src/algorithm/`
 
-**Responsibility:** Define interface for route-finding algorithms.
+**Responsibility:** Interface for route-finding algorithms.
 
-Algorithms specify their graph type and graph manager via associated types, allowing them to use different graph crates and leverage built-in algorithms.
+Algorithms specify their graph type and manager via associated types, so they can use different graph crates and their built-in algorithms.
 
 ```rust
 pub trait Algorithm: Send + Sync {
@@ -363,11 +361,10 @@ impl Algorithm for MostLiquidAlgorithm {
 
 **Key Design Points:**
 
-- Algorithms are **stateless** - they receive graphs as parameters
-- Each algorithm specifies its preferred graph type and graph manager via associated types
-- The solver worker automatically creates the graph manager using `Default::default()`
-- Graph managers handle converting `HashMap<ComponentId, Vec<Address>>` to the algorithm's graph type
-- This allows algorithms to use different graph crates (petgraph, custom, etc.) and leverage built-in algorithms
+- Algorithms are **stateless**: they receive graphs as parameters
+- Each algorithm specifies its graph type and manager via associated types
+- The solver worker creates the graph manager using `Default::default()`
+- Graph managers convert `HashMap<ComponentId, Vec<Address>>` to the algorithm's graph type
 
 ---
 
