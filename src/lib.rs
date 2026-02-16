@@ -1,4 +1,4 @@
-//! Tycho Solver - A high-performance DEX solver built on Tycho.
+//! Fynd - A high-performance DEX solver built on Tycho.
 //!
 //! This crate provides a production-ready DEX solver that:
 //! - Finds optimal swap routes across multiple protocols
@@ -35,7 +35,7 @@
 //! # Example Usage
 //!
 //! ```ignore
-//! use tycho_solver::{parse_chain, PoolConfig, TychoSolverBuilder};
+//! use fynd::{parse_chain, PoolConfig, FyndBuilder};
 //! use std::collections::HashMap;
 //!
 //! // Parse chain
@@ -53,10 +53,10 @@
 //! });
 //!
 //! // Build and run solver
-//! let solver = TychoSolverBuilder::new(
+//! let solver = FyndBuilder::new(
 //!     chain,
 //!     pools,
-//!     "wss://tycho.propellerheads.xyz".to_string(),
+//!     "wss://tycho-beta.propellerheads.xyz".to_string(),
 //!     "https://eth.llamarpc.com".to_string(),
 //!     vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
 //! )
@@ -83,7 +83,7 @@ pub mod worker_pool;
 // Re-export commonly used types at crate root (public API)
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
-pub use builder::{parse_chain, TychoSolver, TychoSolverBuilder};
+pub use builder::{parse_chain, Fynd, FyndBuilder};
 pub use config::{PoolConfig, WorkerPoolsConfig};
 pub use derived::{
     ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,

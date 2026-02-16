@@ -1,6 +1,6 @@
-//! Quickstart-specific types and conversion traits.
+//! Tutorial-specific types and conversion traits.
 //!
-//! This module contains types specific to the quickstart example:
+//! This module contains types specific to the tutorial example:
 //! - Tenderly simulation types
 //! - Conversion trait for solver to execution swaps
 
@@ -65,7 +65,7 @@ pub struct TenderlyTransactionDetails {
 
 /// Trait for converting solver swaps to execution swaps.
 ///
-/// This trait bridges the gap between `tycho_solver::Swap` (which contains
+/// This trait bridges the gap between `fynd::Swap` (which contains
 /// route information) and `tycho_execution::encoding::models::Swap` (which
 /// contains execution details including the full ProtocolComponent).
 pub trait SwapToExecution {
@@ -79,7 +79,7 @@ pub trait SwapToExecution {
     ) -> tycho_execution::encoding::models::Swap;
 }
 
-impl SwapToExecution for tycho_solver::Swap {
+impl SwapToExecution for fynd::Swap {
     fn to_execution_swap(
         &self,
         component: &ProtocolComponent,

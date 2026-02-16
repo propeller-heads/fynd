@@ -4,11 +4,11 @@ use clap::Parser;
 
 use crate::config::defaults;
 
-/// Tycho Solver - High-performance DEX solver built on Tycho
+/// Fynd - High-performance DEX solver built on Tycho
 ///
 /// Finds optimal swap routes across multiple protocols using real-time market data.
 #[derive(Parser, PartialEq, Debug)]
-#[command(name = "tycho-solver", version, about, long_about = None)]
+#[command(name = "fynd", version, about, long_about = None)]
 pub struct Cli {
     /// Target chain (e.g. Ethereum)
     #[arg(short, long, default_value = "Ethereum")]
@@ -22,7 +22,7 @@ pub struct Cli {
     #[arg(long, default_value_t = defaults::HTTP_PORT, env)]
     pub http_port: u16,
 
-    /// Tycho WebSocket URL (default: tycho.propellerheads.xyz)
+    /// Tycho WebSocket URL (default: tycho-beta.propellerheads.xyz)
     #[arg(long, default_value = "localhost:4242", env)]
     pub tycho_url: String,
 
@@ -91,7 +91,7 @@ mod cli_tests {
     #[test]
     fn test_arg_parsing() {
         let cli = Cli::try_parse_from(vec![
-            "tycho-solver",
+            "fynd",
             "--chain",
             "Ethereum",
             "--http-host",
@@ -127,7 +127,7 @@ mod cli_tests {
     #[test]
     fn test_arg_parsing_defaults() {
         let cli = Cli::try_parse_from(vec![
-            "tycho-solver",
+            "fynd",
             "--rpc-url",
             "https://rpc.example.com",
             "--protocols",
@@ -153,7 +153,7 @@ mod cli_tests {
     #[test]
     fn test_arg_parsing_default_worker_pools() {
         let cli = Cli::try_parse_from(vec![
-            "tycho-solver",
+            "fynd",
             "--tycho-api-key",
             "test-key",
             "--rpc-url",
@@ -169,7 +169,7 @@ mod cli_tests {
     #[test]
     fn test_arg_parsing_missing_required_args() {
         // rpc_url required
-        let args = Cli::try_parse_from(vec!["tycho-solver", "--protocols", "uniswap_v2"]);
+        let args = Cli::try_parse_from(vec!["fynd", "--protocols", "uniswap_v2"]);
         assert!(args.is_err());
     }
 }

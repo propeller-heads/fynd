@@ -1,0 +1,66 @@
+services:
+  tycho-solver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+      - "9898:9898"
+    volumes:
+      - ./worker_pools.toml:/etc/tycho-solver/worker_pools.toml:ro
+      - ./blacklist.toml:/etc/tycho-solver/blacklist.toml:ro
+    environment:
+      - RPC_URL=${RPC_URL}
+      - TYCHO_API_KEY=${TYCHO_API_KEY:-}
+      - TYCHO_URL=${TYCHO_URL:-tycho-beta.propellerheads.xyz}
+      - WORKER_POOLS_CONFIG=/etc/tycho-solver/worker_pools.toml
+      - BLACKLIST_CONFIG=/etc/tycho-solver/blacklist.toml
+      - RUST_LOG=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+    depends_on:
+      - tempo
+    command:
+      - "--chain"
+      - "${CHAIN:-Ethereum}"
+      - "--protocols"
+      - "${PROTOCOLS:-uniswap_v2,uniswap_v3}"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - tycho-solver
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+    volumes:
+      - ./monitoring/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    command: ["-config.file=/etc/tempo.yml"]
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  tempo-data:

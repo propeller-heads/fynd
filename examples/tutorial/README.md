@@ -1,4 +1,4 @@
-# Quickstart: Quote, Simulate & Execute Swaps
+# Tutorial: Quote, Simulate & Execute Swaps
 
 This example demonstrates how to interact with an already-running tycho-router solver to get swap quotes, and optionally simulate or execute those swaps on-chain using tycho-execution.
 
@@ -27,7 +27,7 @@ This example demonstrates how to interact with an already-running tycho-router s
 | `TENDERLY_ACCOUNT` | For Tenderly | Tenderly account slug |
 | `TENDERLY_PROJECT` | For Tenderly | Tenderly project slug |
 
-## Quick Start
+## Tutorial
 
 ### 1. Start the solver
 
@@ -47,7 +47,7 @@ In another terminal:
 ```bash
 export TYCHO_URL=tycho-beta.propellerheads.xyz
 export TYCHO_API_KEY=your_api_key
-cargo run --example quickstart -- --sell-amount 100
+cargo run --example tutorial -- --sell-amount 100
 ```
 
 This will display a quote for swapping 100 USDC to WETH (default tokens). You can customize the in/out tokens with
@@ -58,7 +58,7 @@ This will display a quote for swapping 100 USDC to WETH (default tokens). You ca
 Use `--sender` to simulate as any address without exposing a private key:
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
-cargo run --example quickstart -- \
+cargo run --example tutorial -- \
   --sell-amount 100 \
   --simulate-only \
   --sender 0xYourAddressHere
@@ -72,7 +72,7 @@ For full Permit2 simulation with signature:
 ```bash
 export PRIVATE_KEY=your_private_key_hex
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
-cargo run --example quickstart -- \
+cargo run --example tutorial -- \
   --sell-amount 100 \
   --simulate-only
 ```
@@ -83,7 +83,7 @@ cargo run --example quickstart -- \
 export TENDERLY_ACCESS_KEY=your_tenderly_key
 export TENDERLY_ACCOUNT=your_account
 export TENDERLY_PROJECT=your_project
-cargo run --example quickstart -- \
+cargo run --example tutorial -- \
   --sell-amount 100 \
   --simulate-only \
   --use-tenderly
@@ -93,7 +93,7 @@ cargo run --example quickstart -- \
 
 ```bash
 export PRIVATE_KEY=your_private_key_hex
-cargo run --example quickstart -- --sell-amount 10
+cargo run --example tutorial -- --sell-amount 10
 ```
 
 You'll be prompted to choose: Simulate, Execute, or Cancel.
@@ -101,7 +101,7 @@ You'll be prompted to choose: Simulate, Execute, or Cancel.
 ### 7. Custom tokens and protocols
 
 ```bash
-cargo run --example quickstart -- \
+cargo run --example tutorial -- \
   --sell-token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
   --buy-token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
   --sell-amount 1000 \

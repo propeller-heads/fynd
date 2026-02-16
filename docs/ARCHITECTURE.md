@@ -1,8 +1,8 @@
-# Tycho Solver Architecture
+# Fynd Architecture
 
 ## Overview
 
-Tycho Solver is a high-performance route-finding engine built on Tycho for discovering optimal swap routes across multiple DeFi protocols. It maintains real-time market state via Tycho Stream, runs pluggable algorithms on dedicated OS threads, and exposes results through a REST API.
+Fynd is a high-performance solver built on Tycho for finding optimal swap routes across multiple DeFi protocols.
 
 ## Design Decisions
 

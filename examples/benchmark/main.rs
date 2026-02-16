@@ -7,15 +7,15 @@ use std::time::Instant;
 use clap::Parser;
 use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
+use fynd::HealthStatus;
 use runner::{run_benchmark, RunnerResults};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use tycho_solver::HealthStatus;
 
-/// Benchmark tool for measuring tycho-solver performance
+/// Benchmark tool for measuring fynd's performance
 #[derive(Parser, Debug)]
 #[command(name = "benchmark")]
-#[command(about = "Benchmark tycho-solver with various parallelization strategies", long_about = None)]
+#[command(about = "Benchmark fynd with various parallelization strategies", long_about = None)]
 struct Cli {
     /// Solver URL to benchmark against
     #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]

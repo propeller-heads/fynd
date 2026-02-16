@@ -33,7 +33,9 @@ pub enum ApiError {
 /// Error response body.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
+    #[schema(example = "bad request: no orders provided")]
     pub error: String,
+    #[schema(example = "BAD_REQUEST")]
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,

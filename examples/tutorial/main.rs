@@ -1,4 +1,4 @@
-//! Quickstart Example: Quote, Simulate & Execute Swaps
+//! Tutorial Example: Quote, Simulate & Execute Swaps
 //!
 //! This example demonstrates how to:
 //! 1. Call an already-running tycho-router solver for a swap quote
@@ -27,6 +27,9 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
+use fynd::types::solution::OrderSide;
+// Import solver types directly
+use fynd::{parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
@@ -48,19 +51,14 @@ use tycho_simulation::{
     },
     utils::load_all_tokens,
 };
-use tycho_solver::types::solution::OrderSide;
-// Import solver types directly
-use tycho_solver::{
-    parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest,
-};
-// Import quickstart-specific types
+// Import tutorial-specific types
 use types::{
     SwapToExecution, TenderlySimulation, TenderlySimulationRequest, TenderlySimulationResponse,
 };
 
-/// Quickstart CLI: Quote, simulate, and execute swaps via tycho-router
+/// Tutorial CLI: Quote, simulate, and execute swaps via tycho-router
 #[derive(Parser)]
-#[command(name = "quickstart")]
+#[command(name = "tutorial")]
 #[command(about = "Get quotes from tycho-router and optionally simulate/execute swaps")]
 struct Cli {
     /// Sell token address (defaults to USDC on the mainnet)
@@ -571,7 +569,7 @@ fn display_quote(
     for order in &quote.orders {
         println!("Status: {:?}", order.status);
 
-        if !matches!(order.status, tycho_solver::SolutionStatus::Success) {
+        if !matches!(order.status, fynd::SolutionStatus::Success) {
             println!("No route found for this order.");
             continue;
         }

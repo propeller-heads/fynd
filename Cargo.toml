@@ -1,5 +1,5 @@
 [package]
-name = "tycho-solver"
+name = "fynd"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance DEX router built on Tycho"
@@ -32,10 +32,14 @@ anyhow = "1"
 
 # Observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
+tracing-opentelemetry = "0.28"
 tracing-actix-web = "0.7"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.12"
+metrics-exporter-prometheus = "0.16"
 
 # Tycho
 tycho-simulation = ">=0.234.0"
@@ -70,5 +74,5 @@ futures = "0.3"
 hex = "0.4"
 
 [[example]]
-name = "quickstart"
-path = "examples/quickstart/main.rs"
+name = "tutorial"
+path = "examples/tutorial/main.rs"
