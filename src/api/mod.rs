@@ -49,6 +49,10 @@ use crate::{
         BlockInfo,
         HealthStatus,
         ErrorResponse,
+        // Encoding wrapper types
+        crate::types::encoding::EncodedSolution,
+        crate::types::encoding::PermitSingle,
+        crate::types::encoding::PermitDetails,
     ))
 )]
 pub struct ApiDoc;

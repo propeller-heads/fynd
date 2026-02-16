@@ -24,6 +24,7 @@ use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token:
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::encoding::EncodedSolution;
 use super::primitives::ComponentId;
 use crate::AlgorithmError;
 
@@ -60,6 +61,7 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    pub include_encoding: bool,
 }
 
 /// A single swap order to be solved.
@@ -226,6 +228,7 @@ pub struct OrderSolution {
     #[serde(skip)]
     #[schema(ignore)]
     pub algorithm: String,
+    pub encoded_solution: Option<EncodedSolution>,
 }
 
 /// Status of an order solution.

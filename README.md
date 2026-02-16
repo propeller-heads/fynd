@@ -73,7 +73,8 @@ curl -X POST http://localhost:3000/v1/solve \
       }
     ],
     "options": {
-      "timeout_ms": 5000
+      "timeout_ms": 5000,
+      "include_encoding": false
     }
   }'
 ```

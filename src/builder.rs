@@ -4,6 +4,9 @@ use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
+use tycho_execution::encoding::{
+    evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry, models::UserTransferType,
+};
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
@@ -11,6 +14,7 @@ use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, BlacklistConfig, PoolConfig},
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
+    encoding::encoder::Encoder,
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
@@ -50,6 +54,7 @@ pub struct FyndBuilder {
     order_manager_min_responses: usize,
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
+    user_transfer_type: UserTransferType,
 }
 
 impl FyndBuilder {
@@ -79,6 +84,7 @@ impl FyndBuilder {
             order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
+            user_transfer_type: UserTransferType::TransferFrom,
         }
     }
 
@@ -151,6 +157,12 @@ impl FyndBuilder {
     /// Sets the blacklist configuration for filtering components.
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.blacklist = blacklist;
+        self
+    }
+
+    /// Sets user transfer type (to use during encoding)
+    pub fn user_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
+        self.user_transfer_type = transfer_type;
         self
     }
 
@@ -273,10 +285,22 @@ impl FyndBuilder {
                 .await;
         });
 
+        // TODO: add default_encoders to builder
+        let swap_encoder_registry = SwapEncoderRegistry::new(self.chain)
+            .add_default_encoders(None)
+            .expect("Failed to get default SwapEncoderRegistry");
+
+        let encoder = Encoder::new(
+            self.chain,
+            self.user_transfer_type,
+            swap_encoder_registry,
+            Arc::clone(&market_data),
+        )?;
+
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)
             .with_min_responses(self.order_manager_min_responses);
-        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
+        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config, encoder);
 
         let app_state = AppState::new(order_manager, health_tracker);
 

@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod constants;
+pub mod encoding;
 pub mod internal;
 pub mod primitives;
 pub mod solution;

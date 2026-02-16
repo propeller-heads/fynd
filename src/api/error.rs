@@ -69,6 +69,7 @@ impl ResponseError for ApiError {
                 SolveError::InvalidOrder(_) => "INVALID_ORDER",
                 SolveError::Internal(_) => "INTERNAL_ERROR",
                 SolveError::NotReady(_) => "NOT_READY",
+                SolveError::FailedEncoding(_) => "FAILED ENCODING",
             },
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::Internal(_) => "INTERNAL_ERROR",

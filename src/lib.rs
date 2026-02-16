@@ -75,6 +75,7 @@ pub mod types;
 pub mod api;
 pub mod cli;
 pub mod derived;
+pub mod encoding;
 pub mod feed;
 pub mod graph;
 pub mod order_manager;

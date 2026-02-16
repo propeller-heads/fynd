@@ -23,9 +23,10 @@ use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
+    encoding::encoder::Encoder,
     types::{
         solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
         OrderSolution, Solution, SolutionStatus, SolveError,
@@ -67,12 +68,17 @@ pub struct OrderManager {
     solver_pools: Vec<SolverPoolHandle>,
     /// Configuration for the order manager.
     config: OrderManagerConfig,
+    encoder: Encoder,
 }
 
 impl OrderManager {
     /// Creates a new OrderManager with the given solver pools and config.
-    pub fn new(solver_pools: Vec<SolverPoolHandle>, config: OrderManagerConfig) -> Self {
-        Self { solver_pools, config }
+    pub fn new(
+        solver_pools: Vec<SolverPoolHandle>,
+        config: OrderManagerConfig,
+        encoder: Encoder,
+    ) -> Self {
+        Self { solver_pools, config, encoder }
     }
 
     /// Returns the number of registered solver pools.
@@ -108,7 +114,7 @@ impl OrderManager {
         let order_responses = futures::future::join_all(order_futures).await;
 
         // Select best solution for each order
-        let order_solutions: Vec<OrderSolution> = order_responses
+        let mut order_solutions: Vec<OrderSolution> = order_responses
             .into_iter()
             .map(|responses| self.select_best(&responses, &request.options))
             .collect();
@@ -120,6 +126,13 @@ impl OrderManager {
             .fold(BigUint::ZERO, |acc, g| acc + g);
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
+
+        if request.options.include_encoding {
+            order_solutions = self
+                .encoder
+                .encode(order_solutions)
+                .await?;
+        }
 
         Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
     }
@@ -311,6 +324,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: any_sol.block.clone(),
                 algorithm: String::new(),
+                encoded_solution: None,
             }
         } else {
             // No responses at all - determine status from failure types
@@ -355,6 +369,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
                 algorithm: String::new(),
+                encoded_solution: None,
             }
         }
     }
@@ -408,6 +423,7 @@ mod tests {
                 amount_out_net_gas: BigUint::from(amount_out_net_gas),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                 algorithm: "test".to_string(),
+                encoded_solution: None,
             },
             solve_time_ms: 5,
         }
@@ -598,6 +614,7 @@ mod tests {
             timeout_ms: None,
             min_responses: None,
             max_gas: max_gas.map(BigUint::from),
+            include_encoding: false,
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());

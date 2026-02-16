@@ -164,6 +164,7 @@ mod tests {
                 amount_out_net_gas: BigUint::from(990u64),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                 algorithm: "test".to_string(),
+                encoded_solution: None,
             },
             solve_time_ms: 5,
         }
