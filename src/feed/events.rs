@@ -19,7 +19,7 @@ pub(crate) enum MarketEvent {
     MarketUpdated {
         added_components: HashMap<ComponentId, Vec<Address>>,
         removed_components: Vec<ComponentId>,
-        #[allow(dead_code)]
+
         updated_components: Vec<ComponentId>,
     },
 }
@@ -30,10 +30,6 @@ pub(crate) enum EventError {
     /// Graph-related errors
     #[error("graph errors: {0:?}")]
     GraphErrors(Vec<GraphError>),
-    /// Invalid event data.
-    #[error("invalid event: {0}")]
-    #[allow(dead_code)]
-    InvalidEvent(String),
 }
 
 /// Trait for components that can receive market events.

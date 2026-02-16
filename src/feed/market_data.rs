@@ -27,10 +27,6 @@ use crate::types::{BlockInfo, ComponentId};
 /// Thread-safe handle to shared market data.
 pub type SharedMarketDataRef = Arc<RwLock<SharedMarketData>>;
 
-pub fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
-    Arc::new(RwLock::new(market))
-}
-
 /// Shared market data containing all component states and market information.
 ///
 /// This struct is the single source of truth for market data.
@@ -65,13 +61,18 @@ impl SharedMarketData {
         }
     }
 
+    /// Creates a new shared market data store for async computation tests that is wrapped in an
+    /// `Arc<RwLock<>>`.
+    pub fn new_shared() -> SharedMarketDataRef {
+        Arc::new(RwLock::new(Self::new()))
+    }
+
     /// Returns the block info for the last update.
     pub fn last_updated(&self) -> Option<&BlockInfo> {
         self.last_updated.as_ref()
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
-    #[allow(dead_code)]
     pub fn get_protocol_sync_status(&self, protocol_system: &String) -> Option<&SynchronizerState> {
         self.protocol_sync_status
             .get(protocol_system)

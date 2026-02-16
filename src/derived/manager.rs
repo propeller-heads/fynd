@@ -78,17 +78,6 @@ use crate::feed::{
 /// Thread-safe handle to shared derived data store.
 pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
 
-/// Creates a new shared derived data store for async computation tests.
-pub fn wrap_derived(store: DerivedData) -> SharedDerivedDataRef {
-    Arc::new(RwLock::new(store))
-}
-
-/// Creates a new shared derived data instance wrapped in Arc<RwLock<>>.
-#[allow(unused)] // TODO: remove when used, method added for parity with market data
-pub fn new_shared_derived_data() -> SharedDerivedDataRef {
-    wrap_derived(DerivedData::new())
-}
-
 /// Configuration for the ComputationManager.
 ///
 /// TODO: Consider making this a registry of computation configs using `Box<dyn ComputationConfig>`
@@ -167,7 +156,7 @@ impl ComputationManager {
         Ok((
             Self {
                 market_data,
-                store: wrap_derived(DerivedData::new()),
+                store: DerivedData::new_shared(),
                 token_price_computation: TokenGasPriceComputation::default()
                     .with_max_hops(config.max_hop)
                     .with_gas_token(config.gas_token),
@@ -192,7 +181,6 @@ impl ComputationManager {
     /// Runs the main loop until shutdown or channel close.
     ///
     /// **Note:** Consumes `self`. Call [`store()`](Self::store) before `run()` to retain access.
-    #[allow(unused)]
     pub(crate) async fn run(
         mut self,
         mut event_rx: broadcast::Receiver<MarketEvent>,
