@@ -242,7 +242,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// - If `bidirectional` is `true`, updates edges in both directions (token_in -> token_out and
     ///   token_out -> token_in).
     /// - If `bidirectional` is `false`, updates only the forward direction (token_in -> token_out).
-    #[cfg(test)] // Currently not used these are handled by the EdgeWeightUpdaterWithDerived trait
+    #[cfg(test)]
     pub(crate) fn set_edge_weight(
         &mut self,
         component_id: &ComponentId,

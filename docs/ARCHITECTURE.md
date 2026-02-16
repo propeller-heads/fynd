@@ -88,7 +88,7 @@ Tycho Solver is a high-performance route-finding engine built on Tycho for disco
                     ▼              ▼              ▼
               ┌──────────┐   ┌──────────┐   ┌──────────┐
               │SolverWkr │   │SolverWkr │   │SolverWkr │
-              │ GraphMgr │   │ GraphMgr │   │ GraphMgr │
+              │GraphMngr │   │GraphMngr │   │GraphMngr │
               │ updates  │   │ updates  │   │ updates  │
               │ graph    │   │ graph    │   │ graph    │
               │ on event │   │ on event │   │ on event │
