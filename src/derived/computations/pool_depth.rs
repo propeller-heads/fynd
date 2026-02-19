@@ -11,6 +11,8 @@
 //! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
@@ -23,8 +25,6 @@ use tycho_simulation::{
     },
     tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
 };
-
-use std::collections::HashSet;
 
 use crate::{
     derived::{
@@ -184,8 +184,7 @@ impl DerivedComputation for PoolDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
-        // Fetch all data needed for the computation under short-lived locks, then drop guards
-        // so the feed can consume the next message while we run the heavy loop.
+        // Fetch all data needed for the computation under short-lived locks, then drop guards.
         let (snapshot, spot_prices, mut pool_depths, components_to_compute) = {
             let market_guard = market.read().await;
             let store_guard = store.read().await;
@@ -225,7 +224,10 @@ impl DerivedComputation for PoolDepthComputation {
                     .collect()
             };
 
-            let component_ids: HashSet<ComponentId> = components_to_compute.iter().cloned().collect();
+            let component_ids: HashSet<ComponentId> = components_to_compute
+                .iter()
+                .cloned()
+                .collect();
             let snapshot: SharedMarketData = market_guard.extract_subset(&component_ids);
 
             (snapshot, spot_prices, pool_depths, components_to_compute)
