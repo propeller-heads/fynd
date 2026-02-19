@@ -497,11 +497,6 @@ mod tests {
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
     };
 
-    /// Helper to create a new shared derived data store for tests.
-    fn new_shared_derived_data() -> SharedDerivedDataRef {
-        Arc::new(tokio::sync::RwLock::new(DerivedData::new()))
-    }
-
     /// A minimal mock algorithm for testing the worker.
     /// Uses DepthAndPrice as the edge weight type to satisfy trait bounds.
     struct MockAlgorithm {
@@ -516,12 +511,6 @@ mod tests {
 
         fn with_requirements(mut self, requirements: ComputationRequirements) -> Self {
             self.requirements = requirements;
-            self
-        }
-
-        #[allow(dead_code)]
-        fn with_timeout(mut self, timeout: Duration) -> Self {
-            self.timeout = timeout;
             self
         }
     }
@@ -544,10 +533,6 @@ mod tests {
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
 
-        fn supports_exact_out(&self) -> bool {
-            false
-        }
-
         fn computation_requirements(&self) -> ComputationRequirements {
             self.requirements.clone()
         }
@@ -562,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn wait_until_ready_returns_immediately_when_no_requirements() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let algorithm = MockAlgorithm::new();
         let worker = SolverWorker::new(market, derived, algorithm, 0);
@@ -577,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn wait_until_ready_returns_immediately_when_already_ready() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .allow_stale(SpotPriceComputation::ID)
@@ -603,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn wait_until_ready_times_out_when_not_ready() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
@@ -629,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn wait_until_ready_wakes_up_on_notify() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
@@ -661,7 +646,7 @@ mod tests {
     #[tokio::test]
     async fn wait_until_ready_succeeds_when_notified_and_ready() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
@@ -703,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn notify_pattern_handles_multiple_waiters() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .allow_stale(TokenGasPriceComputation::ID)
@@ -749,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn worker_updates_tracker_and_notifies_on_derived_event() {
         let (market, _) = setup_market(vec![]);
-        let derived = new_shared_derived_data();
+        let derived = DerivedData::new_shared();
 
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)

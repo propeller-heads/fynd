@@ -367,8 +367,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{setup_market, token, MockProtocolSim},
-        derived::manager::wrap_derived,
-        feed::market_data::{wrap_market, SharedMarketData},
+        feed::market_data::SharedMarketData,
         DerivedData, PoolDepthKey, SpotPrices,
     };
 
@@ -410,8 +409,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_handles_empty_market() {
-        let market = wrap_market(SharedMarketData::new());
-        let derived = wrap_derived(DerivedData::new());
+        let market = SharedMarketData::new_shared();
+        let derived = DerivedData::new_shared();
         derived
             .try_write()
             .unwrap()
@@ -432,7 +431,7 @@ mod tests {
         let usdc = token(1, "USDC");
 
         let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
-        let derived = wrap_derived(DerivedData::new()); // No spot prices
+        let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
         let result = PoolDepthComputation::default()
@@ -549,7 +548,7 @@ mod tests {
             &usdc,
             MockProtocolSim::new(100).with_liquidity(1_000_000),
         )]);
-        let derived = wrap_derived(DerivedData::new());
+        let derived = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(

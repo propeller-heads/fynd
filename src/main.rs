@@ -42,37 +42,57 @@ pub enum SolverError {
     ShutdownError(String),
 }
 
-fn create_tracing_subscriber() -> TracerProvider {
-    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
-
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()
-        .expect("Failed to build OTLP exporter");
-
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-            "service.name",
-            "tycho-solver",
-        )]))
-        .build();
-
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
-
+fn create_tracing_subscriber() -> Option<TracerProvider> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .compact();
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(fmt_layer)
-        .with(otel_layer)
-        .init();
+    if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        match opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.clone())
+            .build()
+        {
+            Ok(exporter) => {
+                let provider = TracerProvider::builder()
+                    .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                    .with_resource(opentelemetry_sdk::Resource::new(vec![
+                        opentelemetry::KeyValue::new("service.name", "tycho-solver"),
+                    ]))
+                    .build();
 
-    provider
+                let otel_layer =
+                    tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
+
+                tracing_subscriber::registry()
+                    .with(EnvFilter::from_default_env())
+                    .with(fmt_layer)
+                    .with(otel_layer)
+                    .init();
+
+                info!("OpenTelemetry tracing enabled, exporting to: {}", endpoint);
+                Some(provider)
+            }
+            Err(e) => {
+                // Fall back to non-OTEL tracing if exporter fails
+                tracing_subscriber::registry()
+                    .with(EnvFilter::from_default_env())
+                    .with(fmt_layer)
+                    .init();
+
+                error!("Failed to build OTLP exporter: {}. Continuing without OTEL.", e);
+                None
+            }
+        }
+    } else {
+        // OTEL disabled, use only fmt layer
+        tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(fmt_layer)
+            .init();
+
+        None
+    }
 }
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
@@ -216,6 +236,8 @@ async fn run_solver(cli: Cli) -> Result<(), SolverError> {
         }
     }
 
-    let _ = provider.shutdown();
+    if let Some(provider) = provider {
+        let _ = provider.shutdown();
+    }
     Ok(())
 }

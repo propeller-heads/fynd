@@ -159,8 +159,8 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{token, MockProtocolSim},
-        derived::manager::new_shared_derived_data,
-        feed::market_data::{wrap_market, SharedMarketData},
+        feed::market_data::SharedMarketData,
+        DerivedData,
     };
 
     #[test]
@@ -170,8 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn handles_empty_market() {
-        let market_ref = wrap_market(SharedMarketData::new());
-        let derived_ref = new_shared_derived_data();
+        let market_ref = SharedMarketData::new_shared();
+        let derived_ref = DerivedData::new_shared();
         let changed = ChangedComponents::default();
 
         let output = SpotPriceComputation::new()

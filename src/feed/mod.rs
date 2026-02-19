@@ -36,10 +36,6 @@ pub(crate) struct TychoFeedConfig {
     /// threshold.
     /// Default is 1.1 (10% buffer).
     pub(crate) tvl_buffer_multiplier: f64,
-    /// RPC URL for the target chain.
-    /// Used to fetch gas prices.
-    #[allow(dead_code)] //TODO: remove this once we use it (for gas fetching)
-    pub(crate) rpc_url: String,
     /// Gas price refresh interval.
     /// Default is 30 seconds.
     pub(crate) gas_refresh_interval: Duration,
@@ -58,7 +54,6 @@ impl TychoFeedConfig {
         use_tls: bool,
         protocols: Vec<String>,
         min_tvl: f64,
-        rpc_url: String,
     ) -> Self {
         Self {
             tycho_url,
@@ -69,7 +64,6 @@ impl TychoFeedConfig {
             min_tvl,
             min_token_quality: 100,
             tvl_buffer_multiplier: 1.1,
-            rpc_url,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
             blacklisted_components: HashSet::new(),
@@ -107,11 +101,6 @@ impl TychoFeedConfig {
 pub(crate) enum DataFeedError {
     #[error("gas price fetcher error: {0}")]
     GasPriceFetcherError(String),
-
-    /// Market data lock error.
-    #[error("failed to acquire market data lock")]
-    #[allow(dead_code)]
-    LockError,
 
     /// Configuration error.
     #[error("configuration error: {0}")]

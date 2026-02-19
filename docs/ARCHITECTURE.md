@@ -6,16 +6,14 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
 
 ## Design Decisions
 
-- **Concurrency Model**: RwLock upgrade (simpler, sufficient for initial load)
-- **Path-Finding**: Flexible algorithm architecture with generic graph types. Ships with MostLiquid algorithm.
-- **Graph Management**: Algorithms specify their graph type and graph manager via associated types, supporting different graph crates (petgraph, custom, etc.)
-- **Scope**: Production-ready (tracing, metrics, proper error types, token filtering)
-- **Multi-Solver**: Shared data model with stateless algorithms
-- **Output Format**: Structured Solution (not calldata). Encoding is a separate concern.
-- **Order Manager**: Fans out orders to multiple solver pools, manages timeouts, selects the best solution
-- **Worker Pool**: Dedicated thread pool for CPU-bound solving (separate from HTTP runtime). Each pool runs one algorithm type.
-- **Event Bus**: Broadcast channel for market updates to solvers
-- **Market Topology**: Simple `HashMap<ComponentId, Vec<Address>>` representation. Algorithms build their preferred graph structure.
+- **Concurrency Model**: Hybrid async/threaded -- I/O on tokio, route finding on dedicated OS threads
+- **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for SharedMarketData (single writer, many readers)
+- **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its preferred graph representation
+- **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
+- **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager selects the best result
+- **Output Format**: Structured `Solution` objects (routes, amounts, gas estimates)
+- **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a separate computation framework
+- **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
 
 ---
 
@@ -25,9 +23,9 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           HTTP Layer (Actix Web)                            │
 │                         Async I/O - Non-blocking                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                           RouterApi                                  │   │
-│  │    POST /solve              GET /health             GET /metrics    │   │
+│  │    POST /v1/solve            GET /v1/health          GET /metrics    │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
@@ -48,13 +46,14 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
                     │                             │
                     ▼                             ▼
 ┌─────────────────────────────────┐ ┌─────────────────────────────────┐
-│  Worker Pool A (MostLiquid)     │ │  Worker Pool B (Future Algo)    │
+│  Worker Pool A                  │ │  Worker Pool B                  │
+│  (most_liquid, 2 hops, fast)    │ │  (most_liquid, 3 hops, deep)    │
 │  ┌───────────┐                  │ │  ┌───────────┐                  │
 │  │ TaskQueue │ (per-pool)       │ │  │ TaskQueue │ (per-pool)       │
 │  └─────┬─────┘                  │ │  └─────┬─────┘                  │
 │        │                        │ │        │                        │
 │  ┌─────┴─────┐  ┌───────────┐   │ │  ┌─────┴─────┐  ┌───────────┐   │
-│  │  Worker 1 │  │  Worker N │   │ │  │  Worker 1 │  │  Worker N │   │
+│  │  Worker 1 │  │  Worker N │   │ │  │  Worker 1 │  │  Worker M │   │
 │  │(SolverWkr)│  │(SolverWkr)│   │ │  │(SolverWkr)│  │(SolverWkr)│   │
 │  └───────────┘  └───────────┘   │ │  └───────────┘  └───────────┘   │
 └─────────────────────────────────┘ └─────────────────────────────────┘
@@ -65,14 +64,12 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
 ┌────────────────────────────────────────────────────────────────────────────────────┐
 │                         SharedMarketData (Arc<RwLock<>>)                           │
 │  ┌────────────────────────────────────────────────────────────────────────────┐    │
-│  │  component: HashMap<ComponentId, ComponentData>                            │    │
-│  │    └── component: ProtocolComponent                                        │    │
-│  │    └── state: Box<dyn ProtocolSim>    ← Heavy data, never cloned           │    │
-│  │    └── tokens: Vec<Token>                                                  │    │
+│  │  components: HashMap<ComponentId, ProtocolComponent>                       │    │
+│  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>             │    │
 │  │  tokens: HashMap<Address, Token>                                           │    │
-│  │  component_topology: HashMap<ComponentId, Vec<Address>>  ← Simple topology │    │
-│  │  gas_price: GasPrice                                                       │    │
-│  │  gas_constants: HashMap<ProtocolSystem, u64>                               │    │
+│  │  gas_price: Option<BlockGasPrice>                                          │    │
+│  │  protocol_sync_status: HashMap<String, SynchronizerState>                  │    │
+│  │  last_updated: Option<BlockInfo>                                           │    │
 │  └────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────▲─────────────────────────────────────────────────┘
                                    │ WRITE lock
@@ -80,9 +77,9 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
 ┌──────────────────────────────────┴──────────────────────────────────────────┐
 │                              TychoFeed                                      │
 │                     Background task (single instance)                       │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
 │                                   │                                         │
 │                                   ▼ broadcast::Sender<MarketEvent>          │
 └──────────────────────────────────┬──────────────────────────────────────────┘
@@ -90,281 +87,162 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
                     ┌──────────────┼──────────────┐
                     ▼              ▼              ▼
               ┌──────────┐   ┌──────────┐   ┌──────────┐
-              │SolverWorker│ │SolverWorker│ │SolverWorker│
-              │ GraphMgr │   │ GraphMgr │   │ GraphMgr │
+              │SolverWkr │   │SolverWkr │   │SolverWkr │
+              │GraphMngr │   │GraphMngr │   │GraphMngr │
               │ updates  │   │ updates  │   │ updates  │
               │ graph    │   │ graph    │   │ graph    │
               │ on event │   │ on event │   │ on event │
               └──────────┘   └──────────┘   └──────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                     Derived Data Pipeline                        │
+│                                                                  │
+│  TychoFeed events ──► ComputationManager                         │
+│                          │                                       │
+│                          ├─ SpotPriceComputation                 │
+│                          ├─ PoolDepthComputation (needs spots)   │
+│                          ├─ TokenGasPriceComputation(needs spots)│
+│                          │                                       │
+│                          ▼                                       │
+│                     DerivedData Store ──► broadcast events       │
+│                                              │                   │
+│                                    ┌─────────┼──────────┐        │
+│                                    ▼         ▼          ▼        │
+│                              Worker 1  Worker 2  Worker N        │
+│                              (update edge weights on graph)      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Components
 
-### 1. RouterApi (HTTP Layer)
+### 1. API Layer (RouterApi)
 
-**File:** `src/api/`
+**Location:** `src/api/`
 
-**Responsibility:** Accepts HTTP requests, validates input, delegates to OrderManager, returns responses.
+Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns JSON responses.
 
 **Endpoints:**
 
-- `POST /solve` - Submit solve requests
-- `GET /health` - Health check
-- `GET /info` - Service information
+- `POST /v1/solve` -- Submit solve requests
+- `GET /v1/health` -- Health check (data freshness + pool count)
+- `GET /metrics` -- Prometheus metrics (separate server, port 9898)
 
 ---
 
 ### 2. OrderManager
 
-**File:** `src/order_manager/`
+**Location:** `src/order_manager/`
 
-**Responsibility:** Orchestrates multiple solver pools to find the best solution for each order.
+Orchestrates solve requests across multiple worker pools:
 
-```rust
-pub struct OrderManager {
-    solver_pools: Vec<SolverPoolHandle>,
-    config: OrderManagerConfig,
-}
-
-pub struct OrderManagerConfig {
-    pub default_timeout: Duration,  // Default: 100ms
-    pub min_responses: usize,       // Default: 0 (wait for all)
-}
-
-pub struct SolverPoolHandle {
-    pub name: String,       // Human-readable pool name (for logging/metrics)
-    pub algorithm: String,  // Algorithm name
-    pub queue: TaskQueueHandle,
-}
-```
-
-**Key Features:**
-
-1. **Fan-out**: Sends each order to all solver pools in parallel
-2. **Timeout**: Configurable deadline per request (can be overridden via `SolutionOptions`)
-3. **Early Return**: If `min_responses > 0`, returns as soon as N solvers respond
-4. **Best Selection**: Chooses solution with highest `amount_out_net_gas`
-5. **Error Tracking**: Captures all solver failures with error types (timeout, no route, etc.)
+1. Fans out each order to all pools in parallel
+2. Manages per-request timeouts with optional early return
+3. Selects the best solution by `amount_out_net_gas`
+4. Reports failures with error types and metrics
 
 ---
 
-### 3. TaskQueue
+### 3. Worker Pool
 
-**File:** `src/task_queue.rs`
+**Location:** `src/worker_pool/`
 
-**Responsibility:** Buffers solve requests, provides backpressure, distributes to workers within a pool.
+Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 
-Each WorkerPool has its own TaskQueue for independent backpressure per algorithm.
+- A name and algorithm assignment
+- A bounded `TaskQueue` (via `async_channel`)
+- N `SolverWorker` instances on separate threads
 
-```rust
-pub struct TaskQueueHandle {
-    sender: mpsc::Sender<SolveTask>,
-}
-
-impl TaskQueueHandle {
-    pub async fn enqueue(&self, request: SolutionRequest) -> Result<Solution, SolveError>;
-}
-```
+Pools are configured via `worker_pools.toml`. Multiple pools can use the same algorithm with different parameters (e.g., fast 2-hop vs deep 3-hop).
 
 ---
 
-### 4. WorkerPool
+### 4. SolverWorker
 
-**File:** `src/worker_pool.rs`
+**Location:** `src/worker_pool/worker.rs`
 
-**Responsibility:** Manages dedicated compute threads for a single algorithm type. Each pool has its own TaskQueue and SolverWorkers.
+Each worker:
 
-```rust
-pub struct WorkerPool {
-    name: String,       // Human-readable pool name (for logging/metrics)
-    algorithm: String,  // Algorithm name (e.g., "most_liquid")
-    workers: Vec<JoinHandle<()>>,
-    shutdown_tx: broadcast::Sender<()>,
-}
-```
-
-Algorithms are registered in `src/algorithm/registry.rs`. To add a new algorithm:
-1. Implement the `Algorithm` trait
-2. Add a match arm in `spawn_workers()`
-3. Add the name to `AVAILABLE_ALGORITHMS`
-
-**Design Rationale (Queue per Pool):**
-
-| Aspect | Benefit |
-|--------|---------|
-| Independent backpressure | Slow algorithm doesn't block fast ones |
-| Independent scaling | Can have 8 workers for expensive algo, 2 for fast algo |
-| Clean isolation | Algorithm bugs don't affect other pools |
-| Easy extensibility | Add new algorithm = add new pool |
+1. Initializes a graph from market topology
+2. Runs a prioritized `select!` loop: shutdown > market events > derived events > solve tasks
+3. Maintains a `ReadinessTracker` for derived data requirements
+4. Calls the algorithm's `find_best_route` with the local graph and shared market data
 
 ---
 
-### 6. SharedMarketData
+### 5. Algorithm Trait
 
-**File:** `src/feed/market_data.rs`
+**Location:** `src/algorithm/`
 
-**Responsibility:** Single source of truth for all market data. Only TychoFeed writes to it.
+Pluggable interface for route-finding algorithms:
 
-```rust
-pub struct SharedMarketData {
-    /// All components indexed by their ID.
-    components: HashMap<ComponentId, ProtocolComponent>,
-    /// All states indexed by their component ID.
-    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
-    /// All tokens indexed by their address.
-    tokens: HashMap<Address, Token>,
-    /// Current gas price.
-    gas_price: GasPrice,
-    /// Protocol sync status indexed by their protocol system name.
-    protocol_sync_status: HashMap<String, SynchronizerState>,
-    /// Block info for the last update (only updated when protocols reported "Ready" status).
-    /// None if no block has been processed yet.
-    last_updated: Option<BlockInfo>,
-}
-```
+- Specifies preferred graph type and graph manager via associated types
+- Stateless: receives graph as parameter
+- Declares derived data requirements (fresh vs stale)
 
-`SharedMarketData::component_topology()` returns a mapping from component IDs to token addresses. Algorithms use their `GraphManager` to convert this into their preferred graph representation (e.g., `petgraph::UnGraph`).
+**Built-in:** `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
 
 ---
 
-### 7. Graph Module
+### 6. Graph Module
 
-**File:** `src/graph/`
+**Location:** `src/graph/`
 
-**Responsibility:** Graph management infrastructure for algorithms.
+Graph management infrastructure:
 
-- **GraphManager trait**: Interface for building and updating graphs from component topology
-- **Edge & Path types**: Shared types for graph edges and paths
-- **PetgraphStableDiGraphManager**: Implementation for `petgraph::stable_graph::StableDiGraph`
+- `GraphManager` trait: initialize + incremental updates from events
+- `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
+- `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (pool depths)
+- `Path` type: Sequence of edges for route representation
 
-```rust
-pub trait GraphManager<G>: Send + Sync {
-    /// Initializes the graph from the market topology.
-    /// Called once on solver startup.
-    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+---
 
-    /// Returns a reference to the managed graph.
-    fn graph(&self) -> &G;
+### 7. SharedMarketData
 
-    /// Updates the graph based on a market event.
-    fn handle_event(&mut self, event: &MarketEvent);
-}
-```
+**Location:** `src/feed/market_data.rs`
 
-Algorithms specify their graph type and manager via associated types, so they can use different graph crates and their built-in algorithms.
+Single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring).
+
+Provides `extract_subset()` for creating filtered snapshots that algorithms can use without holding the main lock.
 
 ---
 
 ### 8. TychoFeed
 
-**File:** `src/feed/tycho_feed.rs`
+**Location:** `src/feed/tycho_feed.rs`
 
-**Responsibility:** Connects to Tycho Stream, updates SharedMarketData, broadcasts events.
-
----
-
-### 9. MarketEvent (Event Bus)
-
-**File:** `src/feed/events.rs`
-
-**Responsibility:** Events broadcast from TychoFeed to SolverWorkers.
-
-```rust
-pub enum MarketEvent {
-    /// Market was updated.
-    MarketUpdated {
-        added_components: HashMap<ComponentId, Vec<Address>>,
-        removed_components: Vec<ComponentId>,
-        updated_components: Vec<ComponentId>,
-    }
-}
-```
+Background task that connects to Tycho's WebSocket API, processes component/state updates, updates SharedMarketData, and broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis, blacklisting, and token quality filtering.
 
 ---
 
-### 5. SolverWorker
+### 9. Derived Data System
 
-**File:** `src/worker.rs`
+**Location:** `src/derived/`
 
-**Responsibility:** Initializes graph on startup, subscribes to events, executes algorithm.
+Pre-computes analytics from raw market data:
 
-The solver worker is generic over the algorithm type and infers the graph type and graph manager from the algorithm's associated types.
+- `SpotPriceComputation`: Spot prices for all pool pairs
+- `PoolDepthComputation`: Liquidity depth at configured slippage
+- `TokenGasPriceComputation`: Token prices relative to gas token
 
-```rust
-pub struct SolverWorker<A>
-where
-    A: Algorithm,
-    A::GraphType: Send + Sync,
-    A::GraphManager: GraphManager<A::GraphType>,
-{
-    algorithm: A,
-    graph_manager: A::GraphManager,  // Maintains the graph internally
-    market_data: SharedMarketDataRef,
-    event_rx: broadcast::Receiver<MarketEvent>,
-    initialized: bool,
-}
-```
-
-On startup, the solver worker reads the component topology from SharedMarketData and calls `graph_manager.initialize_graph()`. The graph manager maintains the graph and updates it on market events. When solving, the worker reads the graph via `graph_manager.graph()`.
+Computations run in dependency order. Workers use `ReadinessTracker` to wait for required data before solving.
 
 ---
 
-### 11. Algorithm (Trait)
+### 10. Gas Price Fetcher
 
-**File:** `src/algorithm/`
+**Location:** `src/feed/gas.rs`
 
-**Responsibility:** Interface for route-finding algorithms.
+Background worker that fetches gas prices from the RPC node. Signaled by TychoFeed after each block update.
 
-Algorithms specify their graph type and manager via associated types, so they can use different graph crates and their built-in algorithms.
+---
 
-```rust
-pub trait Algorithm: Send + Sync {
-    /// The graph type this algorithm uses (e.g., petgraph::UnGraph<Address, Edge>)
-    type GraphType: Send + Sync;
+### 11. Builder
 
-    /// The graph manager type for this algorithm
-    type GraphManager: GraphManager<Self::GraphType> + Default;
+**Location:** `src/builder.rs`
 
-    fn name(&self) -> &str;
-    fn find_best_route(
-        &self,
-        graph: &Self::GraphType,
-        market: &SharedMarketData,
-        order: &Order,
-    ) -> Result<Route, AlgorithmError>;
-    fn supports_exact_out(&self) -> bool { false }
-    fn max_hops(&self) -> usize { 3 }
-    fn timeout(&self) -> Duration { Duration::from_millis(50) }
-}
-```
-
-**Example Implementation:**
-
-```rust
-impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = UnGraph<Address, Edge>;
-    type GraphManager = PetgraphStableDiGraphManager;
-
-    fn find_best_route(
-        &self,
-        graph: &Self::GraphType,
-        market: &SharedMarketData,
-        order: &Order,
-    ) -> Result<Route, AlgorithmError> {
-        // Use petgraph's built-in algorithms here!
-        // ...
-    }
-}
-```
-
-**Key Design Points:**
-
-- Algorithms are **stateless**: they receive graphs as parameters
-- Each algorithm specifies its graph type and manager via associated types
-- The solver worker creates the graph manager using `Default::default()`
-- Graph managers convert `HashMap<ComponentId, Vec<Address>>` to the algorithm's graph type
+`TychoSolverBuilder` assembles the entire system: creates feed, worker pools, computation manager, order manager, and HTTP server. `TychoSolver` runs the system and handles graceful shutdown.
 
 ---
 
@@ -373,108 +251,44 @@ impl Algorithm for MostLiquidAlgorithm {
 ### Solve Request Flow
 
 ```
-┌──────────┐    POST /solve   ┌───────────┐
-│  Client  │ ───────────────▶ │ RouterApi │
-└──────────┘                  └─────┬─────┘
-                                    │
-                              ┌─────▼─────┐
-                              │ Validate  │
-                              │ Request   │
-                              └─────┬─────┘
-                                    │
-                              ┌─────▼─────┐
-                              │  Order    │
-                              │  Manager  │
-                              └─────┬─────┘
-                                    │
-              ┌─────────────────────┼─────────────────────┐
-              │ Fan-out to all      │                     │
-              │ solver pools        │                     │
-              ▼                     ▼                     ▼
-     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-     │  Pool A Queue  │   │  Pool B Queue  │   │  Pool N Queue  │
-     │  (MostLiquid)  │   │  (Future Algo) │   │  (Future Algo) │
-     └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
-             │                    │                    │
-             ▼                    ▼                    ▼
-     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-     │    Workers     │   │    Workers     │   │    Workers     │
-     │    (Solvers)   │   │    (Solvers)   │   │    (Solvers)   │
-     └───────┬────────┘   └───────┬────────┘   └───────┬────────┘
-             │                    │                    │
-             └─────────────┬──────┴────────────────────┘
-                           │ Collect responses
-                           ▼
-                    ┌──────────────┐
-                    │ OrderManager │
-                    │ select_best()│
-                    │ by net_gas   │
-                    └──────┬───────┘
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │   Solution   │
-                    │   Response   │
-                    └──────────────┘
-```
-
-### Single Solver Flow (within a pool)
-
-```
-┌────────────────┐
-│  SolveTask     │
-│  from Queue    │
-└───────┬────────┘
-        │
-        ▼
-┌────────────────┐
-│    Solver      │
-│    .solve()    │
-└───────┬────────┘
-        │
-        ├─────────────────────┬─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-│ 1. Get graph   │   │ 2. Find paths  │   │ 3. Rank by     │
-│    from        │   │    in graph,   │   │    net output  │
-│    GraphManager│   │    read states │   │    (minus gas) │
-│    (maintained │   │    from        │   │                │
-│    internally) │   │    SharedData  │   │                │
-│                │   │    & simulate  │   │                │
-└────────────────┘   └────────────────┘   └────────────────┘
+Client POST /v1/solve
+    │
+    ▼
+RouterApi (validate)
+    │
+    ▼
+OrderManager (fan-out to all pools)
+    │
+    ├──► Pool A Queue ──► Worker ──► Algorithm ──► Solution
+    ├──► Pool B Queue ──► Worker ──► Algorithm ──► Solution
+    ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
+    │
+    ▼
+OrderManager (select best by amount_out_net_gas)
+    │
+    ▼
+JSON Response to Client
 ```
 
 ### Market Update Flow
 
 ```
-┌───────────┐
-│   Tycho   │
-│   Stream  │
-└─────┬─────┘
-      │ Update
-      ▼
-┌─────────────┐
-│  TychoFeed  │
-└────────┬────┘
-         │
-         ├────────────────────────────────────┐
-         │                                    │
-         ▼                                    ▼
-┌─────────────────────────┐         ┌─────────────────────┐
-│   SharedMarketData      │         │   Event Bus         │
-│   (WRITE lock)          │         │   broadcast::send() │
-└─────────────────────────┘         └──────────┬──────────┘
-                                               │
-                                    ┌──────────┼──────────┐
-                                    ▼          ▼          ▼
-                              ┌──────────┐┌──────────┐┌──────────┐
-                              │SolverWorker││SolverWorker││SolverWorker│
-                              │ GraphMgr ││ GraphMgr ││ GraphMgr │
-                              │ updates  ││ updates  ││ updates  │
-                              │ graph    ││ graph    ││ graph    │
-                              │ on event ││ on event ││ on event │
-                              └──────────┘└──────────┘└──────────┘
+Tycho WebSocket Stream
+    │
+    ▼
+TychoFeed
+    ├──► Write SharedMarketData (RwLock write)
+    ├──► Broadcast MarketEvent
+    │       ├──► Worker 1 GraphManager (update graph)
+    │       ├──► Worker 2 GraphManager (update graph)
+    │       └──► Worker N GraphManager (update graph)
+    └──► Trigger Gas Price Fetcher
+    └──► ComputationManager
+            ├──► SpotPriceComputation
+            ├──► PoolDepthComputation
+            ├──► TokenGasPriceComputation
+            └──► Broadcast DerivedDataEvent
+                    └──► Workers (update edge weights + readiness)
 ```
 
 ---
@@ -482,99 +296,28 @@ impl Algorithm for MostLiquidAlgorithm {
 ## Threading Model
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     Actix Runtime (async, I/O bound)                    │
-│                                                                         │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐               │
-│  │  HTTP Server  │  │   TychoFeed   │  │ OrderManager  │               │
-│  │   Handlers    │  │   Task        │  │ (async fanout)│               │
-│  └───────────────┘  └───────────────┘  └───────────────┘               │
-└─────────────────────────────────────────────────────────────────────────┘
+Actix/Tokio Runtime (async I/O)
+├── HTTP Server handlers
+├── TychoFeed (WebSocket client)
+├── OrderManager (async fan-out)
+├── Gas Price Fetcher
+└── Computation Manager
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│              Worker Pool A (dedicated OS threads, MostLiquid)           │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
-│  │   Thread 1      │  │   Thread 2      │  │   Thread N      │         │
-│  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
-│  │   │SolverWkr│   │  │   │SolverWkr│   │  │   │SolverWkr│   │         │
-│  │   │(graph   │   │  │   │(graph   │   │  │   │(graph   │   │         │
-│  │   │ manager │   │  │   │ manager │   │  │   │ manager │   │         │
-│  │   │maintains│   │  │   │maintains│   │  │   │maintains│   │         │
-│  │   │ graph)  │   │  │   │ graph)  │   │  │   │ graph)  │   │         │
-│  │   └─────────┘   │  │   └─────────┘   │  │   └─────────┘   │         │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
-└─────────────────────────────────────────────────────────────────────────┘
+Worker Pool A (dedicated OS threads)
+├── Thread 1: SolverWorker (local graph + single-thread tokio rt)
+├── Thread 2: SolverWorker
+└── Thread N: SolverWorker
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│              Worker Pool B (dedicated OS threads, Future Algo)          │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
-│  │   Thread 1      │  │   Thread 2      │  │   Thread M      │         │
-│  │   ┌─────────┐   │  │   ┌─────────┐   │  │   ┌─────────┐   │         │
-│  │   │SolverWkr│   │  │   │SolverWkr│   │  │   │SolverWkr│   │         │
-│  │   └─────────┘   │  │   └─────────┘   │  │   └─────────┘   │         │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
-└─────────────────────────────────────────────────────────────────────────┘
-
-Communication:
-  - HTTP → OrderManager: direct call (same async runtime)
-  - OrderManager → Workers: async_channel per pool (SolveTask)
-  - Workers → OrderManager: oneshot channel (SolveResult)
-  - TychoFeed → Workers: broadcast channel (MarketEvent)
-  - All → SharedMarketData: Arc<RwLock<>> (read-heavy)
+Worker Pool B (dedicated OS threads)
+├── Thread 1: SolverWorker
+└── Thread M: SolverWorker
 ```
 
----
+**Communication channels:**
 
-## File Structure
-
-```
-src/
-├── lib.rs                    # Library root, re-exports
-├── main.rs                   # Binary entry point
-│
-├── api/                      # HTTP Layer
-│   ├── mod.rs
-│   ├── handlers.rs           # Actix handlers
-│   └── error.rs              # API error types
-│
-├── order_manager/            # Multi-solver orchestration
-│   ├── mod.rs                # OrderManager, SolverPoolHandle
-│   └── config.rs             # OrderManagerConfig
-│
-├── types/                    # Shared type definitions
-│   ├── mod.rs
-│   ├── api.rs                # Request/Response types
-│   ├── solution.rs           # Solution, Route, Swap, Order
-│   ├── internal.rs           # SolveTask, SolveError
-│   └── primitives.rs         # ComponentId, Address, etc.
-│
-├── feed/                     # Market data feed
-│   ├── mod.rs
-│   ├── market_data.rs        # SharedMarketData
-│   ├── events.rs             # MarketEvent enum
-│   └── tycho_feed.rs         # TychoFeed (WebSocket client)
-│
-├── graph/                    # Graph management
-│   ├── mod.rs                # GraphManager trait, Edge, Path
-│   └── petgraph.rs           # PetgraphStableDiGraphManager
-│
-├── task_queue.rs             # TaskQueue, TaskQueueHandle
-├── worker_pool.rs            # WorkerPool, WorkerPoolBuilder
-├── worker.rs                 # SolverWorker
-│
-└── algorithm/                # Algorithm implementations
-    ├── mod.rs                # Algorithm trait
-    ├── registry.rs           # Algorithm registry for dynamic selection
-    └── most_liquid.rs        # MostLiquidAlgorithm
-```
-
----
-
-## Success Criteria
-
-1. **Performance**: 95% of solves < 50ms, 99% < 100ms
-2. **Scalability**: Linear scaling with worker count
-3. **Memory**: Single copy of ProtocolSim states (not duplicated per solver)
-4. **Reliability**: No panics, graceful error handling
-5. **Observability**: Prometheus metrics for latency, queue depth, cache hits
-6. **Extensibility**: New algorithm = implement trait with associated types, specify graph type and manager, done
+- HTTP -> OrderManager: direct call (same async runtime)
+- OrderManager -> Workers: `async_channel` per pool (bounded, backpressure)
+- Workers -> OrderManager: `oneshot` channel (single response)
+- TychoFeed -> Workers: `broadcast` channel (MarketEvent)
+- ComputationManager -> Workers: `broadcast` channel (DerivedDataEvent)
+- All -> SharedMarketData: `Arc<RwLock<>>` (read-heavy)

@@ -92,6 +92,7 @@ pub(crate) enum GraphError {
     ComponentsNotFound(Vec<ComponentId>),
     #[error("Components with less then 2 tokens cannot be added: {0:?}")]
     InvalidComponents(Vec<ComponentId>),
+    #[cfg(test)] // only used in set_edge_weight which is only tested atm
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }
