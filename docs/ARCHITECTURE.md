@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fynd is a high-performance solver built on Tycho for finding optimal swap routes across multiple DeFi protocols.
+Fynd is a solver built on Tycho that finds optimal swap routes across DeFi protocols.
 
 ## Design Decisions
 
