@@ -1,13 +1,31 @@
+//! Fynd CLI - DeFi routing service
+//!
+//! A command-line application that runs an HTTP RPC server for finding optimal
+//! swap routes across multiple DeFi protocols. Uses [`fynd-rpc`] for the HTTP server
+//! and [`fynd-core`] for the routing algorithms.
+//!
+//! # Usage
+//!
+//! ```bash
+//! fynd --rpc-url $RPC_URL \
+//!      --tycho-url tycho-beta.propellerheads.xyz \
+//!      --protocols uniswap_v2,uniswap_v3
+//! ```
+//!
+//! See `fynd --help` for all available options.
+
 use std::time::Duration;
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
-use fynd::{
+use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
-    cli::Cli,
     config::{BlacklistConfig, WorkerPoolsConfig},
 };
+
+mod cli;
+use cli::Cli;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -133,7 +151,7 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(cli: &Cli) -> Result<fynd::builder::Fynd, SolverError> {
+async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError> {
     // Load worker pools config
     let pools_config =
         WorkerPoolsConfig::load_from_file(&cli.worker_pools_config).map_err(|e| {

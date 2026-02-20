@@ -1,0 +1,35 @@
+[package]
+name = "fynd-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core solving logic for Fynd DEX router"
+license = "MIT"
+
+[dependencies]
+tycho-simulation.workspace = true
+petgraph.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+num_cpus.workspace = true
+async-channel.workspace = true
+async-trait.workspace = true
+itertools.workspace = true
+lazy_static.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+typetag.workspace = true
+# OpenAPI (only for schema generation, no runtime overhead)
+utoipa.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

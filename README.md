@@ -1,16 +1,31 @@
 # Fynd
 
-A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap routes across multiple DeFi protocols in real-time.
+A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
+routes across multiple DeFi protocols in real-time.
 
 ## Features
 
-- **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve, RFQ protocols, or any other protocol supported by [Tycho](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
+- **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve,
+  RFQ protocols, or any other protocol supported
+  by [Tycho](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
 - **Real-time market data** - Tycho Stream keeps all liquidity states synchronized every block
-- **Multi-algorithm competition** - Multiple solver pools run different algorithm configurations in parallel; the best result wins
+- **Multi-algorithm competition** - Multiple solver pools run different algorithm configurations in parallel; the best
+  result wins
 - **Gas-aware ranking** - Solutions are ranked by net output after gas costs, not just raw output
 - **Sub-100ms solves** - Dedicated OS threads for CPU-bound route finding, separate from the async I/O runtime
 - **Production-ready** - Prometheus metrics, structured logging, health endpoints, graceful shutdown
 - **Extensible** - Implement the `Algorithm` trait to add new routing strategies with zero framework changes
+- **Modular** - Use just the core solving logic, or build a custom HTTP server with your own middleware
+
+## Architecture
+
+Fynd is organized into three crates:
+
+- **`fynd-core`** - Pure solving logic with no HTTP dependencies. Use this if you want to integrate Fynd's routing
+  algorithms into your own application.
+- **`fynd-rpc`** - HTTP RPC server builder with customizable middleware. Use this to build a custom HTTP server with
+  your own configuration.
+- **`fynd`** - Complete CLI application that runs an HTTP RPC server. Use this to run Fynd as a standalone service.
 
 ## Prerequisites
 
@@ -52,10 +67,14 @@ cargo run --release -- \
 ```
 
 **Limitations:**
-- RFQ protocols cannot run alone — at least one on-chain protocol is required. 
+
+- RFQ protocols cannot run alone — at least one on-chain protocol is required.
 
 **Environment variables:**
-- RFQ protocols typically require API keys, which are passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
+
+- RFQ protocols typically require API keys, which are passed via environment variables. Check
+  the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the
+  specific variables each protocol needs.
 
 ## Make a Solve Request
 
@@ -92,17 +111,17 @@ Submit one or more swap orders and receive optimal routes.
 
 **Request:**
 
-| Field | Type | Required | Description                            |
-|-------|------|----------|----------------------------------------|
-| `orders[].token_in` | address | Yes | Token to sell                          |
-| `orders[].token_out` | address | Yes | Token to buy                           |
-| `orders[].amount` | string | Yes | Amount in token units (integer string) |
-| `orders[].side` | string | Yes | `"sell"` (exact input)                 |
-| `orders[].sender` | address | Yes | Sender address                         |
-| `orders[].receiver` | address | No | Receiver (defaults to sender)          |
-| `options.timeout_ms` | integer | No | Solve timeout override                 |
-| `options.min_responses` | integer | No | Early return threshold                 |
-| `options.max_gas` | string | No | Max gas filter                         |
+| Field                   | Type    | Required | Description                            |
+|-------------------------|---------|----------|----------------------------------------|
+| `orders[].token_in`     | address | Yes      | Token to sell                          |
+| `orders[].token_out`    | address | Yes      | Token to buy                           |
+| `orders[].amount`       | string  | Yes      | Amount in token units (integer string) |
+| `orders[].side`         | string  | Yes      | `"sell"` (exact input)                 |
+| `orders[].sender`       | address | Yes      | Sender address                         |
+| `orders[].receiver`     | address | No       | Receiver (defaults to sender)          |
+| `options.timeout_ms`    | integer | No       | Solve timeout override                 |
+| `options.min_responses` | integer | No       | Early return threshold                 |
+| `options.max_gas`       | string  | No       | Max gas filter                         |
 
 **Response:**
 
@@ -129,7 +148,11 @@ Submit one or more swap orders and receive optimal routes.
       "amount_out": "3200000000",
       "gas_estimate": "150000",
       "amount_out_net_gas": "3199500000",
-      "block": { "number": 19000000, "hash": "0x...", "timestamp": 1700000000 }
+      "block": {
+        "number": 19000000,
+        "hash": "0x...",
+        "timestamp": 1700000000
+      }
     }
   ],
   "total_gas_estimate": "150000",
@@ -145,22 +168,23 @@ Returns service health status. HTTP 200 if healthy, 503 if stale.
 
 ### CLI / Environment Variables
 
-| Flag | Env Var | Default | Description                                |
-|------|---------|---------|--------------------------------------------|
-| `--rpc-url` | `RPC_URL` | (required) | Ethereum RPC endpoint for the target chain |
-| `--tycho-url` | `TYCHO_URL` | `localhost:4242` | Tycho WebSocket URL                        |
-| `--tycho-api-key` | `TYCHO_API_KEY` | - | Tycho API key                              |
-| `--chain` | - | `Ethereum` | Target chain                               |
-| `-p, --protocols` | - | - | Protocols to index (comma-separated)       |
-| `--http-port` | `HTTP_PORT` | `3000` | API port                                   |
-| `--min-tvl` | - | `10.0` | Minimum pool TVL in native token           |
-| `--order-manager-timeout-ms` | - | `100` | Default solve timeout                      |
-| `-w, --worker-pools-config` | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
-| `--blacklist-config` | `BLACKLIST_CONFIG` | `blacklist.toml` | Blacklist config                           |
+| Flag                         | Env Var               | Default             | Description                                |
+|------------------------------|-----------------------|---------------------|--------------------------------------------|
+| `--rpc-url`                  | `RPC_URL`             | (required)          | Ethereum RPC endpoint for the target chain |
+| `--tycho-url`                | `TYCHO_URL`           | `localhost:4242`    | Tycho WebSocket URL                        |
+| `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                              |
+| `--chain`                    | -                     | `Ethereum`          | Target chain                               |
+| `-p, --protocols`            | -                     | -                   | Protocols to index (comma-separated)       |
+| `--http-port`                | `HTTP_PORT`           | `3000`              | API port                                   |
+| `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token           |
+| `--order-manager-timeout-ms` | -                     | `100`               | Default solve timeout                      |
+| `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
+| `--blacklist-config`         | `BLACKLIST_CONFIG`    | `blacklist.toml`    | Blacklist config                           |
 
 See `--help` for the full list.
 
-Find the list of all available protocols on Tycho [here](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
+Find the list of all available protocols on
+Tycho [here](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
 
 ### Worker Pools (worker_pools.toml)
 
@@ -180,9 +204,12 @@ min_hops = 2
 max_hops = 3
 timeout_ms = 5000
 ```
-A Worker Pool runs a configurable number of Worker threads, all using the same algorithm and pulling tasks from a shared queue. Each worker handles one order at a time — so a pool with 5 workers can solve up to 5 orders concurrently.
 
-Multiple pools run in parallel, each producing its own solution per order. The system then picks the best result across pools within the timeout.
+A Worker Pool runs a configurable number of Worker threads, all using the same algorithm and pulling tasks from a shared
+queue. Each worker handles one order at a time — so a pool with 5 workers can solve up to 5 orders concurrently.
+
+Multiple pools run in parallel, each producing its own solution per order. The system then picks the best result across
+pools within the timeout.
 
 **Example**: Given the config above and 3 incoming orders:
 
@@ -212,7 +239,7 @@ components = [
 
 ### Adding a New Algorithm
 
-1. Implement the `Algorithm` trait (choose your preferred graph type)
-2. Register it in `src/worker_pool/registry.rs`
+1. Implement the `Algorithm` trait in `fynd-core` (choose your preferred graph type)
+2. Register it in `fynd-rpc/src/worker_pool/registry.rs`
 3. Add a pool entry in `worker_pools.toml`
 
