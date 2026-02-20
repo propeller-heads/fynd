@@ -1,0 +1,104 @@
+name: API Semver Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  semver-check:
+    name: API Breaking Change Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@71b48393496777ee11188c07a34d48b048a985cd  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Check for breaking changes
+        id: check
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          WORKSPACE_ROOT=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+          PACKAGES=""
+          while IFS=' ' read -r name manifest_path; do
+            rel_dir="${manifest_path#"${WORKSPACE_ROOT}"/}"
+            rel_dir="${rel_dir%/Cargo.toml}"
+            if git cat-file -e "origin/main:${rel_dir}/Cargo.toml" 2>/dev/null; then
+              PACKAGES="${PACKAGES} --package ${name}"
+            else
+              echo "Skipping new crate '${name}' (not present in baseline)"
+            fi
+          done < <(cargo metadata --no-deps --format-version 1 | \
+            jq -r '.packages[] | select(any(.targets[]; .kind[] == "lib")) | "\(.name) \(.manifest_path)"')
+
+          if [ -z "${PACKAGES}" ]; then
+            echo "No pre-existing library crates to check against baseline."
+            echo "breaking=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # shellcheck disable=SC2086
+          if cargo semver-checks ${PACKAGES} --baseline-rev origin/main > semver-output.txt 2>&1; then
+            echo "breaking=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "breaking=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post breaking change comment
+        if: steps.check.outputs.breaking == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('semver-output.txt', 'utf8');
+            const body = [
+              '## Breaking API Changes Detected',
+              '',
+              'This PR introduces breaking changes to the public API.',
+              'If this is intentional, consider bumping the major version.',
+              '',
+              '<details><summary>semver-checks output</summary>',
+              '',
+              '```',
+              output.trim(),
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail on breaking changes
+        if: steps.check.outputs.breaking == 'true'
+        run: |
+          cat semver-output.txt
+          exit 1
