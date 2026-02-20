@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -43,7 +44,8 @@ jobs:
         env:
           CARGO_TERM_COLOR: never
         run: |
-          WORKSPACE_ROOT=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+          METADATA=$(cargo metadata --no-deps --format-version 1)
+          WORKSPACE_ROOT=$(echo "${METADATA}" | jq -r '.workspace_root')
           PACKAGES=""
           while IFS=' ' read -r name manifest_path; do
             rel_dir="${manifest_path#"${WORKSPACE_ROOT}"/}"
@@ -53,7 +55,7 @@ jobs:
             else
               echo "Skipping new crate '${name}' (not present in baseline)"
             fi
-          done < <(cargo metadata --no-deps --format-version 1 | \
+          done < <(echo "${METADATA}" | \
             jq -r '.packages[] | select(any(.targets[]; .kind[] == "lib")) | "\(.name) \(.manifest_path)"')
 
           if [ -z "${PACKAGES}" ]; then
@@ -75,8 +77,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const output = fs.readFileSync('semver-output.txt', 'utf8');
+            const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
+            const MAX_OUTPUT = 60_000;
+            const output = raw.length > MAX_OUTPUT
+              ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
+              : raw;
+            const marker = '<!-- semver-check -->';
             const body = [
+              marker,
               '## Breaking API Changes Detected',
               '',
               'This PR introduces breaking changes to the public API.',
@@ -85,17 +93,32 @@ jobs:
               '<details><summary>semver-checks output</summary>',
               '',
               '```',
-              output.trim(),
+              output,
               '```',
               '',
               '</details>',
             ].join('\n');
-            await github.rest.issues.createComment({
+            const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body,
             });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
 
       - name: Fail on breaking changes
         if: steps.check.outputs.breaking == 'true'
