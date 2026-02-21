@@ -35,6 +35,10 @@ struct Cli {
     /// Tycho API key
     #[arg(long, env = "TYCHO_API_KEY")]
     tycho_api_key: Option<String>,
+
+    /// Minimum TVL threshold in native token (e.g. ETH)
+    #[arg(long, env = "MIN_TVL", default_value = "10.0")]
+    min_tvl: f64,
 }
 
 #[tokio::main]
@@ -61,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Protocols: {}", cli.protocols);
     info!("HTTP Port: {}", cli.http_port);
     info!("Worker pools config: {}", cli.worker_pools_config);
+    info!("Min TVL: {}", cli.min_tvl);
 
     // Load worker pools configuration
     let pools_config = WorkerPoolsConfig::load_from_file(&cli.worker_pools_config)?;
@@ -76,6 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         protocols,
     )
     .http_port(cli.http_port);
+
+    builder = builder.min_tvl(cli.min_tvl);
 
     if let Some(api_key) = cli.tycho_api_key {
         builder = builder.tycho_api_key(api_key);

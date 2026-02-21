@@ -189,6 +189,15 @@ impl OrderManager {
                             // Remove from remaining
                             remaining_pools.remove(&pool_name);
 
+                            // Log per-pool solution for benchmarking
+                            debug!(
+                                order_id = %order_id,
+                                pool = %pool_name,
+                                amount_out_net_gas = %single_solution.order.amount_out_net_gas,
+                                status = ?single_solution.order.status,
+                                "pool solution received"
+                            );
+
                             // Extract the OrderSolution from SingleOrderSolution
                             solutions.push((pool_name.clone(), single_solution.order));
 

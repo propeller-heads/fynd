@@ -304,6 +304,13 @@ impl Algorithm for BellmanFordAlgorithm {
             token_prices.as_ref(),
         );
 
+        // Check for duplicate pool usage in the route
+        let component_ids: Vec<&str> =
+            route.swaps.iter().map(|s| s.component_id.as_str()).collect();
+        let unique_components: HashSet<&str> =
+            component_ids.iter().copied().collect();
+        let has_duplicate_pools = unique_components.len() < component_ids.len();
+
         let solve_time_ms = start.elapsed().as_millis() as u64;
         debug!(
             solve_time_ms,
@@ -311,6 +318,8 @@ impl Algorithm for BellmanFordAlgorithm {
             amount_in = %order.amount,
             amount_out = %final_amount_out,
             net_amount_out = %net_amount_out,
+            route = %component_ids.join(" -> "),
+            has_duplicate_pools,
             "bellman_ford route found"
         );
 
