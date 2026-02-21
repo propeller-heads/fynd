@@ -16,6 +16,13 @@ min_hops = 2
 max_hops = 3
 timeout_ms = 5000
 
+[pools.bellman_ford_pool]
+algorithm = "bellman_ford"
+num_workers = 2
+task_queue_capacity = 1000
+max_hops = 4
+timeout_ms = 200
+
 # Add more pools by adding entries under [pools.*], e.g.:
 # [pools.dijkstra]
 # algorithm = "dijkstra"

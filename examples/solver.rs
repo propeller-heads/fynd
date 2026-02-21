@@ -31,6 +31,10 @@ struct Cli {
     /// Worker pool configuration file
     #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
     worker_pools_config: String,
+
+    /// Tycho API key
+    #[arg(long, env = "TYCHO_API_KEY")]
+    tycho_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -64,15 +68,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build and spawn the solver
     info!("Starting fynd...");
-    let solver = FyndBuilder::new(
+    let mut builder = FyndBuilder::new(
         chain,
         pools_config.pools,
         cli.tycho_url.clone(),
         cli.rpc_url.clone(),
         protocols,
     )
-    .http_port(cli.http_port)
-    .build()?;
+    .http_port(cli.http_port);
+
+    if let Some(api_key) = cli.tycho_api_key {
+        builder = builder.tycho_api_key(api_key);
+    }
+
+    let solver = builder.build()?;
 
     let server_handle = solver.server_handle();
     let mut solver_task = tokio::spawn(async move {

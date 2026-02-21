@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::{
-    algorithm::{AlgorithmConfig, MostLiquidAlgorithm},
+    algorithm::{AlgorithmConfig, BellmanFordAlgorithm, MostLiquidAlgorithm},
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     graph::EdgeWeightUpdaterWithDerived,
@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// List of available algorithm names.
-pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid"];
+pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid", "bellman_ford"];
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
@@ -82,6 +82,7 @@ pub(crate) fn spawn_workers(
 ) -> Result<Vec<JoinHandle<()>>, UnknownAlgorithmError> {
     match params.algorithm.as_str() {
         "most_liquid" => Ok(spawn_most_liquid_workers(params)),
+        "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
         _ => Err(UnknownAlgorithmError { name: params.algorithm }),
     }
 }
@@ -156,6 +157,14 @@ fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> 
     spawn_workers_generic(params, |config| {
         MostLiquidAlgorithm::with_config(config.clone())
             .expect("invalid worker configuration for MostLiquidAlgorithm")
+    })
+}
+
+/// Spawns workers for the BellmanFord algorithm.
+fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+    spawn_workers_generic(params, |config| {
+        BellmanFordAlgorithm::with_config(config.clone())
+            .expect("invalid worker configuration for BellmanFordAlgorithm")
     })
 }
 

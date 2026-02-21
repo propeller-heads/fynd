@@ -12,6 +12,7 @@
 //! 2. Implement the `Algorithm` trait
 //! 3. Register the algorithm in `registry.rs`
 
+pub mod bellman_ford;
 pub mod most_liquid;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ pub mod test_utils;
 
 use std::time::Duration;
 
+pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
