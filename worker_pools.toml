@@ -20,7 +20,7 @@ timeout_ms = 5000
 algorithm = "bellman_ford"
 num_workers = 2
 task_queue_capacity = 1000
-max_hops = 4
+max_hops = 5
 timeout_ms = 200
 
 # Add more pools by adding entries under [pools.*], e.g.:
