@@ -51,25 +51,14 @@ pub(crate) struct DepthAndPrice {
     pub depth: f64,
 }
 
-#[allow(dead_code)]
 impl DepthAndPrice {
     /// Creates a new DepthAndPrice with all fields set.
+    #[cfg(test)]
     pub fn new(spot_price: f64, depth: f64) -> Self {
         Self { spot_price, depth }
     }
 
-    /// Builder method to set spot price.
-    pub fn with_spot_price(mut self, spot_price: f64) -> Self {
-        self.spot_price = spot_price;
-        self
-    }
-
-    /// Builder method to set depth.
-    pub fn with_depth(mut self, depth: f64) -> Self {
-        self.depth = depth;
-        self
-    }
-
+    #[cfg(test)]
     pub fn from_protocol_sim(
         sim: &impl ProtocolSim,
         token_in: &Token,
@@ -629,10 +618,6 @@ impl Algorithm for MostLiquidAlgorithm {
         })
     }
 
-    fn supports_exact_out(&self) -> bool {
-        false // TODO: Implement exact-out support
-    }
-
     fn computation_requirements(&self) -> ComputationRequirements {
         // MostLiquidAlgorithm uses token prices to convert gas costs from wei
         // to output token terms for accurate amount_out_net_gas calculation.
@@ -669,10 +654,13 @@ mod tests {
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
         derived::{DerivedData, TokenGasPrices},
-        feed::market_data::wrap_market,
         graph::GraphManager,
         types::OrderSide,
     };
+
+    fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
+        Arc::new(RwLock::new(market))
+    }
 
     /// Creates a SharedDerivedDataRef with token prices set for testing.
     ///
@@ -1627,7 +1615,6 @@ mod tests {
 
         assert_eq!(algorithm.max_hops, max_hops);
         assert_eq!(algorithm.timeout, Duration::from_millis(timeout_ms));
-        assert!(!algorithm.supports_exact_out()); // Currently always false
         assert_eq!(algorithm.name(), "most_liquid");
     }
 
@@ -1639,7 +1626,6 @@ mod tests {
 
         assert_eq!(algorithm.max_hops, 3);
         assert_eq!(algorithm.timeout, Duration::from_millis(500));
-        assert!(!algorithm.supports_exact_out());
         assert_eq!(algorithm.name(), "most_liquid");
     }
 

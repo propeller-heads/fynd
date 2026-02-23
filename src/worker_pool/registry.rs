@@ -32,12 +32,6 @@ pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid", "bellman_ford"
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 
-/// Returns a list of all registered algorithm names.
-#[allow(dead_code)]
-pub(crate) fn list_algorithms() -> &'static [&'static str] {
-    AVAILABLE_ALGORITHMS
-}
-
 /// Parameters for spawning workers.
 pub(crate) struct SpawnWorkersParams {
     /// Algorithm name (e.g., "most_liquid").
@@ -176,12 +170,6 @@ mod tests {
 
     use super::*;
     use crate::{derived::DerivedData, feed::market_data::SharedMarketData};
-
-    #[test]
-    fn test_list_algorithms() {
-        let algos = list_algorithms();
-        assert!(algos.contains(&"most_liquid"));
-    }
 
     #[test]
     fn test_spawn_workers_unknown_algorithm_returns_error() {

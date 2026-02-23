@@ -12,7 +12,10 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address, Chain},
         simulation::{
             errors::{SimulationError, TransitionError},
-            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+            protocol_sim::{
+                Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+                SwapConstraint,
+            },
         },
         Bytes,
     },
@@ -132,6 +135,24 @@ impl ProtocolSim for MockProtocolSim {
         Ok(GetAmountOutResult::new(amount_out, BigUint::from(self.gas), new_state))
     }
 
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        let token_in = params.token_in();
+        let token_out = params.token_out();
+
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                let (sell_limit, _) =
+                    self.get_limits(token_in.address.clone(), token_out.address.clone())?;
+                let result = self.get_amount_out(sell_limit.clone(), token_in, token_out)?;
+                Ok(PoolSwap::new(sell_limit, result.amount, result.new_state, None))
+            }
+            _ => Err(SimulationError::InvalidInput(
+                "MockProtocolSim only supports TradeLimitPrice".to_string(),
+                None,
+            )),
+        }
+    }
+
     fn get_limits(
         &self,
         _sell_token: Bytes,
@@ -239,7 +260,6 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 ///
 /// The market is wrapped in `Arc<RwLock<...>>` for use with `find_best_route`.
 /// Use `market_read(&market_lock)` to get a `SharedMarketData` for other tests.
-#[allow(dead_code)]
 pub(crate) fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
 ) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<DepthAndPrice>) {
@@ -298,7 +318,6 @@ pub(crate) fn setup_market(
 
 /// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
 /// Returns the guard which derefs to `&SharedMarketData`.
-#[allow(dead_code)]
 pub(crate) fn market_read(
     lock: &Arc<RwLock<SharedMarketData>>,
 ) -> tokio::sync::RwLockReadGuard<'_, SharedMarketData> {
@@ -316,7 +335,6 @@ pub mod fixtures {
     }
 
     /// A <-> B <-> C <-> D linear chain (bidirectional).
-    #[allow(dead_code)]
     pub(crate) fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
@@ -329,7 +347,6 @@ pub mod fixtures {
     }
 
     /// 3 parallel pools A<->B, 2 pools B<->C.
-    #[allow(dead_code)]
     pub(crate) fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
@@ -344,7 +361,6 @@ pub mod fixtures {
     }
 
     /// Diamond: A->B->D, A->C->D (two 2-hop paths).
-    #[allow(dead_code)]
     pub(crate) fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();

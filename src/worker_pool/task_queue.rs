@@ -34,14 +34,6 @@ pub struct TaskQueueHandle {
 }
 
 impl TaskQueueHandle {
-    /// Creates a TaskQueueHandle from an existing sender.
-    ///
-    /// This is primarily useful for testing with mock channels.
-    #[cfg(test)]
-    pub fn from_sender(sender: async_channel::Sender<SolveTask>) -> Self {
-        Self { sender }
-    }
-
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.
@@ -70,15 +62,23 @@ impl TaskQueueHandle {
     /// Returns the current approximate queue depth.
     ///
     /// Note: This is not exact due to the async nature of the queue.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn approximate_depth(&self) -> usize {
         self.sender.len()
     }
 
     /// Returns true if the queue is likely full.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_full(&self) -> bool {
         self.sender.is_full()
+    }
+
+    /// Creates a TaskQueueHandle from an existing sender.
+    ///
+    /// This is primarily useful for testing with mock channels.
+    #[cfg(test)]
+    pub fn from_sender(sender: async_channel::Sender<SolveTask>) -> Self {
+        Self { sender }
     }
 }
 
@@ -99,8 +99,13 @@ impl TaskQueue {
         Self { receiver, handle }
     }
 
+    /// Splits the queue into handle and receiver.
+    pub fn split(self) -> (TaskQueueHandle, async_channel::Receiver<SolveTask>) {
+        (self.handle, self.receiver)
+    }
+
     /// Returns a handle for enqueueing tasks.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn handle(&self) -> TaskQueueHandle {
         self.handle.clone()
     }
@@ -108,14 +113,9 @@ impl TaskQueue {
     /// Consumes the queue and returns the receiver.
     ///
     /// This is called when setting up the worker pool.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn into_receiver(self) -> async_channel::Receiver<SolveTask> {
         self.receiver
-    }
-
-    /// Splits the queue into handle and receiver.
-    pub fn split(self) -> (TaskQueueHandle, async_channel::Receiver<SolveTask>) {
-        (self.handle, self.receiver)
     }
 }
 
