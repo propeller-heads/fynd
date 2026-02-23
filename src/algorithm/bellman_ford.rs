@@ -379,10 +379,6 @@ impl Algorithm for BellmanFordAlgorithm {
         Ok(result)
     }
 
-    fn supports_exact_out(&self) -> bool {
-        false
-    }
-
     fn computation_requirements(&self) -> ComputationRequirements {
         ComputationRequirements::none()
             .allow_stale("token_prices")
@@ -1198,11 +1194,6 @@ mod tests {
         assert_eq!(algo.name(), "bellman_ford");
     }
 
-    #[test]
-    fn algorithm_supports_exact_out() {
-        let algo = bf_algorithm(4, 200);
-        assert!(!algo.supports_exact_out());
-    }
 
     #[test]
     fn algorithm_timeout() {
