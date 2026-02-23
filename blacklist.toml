@@ -3,7 +3,10 @@
 
 [blacklist]
 # Component IDs to exclude (pool addresses)
-# UniswapV3 AMPL pool - AMPL is a rebasing token that doesn't work correctly
+# AMPL pools - AMPL is a rebasing token that breaks simulation assumptions
+# UniswapV3 AMPL/WETH
+# UniswapV2 AMPL/WETH
 components = [
     "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
+    "0xc5be99a02c6857f9eac67bbce58df5572498f40c",
 ]

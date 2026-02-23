@@ -84,7 +84,7 @@ pub mod worker_pool;
 pub use algorithm::{AlgorithmError, MostLiquidAlgorithm};
 pub use api::{ApiError, AppState};
 pub use builder::{parse_chain, Fynd, FyndBuilder};
-pub use config::{PoolConfig, WorkerPoolsConfig};
+pub use config::{BlacklistConfig, PoolConfig, WorkerPoolsConfig};
 pub use derived::{
     ComputationError, ComputationId, ComputationRequirements, DerivedComputation, DerivedData,
     DerivedDataEvent, PoolDepthKey, PoolDepths, ReadinessTracker, SpotPriceKey, SpotPrices,

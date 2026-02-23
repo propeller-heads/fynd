@@ -1,5 +1,5 @@
 use clap::Parser;
-use fynd::{parse_chain, FyndBuilder, HealthStatus, WorkerPoolsConfig};
+use fynd::{parse_chain, BlacklistConfig, FyndBuilder, HealthStatus, WorkerPoolsConfig};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -39,6 +39,10 @@ struct Cli {
     /// Minimum TVL threshold in native token (e.g. ETH)
     #[arg(long, env = "MIN_TVL", default_value = "10.0")]
     min_tvl: f64,
+
+    /// Path to blacklist TOML config file (optional)
+    #[arg(long, env = "BLACKLIST_CONFIG", default_value = "blacklist.toml")]
+    blacklist_config: Option<String>,
 }
 
 #[tokio::main]
@@ -83,6 +87,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .http_port(cli.http_port);
 
     builder = builder.min_tvl(cli.min_tvl);
+
+    if let Some(ref blacklist_path) = cli.blacklist_config {
+        if std::path::Path::new(blacklist_path).exists() {
+            let blacklist = BlacklistConfig::load_from_file(blacklist_path)?;
+            info!("Loaded blacklist: {} components", blacklist.components.len());
+            builder = builder.blacklist(blacklist);
+        }
+    }
 
     if let Some(api_key) = cli.tycho_api_key {
         builder = builder.tycho_api_key(api_key);

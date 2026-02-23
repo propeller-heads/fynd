@@ -22,12 +22,3 @@ num_workers = 2
 task_queue_capacity = 1000
 max_hops = 5
 timeout_ms = 200
-
-# Add more pools by adding entries under [pools.*], e.g.:
-# [pools.dijkstra]
-# algorithm = "dijkstra"
-# num_workers = 8
-# task_queue_capacity = 1000
-# min_hops = 1
-# max_hops = 5
-# timeout_ms = 200
