@@ -75,19 +75,17 @@ impl Algorithm for BellmanFordAlgorithm {
 
         // Extract token prices from derived data (if available)
         let token_prices = if let Some(ref derived) = derived {
-            derived.read().await.token_prices().cloned()
+            derived
+                .read()
+                .await
+                .token_prices()
+                .cloned()
         } else {
             None
         };
 
         // Acquire read lock, snapshot data, release lock
-        let (
-            token_in_node,
-            token_out_node,
-            subgraph_edges,
-            token_map,
-            market_subset,
-        ) = {
+        let (token_in_node, token_out_node, subgraph_edges, token_map, market_subset) = {
             let market = market.read().await;
 
             // Look up token nodes
@@ -129,7 +127,10 @@ impl Algorithm for BellmanFordAlgorithm {
                 .iter()
                 .filter_map(|&node| {
                     let addr = &graph[node];
-                    market.get_token(addr).cloned().map(|t| (node, t))
+                    market
+                        .get_token(addr)
+                        .cloned()
+                        .map(|t| (node, t))
                 })
                 .collect();
 
@@ -163,13 +164,12 @@ impl Algorithm for BellmanFordAlgorithm {
             .node_indices()
             .map(|n| n.index())
             .max()
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0) +
+            1;
         let num_layers = self.max_hops + 1;
 
         // distance[k][node] = best amount at node using exactly k edges
-        let mut distance: Vec<Vec<BigUint>> =
-            vec![vec![BigUint::ZERO; max_idx]; num_layers];
+        let mut distance: Vec<Vec<BigUint>> = vec![vec![BigUint::ZERO; max_idx]; num_layers];
         // predecessor[k][node] = (prev_node, component_id) for the edge leading here at layer k
         let mut predecessor: Vec<Vec<Option<(NodeIndex, ComponentId)>>> =
             vec![vec![None; max_idx]; num_layers];
@@ -179,7 +179,9 @@ impl Algorithm for BellmanFordAlgorithm {
         // Build adjacency list for efficient edge iteration
         let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, &ComponentId)>> = HashMap::new();
         for (from, to, cid) in &subgraph_edges {
-            adj.entry(*from).or_default().push((*to, cid));
+            adj.entry(*from)
+                .or_default()
+                .push((*to, cid));
         }
 
         // SPFA: seed active set with source node
@@ -230,8 +232,7 @@ impl Algorithm for BellmanFordAlgorithm {
                         continue;
                     };
 
-                    let Some(sim_state) = market_subset.get_simulation_state(component_id)
-                    else {
+                    let Some(sim_state) = market_subset.get_simulation_state(component_id) else {
                         continue;
                     };
 
@@ -339,8 +340,7 @@ impl Algorithm for BellmanFordAlgorithm {
             };
 
             if is_better {
-                best_result =
-                    Some((RouteResult { route, net_amount_out }, final_amount_out));
+                best_result = Some((RouteResult { route, net_amount_out }, final_amount_out));
             }
         }
 
@@ -359,8 +359,7 @@ impl Algorithm for BellmanFordAlgorithm {
             .iter()
             .map(|s| s.component_id.as_str())
             .collect();
-        let unique_components: HashSet<&str> =
-            component_ids.iter().copied().collect();
+        let unique_components: HashSet<&str> = component_ids.iter().copied().collect();
         let has_duplicate_pools = unique_components.len() < component_ids.len();
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
@@ -441,9 +440,7 @@ fn reconstruct_layered_path(
     for k in (1..=best_layer).rev() {
         let idx = current.index();
         if idx >= predecessor[k].len() {
-            return Err(AlgorithmError::Other(
-                "predecessor index out of bounds".to_string(),
-            ));
+            return Err(AlgorithmError::Other("predecessor index out of bounds".to_string()));
         }
 
         match &predecessor[k][idx] {
@@ -460,9 +457,7 @@ fn reconstruct_layered_path(
     }
 
     if current != token_in {
-        return Err(AlgorithmError::Other(
-            "path reconstruction did not reach source".to_string(),
-        ));
+        return Err(AlgorithmError::Other("path reconstruction did not reach source".to_string()));
     }
 
     path.reverse();
@@ -489,28 +484,31 @@ fn simulate_path(
     let mut vm_state_override: Option<Box<dyn ProtocolSim>> = None;
 
     for (from_node, to_node, component_id) in path {
-        let token_in = token_map.get(from_node).ok_or_else(|| AlgorithmError::DataNotFound {
-            kind: "token",
-            id: Some(format!("{:?}", from_node)),
-        })?;
-        let token_out = token_map.get(to_node).ok_or_else(|| AlgorithmError::DataNotFound {
-            kind: "token",
-            id: Some(format!("{:?}", to_node)),
-        })?;
+        let token_in = token_map
+            .get(from_node)
+            .ok_or_else(|| AlgorithmError::DataNotFound {
+                kind: "token",
+                id: Some(format!("{:?}", from_node)),
+            })?;
+        let token_out = token_map
+            .get(to_node)
+            .ok_or_else(|| AlgorithmError::DataNotFound {
+                kind: "token",
+                id: Some(format!("{:?}", to_node)),
+            })?;
 
-        let component = market.get_component(component_id).ok_or_else(|| {
-            AlgorithmError::DataNotFound {
+        let component = market
+            .get_component(component_id)
+            .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "component",
                 id: Some(component_id.clone()),
-            }
-        })?;
-        let component_state =
-            market
-                .get_simulation_state(component_id)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "simulation state",
-                    id: Some(component_id.clone()),
-                })?;
+            })?;
+        let component_state = market
+            .get_simulation_state(component_id)
+            .ok_or_else(|| AlgorithmError::DataNotFound {
+                kind: "simulation state",
+                id: Some(component_id.clone()),
+            })?;
 
         let is_vm = component_state
             .as_any()
@@ -637,8 +635,7 @@ mod tests {
             let tokens = vec![token_in.clone(), token_out.clone()];
             let comp = component(pool_id, &tokens);
             market.upsert_components(std::iter::once(comp));
-            market
-                .update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
+            market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
             market.upsert_tokens(tokens);
         }
 
@@ -648,7 +645,9 @@ mod tests {
         (Arc::new(RwLock::new(market)), graph_manager)
     }
 
-    fn setup_derived_with_token_prices(token_addresses: &[Address]) -> crate::derived::SharedDerivedDataRef {
+    fn setup_derived_with_token_prices(
+        token_addresses: &[Address],
+    ) -> crate::derived::SharedDerivedDataRef {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
         let mut token_prices: TokenGasPrices = HashMap::new();
@@ -762,9 +761,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         // A-B connected, C disconnected
-        let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2)),
-        ]);
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         // Add token_c to market without connecting it
         {
@@ -787,9 +785,8 @@ mod tests {
         let token_b = token(0x02, "B");
         let token_x = token(0x99, "X");
 
-        let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2)),
-        ]);
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_x, &token_b, 100, OrderSide::Sell);
@@ -809,9 +806,8 @@ mod tests {
         let token_b = token(0x02, "B");
         let token_x = token(0x99, "X");
 
-        let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2)),
-        ]);
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_x, 100, OrderSide::Sell);
@@ -875,7 +871,13 @@ mod tests {
             .unwrap();
 
         // Top-N re-simulation finds a path at least as good as the 2-hop (600)
-        let final_amount = result.route.swaps.last().unwrap().amount_out.clone();
+        let final_amount = result
+            .route
+            .swaps
+            .last()
+            .unwrap()
+            .amount_out
+            .clone();
         assert!(
             final_amount >= BigUint::from(600u64),
             "should find at least the baseline 2-hop output: got {final_amount}"
@@ -926,7 +928,13 @@ mod tests {
 
         // The 4-hop path A->B->C->B->D should produce 13200
         // which is much better than direct A->B->D = 400
-        let final_amount = result.route.swaps.last().unwrap().amount_out.clone();
+        let final_amount = result
+            .route
+            .swaps
+            .last()
+            .unwrap()
+            .amount_out
+            .clone();
         let direct_amount = BigUint::from(400u64);
         assert!(
             final_amount > direct_amount,
@@ -948,9 +956,8 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, _) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2)),
-        ]);
+        let (market, _) =
+            setup_market_bf(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
 
         let market_read = market.read().await;
         let token_map: HashMap<NodeIndex, Token> = HashMap::from([
@@ -960,11 +967,7 @@ mod tests {
         ]);
 
         // Single-hop path
-        let path = vec![(
-            NodeIndex::new(0),
-            NodeIndex::new(1),
-            "pool1".to_string(),
-        )];
+        let path = vec![(NodeIndex::new(0), NodeIndex::new(1), "pool1".to_string())];
 
         let mut graph_manager = PetgraphStableDiGraphManager::<()>::default();
         graph_manager.initialize_graph(&market_read.component_topology());
@@ -987,9 +990,12 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2).with_gas(10)),
-        ]);
+        let (market, manager) = setup_market_bf(vec![(
+            "pool1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2).with_gas(10),
+        )]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
@@ -1050,9 +1056,12 @@ mod tests {
         let token_b = token(0x02, "B");
 
         // Pool with 10% fee
-        let (market, manager) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2).with_fee(0.1)),
-        ]);
+        let (market, manager) = setup_market_bf(vec![(
+            "pool1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2).with_fee(0.1),
+        )]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
@@ -1072,9 +1081,12 @@ mod tests {
         let token_b = token(0x02, "B");
 
         // Pool with limited liquidity (500 tokens)
-        let (market, manager) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2).with_liquidity(500)),
-        ]);
+        let (market, manager) = setup_market_bf(vec![(
+            "pool1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2).with_liquidity(500),
+        )]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
@@ -1113,7 +1125,10 @@ mod tests {
         let subgraph = extract_subgraph(token_a_node, 2, graph);
 
         // Subgraph should contain edges for A-B and B-C, not D-E
-        let component_ids: HashSet<_> = subgraph.iter().map(|(_, _, cid)| cid.as_str()).collect();
+        let component_ids: HashSet<_> = subgraph
+            .iter()
+            .map(|(_, _, cid)| cid.as_str())
+            .collect();
         assert!(component_ids.contains("pool_ab"));
         assert!(component_ids.contains("pool_bc"));
         assert!(!component_ids.contains("pool_de"), "disconnected edges should be pruned");
@@ -1193,7 +1208,6 @@ mod tests {
         let algo = bf_algorithm(4, 200);
         assert_eq!(algo.name(), "bellman_ford");
     }
-
 
     #[test]
     fn algorithm_timeout() {
