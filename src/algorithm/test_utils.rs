@@ -12,7 +12,10 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address, Chain},
         simulation::{
             errors::{SimulationError, TransitionError},
-            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+            protocol_sim::{
+                Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+                SwapConstraint,
+            },
         },
         Bytes,
     },
@@ -130,6 +133,24 @@ impl ProtocolSim for MockProtocolSim {
             fee: self.fee,
         });
         Ok(GetAmountOutResult::new(amount_out, BigUint::from(self.gas), new_state))
+    }
+
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        let token_in = params.token_in();
+        let token_out = params.token_out();
+
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                let (sell_limit, _) =
+                    self.get_limits(token_in.address.clone(), token_out.address.clone())?;
+                let result = self.get_amount_out(sell_limit.clone(), token_in, token_out)?;
+                Ok(PoolSwap::new(sell_limit, result.amount, result.new_state, None))
+            }
+            _ => Err(SimulationError::InvalidInput(
+                "MockProtocolSim only supports TradeLimitPrice".to_string(),
+                None,
+            )),
+        }
     }
 
     fn get_limits(
