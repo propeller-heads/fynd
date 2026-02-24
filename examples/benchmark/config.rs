@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
-use fynd_core::OrderSide;
-use fynd_rpc::{Order, SolutionOptions, SolutionRequest};
+use fynd_core::{Order, OrderSide, SolutionOptions, SolutionRequest};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::models::Address;

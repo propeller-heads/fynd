@@ -27,11 +27,8 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::OrderSide;
-// Import solver types from fynd-rpc
-use fynd_rpc::{
-    builder::parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest,
-};
+use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest};
+use fynd_rpc::{builder::parse_chain, HealthStatus};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;

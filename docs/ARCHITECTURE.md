@@ -149,8 +149,8 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 
 ### 2. OrderManager
 
-**Crate:** `fynd-rpc`
-**Location:** `fynd-rpc/src/order_manager/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/order_manager/`
 
 Orchestrates solve requests across multiple worker pools:
 
@@ -245,8 +245,8 @@ broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis, blacklisting, 
 
 ### 9. Derived Data System
 
-**Crate:** `fynd-core` (computations) and `fynd-rpc` (manager)
-**Location:** `fynd-core/src/derived/` and `fynd-rpc/src/derived/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/derived/`
 
 Pre-computes analytics from raw market data:
 

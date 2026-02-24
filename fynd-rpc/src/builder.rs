@@ -8,6 +8,7 @@ use fynd_core::{
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
+    order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -21,9 +22,7 @@ use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::Ethereu
 use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, BlacklistConfig, PoolConfig},
-    order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
 };
-
 /// Builder that assembles Fynd and returns a running server handle.
 ///
 /// The builder does the following:

@@ -21,15 +21,14 @@ use std::{
 
 use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use fynd_core::{
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderSolution, SolutionStatus,
-    SolveError,
-};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
 
-use crate::api::{Solution, SolutionOptions, SolutionRequest};
+use crate::{
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderSolution, Solution,
+    SolutionOptions, SolutionRequest, SolutionStatus, SolveError,
+};
 
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
@@ -368,11 +367,11 @@ impl OrderManager {
 
 #[cfg(test)]
 mod tests {
-    use fynd_core::{OrderSide, SingleOrderSolution, SolveTask};
     use rstest::rstest;
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
+    use crate::{OrderSide, SingleOrderSolution, SolveTask};
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])

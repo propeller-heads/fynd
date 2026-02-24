@@ -1,9 +1,10 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
+use fynd_core::{Solution, SolutionRequest};
 use tracing::{info, instrument};
 
-use super::{ApiError, AppState, Solution, SolutionRequest};
+use super::{ApiError, AppState};
 use crate::api::{error::ErrorResponse, types::HealthStatus};
 
 /// Configures API routes under /v1 namespace.

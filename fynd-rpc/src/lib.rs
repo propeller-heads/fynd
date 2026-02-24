@@ -14,20 +14,12 @@
 //!
 //! - **builder**: `FyndRpcBuilder` for assembling and configuring the HTTP server
 //! - **api**: HTTP endpoint handlers (`/v1/solve`, `/v1/health`) and OpenAPI documentation
-//! - **order_manager**: Request orchestration across multiple solver pools
 //! - **config**: Configuration types for pools, algorithms, and blacklists
 
 // Public modules
 pub mod api;
 pub mod builder;
 pub mod config;
-pub mod order_manager;
 
-// Re-export fynd-core types for convenience
 // Re-export key RPC types
-pub use api::{ApiError, AppState, HealthStatus, Solution, SolutionOptions, SolutionRequest};
-pub use fynd_core::{
-    Algorithm, AlgorithmConfig, AlgorithmError, BlockInfo, ComponentId, MostLiquidAlgorithm, Order,
-    OrderSide, OrderSolution, Route, SolutionStatus, Swap,
-};
-pub use order_manager::OrderManager;
+pub use api::{ApiError, AppState, HealthStatus};

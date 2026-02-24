@@ -16,15 +16,16 @@ use std::{
 use actix_web::web;
 pub use error::ApiError;
 use fynd_core::{
-    feed::market_data::SharedMarketDataRef, BlockInfo, Order, OrderSide, OrderSolution, Route,
-    SolutionStatus, Swap,
+    feed::market_data::SharedMarketDataRef, order_manager::OrderManager, BlockInfo, Order,
+    OrderSide, OrderSolution, Route, Solution, SolutionOptions, SolutionRequest, SolutionStatus,
+    Swap,
 };
 use handlers::configure_routes;
-pub use types::{HealthStatus, Solution, SolutionOptions, SolutionRequest};
+pub use types::HealthStatus;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{api::error::ErrorResponse, order_manager::OrderManager};
+use crate::api::error::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
