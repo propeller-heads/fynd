@@ -27,9 +27,8 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd::types::solution::OrderSide;
-// Import solver types directly
-use fynd::{parse_chain, HealthStatus, Order, Route, Solution, SolutionOptions, SolutionRequest};
+use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest};
+use fynd_rpc::{builder::parse_chain, HealthStatus};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
@@ -569,7 +568,7 @@ fn display_quote(
     for order in &quote.orders {
         println!("Status: {:?}", order.status);
 
-        if !matches!(order.status, fynd::SolutionStatus::Success) {
+        if !matches!(order.status, fynd_core::SolutionStatus::Success) {
             println!("No route found for this order.");
             continue;
         }

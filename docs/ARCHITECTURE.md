@@ -2,17 +2,32 @@
 
 ## Overview
 
-Fynd is a solver built on Tycho that finds optimal swap routes across DeFi protocols.
+Fynd is a solver built on Tycho that finds optimal swap routes across DeFi protocols. It is organized as a multi-crate
+Rust workspace:
+
+- **`fynd-core`** - Pure solving logic with no HTTP dependencies
+- **`fynd-rpc`** - HTTP RPC server library
+- **`fynd`** - CLI binary that runs the complete routing service
+
+This modular architecture allows users to:
+
+- Use just the routing algorithms (`fynd-core`) in their own applications
+- Build custom HTTP servers with their own middleware (`fynd-rpc`)
+- Run the complete solver as a standalone service (`fynd` binary)
 
 ## Design Decisions
 
 - **Concurrency Model**: Hybrid async/threaded -- I/O on tokio, route finding on dedicated OS threads
 - **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for SharedMarketData (single writer, many readers)
-- **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its preferred graph representation
-- **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
-- **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager selects the best result
+- **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its
+  preferred graph representation
+- **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation
+  uses `petgraph::StableDiGraph`
+- **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager
+  selects the best result
 - **Output Format**: Structured `Solution` objects (routes, amounts, gas estimates)
-- **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a separate computation framework
+- **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a
+  separate computation framework
 - **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
 
 ---
@@ -119,7 +134,8 @@ Fynd is a solver built on Tycho that finds optimal swap routes across DeFi proto
 
 ### 1. API Layer (RouterApi)
 
-**Location:** `src/api/`
+**Crate:** `fynd-rpc`
+**Location:** `fynd-rpc/src/api/`
 
 Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns JSON responses.
 
@@ -133,7 +149,8 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 
 ### 2. OrderManager
 
-**Location:** `src/order_manager/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/order_manager/`
 
 Orchestrates solve requests across multiple worker pools:
 
@@ -146,7 +163,8 @@ Orchestrates solve requests across multiple worker pools:
 
 ### 3. Worker Pool
 
-**Location:** `src/worker_pool/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/worker_pool/`
 
 Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 
@@ -154,13 +172,15 @@ Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 - A bounded `TaskQueue` (via `async_channel`)
 - N `SolverWorker` instances on separate threads
 
-Pools are configured via `worker_pools.toml`. Multiple pools can use the same algorithm with different parameters (e.g., fast 2-hop vs deep 3-hop).
+Pools are configured via `worker_pools.toml`. Multiple pools can use the same algorithm with different parameters (e.g.,
+fast 2-hop vs deep 3-hop).
 
 ---
 
 ### 4. SolverWorker
 
-**Location:** `src/worker_pool/worker.rs`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/worker_pool/worker.rs`
 
 Each worker:
 
@@ -173,7 +193,8 @@ Each worker:
 
 ### 5. Algorithm Trait
 
-**Location:** `src/algorithm/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/algorithm/`
 
 Pluggable interface for route-finding algorithms:
 
@@ -181,13 +202,15 @@ Pluggable interface for route-finding algorithms:
 - Stateless: receives graph as parameter
 - Declares derived data requirements (fresh vs stale)
 
-**Built-in:** `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
+**Built-in:** `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation,
+gas-adjusted ranking.
 
 ---
 
 ### 6. Graph Module
 
-**Location:** `src/graph/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/graph/`
 
 Graph management infrastructure:
 
@@ -200,9 +223,11 @@ Graph management infrastructure:
 
 ### 7. SharedMarketData
 
-**Location:** `src/feed/market_data.rs`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/feed/market_data.rs`
 
-Single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring).
+Single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status,
+and block info. Protected by `Arc<RwLock<>>` (write-preferring).
 
 Provides `extract_subset()` for creating filtered snapshots that algorithms can use without holding the main lock.
 
@@ -210,15 +235,18 @@ Provides `extract_subset()` for creating filtered snapshots that algorithms can 
 
 ### 8. TychoFeed
 
-**Location:** `src/feed/tycho_feed.rs`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/feed/tycho_feed.rs`
 
-Background task that connects to Tycho's WebSocket API, processes component/state updates, updates SharedMarketData, and broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis, blacklisting, and token quality filtering.
+Background task that connects to Tycho's WebSocket API, processes component/state updates, updates SharedMarketData, and
+broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis, blacklisting, and token quality filtering.
 
 ---
 
 ### 9. Derived Data System
 
-**Location:** `src/derived/`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/derived/`
 
 Pre-computes analytics from raw market data:
 
@@ -232,7 +260,8 @@ Computations run in dependency order. Workers use `ReadinessTracker` to wait for
 
 ### 10. Gas Price Fetcher
 
-**Location:** `src/feed/gas.rs`
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/feed/gas.rs`
 
 Background worker that fetches gas prices from the RPC node. Signaled by TychoFeed after each block update.
 
@@ -240,9 +269,21 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 
 ### 11. Builder
 
-**Location:** `src/builder.rs`
+**Crate:** `fynd-rpc`
+**Location:** `fynd-rpc/src/builder.rs`
 
-`TychoSolverBuilder` assembles the entire system: creates feed, worker pools, computation manager, order manager, and HTTP server. `TychoSolver` runs the system and handles graceful shutdown.
+`FyndRpcBuilder` assembles the entire system: creates feed, worker pools, computation manager, order manager, and HTTP
+server. `Fynd` runs the system and handles graceful shutdown.
+
+---
+
+### 12. CLI Binary
+
+**Crate:** `fynd`
+**Location:** `src/main.rs` and `src/cli.rs`
+
+Command-line application that parses CLI arguments, sets up observability (tracing, metrics), and uses `FyndRpcBuilder`
+to run the complete routing service.
 
 ---
 
