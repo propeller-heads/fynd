@@ -23,7 +23,7 @@ services:
       - "--chain"
       - "${CHAIN:-Ethereum}"
       - "--protocols"
-      - "${PROTOCOLS:-uniswap_v2,uniswap_v3}"
+      - "${PROTOCOLS:-uniswap_v2,uniswap_v3,ekubo_v2,vm:curve,pancakeswap_v3,vm:maverick_v2,sushiswap_v2,erc4626,uniswap_v4_hooks,fluid_v1,pancakeswap_v2,vm:balancer_v2}"
 
   prometheus:
     image: prom/prometheus:latest

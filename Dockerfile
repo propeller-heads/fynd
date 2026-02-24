@@ -32,8 +32,8 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/tycho-solver /usr/local/bin/tycho-solver
+COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
 
 EXPOSE 3000 9898
 
-ENTRYPOINT ["/usr/local/bin/tycho-solver"]
+ENTRYPOINT ["/usr/local/bin/fynd"]
