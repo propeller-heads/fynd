@@ -47,22 +47,15 @@
 //! }
 //! ```
 
-mod computation;
-mod computations;
-mod error;
-pub mod events;
+pub(crate) mod computation;
+pub(crate) mod computations;
+pub(crate) mod error;
+pub(crate) mod events;
 mod manager;
 mod store;
-mod tracker;
-mod types;
+pub(crate) mod tracker;
+pub(crate) mod types;
 
-pub use computation::{ComputationId, ComputationRequirements, DerivedComputation};
-pub use computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation};
-pub use error::ComputationError;
-pub use events::DerivedDataEvent;
+// Only export the public API: manager, config, store, and shared reference type
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
-pub use tracker::ReadinessTracker;
-pub use types::{
-    PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
-};

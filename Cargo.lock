@@ -3254,7 +3254,6 @@ dependencies = [
 name = "fynd-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-channel",
  "async-trait",
  "chrono",
@@ -3286,16 +3285,9 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "anyhow",
- "async-channel",
- "async-trait",
- "chrono",
- "futures 0.3.32",
  "fynd-core",
- "itertools 0.14.0",
- "lazy_static",
  "metrics",
  "num-bigint",
- "num-traits",
  "num_cpus",
  "rstest",
  "serde",
@@ -3303,15 +3295,12 @@ dependencies = [
  "serde_with",
  "thiserror 1.0.69",
  "tokio",
- "tokio-stream",
  "toml",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber 0.3.22",
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
- "uuid",
 ]
 
 [[package]]

@@ -14,8 +14,9 @@ use crate::{
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::internal::SolveTask,
-    worker_pool::registry::{
-        spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM,
+    worker_pool::{
+        registry::{spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM},
+        task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
     },
 };
 
@@ -32,6 +33,8 @@ pub struct WorkerPoolConfig {
     pub num_workers: usize,
     /// Configuration for the algorithm used by each worker.
     pub algorithm_config: AlgorithmConfig,
+    /// Task queue capacity (maximum number of pending tasks).
+    pub task_queue_capacity: usize,
 }
 
 impl Default for WorkerPoolConfig {
@@ -41,6 +44,7 @@ impl Default for WorkerPoolConfig {
             algorithm: DEFAULT_ALGORITHM.to_string(),
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
+            task_queue_capacity: 1000,
         }
     }
 }
@@ -185,27 +189,43 @@ impl WorkerPoolBuilder {
         self
     }
 
+    /// Sets the task queue capacity.
+    pub fn task_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.task_queue_capacity = capacity;
+        self
+    }
+
     /// Builds and spawns the worker pool.
+    ///
+    /// Creates an internal task queue and returns both the worker pool and a handle
+    /// for enqueueing tasks.
     ///
     /// # Errors
     ///
     /// Returns an error if the algorithm name is not registered.
     pub fn build(
         self,
-        task_rx: async_channel::Receiver<SolveTask>,
         market_data: SharedMarketDataRef,
         derived_data: SharedDerivedDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
         derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
-    ) -> Result<WorkerPool, UnknownAlgorithmError> {
-        WorkerPool::spawn(
+    ) -> Result<(WorkerPool, TaskQueueHandle), UnknownAlgorithmError> {
+        // Create task queue internally
+        let task_queue =
+            TaskQueue::new(TaskQueueConfig { capacity: self.config.task_queue_capacity });
+        let (task_handle, task_rx) = task_queue.split();
+
+        // Spawn worker pool
+        let pool = WorkerPool::spawn(
             self.config,
             task_rx,
             market_data,
             derived_data,
             event_rx,
             derived_event_rx,
-        )
+        )?;
+
+        Ok((pool, task_handle))
     }
 }
 

@@ -19,8 +19,8 @@ use tracing::{debug, error, info, warn};
 use crate::{
     algorithm::Algorithm,
     derived::{
-        events::DerivedDataEvent, DerivedComputation, PoolDepthComputation, ReadinessTracker,
-        SharedDerivedDataRef,
+        computation::DerivedComputation, computations::PoolDepthComputation,
+        events::DerivedDataEvent, tracker::ReadinessTracker, SharedDerivedDataRef,
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
@@ -488,7 +488,9 @@ mod tests {
     use crate::{
         algorithm::{most_liquid::DepthAndPrice, test_utils::setup_market},
         derived::{
-            ComputationRequirements, DerivedData, SpotPriceComputation, TokenGasPriceComputation,
+            computation::ComputationRequirements,
+            computations::{SpotPriceComputation, TokenGasPriceComputation},
+            DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
     };
@@ -741,7 +743,7 @@ mod tests {
         // Create channels
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
-        let (_task_tx, task_rx) = async_channel::bounded::<crate::SolveTask>(16);
+        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
         // Spawn worker

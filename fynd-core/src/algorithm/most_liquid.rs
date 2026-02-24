@@ -25,7 +25,7 @@ use tycho_simulation::{
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
-    derived::{ComputationRequirements, SharedDerivedDataRef, TokenGasPrices},
+    derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
@@ -653,7 +653,7 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
-        derived::{DerivedData, TokenGasPrices},
+        derived::{types::TokenGasPrices, DerivedData},
         graph::GraphManager,
         types::OrderSide,
     };

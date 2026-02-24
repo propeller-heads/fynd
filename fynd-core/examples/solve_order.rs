@@ -20,13 +20,12 @@ use std::{
 
 use fynd_core::{
     algorithm::AlgorithmConfig,
-    derived::{ComputationManager, ComputationManagerConfig},
+    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     types::{constants::native_token, Order, OrderSide},
-    OrderManager, OrderManagerConfig, SolutionRequest, SolverPoolHandle, TaskQueue,
-    TaskQueueConfig, WorkerPoolBuilder,
+    OrderManager, OrderManagerConfig, SolutionRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
@@ -58,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Gas price fetcher
     let ethereum_client = EthereumRpcClient::new(rpc_url.as_str())
-        .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;
+        .map_err(|e| format!("failed to create ethereum client: {}", e))?;
 
     let (mut gas_price_fetcher, gas_price_worker_signal_tx) =
         GasPriceFetcher::new(ethereum_client, Arc::clone(&market_data));
@@ -74,9 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (computation_manager, _derived_event_rx) =
         ComputationManager::new(computation_config, Arc::clone(&market_data))
-            .map_err(|e| anyhow::anyhow!("failed to create computation manager: {}", e))?;
+            .map_err(|e| format!("failed to create computation manager: {}", e))?;
 
-    let derived_data = computation_manager.store();
+    let derived_data: SharedDerivedDataRef = computation_manager.store();
     let derived_event_tx = computation_manager.event_sender();
 
     // 5. Create event subscriptions before spawning tasks
@@ -86,17 +85,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
 
     // 6. Worker pool with most_liquid algorithm
-    let queue = TaskQueue::new(TaskQueueConfig { capacity: 100 });
-    let (task_handle, task_rx) = queue.split();
     let algorithm_config = AlgorithmConfig::new(1, 2, Duration::from_millis(5000))?;
 
-    let worker_pool = WorkerPoolBuilder::new()
+    let (worker_pool, task_handle) = WorkerPoolBuilder::new()
         .name("solver".to_string())
         .algorithm("most_liquid".to_string())
         .algorithm_config(algorithm_config)
         .num_workers(2)
+        .task_queue_capacity(100)
         .build(
-            task_rx,
             Arc::clone(&market_data),
             derived_data,
             pool_event_rx,
@@ -193,7 +190,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let market = market_data.read().await;
 
         let final_swap = route.swaps.last().unwrap();
-        let final_token_out = market.get_token(&final_swap.token_out).unwrap();
+        let final_token_out = market
+            .get_token(&final_swap.token_out)
+            .unwrap();
         let final_amount_out = final_swap
             .amount_out
             .to_string()
@@ -206,8 +205,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Route ({} hops):", route.swaps.len());
         for (i, swap) in route.swaps.iter().enumerate() {
-            let token_in = market.get_token(&swap.token_in).unwrap();
-            let token_out = market.get_token(&swap.token_out).unwrap();
+            let token_in = market
+                .get_token(&swap.token_in)
+                .unwrap();
+            let token_out = market
+                .get_token(&swap.token_out)
+                .unwrap();
 
             let amount_in_f64 = swap
                 .amount_in

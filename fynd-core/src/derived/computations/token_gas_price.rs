@@ -87,6 +87,7 @@ impl Default for TokenGasPriceComputation {
 }
 
 impl TokenGasPriceComputation {
+    #[cfg(test)]
     pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
         Self { gas_token, max_hops, simulation_amount }
     }
@@ -99,10 +100,6 @@ impl TokenGasPriceComputation {
     /// Sets the gas token address.
     pub fn with_gas_token(self, gas_token: Address) -> Self {
         Self { gas_token, ..self }
-    }
-
-    pub fn simulation_amount(&self) -> &BigUint {
-        &self.simulation_amount
     }
 
     /// DFS to discover all paths from gas_token, scored by spot-price spread.

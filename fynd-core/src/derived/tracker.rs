@@ -70,6 +70,7 @@ impl ReadinessTracker {
     }
 
     /// Creates a tracker with no requirements (always ready).
+    #[cfg(test)]
     pub fn no_requirements() -> Self {
         Self::new(ComputationRequirements::none())
     }
@@ -176,13 +177,9 @@ impl ReadinessTracker {
     }
 
     /// Returns the current block being tracked.
+    #[cfg(test)]
     pub fn current_block(&self) -> Option<u64> {
         self.current_block
-    }
-
-    /// Returns a reference to the requirements.
-    pub fn requirements(&self) -> &ComputationRequirements {
-        &self.requirements
     }
 }
 

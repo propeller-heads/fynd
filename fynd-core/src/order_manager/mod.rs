@@ -371,7 +371,7 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::{OrderSide, SingleOrderSolution, SolveTask};
+    use crate::{types::internal::SolveTask, OrderSide, SingleOrderSolution};
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])

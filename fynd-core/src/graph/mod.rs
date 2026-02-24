@@ -8,7 +8,7 @@ pub mod petgraph;
 
 use std::collections::HashMap;
 
-pub use petgraph::{EdgeData, EdgeIndex, PetgraphStableDiGraphManager};
+pub use petgraph::{EdgeData, PetgraphStableDiGraphManager};
 use thiserror::Error;
 use tycho_simulation::{
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},

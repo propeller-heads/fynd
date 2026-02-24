@@ -24,23 +24,21 @@
 pub mod algorithm;
 pub mod derived;
 pub mod feed;
-pub mod graph;
+pub(crate) mod graph;
 pub mod order_manager;
 pub mod types;
 pub mod worker_pool;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
-pub use order_manager::{
-    config::OrderManagerConfig, OrderManager, SolverPoolHandle,
-};
+pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
     BlockInfo, ComponentId, Order, OrderSide, OrderSolution, OrderValidationError, Route,
-    RouteResult, RouteValidationError, SingleOrderSolution, Solution, SolutionOptions,
-    SolutionRequest, SolutionStatus, SolveError, SolveResult, SolveTask, Swap, TaskId,
+    RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
+    SolutionStatus, SolveError, SolveResult, Swap, TaskId,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
     registry::UnknownAlgorithmError,
-    task_queue::{TaskQueue, TaskQueueConfig},
+    TaskQueueHandle,
 };

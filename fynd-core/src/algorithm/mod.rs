@@ -23,7 +23,7 @@ pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
-    derived::{ComputationRequirements, SharedDerivedDataRef},
+    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
     types::{solution::Order, RouteResult},

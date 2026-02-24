@@ -10,10 +10,7 @@ use fynd_core::{
     },
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     types::constants::native_token,
-    worker_pool::{
-        pool::{WorkerPool, WorkerPoolBuilder},
-        task_queue::{TaskQueue, TaskQueueConfig},
-    },
+    worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
@@ -222,17 +219,14 @@ impl FyndBuilder {
                 Duration::from_millis(pool_cfg.timeout_ms),
             )
             .context(format!("invalid algorithm configuration for pool '{}'", pool_name))?;
-            let task_queue =
-                TaskQueue::new(TaskQueueConfig { capacity: pool_cfg.task_queue_capacity });
-            let (task_handle, task_rx) = task_queue.split();
 
-            let worker_pool = WorkerPoolBuilder::new()
+            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
                 .name(pool_name.clone())
                 .algorithm(pool_cfg.algorithm.clone())
                 .algorithm_config(algorithm_config)
                 .num_workers(pool_cfg.num_workers)
+                .task_queue_capacity(pool_cfg.task_queue_capacity)
                 .build(
-                    task_rx,
                     Arc::clone(&market_data),
                     Arc::clone(&derived_data),
                     pool_event_rx,
