@@ -4,9 +4,9 @@
 //! - POST /solve - Submit solve requests
 //! - GET /health - Health check endpoint
 
+pub mod dto;
 pub mod error;
 pub mod handlers;
-pub mod types;
 
 use std::{
     sync::Arc,
@@ -14,14 +14,10 @@ use std::{
 };
 
 use actix_web::web;
+pub use dto::HealthStatus;
 pub use error::ApiError;
-use fynd_core::{
-    feed::market_data::SharedMarketDataRef, order_manager::OrderManager, BlockInfo, Order,
-    OrderSide, OrderSolution, Route, Solution, SolutionOptions, SolutionRequest, SolutionStatus,
-    Swap,
-};
+use fynd_core::{feed::market_data::SharedMarketDataRef, order_manager::OrderManager};
 use handlers::configure_routes;
-pub use types::HealthStatus;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -31,16 +27,16 @@ use crate::api::error::ErrorResponse;
 #[openapi(
     paths(handlers::solve, handlers::health),
     components(schemas(
-        SolutionRequest,
-        Order,
-        OrderSide,
-        SolutionOptions,
-        Solution,
-        OrderSolution,
-        SolutionStatus,
-        Route,
-        Swap,
-        BlockInfo,
+        dto::SolutionRequest,
+        dto::Order,
+        dto::OrderSide,
+        dto::SolutionOptions,
+        dto::Solution,
+        dto::OrderSolution,
+        dto::SolutionStatus,
+        dto::Route,
+        dto::Swap,
+        dto::BlockInfo,
         HealthStatus,
         ErrorResponse,
     ))

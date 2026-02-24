@@ -3275,7 +3275,6 @@ dependencies = [
  "tracing",
  "tycho-simulation",
  "typetag",
- "utoipa 5.4.0",
  "uuid",
 ]
 
@@ -3288,6 +3287,7 @@ dependencies = [
  "fynd-core",
  "metrics",
  "num-bigint",
+ "num-traits",
  "num_cpus",
  "rstest",
  "serde",
@@ -3301,6 +3301,7 @@ dependencies = [
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
+ "uuid",
 ]
 
 [[package]]

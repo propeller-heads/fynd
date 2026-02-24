@@ -27,8 +27,6 @@ thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
-# OpenAPI (only for schema generation, no runtime overhead)
-utoipa.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

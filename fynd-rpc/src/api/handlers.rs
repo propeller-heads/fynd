@@ -1,11 +1,10 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
-use fynd_core::{Solution, SolutionRequest};
 use tracing::{info, instrument};
 
-use super::{ApiError, AppState};
-use crate::api::{error::ErrorResponse, types::HealthStatus};
+use super::{dto, ApiError, AppState};
+use crate::api::{dto::HealthStatus, error::ErrorResponse};
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -31,9 +30,9 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     post,
     path = "/v1/solve",
     tag = "solver",
-    request_body = SolutionRequest,
+    request_body = dto::SolutionRequest,
     responses(
-        (status = 200, description = "Solve completed", body = Solution),
+        (status = 200, description = "Solve completed", body = dto::Solution),
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
@@ -43,34 +42,40 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
 pub async fn solve(
     state: web::Data<AppState>,
-    request: web::Json<SolutionRequest>,
+    request: web::Json<dto::SolutionRequest>,
 ) -> Result<HttpResponse, ApiError> {
-    let request = request.into_inner();
+    let dto_request = request.into_inner();
 
     // Validate request
-    if request.orders.is_empty() {
+    if dto_request.orders.is_empty() {
         return Err(ApiError::BadRequest("no orders provided".to_string()));
     }
 
-    for order in &request.orders {
+    // Convert DTO to core types
+    let core_request: fynd_core::SolutionRequest = dto_request.into();
+
+    // Validate orders
+    for order in &core_request.orders {
         if let Err(e) = order.validate() {
             return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id, e)));
         }
     }
 
-    let solution = state
+    let core_solution = state
         .order_manager
-        .solve(request)
+        .solve(core_request)
         .await?;
 
     info!(
-        solve_time_ms = solution.solve_time_ms,
-        num_orders = solution.orders.len(),
+        solve_time_ms = core_solution.solve_time_ms,
+        num_orders = core_solution.orders.len(),
         num_pools = state.order_manager.num_pools(),
         "solve completed"
     );
 
-    Ok(HttpResponse::Ok().json(solution))
+    let dto_solution: dto::Solution = core_solution.into();
+
+    Ok(HttpResponse::Ok().json(dto_solution))
 }
 
 /// GET /v1/health - Health check endpoint.
