@@ -187,7 +187,12 @@ async fn run_solver(cli: Cli) -> Result<(), SolverError> {
     let provider = create_tracing_subscriber();
     info!("Starting Fynd");
 
-    let _metrics_task = create_metrics_exporter();
+    let _metrics_task = if cli.enable_metrics {
+        info!("Starting metrics server on port 9898");
+        Some(create_metrics_exporter())
+    } else {
+        None
+    };
 
     // Setup solver (handles setup errors)
     let solver = setup_solver(&cli).await?;

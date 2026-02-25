@@ -157,6 +157,7 @@ Returns service health status. HTTP 200 if healthy, 503 if stale.
 | `--order-manager-timeout-ms` | - | `100` | Default solve timeout                      |
 | `-w, --worker-pools-config` | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
 | `--blacklist-config` | `BLACKLIST_CONFIG` | `blacklist.toml` | Blacklist config                           |
+| `--enable-metrics` | `ENABLE_METRICS` | `false` | Enable Prometheus metrics server on port 9898 |
 
 See `--help` for the full list.
 
@@ -204,7 +205,7 @@ components = [
 
 ## Observability
 
-- **Metrics**: Prometheus endpoint at `http://localhost:9898/metrics`
+- **Metrics**: Prometheus endpoint at `http://localhost:9898/metrics`, enabled with `--enable-metrics`
 - **Logging**: Structured logging via `RUST_LOG` (e.g., `RUST_LOG=info,fynd=debug`)
 - **Health**: `GET /v1/health` returns data freshness and pool count
 
