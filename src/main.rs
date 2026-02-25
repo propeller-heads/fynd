@@ -19,10 +19,10 @@ use std::time::Duration;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
+use fynd_core::price_guard::config::PriceGuardConfig;
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
     config::{BlacklistConfig, WorkerPoolsConfig},
-    price_guard::config::PriceGuardConfig,
 };
 
 mod cli;

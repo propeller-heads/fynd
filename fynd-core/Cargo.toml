@@ -29,6 +29,8 @@ metrics.workspace = true
 typetag.workspace = true
 tycho-execution.workspace = true
 alloy.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

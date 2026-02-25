@@ -142,7 +142,9 @@ impl OrderManager {
                     let (to_encode, rest): (Vec<_>, Vec<_>) = order_solutions
                         .into_iter()
                         .partition(|s| s.status == SolutionStatus::Success);
-                    let mut encoded = encoder.encode(to_encode, request.options.slippage).await?;
+                    let mut encoded = encoder
+                        .encode(to_encode, request.options.slippage)
+                        .await?;
                     encoded.extend(rest);
                     order_solutions = encoded;
                 }

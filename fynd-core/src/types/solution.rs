@@ -26,7 +26,6 @@ use tycho_simulation::{
 };
 use uuid::Uuid;
 
-use super::{encoding::EncodedSolution, primitives::ComponentId};
 use super::primitives::ComponentId;
 use crate::AlgorithmError;
 

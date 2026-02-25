@@ -183,6 +183,8 @@ pub enum SolutionStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 /// Block information at which a quote was computed.
@@ -360,6 +362,7 @@ impl From<fynd_core::SolutionStatus> for SolutionStatus {
             fynd_core::SolutionStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
             fynd_core::SolutionStatus::Timeout => Self::Timeout,
             fynd_core::SolutionStatus::NotReady => Self::NotReady,
+            fynd_core::SolutionStatus::PriceCheckFailed => Self::PriceCheckFailed,
         }
     }
 }
