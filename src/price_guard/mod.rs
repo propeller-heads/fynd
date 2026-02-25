@@ -1,3 +1,4 @@
+pub mod binance_ws;
 pub mod config;
 pub mod provider;
 

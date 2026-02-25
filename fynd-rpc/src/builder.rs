@@ -29,7 +29,7 @@ use crate::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
-    price_guard::{config::PriceGuardConfig, provider::NoopPriceProvider, PriceGuard},
+    price_guard::{binance_ws::BinanceWsProvider, config::PriceGuardConfig, PriceGuard},
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -319,9 +319,10 @@ impl FyndBuilder {
             self.swapper_pk,
         )?;
 
+        // Price guard with Binance WebSocket provider
         let price_guard = if self.price_guard_config.enabled() {
-            // TODO: Replace NoopPriceProvider with a real provider
-            Some(PriceGuard::new(Box::new(NoopPriceProvider), self.price_guard_config))
+            let (provider, _handle) = BinanceWsProvider::start(Arc::clone(&market_data));
+            Some(PriceGuard::new(Box::new(provider), self.price_guard_config))
         } else {
             None
         };
