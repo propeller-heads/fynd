@@ -8,14 +8,14 @@ description: >-
 
 ## Tutorial: Quote, Simulate & Execute Swaps
 
-[This example](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) demonstrates how to interact with an already-running Fynd to get swap quotes, and optionally simulate or execute those swaps on-chain using [tycho-execution](https://docs.propellerheads.xyz/tycho/for-solvers/execution).
+[This example](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) shows how to get swap quotes from a running Fynd instance, simulate them, and optionally execute on-chain using [tycho-execution](https://docs.propellerheads.xyz/tycho/for-solvers/execution).
 
 ### Prerequisites
 
-1. **Running solver**: Start Fynd first. If you haven't, yet, please refer to [.](./ "mention")
-2. **Tycho API key**: Required for loading token data from the Tycho API
+1. **Running solver**: Start Fynd first. If you haven't, see [.](./ "mention")
+2. **Tycho API key**: Required to load token data from the Tycho API
 3. **RPC URL**: Required for simulation and execution (Ethereum mainnet or other supported chain)
-4. **Private key**: Required only for execution or Permit2 simulation. For basic simulation, use `--sender` instead to impersonate any account.
+4. **Private key**: Required only for execution or Permit2 simulation. For basic simulation, use `--sender` to impersonate any account.
 
 ### Environment Variables
 
@@ -46,7 +46,7 @@ RUST_LOG=info cargo run --release -- \
   --min-tvl 50
 ```
 
-Wait for the it to be ready to accept requests: [#id-3.1-check-solver-health](./#id-3.1-check-solver-health "mention")
+Wait for it to be ready: [#id-3.1-check-solver-health](./#id-3.1-check-solver-health "mention")
 
 #### 2. Get a quote (no private key needed)
 
@@ -58,7 +58,7 @@ export TYCHO_API_KEY=your_api_key
 cargo run --example tutorial -- --sell-amount 100
 ```
 
-This will display a quote for swapping 100 USDC to WETH (default tokens). You can customize the in/out tokens with `--sell-token` and `--buy-token` parameters
+This displays a quote for swapping 100 USDC to WETH (default tokens). Customize with `--sell-token` and `--buy-token`.
 
 #### 3. Simulate without private key
 
@@ -72,7 +72,7 @@ cargo run --example tutorial -- \
   --sender 0xYourAddressHere
 ```
 
-This simulates using standard ERC-20 `transferFrom` (not Permit2). The simulation will fail if the sender lacks token balance.
+This simulates using standard ERC-20 `transferFrom` (not Permit2). The simulation fails if the sender lacks token balance.
 
 #### 4. Simulate with private key (Permit2)
 
@@ -135,12 +135,12 @@ cargo run --example tutorial -- \
 
 ### Security Notes
 
-1. **Never expose your private key**: Always use environment variables, never CLI arguments
-2. **Use simulate-only first**: Always test with `--simulate-only` before executing real transactions
-3. **Slippage protection**: The default 0.5% slippage may not be suitable for large trades or volatile markets. Adjust `--slippage-bps` as needed
-4. **Mainnet warning**: Executing swaps sends real transactions. Start with small amounts. The routes will always be executed using [Tycho Router](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses) contract.
-5. **Verify routes**: Always review the displayed route before execution. Multi-hop routes through low-liquidity pools may result in worse execution
-6. **Indicative prices only.** The prices returned are indicative. They reflect the best route at the time of the query but are not guaranteed on-chain. The longer you take to encode and execute the transaction, the more the actual executed price may differ from the quoted one. This applies to all protocols due to slippage: on-chain pool states change every block, and for RFQ protocols, quotes have short expiry windows.
+1. **Never expose your private key.** Use environment variables, never CLI arguments.
+2. **Simulate first.** Always test with `--simulate-only` before executing real transactions.
+3. **Slippage protection.** The default 0.5% slippage may not work for large trades or volatile markets. Adjust `--slippage-bps` accordingly.
+4. **Mainnet warning.** Executing swaps sends real transactions. Start with small amounts. All routes execute through the [Tycho Router](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses) contract.
+5. **Verify routes.** Review the displayed route before execution. Multi-hop routes through low-liquidity pools can result in worse execution.
+6. **Prices are indicative.** Quotes reflect the best route at query time but are not guaranteed on-chain. On-chain pool states change every block, and RFQ quotes have short expiry windows. The longer you wait to execute, the more the price may drift.
 
 ### Troubleshooting
 

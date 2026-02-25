@@ -2,10 +2,56 @@
 name = "fynd"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance DEX router built on Tycho"
-license = "MIT"
 
 [dependencies]
+fynd-rpc = { workspace = true }
+fynd-core = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# HTTP (for metrics server)
+actix-web = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+# Tycho (for Chain type in CLI)
+tycho-simulation = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tycho-execution = { version = ">=0.155.0", features = ["evm"] }
+alloy = { version = "1.0", features = ["providers", "signer-local", "rpc-types-eth", "eip712", "node-bindings"] }
+alloy-chains = "0.2"
+dialoguer = "0.11"
+dotenv = "0.15"
+hex = "0.4"
+fastrand = "2.3.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+
+[workspace]
+members = ["fynd-core", "fynd-rpc"]
+resolver = "2"
+
+[workspace.dependencies]
 # HTTP
 actix-web = "4"
 
@@ -43,6 +89,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Tycho
 tycho-simulation = ">=0.234.0"
+typetag = "0.2"
 tycho-execution = { path = "../tycho-execution", features = ["evm"] }
 
 # Graph algorithms
@@ -59,20 +106,13 @@ async-channel = "2.5.0"
 async-trait = "0.1"
 chrono = "0.4"
 itertools = "0.14.0"
-time = ">=0.3.47"  # Fix RUSTSEC-2026-0009
-hex = "0.4"
 
-[dev-dependencies]
+# Internal crates
+fynd-core = { path = "fynd-core" }
+fynd-rpc = { path = "fynd-rpc" }
+
+# Dev dependencies
 rstest = "0.18"
-chrono = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
-fastrand = "2.3.0"
-alloy = { version = "1.0", features = ["providers", "signer-local", "rpc-types-eth", "eip712", "node-bindings"] }
-alloy-chains = "0.2"
-dialoguer = "0.11"
-dotenv = "0.15"
-futures = "0.3"
-hex = "0.4"
 
 [[example]]
 name = "tutorial"

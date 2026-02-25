@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use fynd::{Solution, SolutionRequest, SolutionStatus};
+use fynd_core::{Solution, SolutionRequest, SolutionStatus};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::ParallelizationMode;

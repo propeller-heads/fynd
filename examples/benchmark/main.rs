@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::Parser;
 use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
-use fynd::HealthStatus;
+use fynd_rpc::HealthStatus;
 use runner::{run_benchmark, RunnerResults};
 use tracing::info;
 use tracing_subscriber::EnvFilter;

@@ -1,13 +1,31 @@
+//! Fynd CLI - DeFi routing service
+//!
+//! A command-line application that runs an HTTP RPC server for finding optimal
+//! swap routes across multiple DeFi protocols. Uses [`fynd-rpc`] for the HTTP server
+//! and [`fynd-core`] for the routing algorithms.
+//!
+//! # Usage
+//!
+//! ```bash
+//! fynd --rpc-url $RPC_URL \
+//!      --tycho-url tycho-beta.propellerheads.xyz \
+//!      --protocols uniswap_v2,uniswap_v3
+//! ```
+//!
+//! See `fynd --help` for all available options.
+
 use std::time::Duration;
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
-use fynd::{
+use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
-    cli::Cli,
     config::{BlacklistConfig, WorkerPoolsConfig},
 };
+
+mod cli;
+use cli::Cli;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -42,37 +60,57 @@ pub enum SolverError {
     ShutdownError(String),
 }
 
-fn create_tracing_subscriber() -> TracerProvider {
-    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
-
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()
-        .expect("Failed to build OTLP exporter");
-
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-            "service.name",
-            "tycho-solver",
-        )]))
-        .build();
-
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
-
+fn create_tracing_subscriber() -> Option<TracerProvider> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .compact();
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(fmt_layer)
-        .with(otel_layer)
-        .init();
+    if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        match opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.clone())
+            .build()
+        {
+            Ok(exporter) => {
+                let provider = TracerProvider::builder()
+                    .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                    .with_resource(opentelemetry_sdk::Resource::new(vec![
+                        opentelemetry::KeyValue::new("service.name", "tycho-solver"),
+                    ]))
+                    .build();
 
-    provider
+                let otel_layer =
+                    tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
+
+                tracing_subscriber::registry()
+                    .with(EnvFilter::from_default_env())
+                    .with(fmt_layer)
+                    .with(otel_layer)
+                    .init();
+
+                info!("OpenTelemetry tracing enabled, exporting to: {}", endpoint);
+                Some(provider)
+            }
+            Err(e) => {
+                // Fall back to non-OTEL tracing if exporter fails
+                tracing_subscriber::registry()
+                    .with(EnvFilter::from_default_env())
+                    .with(fmt_layer)
+                    .init();
+
+                error!("Failed to build OTLP exporter: {}. Continuing without OTEL.", e);
+                None
+            }
+        }
+    } else {
+        // OTEL disabled, use only fmt layer
+        tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(fmt_layer)
+            .init();
+
+        None
+    }
 }
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
@@ -113,7 +151,7 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(cli: &Cli) -> Result<fynd::builder::Fynd, SolverError> {
+async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError> {
     // Load worker pools config
     let pools_config =
         WorkerPoolsConfig::load_from_file(&cli.worker_pools_config).map_err(|e| {
@@ -216,6 +254,8 @@ async fn run_solver(cli: Cli) -> Result<(), SolverError> {
         }
     }
 
-    let _ = provider.shutdown();
+    if let Some(provider) = provider {
+        let _ = provider.shutdown();
+    }
     Ok(())
 }

@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-
-use crate::config::defaults;
+use fynd_rpc::config::defaults;
 
 /// Fynd - High-performance DEX solver built on Tycho
 ///

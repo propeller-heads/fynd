@@ -23,23 +23,23 @@ layout:
 
 ## What is Fynd?
 
-Fynd is a high-performance DeFi route-finding engine built on top of [Tycho](https://www.propellerheads.xyz/tycho). It discovers optimal swap routes across multiple DeFi protocols in real-time, returning structured solutions that can be encoded and executed on-chain.
+Fynd is a DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). It finds optimal swap routes across DeFi protocols in real-time and returns solutions you can encode and execute on-chain.
 
 ## Own Your Routing <a href="#own-your-dex-routing" id="own-your-dex-routing"></a>
 
-Route APIs are simple, but there's a big tradeoff. Rate limits, network overhead, lack of transparency, unreliable APIs, and unexplainable slippage are one of the main issues. And you, as an engineer, can't do anything to fix it.
+Route APIs are simple, but the tradeoffs are painful: rate limits, network overhead, no transparency, unreliable uptime, and unexplainable slippage. And you can't fix any of it.
 
-Fynd solves this. With it, you have:
+Fynd puts you in control:
 
-1. **Access to real-time market state** via Tycho Stream, with all [Tycho supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
-2. **Super fast solution times:** With results as fast as 50ms, you can decide the balance between routing quality and latency.
-3. **Custom route-finding algorithms:** Plug in your own algorithm, or customize our pre-built one. Fynd is designed to support multiple algorithms, and always give you the best solution.
-4. **Scale as you need:** A scalable architecture that allows you to scale vertically to fulfill your speed requirements.
+1. **Real-time market state** via Tycho Stream, covering all [Tycho-supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
+2. **50ms solution times:** You choose the balance between routing quality and latency.
+3. **Custom algorithms:** Plug in your own algorithm or customize the pre-built one. Fynd runs multiple algorithms in parallel and picks the best result.
+4. **Vertical scaling:** Scale up to meet your speed requirements.
 
 ### Key Design Principles
 
-* **Single source of truth**: All market data lives in one `SharedMarketData` structure. It is written to by a single feed and read by all workers. No data duplication.
-* **Algorithm-agnostic**: The system is designed around a pluggable `Algorithm` trait. Different algorithms can use different graph representations and strategies. Multiple algorithms compete in parallel, and the best result wins.
+* **Single source of truth**: All market data lives in one `SharedMarketData` structure. A single feed writes to it; all workers read from it. No duplication.
+* **Algorithm-agnostic**: Built around a pluggable `Algorithm` trait. Different algorithms use different graph representations and strategies. Multiple algorithms compete in parallel; the best result wins.
 * **Performance-first**: CPU-bound route finding runs on dedicated OS threads (not the async runtime). Each worker pool has its own task queue for independent backpressure and scaling.
 * **Observability built-in**: Prometheus metrics, structured logging via `tracing`, and health endpoints are first-class citizens.
 
@@ -52,18 +52,18 @@ Fynd solves this. With it, you have:
 
 ### Supported Protocols
 
-Any protocol supported by Tycho can be used. See [list of supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols) and [supported RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#quickstart)
+Fynd works with any protocol Tycho supports. See the [list of supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols) and [supported RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#quickstart).
 
-### How It Works (High-Level Overview)
+### How It Works
 
 <figure><picture><source srcset=".gitbook/assets/This big artboard can be taller-1.png" media="(prefers-color-scheme: dark)"><img src=".gitbook/assets/This big artboard can be taller.png" alt=""></picture><figcaption></figcaption></figure>
 
-1. **TychoFeed** connects to **Tycho Streams** (both [on-chain protocols](https://docs.propellerheads.xyz/tycho/for-solvers/simulation#streaming-protocol-states) and [RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#stream-real-time-price-updates) streams) and handle market updates (added/removed components and state changes) every block.
-2. **SharedMarketData** stores all component states, tokens, and gas prices as a single shared structure.
-3. When a **solve request** arrives via HTTP, the **OrderManager** fans it out to all configured worker pools in parallel.
-4. Each **Worker Pool** runs a specific algorithm configuration. Workers within the pool compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
-5. The **OrderManager** collects results, selects the best solution by `amount_out_net_gas`, and returns it to the caller.
+1. **TychoFeed** connects to **Tycho Streams** ([on-chain protocols](https://docs.propellerheads.xyz/tycho/for-solvers/simulation#streaming-protocol-states) and [RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#stream-real-time-price-updates)) and processes market updates (added/removed components and state changes) every block.
+2. **SharedMarketData** stores all component states, tokens, and gas prices in a single shared structure.
+3. When a **solve request** arrives via HTTP, the **OrderManager** fans it out to all worker pools in parallel.
+4. Each **Worker Pool** runs a specific algorithm. Workers compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
+5. The **OrderManager** collects results, picks the best solution by `amount_out_net_gas`, and returns it.
 
-## Try it out!
+## Try it out
 
-Ready to try it out? Head to our [quickstart](get-started/quickstart/ "mention") page and try Fynd!
+Head to the [quickstart](get-started/quickstart/ "mention") to get Fynd running.
