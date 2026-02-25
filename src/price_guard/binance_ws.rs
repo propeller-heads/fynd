@@ -7,15 +7,17 @@ use futures::StreamExt;
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-use tycho_simulation::tycho_common::models::{token::Token, Address};
+use tycho_simulation::tycho_common::models::Address;
 
-use super::provider::{ExternalPrice, PriceProvider, PriceProviderError};
+use super::{
+    common::{check_staleness, compute_expected_out, resolve_token},
+    provider::{ExternalPrice, PriceProvider, PriceProviderError},
+};
 use crate::feed::market_data::SharedMarketData;
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws/!bookTicker";
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
-const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Common quote currencies used to find intermediate paths on Binance.
 const INTERMEDIATE_QUOTES: &[&str] = &["USDT", "USDC", "ETH", "BTC"];
@@ -58,32 +60,6 @@ impl BinanceWsProvider {
         (Self { cache, market_data }, handle)
     }
 
-    /// Resolves an on-chain address to a (normalized_symbol, decimals) pair.
-    async fn resolve_token(&self, address: &Address) -> Result<(String, u32), PriceProviderError> {
-        let market_data = self.market_data.read().await;
-        let token: &Token = market_data.get_token(address).ok_or_else(|| {
-            PriceProviderError::PriceNotFound {
-                token_in: format!("{:?}", address),
-                token_out: "unknown".into(),
-            }
-        })?;
-        let symbol = Self::normalize_symbol(&token.symbol).to_uppercase();
-        let decimals = token.decimals;
-        Ok((symbol, decimals))
-    }
-
-    /// Maps wrapped on-chain token symbols to their Binance equivalents.
-    fn normalize_symbol(symbol: &str) -> &str {
-        match symbol.to_uppercase().as_str() {
-            "WETH" => "ETH",
-            "WBTC" => "BTC",
-            "WBNB" => "BNB",
-            "WMATIC" => "MATIC",
-            "WAVAX" => "AVAX",
-            _ => return symbol,
-        }
-    }
-
     /// Attempts to find a price between two symbols in the cache.
     ///
     /// Tries: direct pair, reverse pair, then routing through intermediates.
@@ -96,14 +72,14 @@ impl BinanceWsProvider {
         // Direct pair: sym_in is base, sym_out is quote → selling base for quote
         let direct = format!("{}{}", sym_in, sym_out);
         if let Some(ticker) = cache.get(&direct) {
-            Self::check_staleness(ticker.timestamp_ms, now_ms)?;
+            check_staleness(ticker.timestamp_ms, now_ms)?;
             return Ok(PriceLookup { price: ticker.bid, timestamp_ms: ticker.timestamp_ms });
         }
 
         // Reverse pair: sym_out is base, sym_in is quote → buying base with quote
         let reverse = format!("{}{}", sym_out, sym_in);
         if let Some(ticker) = cache.get(&reverse) {
-            Self::check_staleness(ticker.timestamp_ms, now_ms)?;
+            check_staleness(ticker.timestamp_ms, now_ms)?;
             if ticker.ask == 0.0 {
                 return Err(PriceProviderError::Unavailable("zero ask price".into()));
             }
@@ -121,7 +97,7 @@ impl BinanceWsProvider {
 
             if let (Some((p_in, ts_in)), Some((p_out, ts_out))) = (price_in, price_out) {
                 let oldest_ts = ts_in.min(ts_out);
-                Self::check_staleness(oldest_ts, now_ms)?;
+                check_staleness(oldest_ts, now_ms)?;
                 return Ok(PriceLookup {
                     price: p_in * p_out,
                     timestamp_ms: oldest_ts,
@@ -153,44 +129,6 @@ impl BinanceWsProvider {
         }
         None
     }
-
-    fn check_staleness(ticker_ts: u64, now_ms: u64) -> Result<(), PriceProviderError> {
-        let age_ms = now_ms.saturating_sub(ticker_ts);
-        if age_ms > STALENESS_THRESHOLD.as_millis() as u64 {
-            return Err(PriceProviderError::StaleData { age_ms });
-        }
-        Ok(())
-    }
-
-    /// Computes the expected raw output amount given a price and token decimals.
-    ///
-    /// `price` is in human terms: how many units of `token_out` per 1 unit of `token_in`.
-    /// `amount_in` is in raw units (e.g. wei). Returns raw units of `token_out`.
-    fn compute_expected_out(
-        amount_in: &BigUint,
-        price: f64,
-        decimals_in: u32,
-        decimals_out: u32,
-    ) -> BigUint {
-        // raw_out = amount_in * price * 10^decimals_out / 10^decimals_in
-        //
-        // To avoid precision loss, we scale the price to an integer:
-        // price_scaled = (price * SCALE) as u128
-        // raw_out = amount_in * price_scaled * 10^decimals_out / (10^decimals_in * SCALE)
-
-        const SCALE: f64 = 1_000_000_000_000.0; // 10^12
-
-        let price_scaled = (price * SCALE) as u128;
-        if price_scaled == 0 {
-            return BigUint::ZERO;
-        }
-
-        let pow10 = |exp: u32| BigUint::from(10u64).pow(exp);
-        let numerator = amount_in * BigUint::from(price_scaled) * pow10(decimals_out);
-        let denominator = pow10(decimals_in) * BigUint::from(SCALE as u128);
-
-        numerator / denominator
-    }
 }
 
 #[async_trait]
@@ -201,8 +139,8 @@ impl PriceProvider for BinanceWsProvider {
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = self.resolve_token(token_in).await?;
-        let (sym_out, dec_out) = self.resolve_token(token_out).await?;
+        let (sym_in, dec_in) = resolve_token(&self.market_data, token_in).await?;
+        let (sym_out, dec_out) = resolve_token(&self.market_data, token_out).await?;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -213,7 +151,7 @@ impl PriceProvider for BinanceWsProvider {
         let price_lookup = Self::lookup_price(&cache, &sym_in, &sym_out, now_ms)?;
 
         let expected_out =
-            Self::compute_expected_out(amount_in, price_lookup.price, dec_in, dec_out);
+            compute_expected_out(amount_in, price_lookup.price, dec_in, dec_out);
 
         Ok(ExternalPrice::new(
             expected_out,
@@ -222,11 +160,7 @@ impl PriceProvider for BinanceWsProvider {
         ))
     }
 
-    fn name(&self) -> &str {
-        "binance_ws"
-    }
 }
-
 
 /// Background task that connects to Binance WebSocket and populates the price cache.
 struct BinanceWsWorker {
@@ -321,32 +255,6 @@ struct BookTickerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn test_compute_expected_out_eth_to_usdc() {
-        // 1 ETH (18 decimals) at price 2000 USDC (6 decimals)
-        let amount_in = BigUint::from(10u64).pow(18);
-        let result = BinanceWsProvider::compute_expected_out(&amount_in, 2000.0, 18, 6);
-        assert_eq!(result, BigUint::from(2_000_000_000u64));
-    }
-
-    #[test]
-    fn test_compute_expected_out_usdc_to_eth() {
-        // 2000 USDC (6 decimals) at price 0.0005 ETH (18 decimals)
-        let amount_in = BigUint::from(2_000_000_000u64);
-        let result = BinanceWsProvider::compute_expected_out(&amount_in, 0.0005, 6, 18);
-        let one_eth = BigUint::from(10u64).pow(18);
-        let diff = if result > one_eth { &result - &one_eth } else { &one_eth - &result };
-        let tolerance = &one_eth / BigUint::from(1000u64); // 0.1%
-        assert!(diff < tolerance, "result={result}, expected ~{one_eth}");
-    }
-
-    #[test]
-    fn test_compute_expected_out_same_decimals() {
-        // 100 USDC (6 dec) at price 1.0 to USDT (6 dec)
-        let amount_in = BigUint::from(100_000_000u64);
-        let result = BinanceWsProvider::compute_expected_out(&amount_in, 1.0, 6, 6);
-        assert_eq!(result, BigUint::from(100_000_000u64));
-    }
 
     #[test]
     fn test_lookup_price_direct() {

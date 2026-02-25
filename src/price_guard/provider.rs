@@ -73,8 +73,6 @@ pub trait PriceProvider: Send + Sync + 'static {
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError>;
 
-    /// Human-readable name for this provider (used in logs and metrics).
-    fn name(&self) -> &str;
 }
 
 /// A no-op provider that always returns [`PriceProviderError::Unavailable`].
@@ -93,7 +91,4 @@ impl PriceProvider for NoopPriceProvider {
         Err(PriceProviderError::Unavailable("no price provider configured".into()))
     }
 
-    fn name(&self) -> &str {
-        "noop"
-    }
 }

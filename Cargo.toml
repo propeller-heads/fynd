@@ -102,6 +102,7 @@ async-channel = "2.5.0"
 async-trait = "0.1"
 chrono = "0.4"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+reqwest = { version = "0.12", features = ["json"] }
 itertools = "0.14.0"
 typetag = "0.2"
 hex = "0.4"
