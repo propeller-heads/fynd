@@ -26,6 +26,7 @@ use tycho_simulation::{
 };
 use uuid::Uuid;
 
+use super::{encoding::EncodedSolution, primitives::ComponentId};
 use super::primitives::ComponentId;
 use crate::AlgorithmError;
 
@@ -245,6 +246,8 @@ pub enum SolutionStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 impl From<AlgorithmError> for SolutionStatus {

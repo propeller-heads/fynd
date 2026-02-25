@@ -1,0 +1,99 @@
+//! Price provider trait and implementations.
+//!
+//! Defines the [`PriceProvider`] trait for fetching external token prices,
+//! along with error types and a no-op placeholder implementation.
+
+use async_trait::async_trait;
+use num_bigint::BigUint;
+use tycho_simulation::tycho_common::models::Address;
+
+/// Errors that can occur when fetching external prices.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PriceProviderError {
+    /// External price source is unavailable.
+    #[error("price source unavailable: {0}")]
+    Unavailable(String),
+
+    /// No price data found for the requested token pair.
+    #[error("price not found for pair {token_in} -> {token_out}")]
+    PriceNotFound { token_in: String, token_out: String },
+
+    /// Price data is stale (e.g., WebSocket feed hasn't updated recently).
+    #[error("price data stale: last update {age_ms}ms ago")]
+    StaleData { age_ms: u64 },
+}
+
+/// A price quote from an external source.
+#[derive(Debug, Clone)]
+pub struct ExternalPrice {
+    /// Expected output amount for the given input, in output token units.
+    expected_amount_out: BigUint,
+    /// Name of the price source (e.g., "coingecko", "binance_ws").
+    source: String,
+    /// Timestamp of the price data in Unix milliseconds.
+    timestamp_ms: u64,
+}
+
+impl ExternalPrice {
+    /// Creates a new external price quote.
+    pub fn new(expected_amount_out: BigUint, source: String, timestamp_ms: u64) -> Self {
+        Self { expected_amount_out, source, timestamp_ms }
+    }
+
+    pub fn expected_amount_out(&self) -> &BigUint {
+        &self.expected_amount_out
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+}
+
+/// Trait for fetching external token prices.
+///
+/// Implementations can be REST API polling, WebSocket streaming, or any other source.
+/// Stateful providers (e.g., a WebSocket feed caching prices in `Arc<RwLock<HashMap>>`)
+/// should read from their internal cache in [`get_expected_out`].
+#[async_trait]
+pub trait PriceProvider: Send + Sync + 'static {
+    /// Returns the expected output amount for a given input.
+    ///
+    /// # Arguments
+    /// * `token_in` - Address of the input token
+    /// * `token_out` - Address of the output token
+    /// * `amount_in` - Amount of input token (in token units)
+    async fn get_expected_out(
+        &self,
+        token_in: &Address,
+        token_out: &Address,
+        amount_in: &BigUint,
+    ) -> Result<ExternalPrice, PriceProviderError>;
+
+    /// Human-readable name for this provider (used in logs and metrics).
+    fn name(&self) -> &str;
+}
+
+/// A no-op provider that always returns [`PriceProviderError::Unavailable`].
+///
+/// Used as the default placeholder when no real provider is configured.
+pub struct NoopPriceProvider;
+
+#[async_trait]
+impl PriceProvider for NoopPriceProvider {
+    async fn get_expected_out(
+        &self,
+        _token_in: &Address,
+        _token_out: &Address,
+        _amount_in: &BigUint,
+    ) -> Result<ExternalPrice, PriceProviderError> {
+        Err(PriceProviderError::Unavailable("no price provider configured".into()))
+    }
+
+    fn name(&self) -> &str {
+        "noop"
+    }
+}

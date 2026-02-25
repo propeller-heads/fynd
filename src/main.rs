@@ -22,6 +22,7 @@ use clap::Parser;
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
     config::{BlacklistConfig, WorkerPoolsConfig},
+    price_guard::config::PriceGuardConfig,
 };
 
 mod cli;
@@ -177,7 +178,13 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
     .gas_refresh_interval(Duration::from_secs(cli.gas_refresh_interval_secs))
     .reconnect_delay(Duration::from_secs(cli.reconnect_delay_secs))
     .order_manager_timeout(Duration::from_millis(cli.order_manager_timeout_ms))
-    .order_manager_min_responses(cli.order_manager_min_responses);
+    .order_manager_min_responses(cli.order_manager_min_responses)
+    .price_guard_config(
+        PriceGuardConfig::default()
+            .with_enabled(cli.price_guard_enabled)
+            .with_tolerance_bps(cli.price_guard_tolerance_bps)
+            .with_allow_on_provider_error(cli.price_guard_allow_on_provider_error),
+    );
 
     if cli.disable_tls {
         builder = builder.disable_tls();

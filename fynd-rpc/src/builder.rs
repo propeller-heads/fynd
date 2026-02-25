@@ -23,6 +23,18 @@ use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::Ethereu
 use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, BlacklistConfig, PoolConfig},
+    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
+    encoding::encoder::Encoder,
+    feed::{
+        gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
+    },
+    order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
+    price_guard::{config::PriceGuardConfig, provider::NoopPriceProvider, PriceGuard},
+    types::constants::native_token,
+    worker_pool::{
+        pool::{WorkerPool, WorkerPoolBuilder},
+        task_queue::{TaskQueue, TaskQueueConfig},
+    },
 };
 /// Builder that assembles Fynd and returns a running server handle.
 ///
@@ -53,6 +65,7 @@ pub struct FyndBuilder {
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
     user_transfer_type: UserTransferType,
+    price_guard_config: PriceGuardConfig,
     swapper_pk: Option<String>,
 }
 
@@ -84,6 +97,7 @@ impl FyndBuilder {
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
             user_transfer_type: UserTransferType::TransferFrom,
+            price_guard_config: PriceGuardConfig::default(),
             swapper_pk: None,
         }
     }
@@ -163,6 +177,12 @@ impl FyndBuilder {
     /// Sets user transfer type (to use during encoding)
     pub fn user_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
         self.user_transfer_type = transfer_type;
+        self
+    }
+
+    /// Sets the price guard configuration.
+    pub fn price_guard_config(mut self, config: PriceGuardConfig) -> Self {
+        self.price_guard_config = config;
         self
     }
 
@@ -299,10 +319,22 @@ impl FyndBuilder {
             self.swapper_pk,
         )?;
 
+        let price_guard = if self.price_guard_config.enabled() {
+            // TODO: Replace NoopPriceProvider with a real provider
+            Some(PriceGuard::new(Box::new(NoopPriceProvider), self.price_guard_config))
+        } else {
+            None
+        };
+
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)
             .with_min_responses(self.order_manager_min_responses);
-        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config, encoder);
+        let order_manager = OrderManager::new(
+            solver_pool_handles,
+            order_manager_config,
+            Some(encoder),
+            price_guard,
+        );
 
         let app_state = AppState::new(order_manager, health_tracker);
 
