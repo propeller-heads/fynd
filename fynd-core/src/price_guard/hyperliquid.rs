@@ -198,7 +198,13 @@ struct AssetCtx {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::RwLock;
+    use tycho_simulation::tycho_core::models::{token::Token, Chain};
+
     use super::*;
+    use crate::feed::market_data::SharedMarketData;
 
     #[test]
     fn test_price_from_usd_oracle() {
@@ -235,5 +241,65 @@ mod tests {
         assert_eq!(resp.meta.universe[1].name, "ETH");
         assert_eq!(resp.asset_ctxs[0].oracle_px, "66820.0");
         assert_eq!(resp.asset_ctxs[1].oracle_px, "1989.0");
+    }
+
+    #[tokio::test]
+    #[ignore] // requires network access
+    async fn test_hyperliquid_provider_live() {
+        /// Integration test: starts the Hyperliquid provider, waits for its background
+        /// poller to populate the cache, then queries 1 WETH → USDC and checks that the
+        /// returned amount is in a sane range.
+        let weth_addr: Address = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+            .parse()
+            .unwrap();
+        let usdc_addr: Address = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap();
+
+        let weth = Token {
+            address: weth_addr.clone(),
+            symbol: "WETH".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+        let usdc = Token {
+            address: usdc_addr.clone(),
+            symbol: "USDC".to_string(),
+            decimals: 6,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+
+        let mut market_data = SharedMarketData::new();
+        market_data.upsert_tokens([weth, usdc]);
+        let market_data = Arc::new(RwLock::new(market_data));
+
+        let (provider, handle) = HyperliquidProvider::start(market_data);
+
+        // Hyperliquid polls every 3s; give it time to populate the cache.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let one_eth = BigUint::from(10u64).pow(18);
+        let result = provider
+            .get_expected_out(&weth_addr, &usdc_addr, &one_eth)
+            .await;
+        handle.abort();
+
+        let price = result.expect("should get a price from Hyperliquid");
+        let amount_out = price.expected_amount_out().clone();
+
+        // 1 ETH should be worth between $100 and $100,000 USDC (6 decimals)
+        let min = BigUint::from(100_000_000u64); // 100 USDC
+        let max = BigUint::from(100_000_000_000u64); // 100,000 USDC
+        assert!(
+            amount_out >= min && amount_out <= max,
+            "expected amount_out in [{min}, {max}], got {amount_out}"
+        );
+        println!("Hyperliquid: 1 WETH = {} USDC (raw)", amount_out);
     }
 }

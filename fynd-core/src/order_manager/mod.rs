@@ -625,7 +625,7 @@ mod tests {
                     amount_out_net_gas: BigUint::from(900u64),
                     block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                     algorithm: "test".to_string(),
-                    encoded_solution: None,
+                    transaction: None,
                 },
             )],
             failed_solvers: vec![],
@@ -635,6 +635,7 @@ mod tests {
             timeout_ms: None,
             min_responses: None,
             max_gas: max_gas.map(BigUint::from),
+            slippage: 0.0,
             include_encoding: false,
         };
 

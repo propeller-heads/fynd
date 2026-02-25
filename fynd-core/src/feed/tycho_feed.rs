@@ -477,7 +477,6 @@ mod tests {
         }
     }
 
-    #[typetag::serde]
     impl ProtocolSim for MockProtocolSim {
         fn get_amount_out(
             &self,
