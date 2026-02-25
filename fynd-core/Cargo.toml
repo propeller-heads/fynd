@@ -27,6 +27,7 @@ thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
+tycho-execution.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

@@ -23,6 +23,7 @@
 // Public modules
 pub mod algorithm;
 pub mod derived;
+pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
 pub mod order_manager;

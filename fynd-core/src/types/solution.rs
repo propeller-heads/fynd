@@ -20,10 +20,10 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use tycho_execution::encoding::models::EncodedSolution;
 use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use uuid::Uuid;
 
-use super::encoding::EncodedSolution;
 use super::primitives::ComponentId;
 use crate::AlgorithmError;
 

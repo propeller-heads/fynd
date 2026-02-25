@@ -15,6 +15,9 @@ use fynd_core::{
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
+use tycho_execution::encoding::{
+    evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry, models::UserTransferType,
+};
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{

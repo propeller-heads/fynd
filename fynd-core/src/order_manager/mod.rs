@@ -23,11 +23,11 @@ use config::OrderManagerConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::{
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderSolution, Solution,
-    SolutionOptions, SolutionRequest, SolutionStatus, SolveError,
+    encoding::encoder::Encoder, worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order,
+    OrderSolution, Solution, SolutionOptions, SolutionRequest, SolutionStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.

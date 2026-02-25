@@ -3230,7 +3230,6 @@ dependencies = [
  "fastrand",
  "fynd-core",
  "fynd-rpc",
- "hex",
  "metrics-exporter-prometheus",
  "num-bigint",
  "num-traits",
@@ -3246,7 +3245,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber 0.3.22",
- "tycho-execution",
  "tycho-simulation",
 ]
 
@@ -3273,6 +3271,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tycho-execution",
  "tycho-simulation",
  "typetag",
  "uuid",
@@ -3285,6 +3284,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "fynd-core",
+ "hex",
  "metrics",
  "num-bigint",
  "num-traits",
@@ -3298,6 +3298,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-actix-web",
+ "tycho-execution",
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
@@ -7370,9 +7371,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.160.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45694f91323ec97a2dafc200b34f9286988fa704b0fa3cef71254e2e314028e9"
+version = "0.159.0"
 dependencies = [
  "alloy",
  "chrono",
