@@ -183,13 +183,13 @@ mod tests {
     }
 
     /// MockProtocolSim spot_price behavior:
-    /// - When base < quote: returns 1/spot_price
-    /// - When base > quote: returns spot_price
+    /// - When base < quote: returns spot_price
+    /// - When base > quote: returns 1/spot_price
     #[rstest]
-    #[case::low_to_high(0x01, 0x02, 2, 0.5)]
-    #[case::high_to_low(0x02, 0x01, 2, 2.0)]
-    #[case::spot_price_4_low_to_high(0x01, 0x02, 4, 0.25)]
-    #[case::spot_price_4_high_to_low(0x02, 0x01, 4, 4.0)]
+    #[case::low_to_high(0x01, 0x02, 2, 2.0)]
+    #[case::high_to_low(0x02, 0x01, 2, 0.5)]
+    #[case::spot_price_4_low_to_high(0x01, 0x02, 4, 4.0)]
+    #[case::spot_price_4_high_to_low(0x02, 0x01, 4, 0.25)]
     fn spot_price_direction(
         #[case] in_addr: u8,
         #[case] out_addr: u8,
