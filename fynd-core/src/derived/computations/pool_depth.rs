@@ -467,7 +467,7 @@ mod tests {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
         let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
@@ -486,10 +486,10 @@ mod tests {
     /// threshold, so the limit itself passes → depth = sell_limit.
     /// With zero liquidity, depth is zero.
     #[rstest]
-    #[case::within_threshold(100, 1_000_000, 10_000)]
-    #[case::zero_for_zero_liquidity(100, 0, 0)]
+    #[case::within_threshold(100.0, 1_000_000, 10_000)]
+    #[case::zero_for_zero_liquidity(100.0, 0, 0)]
     fn test_binary_search_finds_depth_within_threshold(
-        #[case] spot_price: u32,
+        #[case] spot_price: f64,
         #[case] liquidity: u128,
         #[case] expected_depth: u64,
     ) {
@@ -517,7 +517,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let sim = MockProtocolSim::new(1).with_liquidity(1_000_000);
+        let sim = MockProtocolSim::new(1.0).with_liquidity(1_000_000);
         let comp = PoolDepthComputation::default();
 
         let result = comp.find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into());
@@ -538,7 +538,7 @@ mod tests {
         let comp = PoolDepthComputation::new(0.5).unwrap();
 
         // spot_price=2: new_state has spot_price=3, impact = |3 - 2| / 2 = 1/2 = 50%
-        let sim = MockProtocolSim::new(2).with_liquidity(1_000_000);
+        let sim = MockProtocolSim::new(2.0).with_liquidity(1_000_000);
         let depth = comp
             .find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into())
             .unwrap();
@@ -559,7 +559,7 @@ mod tests {
         // After swap: new spot_price=201. Price impact based on spot prices:
         // initial = 200/0.99, new = 201/0.99 → impact = |new-initial|/initial = 1/200 = 0.5%
         // With default threshold 1%, this should pass (impact <= threshold).
-        let sim = MockProtocolSim::new(200)
+        let sim = MockProtocolSim::new(200.0)
             .with_liquidity(1_000_000)
             .with_fee(0.01);
         let comp = PoolDepthComputation::default();
@@ -573,16 +573,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::same_decimals_price_100(18, 18, 100)]
-    #[case::high_to_low_price_100(18, 6, 100)]
-    #[case::low_to_high_price_100(6, 18, 100)]
-    #[case::same_decimals_price_2000(18, 18, 2000)]
-    #[case::high_to_low_price_2000(18, 6, 2000)]
+    #[case::same_decimals_price_100(18, 18, 100.0)]
+    #[case::high_to_low_price_100(18, 6, 100.0)]
+    #[case::low_to_high_price_100(6, 18, 100.0)]
+    #[case::same_decimals_price_2000(18, 18, 2000.0)]
+    #[case::high_to_low_price_2000(18, 6, 2000.0)]
     #[tokio::test]
     async fn test_compute_integration(
         #[case] decimals_in: u32,
         #[case] decimals_out: u32,
-        #[case] spot_price: u32,
+        #[case] spot_price: f64,
     ) {
         let eth = token_with_decimals(0, "ETH", decimals_in);
         let usdc = token_with_decimals(1, "USDC", decimals_out);
@@ -591,7 +591,9 @@ mod tests {
             "pool",
             &eth,
             &usdc,
-            MockProtocolSim::new(spot_price).with_liquidity(1_000_000),
+            MockProtocolSim::new(spot_price)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[eth.clone(), usdc.clone()]),
         )]);
         let derived = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
@@ -626,10 +628,26 @@ mod tests {
         assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
         assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
 
-        // sell_limit = liquidity / spot_price (mock's get_limits is direction/decimal agnostic)
-        let expected_depth = BigUint::from(1_000_000u64 / spot_price as u64);
-        assert_eq!(pool_depths.get(&key_eth_usdc).unwrap(), &expected_depth, "ETH→USDC depth");
-        assert_eq!(pool_depths.get(&key_usdc_eth).unwrap(), &expected_depth, "USDC→ETH depth");
+        // sell_limit = liquidity / spot_price * 10^(sell_dec - buy_dec)
+        let expected_depth = |sell_dec: u32, buy_dec: u32| -> BigUint {
+            let base = BigUint::from((1_000_000.0 / spot_price) as u64);
+            let decimal_diff = sell_dec as i32 - buy_dec as i32;
+            if decimal_diff >= 0 {
+                base * BigUint::from(10u64).pow(decimal_diff as u32)
+            } else {
+                base / BigUint::from(10u64).pow((-decimal_diff) as u32)
+            }
+        };
+        assert_eq!(
+            pool_depths.get(&key_eth_usdc).unwrap(),
+            &expected_depth(decimals_in, decimals_out),
+            "ETH→USDC depth"
+        );
+        assert_eq!(
+            pool_depths.get(&key_usdc_eth).unwrap(),
+            &expected_depth(decimals_out, decimals_in),
+            "USDC→ETH depth"
+        );
     }
 
     /// Verify that Price construction in compute() correctly handles decimal scaling
