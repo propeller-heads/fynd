@@ -284,15 +284,32 @@ impl DerivedComputation for PoolDepthComputation {
                     continue;
                 };
 
-                // Calculate minimum acceptable price at slippage threshold
                 let min_price = spot_price * (1.0 - self.slippage_threshold);
 
-                // Convert the f64 price to a BigUint / BigUint price representation by scaling
-                const SCALE: u128 = 10u128.pow(18);
-                let min_price_scaled = (min_price * SCALE as f64) as u128;
+                // Price is a raw fraction (numerator/denominator) that query_pool_swap
+                // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
+                // the f64→u128 multiply at a fixed precision scale and absorb the decimal
+                // adjustment into the BigUint denominator.
+                const SCALE_EXP: i32 = 18;
+                let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
+                let denominator_exp = SCALE_EXP + decimal_diff;
+                if denominator_exp < 0 {
+                    warn!(
+                        component_id,
+                        token_in = %token_in.address,
+                        token_out = %token_out.address,
+                        "extreme decimal mismatch ({}→{}), skipping pair",
+                        token_in.decimals, token_out.decimals
+                    );
+                    pool_depths.remove(&key);
+                    failed += 1;
+                    continue;
+                }
 
-                // Skip pairs where the scaled price rounds to zero (extremely small spot price)
-                if min_price_scaled == 0 {
+                let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
+                let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
+
+                if numerator.is_zero() {
                     warn!(
                         component_id,
                         token_in = %token_in.address,
@@ -305,7 +322,7 @@ impl DerivedComputation for PoolDepthComputation {
                     continue;
                 }
 
-                let limit_price = Price::new(BigUint::from(min_price_scaled), BigUint::from(SCALE));
+                let limit_price = Price::new(numerator, denominator);
 
                 let params = QueryPoolSwapParams::new(
                     token_in.clone(),
@@ -383,7 +400,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{setup_market, token, MockProtocolSim},
+        algorithm::test_utils::{setup_market, token, token_with_decimals, MockProtocolSim},
         derived::{
             store::DerivedData,
             types::{PoolDepthKey, SpotPrices},
@@ -555,18 +572,26 @@ mod tests {
         assert!(depth > BigUint::zero(), "should find valid depth for high-fee pool");
     }
 
+    #[rstest]
+    #[case::same_decimals_price_100(18, 18, 100)]
+    #[case::high_to_low_price_100(18, 6, 100)]
+    #[case::low_to_high_price_100(6, 18, 100)]
+    #[case::same_decimals_price_2000(18, 18, 2000)]
+    #[case::high_to_low_price_2000(18, 6, 2000)]
     #[tokio::test]
-    async fn test_compute_integration() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
+    async fn test_compute_integration(
+        #[case] decimals_in: u32,
+        #[case] decimals_out: u32,
+        #[case] spot_price: u32,
+    ) {
+        let eth = token_with_decimals(0, "ETH", decimals_in);
+        let usdc = token_with_decimals(1, "USDC", decimals_out);
 
-        // Use spot_price=100 so price impact (1/100 = 1%) equals the default threshold.
-        // The mock increments spot_price by 1 on each swap, so new_state.spot_price=101.
         let (market, _) = setup_market(vec![(
             "pool",
             &eth,
             &usdc,
-            MockProtocolSim::new(100).with_liquidity(1_000_000),
+            MockProtocolSim::new(spot_price).with_liquidity(1_000_000),
         )]);
         let derived = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
@@ -593,7 +618,6 @@ mod tests {
             .await
             .expect("computation should succeed");
 
-        // Should have depths for both directions: ETH→USDC and USDC→ETH
         assert_eq!(pool_depths.len(), 2, "should have depths for both directions");
 
         let key_eth_usdc: PoolDepthKey = ("pool".into(), eth.address.clone(), usdc.address.clone());
@@ -602,12 +626,91 @@ mod tests {
         assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
         assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
 
-        // With spot_price=100, price impact = 1% which equals threshold → limit passes.
-        // sell_limit = liquidity / spot_price = 1_000_000 / 100 = 10_000
-        let expected_depth = BigUint::from(10_000u64);
+        // sell_limit = liquidity / spot_price (mock's get_limits is direction/decimal agnostic)
+        let expected_depth = BigUint::from(1_000_000u64 / spot_price as u64);
         assert_eq!(pool_depths.get(&key_eth_usdc).unwrap(), &expected_depth, "ETH→USDC depth");
-        // For USDC→ETH (addr 0x01 > addr 0x00): sell_limit = liquidity * spot_price (inverted)
-        // Actually get_limits is direction-agnostic in the mock, so same sell_limit
         assert_eq!(pool_depths.get(&key_usdc_eth).unwrap(), &expected_depth, "USDC→ETH depth");
+    }
+
+    /// Verify that Price construction in compute() correctly handles decimal scaling
+    /// across mixed-decimal token pairs (e.g. WETH(18)/USDC(6)).
+    ///
+    /// Uses the shared `query_pool_swap` function directly because UniV2's trait
+    /// method rejects TradeLimitPrice, but the shared function works with any
+    /// ProtocolSim via get_amount_out/spot_price.
+    #[rstest]
+    #[case::same_decimals(18, 18, 1000, 2000)]
+    #[case::high_to_low(18, 6, 1000, 2_000_000)]
+    #[case::low_to_high(6, 18, 2_000_000, 1000)]
+    #[case::small_difference(8, 18, 100, 2000)]
+    #[test]
+    fn test_decimal_scaling_with_real_univ2(
+        #[case] decimals_in: u32,
+        #[case] decimals_out: u32,
+        #[case] tokens_in_reserve: u64,
+        #[case] tokens_out_reserve: u64,
+    ) {
+        use alloy::primitives::U256;
+        use tycho_simulation::evm::{
+            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
+        };
+
+        let token_in = token_with_decimals(0x01, "IN", decimals_in);
+        let token_out = token_with_decimals(0x02, "OUT", decimals_out);
+
+        let reserve_in =
+            U256::from(tokens_in_reserve) * U256::from(10u64).pow(U256::from(decimals_in));
+        let reserve_out =
+            U256::from(tokens_out_reserve) * U256::from(10u64).pow(U256::from(decimals_out));
+        let univ2 = UniswapV2State::new(reserve_in, reserve_out);
+
+        let spot_price = univ2
+            .spot_price(&token_in, &token_out)
+            .expect("spot_price should succeed");
+
+        let slippage = 0.01;
+        let min_price = spot_price * (1.0 - slippage);
+
+        let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
+        let numerator = BigUint::from((min_price * 10_f64.powi(18)) as u128);
+        let denominator = BigUint::from(10u64).pow((18 + decimal_diff) as u32);
+
+        let limit_price = Price::new(numerator, denominator);
+
+        let params = QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::TradeLimitPrice {
+                limit: limit_price,
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+
+        let result = query_pool_swap(&univ2, &params);
+        assert!(
+            result.is_ok(),
+            "query_pool_swap should succeed for {decimals_in}/{decimals_out} decimals, \
+             got error: {:?}",
+            result.err()
+        );
+
+        let swap = result.unwrap();
+        assert!(
+            !swap.amount_in().is_zero(),
+            "amount_in should be non-zero for {decimals_in}/{decimals_out} decimals"
+        );
+
+        let post_swap_spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .expect("post-swap spot_price should succeed");
+        let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
+        assert!(
+            price_impact <= slippage + 0.005,
+            "post-swap price impact {price_impact:.4} should be near slippage {slippage} \
+             for {decimals_in}/{decimals_out} decimals"
+        );
     }
 }

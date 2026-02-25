@@ -191,12 +191,16 @@ pub fn addr(b: u8) -> Address {
     Address::from([b; 20])
 }
 
-/// Creates a test token with the given address byte and symbol.
+/// Creates a test token with the given address byte and symbol (18 decimals).
 pub fn token(addr_b: u8, symbol: &str) -> Token {
+    token_with_decimals(addr_b, symbol, 18)
+}
+
+pub fn token_with_decimals(addr_b: u8, symbol: &str, decimals: u32) -> Token {
     Token {
         address: addr(addr_b),
         symbol: symbol.to_string(),
-        decimals: 18,
+        decimals,
         tax: Default::default(),
         gas: vec![],
         chain: Chain::Ethereum,
