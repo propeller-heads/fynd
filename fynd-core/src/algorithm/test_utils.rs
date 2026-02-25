@@ -169,9 +169,12 @@ impl ProtocolSim for MockProtocolSim {
         // liquidity represents max amount of tokens we can receive (max output)
         let buy_limit = BigUint::from(self.liquidity);
 
-        // sell_limit = buy_limit / (spot_price * (1 - fee))
         const PRECISION: u64 = 1_000_000_000_000;
-        let effective_price = self.spot_price * (1.0 - self.fee);
+        let effective_price = if sell_token < buy_token {
+            self.spot_price * (1.0 - self.fee)
+        } else {
+            (1.0 - self.fee) / self.spot_price
+        };
         let price_scaled = (effective_price * PRECISION as f64) as u128;
         let sell_limit = (&buy_limit * PRECISION) / price_scaled;
 
@@ -645,7 +648,7 @@ mod tests {
         let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
 
         let (sell_limit, buy_limit) = sim
-            .get_limits(Bytes::default(), Bytes::default())
+            .get_limits(addr(1).into(), addr(2).into())
             .unwrap();
 
         assert_eq!(buy_limit, BigUint::from(8_000u64));
@@ -662,7 +665,7 @@ mod tests {
             .with_fee(0.5);
 
         let (sell_limit, buy_limit) = sim
-            .get_limits(Bytes::default(), Bytes::default())
+            .get_limits(addr(1).into(), addr(2).into())
             .unwrap();
 
         assert_eq!(buy_limit, BigUint::from(1_000u64));
@@ -788,14 +791,28 @@ mod tests {
     }
 
     #[test]
-    fn get_limits_without_token_decimals_is_backward_compatible() {
+    fn get_limits_without_token_decimals_assumes_equal_decimals() {
         let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
 
         let (sell_limit, _) = sim
-            .get_limits(Bytes::default(), Bytes::default())
+            .get_limits(addr(1).into(), addr(2).into())
             .unwrap();
 
         assert_eq!(sell_limit, BigUint::from(2_000u64));
+    }
+
+    #[test]
+    fn get_limits_uses_reciprocal_price_for_reverse_direction() {
+        // spot_price=4 means low→high rate is 4, so high→low rate is 1/4
+        // sell_limit = buy_limit / ((1-fee)/spot_price) = buy_limit * spot_price / (1-fee)
+        let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
+
+        let (sell_limit, buy_limit) = sim
+            .get_limits(addr(2).into(), addr(1).into())
+            .unwrap();
+
+        assert_eq!(buy_limit, BigUint::from(8_000u64));
+        assert_eq!(sell_limit, BigUint::from(32_000u64)); // 8000 * 4
     }
 
     // ==================== Mock vs UniV2 Comparison Test ====================

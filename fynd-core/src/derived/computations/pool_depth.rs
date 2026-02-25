@@ -299,7 +299,9 @@ impl DerivedComputation for PoolDepthComputation {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+    use tycho_simulation::{
+        tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
+    };
 
     use super::*;
     use crate::{
@@ -390,6 +392,7 @@ mod tests {
     #[case::low_to_high_price_100(6, 18, 100.0)]
     #[case::same_decimals_price_2000(18, 18, 2000.0)]
     #[case::high_to_low_price_2000(18, 6, 2000.0)]
+    #[case::low_to_high_price_2000(6, 18, 2000.0)]
     #[tokio::test]
     async fn test_compute_integration(
         #[case] decimals_in: u32,
@@ -440,10 +443,11 @@ mod tests {
         assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
         assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
 
-        // sell_limit = liquidity / spot_price * 10^(sell_dec - buy_dec)
-        let expected_depth = |sell_dec: u32, buy_dec: u32| -> BigUint {
-            let base = BigUint::from((1_000_000.0 / spot_price) as u64);
-            let decimal_diff = sell_dec as i32 - buy_dec as i32;
+        let expected_depth = |sell_token: &Token, buy_token: &Token| -> BigUint {
+            let effective_price =
+                if sell_token.address < buy_token.address { spot_price } else { 1.0 / spot_price };
+            let base = BigUint::from((1_000_000.0 / effective_price) as u64);
+            let decimal_diff = sell_token.decimals as i32 - buy_token.decimals as i32;
             if decimal_diff >= 0 {
                 base * BigUint::from(10u64).pow(decimal_diff as u32)
             } else {
@@ -452,12 +456,12 @@ mod tests {
         };
         assert_eq!(
             pool_depths.get(&key_eth_usdc).unwrap(),
-            &expected_depth(decimals_in, decimals_out),
+            &expected_depth(&eth, &usdc),
             "ETH→USDC depth"
         );
         assert_eq!(
             pool_depths.get(&key_usdc_eth).unwrap(),
-            &expected_depth(decimals_out, decimals_in),
+            &expected_depth(&usdc, &eth),
             "USDC→ETH depth"
         );
     }
