@@ -126,7 +126,7 @@ impl OrderManager {
         if request.options.include_encoding {
             order_solutions = self
                 .encoder
-                .encode(order_solutions)
+                .encode(order_solutions, request.options.slippage)
                 .await?;
         }
 
@@ -320,7 +320,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: any_sol.block.clone(),
                 algorithm: String::new(),
-                encoded_solution: None,
+                transaction: None,
             }
         } else {
             // No responses at all - determine status from failure types
@@ -365,7 +365,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
                 algorithm: String::new(),
-                encoded_solution: None,
+                transaction: None,
             }
         }
     }
@@ -416,7 +416,7 @@ mod tests {
                 amount_out_net_gas: BigUint::from(amount_out_net_gas),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                 algorithm: "test".to_string(),
-                encoded_solution: None,
+                transaction: None,
             },
             solve_time_ms: 5,
         }

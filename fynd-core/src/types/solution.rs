@@ -20,8 +20,10 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_execution::encoding::models::EncodedSolution;
-use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
+use tycho_simulation::{
+    tycho_common::{models::Address, Bytes},
+    tycho_core::models::token::Token,
+};
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
@@ -58,6 +60,7 @@ pub struct SolutionOptions {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas: Option<BigUint>,
+    pub slippage: f64,
     pub include_encoding: bool,
 }
 
@@ -212,7 +215,20 @@ pub struct OrderSolution {
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
-    pub encoded_solution: Option<EncodedSolution>,
+    pub transaction: Option<Transaction>,
+}
+
+/// An encoded EVM transaction ready to be submitted on-chain.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    /// Contract address to call.
+    pub to: Bytes,
+    /// Native token value to send with the transaction.
+    #[serde_as(as = "DisplayFromStr")]
+    pub value: num_bigint::BigUint,
+    /// ABI-encoded calldata.
+    pub data: Vec<u8>,
 }
 
 /// Status of an order solution.

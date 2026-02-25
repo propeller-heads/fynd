@@ -235,7 +235,7 @@ where
                     amount_out_net_gas,
                     block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
-                    encoded_solution: None,
+                    transaction: None,
                 }
             }
             Err(err) => {

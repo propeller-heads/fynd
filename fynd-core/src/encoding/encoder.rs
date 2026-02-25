@@ -1,3 +1,4 @@
+use alloy::signers::local::PrivateKeySigner;
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
@@ -13,10 +14,10 @@ use tycho_simulation::tycho_common::{
 };
 
 use crate::{feed::market_data::SharedMarketDataRef, types::OrderSolution, SolveError};
-
 pub struct Encoder {
     tycho_encoder: Box<dyn TychoEncoder>,
     market_data: SharedMarketDataRef,
+    signer: Option<PrivateKeySigner>,
 }
 
 impl Encoder {
@@ -25,6 +26,7 @@ impl Encoder {
         transfer_type: UserTransferType,
         swap_encoder_registry: SwapEncoderRegistry,
         market_data: SharedMarketDataRef,
+        swapper_pk: Option<String>,
     ) -> Result<Self, SolveError> {
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
@@ -33,17 +35,22 @@ impl Encoder {
                 .swap_encoder_registry(swap_encoder_registry)
                 .build()?,
             market_data,
+            signer: None, // TODO: create signer if signer_pk is passed
         })
     }
 
     pub async fn encode(
         &self,
         solutions: Vec<OrderSolution>,
+        slippage: f64,
     ) -> Result<Vec<OrderSolution>, SolveError> {
         // loop through solutions and convert into the execution Solution model
         //   use the self.market_data to get the ProtocolComponent and ProtocolSim
         // call self.tycho_encoder.encode_solutions()
-        // put the EncodedSolution in the corresponding OrderSolution
+        // Encode the full tycho call,
+        //   - use signer if it's not None for permit2
+        //   - set a meaningful min amount out with the slippage value
+        //   - create a Transaction and put it in the OrderSolution
         // return all the OrderSolutions
         Ok(solutions)
     }

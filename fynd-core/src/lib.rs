@@ -36,7 +36,7 @@ pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHand
 pub use types::{
     BlockInfo, ComponentId, Order, OrderSide, OrderSolution, OrderValidationError, Route,
     RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
-    SolutionStatus, SolveError, SolveResult, Swap, TaskId,
+    SolutionStatus, SolveError, SolveResult, Swap, TaskId, Transaction,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

@@ -20,5 +20,5 @@ pub use primitives::*;
 pub use solution::{
     BlockInfo, Order, OrderSide, OrderSolution, OrderValidationError, Route, RouteResult,
     RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
-    SolutionStatus, Swap,
+    SolutionStatus, Swap, Transaction,
 };

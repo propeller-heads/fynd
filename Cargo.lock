@@ -3221,7 +3221,6 @@ name = "fynd"
 version = "0.1.0"
 dependencies = [
  "actix-web",
- "alloy",
  "alloy-chains",
  "anyhow",
  "clap",
@@ -3252,6 +3251,7 @@ dependencies = [
 name = "fynd-core"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "async-channel",
  "async-trait",
  "chrono",
