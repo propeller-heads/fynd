@@ -26,8 +26,13 @@ use num_bigint::BigUint;
 use tracing::{debug, warn};
 
 use crate::{
-    encoding::encoder::Encoder, worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order,
-    OrderSolution, Solution, SolutionOptions, SolutionRequest, SolutionStatus, SolveError,
+    encoding::encoder::Encoder,
+    price_guard::PriceGuard,
+    types::{
+        solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
+        OrderSolution, Solution, SolutionStatus, SolveError,
+    },
+    worker_pool::task_queue::TaskQueueHandle,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -64,7 +69,8 @@ pub struct OrderManager {
     solver_pools: Vec<SolverPoolHandle>,
     /// Configuration for the order manager.
     config: OrderManagerConfig,
-    encoder: Encoder,
+    encoder: Option<Encoder>,
+    price_guard: Option<PriceGuard>,
 }
 
 impl OrderManager {
@@ -72,9 +78,10 @@ impl OrderManager {
     pub fn new(
         solver_pools: Vec<SolverPoolHandle>,
         config: OrderManagerConfig,
-        encoder: Encoder,
+        encoder: Option<Encoder>,
+        price_guard: Option<PriceGuard>,
     ) -> Self {
-        Self { solver_pools, config, encoder }
+        Self { solver_pools, config, encoder, price_guard }
     }
 
     /// Returns the number of registered solver pools.
@@ -123,11 +130,30 @@ impl OrderManager {
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
 
+        // Validate against external prices (if configured)
+        if let Some(ref guard) = self.price_guard {
+            order_solutions = guard.validate(order_solutions).await?;
+        }
+
         if request.options.include_encoding {
-            order_solutions = self
-                .encoder
-                .encode(order_solutions, request.options.slippage)
-                .await?;
+            match &self.encoder {
+                Some(encoder) => {
+                    // Only encode solutions that are ready for on-chain execution
+                    let (to_encode, rest): (Vec<_>, Vec<_>) = order_solutions
+                        .into_iter()
+                        .partition(|s| s.status == SolutionStatus::Success);
+                    let mut encoded = encoder
+                        .encode(to_encode, request.options.slippage)
+                        .await?;
+                    encoded.extend(rest);
+                    order_solutions = encoded;
+                }
+                None => {
+                    return Err(SolveError::Internal(
+                        "encoding requested but no encoder configured".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
@@ -244,6 +270,7 @@ impl OrderManager {
                 SolveError::NoRouteFound { .. } => "no_route",
                 SolveError::QueueFull => "queue_full",
                 SolveError::Internal(_) => "internal",
+                SolveError::PriceCheckFailed { .. } => "price_check_failed",
                 _ => "other",
             };
             counter!("order_manager_solver_failures_total", "pool" => pool_name.clone(), "error_type" => error_type).increment(1);
@@ -461,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_order_manager_no_pools() {
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -473,7 +500,7 @@ mod tests {
     async fn test_order_manager_single_pool_success() {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_solution(900)), 0);
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default(), None, None);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -498,7 +525,7 @@ mod tests {
 
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config, None, None);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -521,7 +548,7 @@ mod tests {
         let (pool, worker) = create_mock_pool("slow_pool", Ok(make_single_solution(900)), 500);
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
-        let manager = OrderManager::new(vec![pool], config);
+        let manager = OrderManager::new(vec![pool], config, None, None);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -550,7 +577,7 @@ mod tests {
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(1000))
             .with_min_responses(1);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config, None, None);
 
         let start = Instant::now();
         let request =
@@ -598,6 +625,7 @@ mod tests {
                     amount_out_net_gas: BigUint::from(900u64),
                     block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                     algorithm: "test".to_string(),
+                    transaction: None,
                 },
             )],
             failed_solvers: vec![],
@@ -607,10 +635,11 @@ mod tests {
             timeout_ms: None,
             min_responses: None,
             max_gas: max_gas.map(BigUint::from),
+            slippage: 0.0,
             include_encoding: false,
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);
         let result = manager.select_best(&responses, &options);
 
         if should_pass {
@@ -629,7 +658,7 @@ mod tests {
             0,
         );
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default(), None, None);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -656,7 +685,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         assert_eq!(result.status, SolutionStatus::Timeout);
@@ -673,7 +702,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
@@ -688,7 +717,7 @@ mod tests {
             failed_solvers: vec![],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // No failures but also no solutions means NoRouteFound

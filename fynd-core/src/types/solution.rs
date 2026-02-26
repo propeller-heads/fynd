@@ -245,6 +245,8 @@ pub enum SolutionStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 impl From<AlgorithmError> for SolutionStatus {

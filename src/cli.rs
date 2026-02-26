@@ -81,6 +81,18 @@ pub struct Cli {
     /// Path to blacklist TOML config file (optional)
     #[arg(long, env, default_value = "blacklist.toml")]
     pub blacklist_config: Option<PathBuf>,
+
+    /// Enable external price guard validation
+    #[arg(long, env, default_value_t = defaults::PRICE_GUARD_ENABLED)]
+    pub price_guard_enabled: bool,
+
+    /// Price guard tolerance in basis points (100 = 1%)
+    #[arg(long, env, default_value_t = defaults::PRICE_GUARD_TOLERANCE_BPS)]
+    pub price_guard_tolerance_bps: u32,
+
+    /// Price guard fail-open behavior (pass through on provider error)
+    #[arg(long, env, default_value_t = defaults::PRICE_GUARD_ALLOW_ON_PROVIDER_ERROR)]
+    pub price_guard_allow_on_provider_error: bool,
 }
 
 #[cfg(test)]
