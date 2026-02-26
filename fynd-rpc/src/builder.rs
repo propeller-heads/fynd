@@ -12,6 +12,7 @@ use fynd_core::{
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     price_guard::{
         binance_ws::BinanceWsProvider,
+        chainlink::ChainlinkProvider,
         config::PriceGuardConfig,
         hyperliquid::HyperliquidProvider,
         provider::PriceProviderRegistry,
@@ -320,9 +321,12 @@ impl FyndBuilder {
                 HyperliquidProvider::start(Arc::clone(&market_data));
             let (binance, _bn_handle) =
                 BinanceWsProvider::start(Arc::clone(&market_data));
+            let (chainlink, _cl_handle) =
+                ChainlinkProvider::start(self.rpc_url.clone(), Arc::clone(&market_data));
             let registry = PriceProviderRegistry::new()
                 .register(Box::new(hyperliquid))
-                .register(Box::new(binance));
+                .register(Box::new(binance))
+                .register(Box::new(chainlink));
             Some(PriceGuard::new(registry, self.price_guard_config))
         } else {
             None

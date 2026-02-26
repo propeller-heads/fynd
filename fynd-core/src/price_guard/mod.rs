@@ -1,4 +1,5 @@
 pub mod binance_ws;
+pub mod chainlink;
 pub mod common;
 pub mod config;
 pub mod hyperliquid;

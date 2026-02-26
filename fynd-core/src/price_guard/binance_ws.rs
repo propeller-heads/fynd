@@ -369,9 +369,9 @@ mod tests {
     #[tokio::test]
     #[ignore] // requires network access
     async fn test_binance_ws_provider_live() {
-        /// Integration test: starts the Binance WS provider, waits for the book ticker
-        /// stream to populate the cache, then queries 1 WETH → USDC and checks that the
-        /// returned amount is in a sane range.
+        // Integration test: starts the Binance WS provider, waits for the book ticker
+        // stream to populate the cache, then queries 1 WETH → USDC and checks that the
+        // returned amount is in a sane range.
         let weth_addr: Address = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
             .parse()
             .unwrap();
