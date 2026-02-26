@@ -354,11 +354,12 @@ impl FyndBuilder {
         // Price guard with provider registry (pass if at least one validates)
         let price_guard = if self.price_guard_config.enabled() {
             let mut registry = PriceProviderRegistry::new();
+            let mut worker_handles = Vec::new();
             for mut provider in self.price_providers {
-                provider.start(Arc::clone(&market_data));
+                worker_handles.push(provider.start(Arc::clone(&market_data)));
                 registry = registry.register(provider);
             }
-            Some(PriceGuard::new(registry, self.price_guard_config))
+            Some(PriceGuard::new(registry, self.price_guard_config, worker_handles))
         } else {
             None
         };

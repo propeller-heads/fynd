@@ -1,13 +1,13 @@
 //! Price provider trait and implementations.
 //!
 //! Defines the [`PriceProvider`] trait for fetching external token prices,
-//! along with error types and a no-op placeholder implementation.
+//! along with error types.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::feed::market_data::SharedMarketData;
@@ -67,15 +67,18 @@ impl ExternalPrice {
 /// # Lifecycle
 ///
 /// Providers are constructed via their own `new()` method, then [`start`](Self::start) is
-/// called once during server startup with the shared market data. Providers that need
-/// token resolution or background tasks should implement `start`; the default is a no-op.
+/// called once during server startup with the shared market data. Every provider must
+/// spawn a background worker and return its handle so the caller can abort it on shutdown.
 #[async_trait]
 pub trait PriceProvider: Send + Sync + 'static {
-    /// Initialize the provider with shared market data and start background tasks.
+    /// Initialize the provider with shared market data and start the background worker.
     ///
-    /// Called once during server startup. The default implementation is a no-op
-    /// for providers that don't need market data or background polling.
-    fn start(&mut self, _market_data: Arc<RwLock<SharedMarketData>>) {}
+    /// Called once during server startup. Returns the background task handle so
+    /// the caller can abort it on shutdown.
+    fn start(
+        &mut self,
+        market_data: Arc<RwLock<SharedMarketData>>,
+    ) -> JoinHandle<()>;
 
     /// Returns the expected output amount for a given input.
     ///
@@ -89,23 +92,6 @@ pub trait PriceProvider: Send + Sync + 'static {
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError>;
-}
-
-/// A no-op provider that always returns [`PriceProviderError::Unavailable`].
-///
-/// Used as the default placeholder when no real provider is configured.
-pub struct NoopPriceProvider;
-
-#[async_trait]
-impl PriceProvider for NoopPriceProvider {
-    async fn get_expected_out(
-        &self,
-        _token_in: &Address,
-        _token_out: &Address,
-        _amount_in: &BigUint,
-    ) -> Result<ExternalPrice, PriceProviderError> {
-        Err(PriceProviderError::Unavailable("no price provider configured".into()))
-    }
 }
 
 /// Registry of price providers that queries all registered sources concurrently.

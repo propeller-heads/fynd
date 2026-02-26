@@ -22,6 +22,7 @@ use super::{
     common::{compute_expected_out, normalize_symbol, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
+use tokio::task::JoinHandle;
 use crate::feed::market_data::SharedMarketData;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -85,14 +86,17 @@ impl ChainlinkProvider {
 
 #[async_trait]
 impl PriceProvider for ChainlinkProvider {
-    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) {
+    fn start(
+        &mut self,
+        market_data: Arc<RwLock<SharedMarketData>>,
+    ) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
         let worker = ChainlinkWorker {
             cache: Arc::clone(&self.cache),
             rpc_url: self.rpc_url.clone(),
             market_data,
         };
-        tokio::spawn(async move { worker.run().await });
+        tokio::spawn(async move { worker.run().await })
     }
 
     async fn get_expected_out(

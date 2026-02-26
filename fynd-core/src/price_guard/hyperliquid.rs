@@ -17,6 +17,7 @@ use super::{
     common::{check_staleness, compute_expected_out, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
+use tokio::task::JoinHandle;
 use crate::feed::market_data::SharedMarketData;
 
 const API_URL: &str = "https://api.hyperliquid.xyz/info";
@@ -53,10 +54,13 @@ impl HyperliquidProvider {
 
 #[async_trait]
 impl PriceProvider for HyperliquidProvider {
-    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) {
+    fn start(
+        &mut self,
+        market_data: Arc<RwLock<SharedMarketData>>,
+    ) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
         let worker = HyperliquidWorker { cache: Arc::clone(&self.cache), client: Client::new() };
-        tokio::spawn(async move { worker.run().await });
+        tokio::spawn(async move { worker.run().await })
     }
 
     async fn get_expected_out(

@@ -7,6 +7,7 @@ pub mod provider;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use self::{config::PriceGuardConfig, provider::PriceProviderRegistry};
@@ -17,14 +18,29 @@ use crate::types::{OrderSolution, SolutionStatus, SolveError};
 /// Queries all registered providers concurrently and checks each provider's price
 /// individually against the BPS tolerance. A solution passes if **at least one**
 /// provider's price is within tolerance. Only rejects if no provider validates.
+///
+/// Owns the background worker handles for each provider and aborts them on drop.
 pub struct PriceGuard {
     registry: PriceProviderRegistry,
     config: PriceGuardConfig,
+    worker_handles: Vec<JoinHandle<()>>,
+}
+
+impl Drop for PriceGuard {
+    fn drop(&mut self) {
+        for handle in &self.worker_handles {
+            handle.abort();
+        }
+    }
 }
 
 impl PriceGuard {
-    pub fn new(registry: PriceProviderRegistry, config: PriceGuardConfig) -> Self {
-        Self { registry, config }
+    pub fn new(
+        registry: PriceProviderRegistry,
+        config: PriceGuardConfig,
+        worker_handles: Vec<JoinHandle<()>>,
+    ) -> Self {
+        Self { registry, config, worker_handles }
     }
 
     /// Validates a list of order solutions against external prices.
@@ -165,8 +181,11 @@ impl PriceGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use async_trait::async_trait;
     use num_bigint::BigUint;
+    use tokio::{sync::RwLock, task::JoinHandle};
     use tycho_simulation::tycho_common::models::Address;
 
     use super::{
@@ -174,9 +193,12 @@ mod tests {
         provider::{ExternalPrice, PriceProvider, PriceProviderError, PriceProviderRegistry},
         PriceGuard,
     };
-    use crate::types::{
-        solution::{BlockInfo, Route, Swap},
-        OrderSolution, SolutionStatus, SolveError,
+    use crate::{
+        feed::market_data::SharedMarketData,
+        types::{
+            solution::{BlockInfo, Route, Swap},
+            OrderSolution, SolutionStatus, SolveError,
+        },
     };
 
     // -- Mock providers -------------------------------------------------------
@@ -189,6 +211,13 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for FixedProvider {
+        fn start(
+            &mut self,
+            _market_data: Arc<RwLock<SharedMarketData>>,
+        ) -> JoinHandle<()> {
+            tokio::spawn(std::future::ready(()))
+        }
+
         async fn get_expected_out(
             &self,
             _token_in: &Address,
@@ -204,6 +233,13 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for FailingProvider {
+        fn start(
+            &mut self,
+            _market_data: Arc<RwLock<SharedMarketData>>,
+        ) -> JoinHandle<()> {
+            tokio::spawn(std::future::ready(()))
+        }
+
         async fn get_expected_out(
             &self,
             _token_in: &Address,
@@ -219,6 +255,13 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for ZeroPriceProvider {
+        fn start(
+            &mut self,
+            _market_data: Arc<RwLock<SharedMarketData>>,
+        ) -> JoinHandle<()> {
+            tokio::spawn(std::future::ready(()))
+        }
+
         async fn get_expected_out(
             &self,
             _token_in: &Address,
@@ -266,7 +309,7 @@ mod tests {
         for p in providers {
             registry = registry.register(p);
         }
-        PriceGuard::new(registry, config)
+        PriceGuard::new(registry, config, vec![])
     }
 
     fn fixed(expected_out: u64) -> Box<dyn PriceProvider> {
