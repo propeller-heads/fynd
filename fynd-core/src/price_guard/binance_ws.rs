@@ -1,53 +1,34 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use num_bigint::BigUint;
-use tokio::sync::RwLock;
+use reqwest::Client;
+use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{debug, error, info, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    common::{check_staleness, compute_expected_out, resolve_token},
+    common::{check_staleness, compute_expected_out, normalize_symbol, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
-use tokio::task::JoinHandle;
 use crate::feed::market_data::SharedMarketData;
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
+const EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Common quote currencies used to find intermediate paths on Binance.
-const INTERMEDIATE_QUOTES: &[&str] = &["USDT", "USDC", "ETH", "BTC"];
+/// Quote currencies to pair each token symbol against when building subscriptions.
+const QUOTE_CURRENCIES: &[&str] = &["USDT", "USDC", "ETH", "BTC"];
 
-/// Major trading pairs to subscribe to for book ticker updates.
-/// Covers the most common DeFi tokens paired with major quote currencies.
-const BOOK_TICKER_STREAMS: &[&str] = &[
-    "ethusdc@bookTicker",
-    "ethusdt@bookTicker",
-    "btcusdc@bookTicker",
-    "btcusdt@bookTicker",
-    "linkusdt@bookTicker",
-    "linketh@bookTicker",
-    "uniusdt@bookTicker",
-    "aaveusdt@bookTicker",
-    "maticusdt@bookTicker",
-    "avaxusdt@bookTicker",
-    "solusdt@bookTicker",
-    "arbusdt@bookTicker",
-    "opusdt@bookTicker",
-    "mkrusdt@bookTicker",
-    "snxusdt@bookTicker",
-    "compusdt@bookTicker",
-    "crvusdt@bookTicker",
-    "ldousdt@bookTicker",
-    "rpleth@bookTicker",
-    "sushiusdt@bookTicker",
-    "daiusdt@bookTicker",
-    "bnbusdt@bookTicker",
-    "bnbeth@bookTicker",
-];
+/// Common quote currencies used to find intermediate paths in the cache.
+const INTERMEDIATE_QUOTES: &[&str] = QUOTE_CURRENCIES;
 
 /// Cached book ticker entry from Binance.
 #[derive(Debug, Clone)]
@@ -67,7 +48,8 @@ struct PriceLookup {
 
 /// Binance WebSocket price provider.
 ///
-/// Reads from a shared in-memory cache that is populated by [`BinanceWsWorker`].
+/// Dynamically subscribes to bookTicker streams for all tokens in [`SharedMarketData`]
+/// that have a valid Binance trading pair. New tokens are picked up every 60 seconds.
 pub struct BinanceWsProvider {
     cache: PriceCache,
     /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
@@ -153,8 +135,12 @@ impl PriceProvider for BinanceWsProvider {
         &mut self,
         market_data: Arc<RwLock<SharedMarketData>>,
     ) -> JoinHandle<()> {
-        self.market_data = Some(market_data);
-        let worker = BinanceWsWorker { cache: Arc::clone(&self.cache) };
+        self.market_data = Some(Arc::clone(&market_data));
+        let worker = BinanceWsWorker {
+            cache: Arc::clone(&self.cache),
+            market_data,
+            client: Client::new(),
+        };
         tokio::spawn(async move { worker.run().await })
     }
 
@@ -186,17 +172,37 @@ impl PriceProvider for BinanceWsProvider {
 }
 
 /// Background task that connects to Binance WebSocket and populates the price cache.
+///
+/// On each connection, fetches the Binance exchange info to discover which trading
+/// pairs exist, then cross-references with [`SharedMarketData`] to subscribe only to
+/// relevant bookTicker streams. Periodically re-checks for new tokens and subscribes
+/// to additional streams on the live connection.
 struct BinanceWsWorker {
     cache: PriceCache,
+    market_data: Arc<RwLock<SharedMarketData>>,
+    client: Client,
 }
 
 impl BinanceWsWorker {
     /// Runs the WebSocket loop. Reconnects with exponential backoff on failure.
-    pub async fn run(&self) {
+    async fn run(&self) {
         let mut current_delay = RECONNECT_DELAY;
 
         loop {
             info!(url = WS_URL, "connecting to Binance WebSocket");
+
+            let valid_symbols = match self.fetch_valid_symbols().await {
+                Ok(s) => {
+                    debug!(count = s.len(), "fetched Binance exchange info");
+                    s
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to fetch Binance exchange info, will retry");
+                    tokio::time::sleep(current_delay).await;
+                    current_delay = (current_delay * 2).min(MAX_RECONNECT_DELAY);
+                    continue;
+                }
+            };
 
             match tokio_tungstenite::connect_async(WS_URL).await {
                 Ok((ws_stream, _)) => {
@@ -205,34 +211,63 @@ impl BinanceWsWorker {
 
                     let (mut write, mut read) = ws_stream.split();
 
-                    // Subscribe to individual book ticker streams for major pairs.
-                    let sub_msg = serde_json::json!({
-                        "method": "SUBSCRIBE",
-                        "params": BOOK_TICKER_STREAMS,
-                        "id": 1
-                    });
-                    if let Err(e) = futures::SinkExt::send(
-                        &mut write,
-                        tokio_tungstenite::tungstenite::Message::Text(sub_msg.to_string().into()),
-                    )
-                    .await
-                    {
-                        warn!(error = %e, "failed to subscribe to bookTicker");
-                        continue;
+                    let streams = self.build_streams(&valid_symbols).await;
+                    let mut subscribed: HashSet<String> =
+                        streams.iter().cloned().collect();
+
+                    if streams.is_empty() {
+                        warn!("no Binance streams to subscribe to");
+                    } else {
+                        info!(count = streams.len(), "subscribing to Binance bookTicker streams");
+                        if let Err(e) = Self::subscribe(&mut write, &streams, 1).await {
+                            warn!(error = %e, "failed to subscribe");
+                            continue;
+                        }
                     }
-                    while let Some(msg) = read.next().await {
-                        match msg {
-                            Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                                self.handle_message(&text).await;
+
+                    let mut sub_id: u64 = 2;
+                    let mut resync = tokio::time::interval(RESYNC_INTERVAL);
+                    resync.tick().await; // consume the immediate first tick
+
+                    loop {
+                        tokio::select! {
+                            msg = read.next() => {
+                                match msg {
+                                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                                        self.handle_message(&text).await;
+                                    }
+                                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                                        warn!("Binance WebSocket closed by server");
+                                        break;
+                                    }
+                                    Some(Ok(_)) => {}
+                                    Some(Err(e)) => {
+                                        warn!(error = %e, "Binance WebSocket read error");
+                                        break;
+                                    }
+                                    None => break,
+                                }
                             }
-                            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                                warn!("Binance WebSocket closed by server");
-                                break;
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!(error = %e, "Binance WebSocket read error");
-                                break;
+                            _ = resync.tick() => {
+                                let new_streams = self.build_streams(&valid_symbols).await;
+                                let additions: Vec<String> = new_streams
+                                    .into_iter()
+                                    .filter(|s| !subscribed.contains(s))
+                                    .collect();
+                                if !additions.is_empty() {
+                                    info!(
+                                        count = additions.len(),
+                                        "subscribing to new Binance streams"
+                                    );
+                                    if let Err(e) =
+                                        Self::subscribe(&mut write, &additions, sub_id).await
+                                    {
+                                        warn!(error = %e, "failed to subscribe to new streams");
+                                    } else {
+                                        subscribed.extend(additions);
+                                        sub_id += 1;
+                                    }
+                                }
                             }
                         }
                     }
@@ -246,6 +281,77 @@ impl BinanceWsWorker {
             tokio::time::sleep(current_delay).await;
             current_delay = (current_delay * 2).min(MAX_RECONNECT_DELAY);
         }
+    }
+
+    /// Fetches Binance exchange info and returns the set of actively-trading symbols.
+    async fn fetch_valid_symbols(&self) -> Result<HashSet<String>, reqwest::Error> {
+        let resp: ExchangeInfoResponse = self
+            .client
+            .get(EXCHANGE_INFO_URL)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let symbols = resp
+            .symbols
+            .into_iter()
+            .filter(|s| s.status == "TRADING")
+            .map(|s| s.symbol)
+            .collect();
+
+        Ok(symbols)
+    }
+
+    /// Reads all token symbols from market data and builds bookTicker stream names
+    /// for pairs that exist on Binance.
+    async fn build_streams(&self, valid_symbols: &HashSet<String>) -> Vec<String> {
+        let market_data = self.market_data.read().await;
+        let token_symbols: HashSet<String> = market_data
+            .token_registry_ref()
+            .values()
+            .map(|t| normalize_symbol(&t.symbol).to_uppercase())
+            .collect();
+        drop(market_data);
+
+        let mut streams = Vec::new();
+        for symbol in &token_symbols {
+            for &quote in QUOTE_CURRENCIES {
+                if symbol == quote {
+                    continue;
+                }
+                let pair = format!("{}{}", symbol, quote);
+                if valid_symbols.contains(&pair) {
+                    streams.push(format!("{}@bookTicker", pair.to_lowercase()));
+                }
+            }
+        }
+
+        streams.sort();
+        streams.dedup();
+        streams
+    }
+
+    async fn subscribe<W>(
+        write: &mut W,
+        streams: &[String],
+        id: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        W: futures::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+        W::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let sub_msg = serde_json::json!({
+            "method": "SUBSCRIBE",
+            "params": streams,
+            "id": id
+        });
+        futures::SinkExt::send(
+            write,
+            tokio_tungstenite::tungstenite::Message::Text(sub_msg.to_string().into()),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn handle_message(&self, text: &str) {
@@ -289,6 +395,19 @@ struct BookTickerMsg {
     /// Event time in milliseconds
     #[serde(rename = "E")]
     event_time: Option<u64>,
+}
+
+/// Binance exchange info response (only the fields we need).
+#[derive(serde::Deserialize)]
+struct ExchangeInfoResponse {
+    symbols: Vec<SymbolInfo>,
+}
+
+/// Per-symbol info from Binance exchange info.
+#[derive(serde::Deserialize)]
+struct SymbolInfo {
+    symbol: String,
+    status: String,
 }
 
 #[cfg(test)]
@@ -372,11 +491,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_streams_filters_by_valid_symbols() {
+        let weth = Token {
+            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap(),
+            symbol: "WETH".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+        let link = Token {
+            address: "514910771AF9Ca656af840dff83E8264EcF986CA".parse().unwrap(),
+            symbol: "LINK".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+        let obscure = Token {
+            address: "0000000000000000000000000000000000000001".parse().unwrap(),
+            symbol: "OBSCURE".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+
+        let mut market_data = SharedMarketData::new();
+        market_data.upsert_tokens([weth, link, obscure]);
+        let market_data = Arc::new(RwLock::new(market_data));
+
+        let valid_symbols: HashSet<String> = [
+            "ETHUSDT", "ETHUSDC", "ETHBTC",
+            "LINKUSDT", "LINKETH",
+            // OBSCURE pairs intentionally missing
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let worker = BinanceWsWorker {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            market_data,
+            client: Client::new(),
+        };
+
+        let streams = worker.build_streams(&valid_symbols).await;
+
+        assert!(streams.contains(&"ethusdt@bookTicker".to_string()));
+        assert!(streams.contains(&"ethusdc@bookTicker".to_string()));
+        assert!(streams.contains(&"ethbtc@bookTicker".to_string()));
+        assert!(streams.contains(&"linkusdt@bookTicker".to_string()));
+        assert!(streams.contains(&"linketh@bookTicker".to_string()));
+
+        // OBSCURE has no valid pairs — should not appear
+        assert!(!streams.iter().any(|s| s.contains("obscure")));
+    }
+
+    #[tokio::test]
+    async fn test_build_streams_deduplicates_wrapped_tokens() {
+        // WETH normalizes to ETH — should not produce duplicate streams
+        let weth = Token {
+            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap(),
+            symbol: "WETH".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        };
+
+        let mut market_data = SharedMarketData::new();
+        market_data.upsert_tokens([weth]);
+        let market_data = Arc::new(RwLock::new(market_data));
+
+        let valid_symbols: HashSet<String> =
+            ["ETHUSDT", "ETHUSDC"].iter().map(|s| s.to_string()).collect();
+
+        let worker = BinanceWsWorker {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            market_data,
+            client: Client::new(),
+        };
+
+        let streams = worker.build_streams(&valid_symbols).await;
+        assert_eq!(streams.len(), 2);
+    }
+
+    #[tokio::test]
     #[ignore] // requires network access
     async fn test_binance_ws_provider_live() {
-        // Integration test: starts the Binance WS provider, waits for the book ticker
-        // stream to populate the cache, then queries 1 WETH → USDC and checks that the
-        // returned amount is in a sane range.
         let weth_addr: Address = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
             .parse()
             .unwrap();
