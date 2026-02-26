@@ -23,3 +23,5 @@ pub mod config;
 
 // Re-export key RPC types
 pub use api::{ApiError, AppState, HealthStatus};
+// Re-export price provider trait and types for custom provider implementations
+pub use fynd_core::price_guard::provider::{ExternalPrice, PriceProvider, PriceProviderError};

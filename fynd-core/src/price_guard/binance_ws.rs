@@ -70,21 +70,12 @@ struct PriceLookup {
 pub struct BinanceWsProvider {
     cache: PriceCache,
     /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
-    market_data: Arc<RwLock<SharedMarketData>>,
+    market_data: Option<Arc<RwLock<SharedMarketData>>>,
 }
 
 impl BinanceWsProvider {
-    /// Starts the Binance WebSocket price feed and returns a provider + background task handle.
-    ///
-    /// The background task connects to Binance, streams book ticker updates into a shared cache,
-    /// and the returned provider reads from that cache to answer price queries.
-    pub fn start(
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
-        let cache: PriceCache = Arc::new(RwLock::new(HashMap::new()));
-        let worker = BinanceWsWorker { cache: Arc::clone(&cache) };
-        let handle = tokio::spawn(async move { worker.run().await });
-        (Self { cache, market_data }, handle)
+    pub fn new() -> Self {
+        Self { cache: Arc::new(RwLock::new(HashMap::new())), market_data: None }
     }
 
     /// Attempts to find a price between two symbols in the cache.
@@ -157,14 +148,24 @@ impl BinanceWsProvider {
 
 #[async_trait]
 impl PriceProvider for BinanceWsProvider {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) {
+        self.market_data = Some(market_data);
+        let worker = BinanceWsWorker { cache: Arc::clone(&self.cache) };
+        tokio::spawn(async move { worker.run().await });
+    }
+
     async fn get_expected_out(
         &self,
         token_in: &Address,
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = resolve_token(&self.market_data, token_in).await?;
-        let (sym_out, dec_out) = resolve_token(&self.market_data, token_out).await?;
+        let market_data = self
+            .market_data
+            .as_ref()
+            .ok_or_else(|| PriceProviderError::Unavailable("provider not started".into()))?;
+        let (sym_in, dec_in) = resolve_token(market_data, token_in).await?;
+        let (sym_out, dec_out) = resolve_token(market_data, token_out).await?;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -402,7 +403,8 @@ mod tests {
         market_data.upsert_tokens([weth, usdc]);
         let market_data = Arc::new(RwLock::new(market_data));
 
-        let (provider, handle) = BinanceWsProvider::start(market_data);
+        let mut provider = BinanceWsProvider::new();
+        provider.start(market_data);
 
         // The WebSocket needs time to connect and receive ticker data.
         // Retry a few times since the subscription and first messages take a moment.
@@ -417,7 +419,6 @@ mod tests {
                 break;
             }
         }
-        handle.abort();
 
         let price = result.expect("should get a price from Binance WS");
         let amount_out = price.expected_amount_out().clone();

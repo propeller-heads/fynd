@@ -3,9 +3,14 @@
 //! Defines the [`PriceProvider`] trait for fetching external token prices,
 //! along with error types and a no-op placeholder implementation.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use num_bigint::BigUint;
+use tokio::sync::RwLock;
 use tycho_simulation::tycho_common::models::Address;
+
+use crate::feed::market_data::SharedMarketData;
 
 /// Errors that can occur when fetching external prices.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -59,12 +64,19 @@ impl ExternalPrice {
 /// Stateful providers (e.g., a WebSocket feed caching prices in `Arc<RwLock<HashMap>>`)
 /// should read from their internal cache in [`get_expected_out`].
 ///
-/// All providers follow a similar construction pattern returning `(Self, JoinHandle<()>)`.
+/// # Lifecycle
 ///
-/// TODO: Consider whether `start` should be formalized (e.g., a separate `PriceProviderFactory`
-/// trait) to standardize provider construction and lifecycle management.
+/// Providers are constructed via their own `new()` method, then [`start`](Self::start) is
+/// called once during server startup with the shared market data. Providers that need
+/// token resolution or background tasks should implement `start`; the default is a no-op.
 #[async_trait]
 pub trait PriceProvider: Send + Sync + 'static {
+    /// Initialize the provider with shared market data and start background tasks.
+    ///
+    /// Called once during server startup. The default implementation is a no-op
+    /// for providers that don't need market data or background polling.
+    fn start(&mut self, _market_data: Arc<RwLock<SharedMarketData>>) {}
+
     /// Returns the expected output amount for a given input.
     ///
     /// # Arguments

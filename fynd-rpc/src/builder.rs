@@ -15,7 +15,7 @@ use fynd_core::{
         chainlink::ChainlinkProvider,
         config::PriceGuardConfig,
         hyperliquid::HyperliquidProvider,
-        provider::PriceProviderRegistry,
+        provider::{PriceProvider, PriceProviderRegistry},
         PriceGuard,
     },
     types::constants::native_token,
@@ -62,6 +62,10 @@ pub struct FyndBuilder {
     blacklist: BlacklistConfig,
     user_transfer_type: UserTransferType,
     price_guard_config: PriceGuardConfig,
+    /// Price providers for the price guard.
+    /// Populated with built-in providers by default via [`add_default_price_providers`].
+    /// Each provider's [`start`](PriceProvider::start) is called during `build()`.
+    price_providers: Vec<Box<dyn PriceProvider>>,
     swapper_pk: Option<String>,
 }
 
@@ -94,6 +98,7 @@ impl FyndBuilder {
             blacklist: BlacklistConfig::default(),
             user_transfer_type: UserTransferType::TransferFrom,
             price_guard_config: PriceGuardConfig::default(),
+            price_providers: Vec::new(),
             swapper_pk: None,
         }
     }
@@ -182,13 +187,44 @@ impl FyndBuilder {
         self
     }
 
+    /// Registers the built-in price providers (Hyperliquid, Binance, Chainlink).
+    ///
+    /// Called automatically during [`build`](Self::build) if no providers have been
+    /// registered. To use only custom providers, call
+    /// [`register_price_provider`](Self::register_price_provider) before `build()`
+    /// and the defaults will be skipped.
+    pub fn add_default_price_providers(mut self) -> Self {
+        self.price_providers
+            .push(Box::new(HyperliquidProvider::new()));
+        self.price_providers
+            .push(Box::new(BinanceWsProvider::new()));
+        self.price_providers
+            .push(Box::new(ChainlinkProvider::new(self.rpc_url.clone())));
+        self
+    }
+
+    /// Registers a custom price provider for the price guard.
+    ///
+    /// The provider's [`start`](PriceProvider::start) method is called during
+    /// [`build`](Self::build) with the shared market data. A solution passes if
+    /// **at least one** registered provider validates within the BPS tolerance.
+    pub fn register_price_provider(mut self, provider: Box<dyn PriceProvider>) -> Self {
+        self.price_providers.push(provider);
+        self
+    }
+
     /// Sets swapper pk (used for permit2 signing).
     pub fn swapper_pk(mut self, swapper_pk: String) -> Self {
         self.swapper_pk = Some(swapper_pk);
         self
     }
 
-    pub fn build(self) -> Result<Fynd> {
+    pub fn build(mut self) -> Result<Fynd> {
+        // Add built-in providers if none were explicitly registered and the guard is enabled.
+        if self.price_guard_config.enabled() && self.price_providers.is_empty() {
+            self = self.add_default_price_providers();
+        }
+
         info!(
             host = %self.http_host,
             port = self.http_port,
@@ -317,16 +353,11 @@ impl FyndBuilder {
 
         // Price guard with provider registry (pass if at least one validates)
         let price_guard = if self.price_guard_config.enabled() {
-            let (hyperliquid, _hl_handle) =
-                HyperliquidProvider::start(Arc::clone(&market_data));
-            let (binance, _bn_handle) =
-                BinanceWsProvider::start(Arc::clone(&market_data));
-            let (chainlink, _cl_handle) =
-                ChainlinkProvider::start(self.rpc_url.clone(), Arc::clone(&market_data));
-            let registry = PriceProviderRegistry::new()
-                .register(Box::new(hyperliquid))
-                .register(Box::new(binance))
-                .register(Box::new(chainlink));
+            let mut registry = PriceProviderRegistry::new();
+            for mut provider in self.price_providers {
+                provider.start(Arc::clone(&market_data));
+                registry = registry.register(provider);
+            }
             Some(PriceGuard::new(registry, self.price_guard_config))
         } else {
             None

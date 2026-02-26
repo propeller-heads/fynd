@@ -40,12 +40,11 @@ impl PriceGuard {
     /// # Error semantics
     ///
     /// Two distinct failure modes:
-    /// - **Per-solution**: When providers return prices but none validate within
-    ///   tolerance, the solution's status is set to `PriceCheckFailed` and
-    ///   processing continues with the remaining solutions.
-    /// - **Catastrophic**: When *all* providers error and `allow_on_provider_error`
-    ///   is `false`, returns `Err(SolveError::PriceCheckFailed)` immediately,
-    ///   aborting the entire batch.
+    /// - **Per-solution**: When providers return prices but none validate within tolerance, the
+    ///   solution's status is set to `PriceCheckFailed` and processing continues with the remaining
+    ///   solutions.
+    /// - **Catastrophic**: When *all* providers error and `allow_on_provider_error` is `false`,
+    ///   returns `Err(SolveError::PriceCheckFailed)` immediately, aborting the entire batch.
     pub async fn validate(
         &self,
         solutions: Vec<OrderSolution>,
@@ -96,7 +95,10 @@ impl PriceGuard {
                     Ok(external_price) => {
                         all_errors = false;
 
-                        if external_price.expected_amount_out().is_zero() {
+                        if external_price
+                            .expected_amount_out()
+                            .is_zero()
+                        {
                             // Zero price means we can't validate — treat as pass
                             any_validated = true;
                             break;
@@ -113,10 +115,11 @@ impl PriceGuard {
                         }
 
                         let diff = external_price.expected_amount_out() - &solution.amount_out;
-                        let deviation_bps = (&diff * BigUint::from(10_000u32))
-                            / external_price.expected_amount_out();
-                        let deviation_bps_u32: u32 =
-                            deviation_bps.try_into().unwrap_or(u32::MAX);
+                        let deviation_bps = (&diff * BigUint::from(10_000u32)) /
+                            external_price.expected_amount_out();
+                        let deviation_bps_u32: u32 = deviation_bps
+                            .try_into()
+                            .unwrap_or(u32::MAX);
 
                         if deviation_bps_u32 <= self.config.tolerance_bps() {
                             any_validated = true;
@@ -192,11 +195,7 @@ mod tests {
             _token_out: &Address,
             _amount_in: &BigUint,
         ) -> Result<ExternalPrice, PriceProviderError> {
-            Ok(ExternalPrice::new(
-                self.expected_out.clone(),
-                self.source.clone(),
-                1000,
-            ))
+            Ok(ExternalPrice::new(self.expected_out.clone(), self.source.clone(), 1000))
         }
     }
 
@@ -226,11 +225,7 @@ mod tests {
             _token_out: &Address,
             _amount_in: &BigUint,
         ) -> Result<ExternalPrice, PriceProviderError> {
-            Ok(ExternalPrice::new(
-                BigUint::ZERO,
-                "zero".to_string(),
-                1000,
-            ))
+            Ok(ExternalPrice::new(BigUint::ZERO, "zero".to_string(), 1000))
         }
     }
 
@@ -364,10 +359,8 @@ mod tests {
         // Provider B expects 970, solution gives 960 → ~103 bps → passes.
         // "At least one validates" → passes.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(
-            vec![fixed_named(1000, "strict"), fixed_named(970, "lenient")],
-            config,
-        );
+        let guard =
+            make_guard(vec![fixed_named(1000, "strict"), fixed_named(970, "lenient")], config);
 
         let solutions = vec![make_solution(1000, 960)];
         let result = guard.validate(solutions).await.unwrap();
@@ -405,7 +398,10 @@ mod tests {
         let guard = make_guard(vec![failing(), failing()], config);
 
         let solutions = vec![make_solution(1000, 500)];
-        let err = guard.validate(solutions).await.unwrap_err();
+        let err = guard
+            .validate(solutions)
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, SolveError::PriceCheckFailed { .. }));
     }
@@ -419,7 +415,10 @@ mod tests {
         let mut solution = make_solution(1000, 1);
         solution.status = SolutionStatus::NoRouteFound;
 
-        let result = guard.validate(vec![solution]).await.unwrap();
+        let result = guard
+            .validate(vec![solution])
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::NoRouteFound);
     }
@@ -432,7 +431,10 @@ mod tests {
         let mut solution = make_solution(1000, 1);
         solution.route = None;
 
-        let result = guard.validate(vec![solution]).await.unwrap();
+        let result = guard
+            .validate(vec![solution])
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
@@ -445,7 +447,10 @@ mod tests {
         let mut solution = make_solution(1000, 1);
         solution.route = Some(Route::new(vec![]));
 
-        let result = guard.validate(vec![solution]).await.unwrap();
+        let result = guard
+            .validate(vec![solution])
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
@@ -481,7 +486,10 @@ mod tests {
             s
         };
 
-        let result = guard.validate(vec![solution_a, solution_b]).await.unwrap();
+        let result = guard
+            .validate(vec![solution_a, solution_b])
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
         assert_eq!(result[1].status, SolutionStatus::PriceCheckFailed);
@@ -505,7 +513,10 @@ mod tests {
         let guard = make_guard(vec![], config);
 
         let solutions = vec![make_solution(1000, 500)];
-        let err = guard.validate(solutions).await.unwrap_err();
+        let err = guard
+            .validate(solutions)
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, SolveError::PriceCheckFailed { .. }));
     }

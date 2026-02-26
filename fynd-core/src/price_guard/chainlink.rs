@@ -72,40 +72,41 @@ type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
 /// price any pair as `price_in_usd / price_out_usd`, same as Hyperliquid.
 pub struct ChainlinkProvider {
     cache: PriceCache,
+    rpc_url: String,
     /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
-    market_data: Arc<RwLock<SharedMarketData>>,
+    market_data: Option<Arc<RwLock<SharedMarketData>>>,
 }
 
 impl ChainlinkProvider {
-    /// Starts the Chainlink price feed and returns a provider + background task handle.
-    ///
-    /// The background task polls the Chainlink Feed Registry via RPC for all tokens
-    /// in market data and writes prices to a shared cache.
-    pub fn start(
-        rpc_url: String,
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
-        let cache: PriceCache = Arc::new(RwLock::new(HashMap::new()));
-        let worker = ChainlinkWorker {
-            cache: Arc::clone(&cache),
-            rpc_url,
-            market_data: Arc::clone(&market_data),
-        };
-        let handle = tokio::spawn(async move { worker.run().await });
-        (Self { cache, market_data }, handle)
+    pub fn new(rpc_url: String) -> Self {
+        Self { cache: Arc::new(RwLock::new(HashMap::new())), rpc_url, market_data: None }
     }
 }
 
 #[async_trait]
 impl PriceProvider for ChainlinkProvider {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) {
+        self.market_data = Some(Arc::clone(&market_data));
+        let worker = ChainlinkWorker {
+            cache: Arc::clone(&self.cache),
+            rpc_url: self.rpc_url.clone(),
+            market_data,
+        };
+        tokio::spawn(async move { worker.run().await });
+    }
+
     async fn get_expected_out(
         &self,
         token_in: &Address,
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = resolve_token(&self.market_data, token_in).await?;
-        let (sym_out, dec_out) = resolve_token(&self.market_data, token_out).await?;
+        let market_data = self
+            .market_data
+            .as_ref()
+            .ok_or_else(|| PriceProviderError::Unavailable("provider not started".into()))?;
+        let (sym_in, dec_in) = resolve_token(market_data, token_in).await?;
+        let (sym_out, dec_out) = resolve_token(market_data, token_out).await?;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -127,7 +128,9 @@ impl PriceProvider for ChainlinkProvider {
                 token_out: sym_out.clone(),
             })?;
 
-        let oldest_ts = price_in.timestamp_ms.min(price_out.timestamp_ms);
+        let oldest_ts = price_in
+            .timestamp_ms
+            .min(price_out.timestamp_ms);
         let age_ms = now_ms.saturating_sub(oldest_ts);
         if age_ms > STALENESS_THRESHOLD.as_millis() as u64 {
             return Err(PriceProviderError::StaleData { age_ms });
@@ -209,14 +212,20 @@ impl ChainlinkWorker {
         let mut count = 0;
 
         for (symbol, base_addr) in &tokens_to_query {
-            match registry.latestRoundData(*base_addr, USD_QUOTE).call().await {
+            match registry
+                .latestRoundData(*base_addr, USD_QUOTE)
+                .call()
+                .await
+            {
                 Ok(data) => {
                     // answer is int256 with 8 decimals for USD feeds.
                     let answer_i256 = data.answer;
                     if answer_i256.is_negative() {
                         continue;
                     }
-                    let answer_u256: U256 = answer_i256.try_into().unwrap_or(U256::ZERO);
+                    let answer_u256: U256 = answer_i256
+                        .try_into()
+                        .unwrap_or(U256::ZERO);
                     let usd_price = answer_u256.to::<u128>() as f64 / 1e8;
 
                     // updatedAt is Unix timestamp in seconds.
@@ -315,18 +324,17 @@ mod tests {
 
         let rpc_url =
             std::env::var("RPC_URL").expect("RPC_URL env var required for Chainlink live test");
-        let (provider, handle) = ChainlinkProvider::start(rpc_url, market_data);
+        let mut provider = ChainlinkProvider::new(rpc_url);
+        provider.start(market_data);
 
         // Chainlink polls every 10s; give it time to populate the cache.
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
         let one_eth = BigUint::from(10u64).pow(18);
-        let result = provider
+        let price = provider
             .get_expected_out(&weth_addr, &usdc_addr, &one_eth)
-            .await;
-        handle.abort();
-
-        let price = result.expect("should get a price from Chainlink");
+            .await
+            .expect("should get a price from Chainlink");
         let amount_out = price.expected_amount_out().clone();
 
         // 1 ETH should be worth between $100 and $100,000 USDC (6 decimals)

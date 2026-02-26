@@ -42,34 +42,35 @@ type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
 pub struct HyperliquidProvider {
     cache: PriceCache,
     /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
-    market_data: Arc<RwLock<SharedMarketData>>,
+    market_data: Option<Arc<RwLock<SharedMarketData>>>,
 }
 
 impl HyperliquidProvider {
-    /// Starts the Hyperliquid price feed and returns a provider + background task handle.
-    ///
-    /// The background task polls the Hyperliquid API for oracle prices and writes them
-    /// to a shared cache. The returned provider reads from that cache.
-    pub fn start(
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
-        let cache: PriceCache = Arc::new(RwLock::new(HashMap::new()));
-        let worker = HyperliquidWorker { cache: Arc::clone(&cache), client: Client::new() };
-        let handle = tokio::spawn(async move { worker.run().await });
-        (Self { cache, market_data }, handle)
+    pub fn new() -> Self {
+        Self { cache: Arc::new(RwLock::new(HashMap::new())), market_data: None }
     }
 }
 
 #[async_trait]
 impl PriceProvider for HyperliquidProvider {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) {
+        self.market_data = Some(Arc::clone(&market_data));
+        let worker = HyperliquidWorker { cache: Arc::clone(&self.cache), client: Client::new() };
+        tokio::spawn(async move { worker.run().await });
+    }
+
     async fn get_expected_out(
         &self,
         token_in: &Address,
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = resolve_token(&self.market_data, token_in).await?;
-        let (sym_out, dec_out) = resolve_token(&self.market_data, token_out).await?;
+        let market_data = self
+            .market_data
+            .as_ref()
+            .ok_or_else(|| PriceProviderError::Unavailable("provider not started".into()))?;
+        let (sym_in, dec_in) = resolve_token(market_data, token_in).await?;
+        let (sym_out, dec_out) = resolve_token(market_data, token_out).await?;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -280,18 +281,17 @@ mod tests {
         market_data.upsert_tokens([weth, usdc]);
         let market_data = Arc::new(RwLock::new(market_data));
 
-        let (provider, handle) = HyperliquidProvider::start(market_data);
+        let mut provider = HyperliquidProvider::new();
+        provider.start(market_data);
 
         // Hyperliquid polls every 3s; give it time to populate the cache.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         let one_eth = BigUint::from(10u64).pow(18);
-        let result = provider
+        let price = provider
             .get_expected_out(&weth_addr, &usdc_addr, &one_eth)
-            .await;
-        handle.abort();
-
-        let price = result.expect("should get a price from Hyperliquid");
+            .await
+            .expect("should get a price from Hyperliquid");
         let amount_out = price.expected_amount_out().clone();
 
         // 1 ETH should be worth between $100 and $100,000 USDC (6 decimals)
