@@ -58,6 +58,11 @@ impl ExternalPrice {
 /// Implementations can be REST API polling, WebSocket streaming, or any other source.
 /// Stateful providers (e.g., a WebSocket feed caching prices in `Arc<RwLock<HashMap>>`)
 /// should read from their internal cache in [`get_expected_out`].
+///
+/// All providers follow a similar construction pattern returning `(Self, JoinHandle<()>)`.
+///
+/// TODO: Consider whether `start` should be formalized (e.g., a separate `PriceProviderFactory`
+/// trait) to standardize provider construction and lifecycle management.
 #[async_trait]
 pub trait PriceProvider: Send + Sync + 'static {
     /// Returns the expected output amount for a given input.
