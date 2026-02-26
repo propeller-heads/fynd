@@ -90,3 +90,50 @@ impl PriceProvider for NoopPriceProvider {
         Err(PriceProviderError::Unavailable("no price provider configured".into()))
     }
 }
+
+/// Registry of price providers that queries all registered sources concurrently.
+///
+/// Used by [`PriceGuard`] to implement "at least one provider must validate" semantics:
+/// each provider's price is independently checked against the BPS tolerance. If *any*
+/// provider's price is close enough to the solution's output, the solution passes.
+///
+/// # Example
+///
+/// ```ignore
+/// let registry = PriceProviderRegistry::new()
+///     .register(Box::new(hyperliquid_provider))
+///     .register(Box::new(binance_provider));
+/// ```
+pub struct PriceProviderRegistry {
+    providers: Vec<Box<dyn PriceProvider>>,
+}
+
+impl PriceProviderRegistry {
+    pub fn new() -> Self {
+        Self { providers: Vec::new() }
+    }
+
+    /// Registers a price provider. Providers are queried concurrently during validation.
+    pub fn register(mut self, provider: Box<dyn PriceProvider>) -> Self {
+        self.providers.push(provider);
+        self
+    }
+
+    /// Queries all registered providers concurrently and returns individual results.
+    ///
+    /// Each entry in the returned `Vec` corresponds to one provider's result.
+    /// The caller decides how to interpret the results (e.g., pass if at least one validates).
+    pub async fn get_all_expected_out(
+        &self,
+        token_in: &Address,
+        token_out: &Address,
+        amount_in: &BigUint,
+    ) -> Vec<Result<ExternalPrice, PriceProviderError>> {
+        let futures: Vec<_> = self
+            .providers
+            .iter()
+            .map(|p| p.get_expected_out(token_in, token_out, amount_in))
+            .collect();
+        futures::future::join_all(futures).await
+    }
+}

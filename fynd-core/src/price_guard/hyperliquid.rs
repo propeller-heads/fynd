@@ -41,6 +41,7 @@ type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
 /// All oracle prices are in USD, so pricing any pair is just `price_in / price_out`.
 pub struct HyperliquidProvider {
     cache: PriceCache,
+    /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
     market_data: Arc<RwLock<SharedMarketData>>,
 }
 

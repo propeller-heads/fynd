@@ -69,6 +69,7 @@ struct PriceLookup {
 /// Reads from a shared in-memory cache that is populated by [`BinanceWsWorker`].
 pub struct BinanceWsProvider {
     cache: PriceCache,
+    /// Token registry for resolving on-chain addresses to exchange symbols and decimals.
     market_data: Arc<RwLock<SharedMarketData>>,
 }
 

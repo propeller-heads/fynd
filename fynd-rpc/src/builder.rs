@@ -10,7 +10,13 @@ use fynd_core::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
-    price_guard::{config::PriceGuardConfig, hyperliquid::HyperliquidProvider, PriceGuard},
+    price_guard::{
+        binance_ws::BinanceWsProvider,
+        config::PriceGuardConfig,
+        hyperliquid::HyperliquidProvider,
+        provider::PriceProviderRegistry,
+        PriceGuard,
+    },
     types::constants::native_token,
     worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
 };
@@ -308,10 +314,16 @@ impl FyndBuilder {
             self.swapper_pk,
         )?;
 
-        // Price guard with Hyperliquid oracle provider
+        // Price guard with provider registry (pass if at least one validates)
         let price_guard = if self.price_guard_config.enabled() {
-            let (provider, _handle) = HyperliquidProvider::start(Arc::clone(&market_data));
-            Some(PriceGuard::new(Box::new(provider), self.price_guard_config))
+            let (hyperliquid, _hl_handle) =
+                HyperliquidProvider::start(Arc::clone(&market_data));
+            let (binance, _bn_handle) =
+                BinanceWsProvider::start(Arc::clone(&market_data));
+            let registry = PriceProviderRegistry::new()
+                .register(Box::new(hyperliquid))
+                .register(Box::new(binance));
+            Some(PriceGuard::new(registry, self.price_guard_config))
         } else {
             None
         };
