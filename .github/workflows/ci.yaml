@@ -78,7 +78,7 @@ jobs:
           cache-on-failure: true
       - name: Check OpenAPI spec is up to date
         run: |
-          cargo run -- openapi > /tmp/openapi.json
+          cargo run --locked -- openapi > /tmp/openapi.json
           if ! diff -q clients/openapi.json /tmp/openapi.json > /dev/null 2>&1; then
             echo "clients/openapi.json is out of date. Run 'cargo run -- openapi > clients/openapi.json' and commit."
             diff clients/openapi.json /tmp/openapi.json
