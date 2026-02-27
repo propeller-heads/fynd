@@ -8,6 +8,8 @@
 pub mod client;
 pub mod error;
 pub mod execution;
+#[cfg(feature = "local-testing")]
+pub mod local;
 pub mod signing;
 pub mod types;
 mod wire;
@@ -15,6 +17,8 @@ mod wire;
 pub use client::FyndClient;
 pub use error::FyndClientError;
 pub use execution::{ExecutionReceipt, SettledOrder, TransactionHandle};
+#[cfg(feature = "local-testing")]
+pub use local::{LocalFyndConfig, LocalFyndInstance};
 pub use signing::{
     assemble_signed_order, FyndPayload, SignablePayload, SignedOrder, TurbinePayload,
 };
