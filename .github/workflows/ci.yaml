@@ -62,6 +62,29 @@ jobs:
       - name: Rustfmt
         run: cargo +${{steps.toolchain.outputs.name}} fmt --all --check
 
+  openapi_drift:
+    name: OpenAPI Spec Drift Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Check OpenAPI spec is up to date
+        run: |
+          cargo run -- openapi > /tmp/openapi.json
+          if ! diff -q clients/openapi.json /tmp/openapi.json > /dev/null 2>&1; then
+            echo "clients/openapi.json is out of date. Run 'cargo run -- openapi > clients/openapi.json' and commit."
+            diff clients/openapi.json /tmp/openapi.json
+            exit 1
+          fi
+
   security_audit:
     name: Security Audit
     runs-on: ubuntu-latest
