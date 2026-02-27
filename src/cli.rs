@@ -81,6 +81,10 @@ pub struct Cli {
     /// Path to blacklist TOML config file (optional)
     #[arg(long, env, default_value = "blacklist.toml")]
     pub blacklist_config: Option<PathBuf>,
+
+    /// Enable Prometheus metrics server on port 9898
+    #[arg(long, env)]
+    pub enable_metrics: bool,
 }
 
 #[cfg(test)]
@@ -121,6 +125,7 @@ mod cli_tests {
         assert_eq!(cli.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(cli.min_tvl, 20.0);
         assert_eq!(cli.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
+        assert!(!cli.enable_metrics);
     }
 
     #[test]
@@ -147,6 +152,7 @@ mod cli_tests {
         assert_eq!(cli.reconnect_delay_secs, 5);
         assert_eq!(cli.order_manager_timeout_ms, 100);
         assert_eq!(cli.order_manager_min_responses, 0);
+        assert!(!cli.enable_metrics);
     }
 
     #[test]
@@ -163,6 +169,21 @@ mod cli_tests {
         .expect("parse errored");
 
         assert_eq!(cli.worker_pools_config, PathBuf::from("worker_pools.toml"));
+    }
+
+    #[test]
+    fn test_arg_parsing_enable_metrics() {
+        let cli = Cli::try_parse_from(vec![
+            "fynd",
+            "--rpc-url",
+            "https://rpc.example.com",
+            "--protocols",
+            "uniswap_v2",
+            "--enable-metrics",
+        ])
+        .expect("parse errored");
+
+        assert!(cli.enable_metrics);
     }
 
     #[test]
