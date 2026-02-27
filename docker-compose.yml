@@ -20,6 +20,7 @@ services:
     depends_on:
       - tempo
     command:
+      - "serve"
       - "--chain"
       - "${CHAIN:-Ethereum}"
       - "--protocols"
