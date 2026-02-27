@@ -3251,6 +3251,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fynd-client"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "bytes",
+ "futures 0.3.32",
+ "num-bigint",
+ "num-traits",
+ "reqwest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fynd-core"
 version = "0.1.0"
 dependencies = [

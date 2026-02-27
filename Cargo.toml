@@ -54,10 +54,20 @@ num-traits = { workspace = true }
 tycho-execution = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc"]
+members = ["fynd-core", "fynd-rpc", "clients/rust"]
 resolver = "2"
 
 [workspace.dependencies]
+bytes = "1"
+alloy = { version = "1", features = [
+    "consensus",
+    "dyn-abi",
+    "eip712",
+    "network",
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+] }
 # HTTP
 actix-web = "4"
 
