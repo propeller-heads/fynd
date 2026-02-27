@@ -235,32 +235,39 @@ impl LocalFyndInstance {
 impl Drop for LocalFyndInstance {
     /// Stops and removes the Docker container.
     ///
-    /// Uses `block_on` to run the async teardown synchronously.
-    /// This is sound because `Drop` is called from the Tokio runtime thread,
-    /// but we spawn a blocking task to avoid blocking the async executor.
+    /// Spawns a background OS thread with its own single-threaded Tokio runtime to run
+    /// teardown. This avoids the `Handle::block_on` panic that occurs when called from
+    /// within an async context (including `#[tokio::test]`, which uses a current-thread
+    /// scheduler where `block_in_place` also panics). The thread is joined so teardown
+    /// completes before `Drop` returns.
     fn drop(&mut self) {
-        // We cannot call `.await` in `Drop`. Instead, we use the Tokio runtime handle
-        // if one is available. If no runtime is available (e.g., test teardown after
-        // runtime exit), we log a warning and skip cleanup.
         let container_id = self.container_id.clone();
         let container_name = self.container_name.clone();
         let docker = self.docker.clone();
 
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                rt.block_on(async move {
-                    let instance_ref =
-                        LocalFyndInstance { container_id, container_name, port: 0, docker };
-                    instance_ref.teardown().await;
-                });
-            }
-            Err(_) => {
-                warn!(
-                    "no async runtime available during Drop; \
-                     container {} may not be cleaned up",
-                    container_name
-                );
-            }
+        let handle =
+            std::thread::spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => {
+                        rt.block_on(async move {
+                            let instance_ref =
+                                LocalFyndInstance { container_id, container_name, port: 0, docker };
+                            instance_ref.teardown().await;
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            "failed to build teardown runtime for container {container_name}: {e}"
+                        );
+                    }
+                }
+            });
+
+        if let Err(e) = handle.join() {
+            warn!("teardown thread panicked for container {}: {:?}", self.container_name, e);
         }
     }
 }
