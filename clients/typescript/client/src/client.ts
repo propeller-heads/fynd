@@ -149,27 +149,19 @@ export class FyndClient {
     sender: string,
     rpcUrl: string,
   ): Promise<SignablePayload> {
-    const [nonce, feeData] = await Promise.all([
+    const [nonce, block] = await Promise.all([
       this.rpcCall<string>(rpcUrl, "eth_getTransactionCount", [sender, "latest"]),
-      this.rpcCall<{ maxFeePerGas: string; maxPriorityFeePerGas: string }>(
-        rpcUrl,
-        "eth_feeHistory",
-        [1, "latest", [50]],
-      ).then(async () => {
-        // Get base fee from latest block
-        const block = await this.rpcCall<{ baseFeePerGas: string }>(
-          rpcUrl,
-          "eth_getBlockByNumber",
-          ["latest", false],
-        );
-        const baseFee = BigInt(block.baseFeePerGas);
-        const priorityFee = 1_500_000_000n; // 1.5 gwei tip
-        return {
-          maxFeePerGas: (baseFee * 2n + priorityFee).toString(16),
-          maxPriorityFeePerGas: priorityFee.toString(16),
-        };
-      }),
+      this.rpcCall<{ baseFeePerGas: string }>(rpcUrl, "eth_getBlockByNumber", [
+        "latest",
+        false,
+      ]),
     ]);
+    const baseFee = BigInt(block.baseFeePerGas);
+    const priorityFee = 1_500_000_000n; // 1.5 gwei tip
+    const feeData = {
+      maxFeePerGas: (baseFee * 2n + priorityFee).toString(16),
+      maxPriorityFeePerGas: priorityFee.toString(16),
+    };
 
     const chainId = await this.rpcCall<string>(rpcUrl, "eth_chainId", []);
 

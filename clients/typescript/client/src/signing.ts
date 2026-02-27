@@ -1,3 +1,5 @@
+import { FyndClientError } from "./error.js";
+
 /**
  * The payload the caller must sign to execute a trade.
  *
@@ -41,7 +43,7 @@ export function assembleSignedOrder(
   signedRawTx: string,
 ): SignedOrder {
   if (payload.backend === "turbine") {
-    throw new Error("Turbine signing not yet implemented");
+    throw new FyndClientError("Turbine signing not yet implemented", false);
   }
   return {
     backend: "fynd",

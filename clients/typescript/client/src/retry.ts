@@ -20,14 +20,10 @@ export async function withRetry<T>(
   fn: () => Promise<T>,
   options: RetryOptions = DEFAULT_RETRY_OPTIONS,
 ): Promise<T> {
-  let lastError: unknown;
-
   for (let attempt = 0; attempt < options.maxAttempts; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      lastError = error;
-
       if (!isRetryable(error) || attempt === options.maxAttempts - 1) {
         throw error;
       }
@@ -42,5 +38,7 @@ export async function withRetry<T>(
     }
   }
 
-  throw lastError;
+  // Unreachable: the loop always throws on the final attempt.
+  // This satisfies the TypeScript return-type checker.
+  throw new Error("withRetry: maxAttempts must be >= 1");
 }

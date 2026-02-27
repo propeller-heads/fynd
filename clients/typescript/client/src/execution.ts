@@ -123,7 +123,13 @@ export class TransactionHandle {
       );
     }
 
-    const json = (await response.json()) as { result: TxReceipt | null };
+    const json = (await response.json()) as {
+      result: TxReceipt | null;
+      error?: { message: string };
+    };
+    if (json.error) {
+      throw new FyndClientError(`RPC error: ${json.error.message}`, false);
+    }
     return json.result;
   }
 }

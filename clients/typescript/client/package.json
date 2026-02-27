@@ -10,9 +10,6 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "@fynd/autogen": "file:../autogen"
-  },
   "devDependencies": {
     "typescript": "5.8.2"
   }
