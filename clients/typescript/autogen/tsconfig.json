@@ -9,6 +9,7 @@
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true,
     "verbatimModuleSyntax": true,
+    "isolatedModules": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
