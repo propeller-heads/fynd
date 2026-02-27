@@ -57,6 +57,32 @@ pub struct SolutionOptions {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas: Option<BigUint>,
+    /// Encoding options. When set, the response includes encoded calldata
+    /// for on-chain execution via the Tycho router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodingOptions>,
+}
+
+/// Options for encoding swap calldata for on-chain execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodingOptions {
+    /// Slippage tolerance in basis points (1 bps = 0.01%).
+    /// Applied to the output amount to calculate the minimum acceptable amount.
+    pub slippage_bps: u32,
+    /// How the router receives input tokens.
+    #[serde(default)]
+    pub transfer_type: TransferType,
+}
+
+/// How the Tycho router receives input tokens for a swap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferType {
+    /// The adapter pulls tokens from the sender via `transferFrom`.
+    #[default]
+    TransferFrom,
+    /// Tokens are already in the router (pre-transferred by the caller).
+    None,
 }
 
 // ============================================================================
@@ -207,6 +233,11 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Encoded swap data for on-chain execution. Only present when
+    /// `encoding` options are provided in the request and Fynd is running
+    /// with the `encoding` feature activated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodedSwapData>,
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
@@ -426,6 +457,52 @@ impl Swap {
         gas_estimate: BigUint,
     ) -> Self {
         Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+    }
+}
+
+// ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// Encoded swap data for on-chain execution via the Tycho router.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodedSwapData {
+    /// Address of the Tycho router contract (hex with 0x prefix).
+    pub router_address: Address,
+    /// ABI-encoded swap calldata. Serialized as 0x-prefixed hex string.
+    #[serde(serialize_with = "hex_0x::serialize", deserialize_with = "hex_0x::deserialize")]
+    pub encoded_calldata: Vec<u8>,
+    /// Minimum acceptable output amount after slippage (decimal string).
+    #[serde_as(as = "DisplayFromStr")]
+    pub checked_amount: BigUint,
+}
+
+#[cfg(feature = "encoding")]
+impl EncodedSwapData {
+    pub fn new(
+        encoded_solution: &tycho_execution::encoding::models::EncodedSolution,
+        checked_amount: BigUint,
+    ) -> Self {
+        let router_address = encoded_solution.interacting_with.clone();
+        let encoded_calldata = encoded_solution.swaps.to_vec();
+        Self { router_address, encoded_calldata, checked_amount }
+    }
+}
+
+/// Serde helpers for `Vec<u8>` as `0x`-prefixed hex strings.
+mod hex_0x {
+    use serde::{de, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let hex_string = format!("0x{}", hex::encode(bytes));
+        serializer.serialize_str(&hex_string)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(s).map_err(de::Error::custom)
     }
 }
 

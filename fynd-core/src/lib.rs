@@ -23,6 +23,8 @@
 // Public modules
 pub mod algorithm;
 pub mod derived;
+#[cfg(feature = "encoding")]
+pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
 pub mod order_manager;
@@ -33,6 +35,7 @@ pub mod worker_pool;
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
+    solution::{EncodedSwapData, EncodingOptions, TransferType},
     BlockInfo, ComponentId, Order, OrderSide, OrderSolution, OrderValidationError, Route,
     RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
     SolutionStatus, SolveError, SolveResult, Swap, TaskId,

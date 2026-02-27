@@ -156,6 +156,7 @@ mod tests {
                 price_impact_bps: None,
                 amount_out_net_gas: BigUint::from(990u64),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
+                encoding: None,
                 algorithm: "test".to_string(),
             },
             solve_time_ms: 5,

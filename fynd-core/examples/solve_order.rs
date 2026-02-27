@@ -101,10 +101,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
     // 7. OrderManager to coordinate solving
-    let order_manager = OrderManager::new(
-        vec![SolverPoolHandle::new("solver", task_handle)],
-        OrderManagerConfig::default().with_timeout(Duration::from_secs(10)),
-    );
+    let solver_pools = vec![SolverPoolHandle::new("solver", task_handle)];
+    let order_manager_config = OrderManagerConfig::default().with_timeout(Duration::from_secs(10));
+
+    #[cfg(feature = "encoding")]
+    let order_manager = {
+        let swap_encoder =
+            fynd_core::encoding::SwapEncoder::new(chain, Arc::clone(&market_data))
+                .expect("failed to create swap encoder");
+        OrderManager::new(solver_pools, order_manager_config, swap_encoder)
+    };
+    #[cfg(not(feature = "encoding"))]
+    let order_manager = OrderManager::new(solver_pools, order_manager_config);
 
     // 8. Spawn background tasks
     let feed_handle = tokio::spawn(async move {

@@ -28,6 +28,11 @@ tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
 rayon.workspace = true
+hex.workspace = true
+tycho-execution = { workspace = true, optional = true }
+
+[features]
+encoding = ["dep:tycho-execution"]
 
 [dev-dependencies]
 rstest.workspace = true
