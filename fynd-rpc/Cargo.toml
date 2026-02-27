@@ -25,6 +25,10 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-actix-web.workspace = true
 metrics.workspace = true
+hex.workspace = true
+
+[features]
+encoding = ["fynd-core/encoding"]
 
 [dev-dependencies]
 rstest.workspace = true

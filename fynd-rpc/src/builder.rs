@@ -269,7 +269,18 @@ impl FyndBuilder {
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)
             .with_min_responses(self.order_manager_min_responses);
-        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
+
+        #[cfg(feature = "encoding")]
+        let swap_encoder =
+            fynd_core::encoding::SwapEncoder::new(self.chain, Arc::clone(&market_data))
+                .context("failed to create swap encoder")?;
+
+        let order_manager = OrderManager::new(
+            solver_pool_handles,
+            order_manager_config,
+            #[cfg(feature = "encoding")]
+            swap_encoder,
+        );
 
         let app_state = AppState::new(order_manager, health_tracker);
 

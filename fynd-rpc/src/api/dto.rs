@@ -43,6 +43,32 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    /// Encoding options. When set, the response includes encoded calldata
+    /// for on-chain execution via the Tycho router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodingOptions>,
+}
+
+/// Options for encoding swap calldata for on-chain execution.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodingOptions {
+    /// Slippage tolerance in basis points (1 bps = 0.01%).
+    #[schema(example = 50)]
+    pub slippage_bps: u32,
+    /// How the router receives input tokens.
+    #[serde(default)]
+    pub transfer_type: TransferType,
+}
+
+/// How the Tycho router receives input tokens for a swap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferType {
+    /// The adapter pulls tokens from the sender via `transferFrom`.
+    #[default]
+    TransferFrom,
+    /// Tokens are already in the router (pre-transferred by the caller).
+    None,
 }
 
 // ============================================================================
@@ -161,6 +187,10 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Encoded swap data for on-chain execution. Only present when
+    /// `encoding` options are provided in the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodedSwapData>,
 }
 
 /// Status of an order solution.
@@ -243,6 +273,46 @@ pub struct Swap {
 }
 
 // ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// Encoded swap data for on-chain execution via the Tycho router.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodedSwapData {
+    /// Address of the Tycho router contract (hex with 0x prefix).
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub router_address: Address,
+    /// ABI-encoded swap calldata. Serialized as 0x-prefixed hex string.
+    #[serde(
+        serialize_with = "hex_0x::serialize",
+        deserialize_with = "hex_0x::deserialize"
+    )]
+    #[schema(value_type = String, example = "0xabcdef...")]
+    pub encoded_calldata: Vec<u8>,
+    /// Minimum acceptable output amount after slippage (decimal string).
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub checked_amount: BigUint,
+}
+
+/// Serde helpers for `Vec<u8>` as `0x`-prefixed hex strings.
+mod hex_0x {
+    use serde::{de, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let hex_string = format!("0x{}", hex::encode(bytes));
+        serializer.serialize_str(&hex_string)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(s).map_err(de::Error::custom)
+    }
+}
+
+// ============================================================================
 // HEALTH CHECK TYPES
 // ============================================================================
 
@@ -279,7 +349,27 @@ impl From<SolutionRequest> for fynd_core::SolutionRequest {
 
 impl From<SolutionOptions> for fynd_core::SolutionOptions {
     fn from(dto: SolutionOptions) -> Self {
-        Self { timeout_ms: dto.timeout_ms, min_responses: dto.min_responses, max_gas: dto.max_gas }
+        Self {
+            timeout_ms: dto.timeout_ms,
+            min_responses: dto.min_responses,
+            max_gas: dto.max_gas,
+            encoding: dto.encoding.map(Into::into),
+        }
+    }
+}
+
+impl From<EncodingOptions> for fynd_core::EncodingOptions {
+    fn from(dto: EncodingOptions) -> Self {
+        Self { slippage_bps: dto.slippage_bps, transfer_type: dto.transfer_type.into() }
+    }
+}
+
+impl From<TransferType> for fynd_core::TransferType {
+    fn from(dto: TransferType) -> Self {
+        match dto {
+            TransferType::TransferFrom => Self::TransferFrom,
+            TransferType::None => Self::None,
+        }
     }
 }
 
@@ -335,6 +425,17 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
             price_impact_bps: core.price_impact_bps,
             amount_out_net_gas: core.amount_out_net_gas,
             block: core.block.into(),
+            encoding: core.encoding.map(Into::into),
+        }
+    }
+}
+
+impl From<fynd_core::EncodedSwapData> for EncodedSwapData {
+    fn from(core: fynd_core::EncodedSwapData) -> Self {
+        Self {
+            router_address: core.router_address,
+            encoded_calldata: core.encoded_calldata,
+            checked_amount: core.checked_amount,
         }
     }
 }
@@ -412,7 +513,12 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
+            options: SolutionOptions {
+                timeout_ms: Some(5000),
+                min_responses: None,
+                max_gas: None,
+                encoding: None,
+            },
         };
 
         let core: fynd_core::SolutionRequest = dto.clone().into();
