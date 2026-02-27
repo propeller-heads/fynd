@@ -1,4 +1,3 @@
-use alloy::signers::local::PrivateKeySigner;
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
@@ -8,16 +7,14 @@ use tycho_execution::encoding::{
     models::UserTransferType,
     tycho_encoder::TychoEncoder,
 };
-use tycho_simulation::tycho_common::{
-    models::{protocol::ProtocolComponent, Chain},
-    simulation::protocol_sim::ProtocolSim,
-};
+use tycho_simulation::tycho_common::models::Chain;
 
-use crate::{feed::market_data::SharedMarketDataRef, types::OrderSolution, SolveError};
+use crate::{
+    types::{EncodingOptions, OrderSolution},
+    SolveError,
+};
 pub struct Encoder {
     tycho_encoder: Box<dyn TychoEncoder>,
-    market_data: SharedMarketDataRef,
-    signer: Option<PrivateKeySigner>,
 }
 
 impl Encoder {
@@ -25,8 +22,6 @@ impl Encoder {
         chain: Chain,
         transfer_type: UserTransferType,
         swap_encoder_registry: SwapEncoderRegistry,
-        market_data: SharedMarketDataRef,
-        swapper_pk: Option<String>,
     ) -> Result<Self, SolveError> {
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
@@ -34,15 +29,13 @@ impl Encoder {
                 .user_transfer_type(transfer_type.clone())
                 .swap_encoder_registry(swap_encoder_registry)
                 .build()?,
-            market_data,
-            signer: None, // TODO: create signer if signer_pk is passed
         })
     }
 
     pub async fn encode(
         &self,
         solutions: Vec<OrderSolution>,
-        slippage: f64,
+        encoding_options: EncodingOptions,
     ) -> Result<Vec<OrderSolution>, SolveError> {
         // loop through solutions and convert into the execution Solution model
         //   use the self.market_data to get the ProtocolComponent and ProtocolSim
@@ -53,24 +46,6 @@ impl Encoder {
         //   - create a Transaction and put it in the OrderSolution
         // return all the OrderSolutions
         Ok(solutions)
-    }
-
-    async fn get_component(&mut self, id: &str) -> Result<ProtocolComponent, SolveError> {
-        let market = self.market_data.read().await;
-        let component = market
-            .get_component(id)
-            .cloned()
-            .ok_or(SolveError::FailedEncoding("no component found".to_string()))?;
-        Ok(component)
-    }
-
-    async fn get_simulation_state(&mut self, id: &str) -> Result<Box<dyn ProtocolSim>, SolveError> {
-        let market = self.market_data.read().await;
-        let state = market
-            .get_simulation_state(id)
-            .map(|state| state.clone_box())
-            .ok_or(SolveError::FailedEncoding("no state found".to_string()))?;
-        Ok(state)
     }
 }
 

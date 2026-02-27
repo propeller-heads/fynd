@@ -21,7 +21,11 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tycho_simulation::{
-    tycho_common::{models::Address, Bytes},
+    tycho_common::{
+        models::{protocol::ProtocolComponent, Address},
+        simulation::protocol_sim::ProtocolSim,
+        Bytes,
+    },
     tycho_core::models::token::Token,
 };
 use uuid::Uuid;
@@ -60,8 +64,15 @@ pub struct SolutionOptions {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EncodingOptions {
     pub slippage: f64,
-    pub include_encoding: bool,
+    // Only needed for permit2 signing
+    pub swapper_pk: Option<String>,
 }
 
 // ============================================================================
@@ -215,6 +226,9 @@ pub struct OrderSolution {
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub gas_price: Option<BigUint>,
     pub transaction: Option<Transaction>,
 }
 
@@ -308,6 +322,8 @@ pub struct RouteResult {
     pub route: Route,
     /// Net amount out after accounting for gas costs in output token terms.
     pub net_amount_out: BigInt,
+    /// Effective gas price (in wei) at the time the route was computed.
+    pub gas_price: BigUint,
 }
 
 impl Route {
@@ -431,6 +447,8 @@ pub struct Swap {
     /// Estimated gas cost for this swap (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
+    pub protocol_component: ProtocolComponent,
+    pub protocol_state: Box<dyn ProtocolSim>,
 }
 
 impl Swap {
@@ -443,8 +461,20 @@ impl Swap {
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
+        protocol_component: ProtocolComponent,
+        protocol_state: Box<dyn ProtocolSim>,
     ) -> Self {
-        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self {
+            component_id,
+            protocol,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            protocol_component,
+            protocol_state,
+        }
     }
 }
 

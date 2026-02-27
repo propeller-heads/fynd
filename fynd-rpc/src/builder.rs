@@ -53,7 +53,6 @@ pub struct FyndBuilder {
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
     user_transfer_type: UserTransferType,
-    swapper_pk: Option<String>,
 }
 
 impl FyndBuilder {
@@ -84,7 +83,6 @@ impl FyndBuilder {
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
             user_transfer_type: UserTransferType::TransferFrom,
-            swapper_pk: None,
         }
     }
 
@@ -163,12 +161,6 @@ impl FyndBuilder {
     /// Sets user transfer type (to use during encoding)
     pub fn user_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
         self.user_transfer_type = transfer_type;
-        self
-    }
-
-    /// Sets swapper pk (used for permit2 signing).
-    pub fn swapper_pk(mut self, swapper_pk: String) -> Self {
-        self.swapper_pk = Some(swapper_pk);
         self
     }
 
@@ -291,13 +283,7 @@ impl FyndBuilder {
             .add_default_encoders(None)
             .expect("Failed to get default SwapEncoderRegistry");
 
-        let encoder = Encoder::new(
-            self.chain,
-            self.user_transfer_type,
-            swap_encoder_registry,
-            Arc::clone(&market_data),
-            self.swapper_pk,
-        )?;
+        let encoder = Encoder::new(self.chain, self.user_transfer_type, swap_encoder_registry)?;
 
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)

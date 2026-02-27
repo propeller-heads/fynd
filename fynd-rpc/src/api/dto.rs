@@ -43,11 +43,18 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct EncodingOptions {
+    #[schema(example = "true")]
     #[serde_as(as = "DisplayFromStr")]
     #[schema(example = "0.001")]
     pub slippage: f64,
-    #[schema(value_type = bool, example = "true")]
-    pub include_encoding: bool,
+    // Only needed for permit2 signing
+    #[schema(value_type = Option<String>, example = "None")]
+    pub swapper_pk: Option<String>,
 }
 
 // ============================================================================
@@ -166,6 +173,11 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "20000000000")]
+    pub gas_price: Option<BigUint>,
     pub transaction: Option<Transaction>,
 }
 
@@ -289,9 +301,14 @@ impl From<SolutionOptions> for fynd_core::SolutionOptions {
             timeout_ms: dto.timeout_ms,
             min_responses: dto.min_responses,
             max_gas: dto.max_gas,
-            include_encoding: dto.include_encoding,
-            slippage: dto.slippage,
+            encoding_options: dto.encoding_options.map(Into::into),
         }
+    }
+}
+
+impl From<EncodingOptions> for fynd_core::EncodingOptions {
+    fn from(dto: EncodingOptions) -> Self {
+        Self { slippage: dto.slippage, swapper_pk: dto.swapper_pk }
     }
 }
 
@@ -347,6 +364,7 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
             price_impact_bps: core.price_impact_bps,
             amount_out_net_gas: core.amount_out_net_gas,
             block: core.block.into(),
+            gas_price: core.gas_price,
             transaction: core.transaction.map(Into::into),
         }
     }
@@ -480,12 +498,7 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions {
-                timeout_ms: Some(5000),
-                min_responses: None,
-                max_gas: None,
-                include_encoding: true,
-            },
+            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
         };
 
         let core: fynd_core::SolutionRequest = dto.clone().into();
