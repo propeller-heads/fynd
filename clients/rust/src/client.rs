@@ -15,6 +15,7 @@ use crate::{
     wire::{WireOrder, WireOrderSide, WireOrderSolution, WireSolutionRequest, WireSolutionStatus},
 };
 
+#[derive(Clone)]
 pub struct FyndClient {
     base_url: String,
     http: Client,
@@ -173,14 +174,17 @@ fn biguint_from_u256(v: U256) -> BigUint {
     BigUint::from_bytes_be(&v.to_be_bytes::<32>())
 }
 
-fn u256_from_biguint(v: &BigUint) -> U256 {
+fn u256_from_biguint(v: &BigUint) -> Result<U256, FyndClientError> {
     let bytes = v.to_bytes_be();
-    // BigUint values from the solver are token amounts and gas estimates;
-    // values exceeding U256 are impossible in practice.
-    assert!(bytes.len() <= 32, "BigUint from server exceeds U256 range");
+    if bytes.len() > 32 {
+        return Err(FyndClientError::UnexpectedResponse(format!(
+            "server returned a value exceeding U256 range ({} bytes)",
+            bytes.len()
+        )));
+    }
     let mut padded = [0u8; 32];
     padded[32 - bytes.len()..].copy_from_slice(&bytes);
-    U256::from_be_bytes(padded)
+    Ok(U256::from_be_bytes(padded))
 }
 
 fn parse_address(s: &str) -> Result<Address, FyndClientError> {
@@ -229,9 +233,9 @@ fn from_wire_order_solution(w: WireOrderSolution) -> Result<OrderSolution, FyndC
                         protocol: s.protocol,
                         token_in: parse_address(&s.token_in)?,
                         token_out: parse_address(&s.token_out)?,
-                        amount_in: u256_from_biguint(&s.amount_in),
-                        amount_out: u256_from_biguint(&s.amount_out),
-                        gas_estimate: u256_from_biguint(&s.gas_estimate),
+                        amount_in: u256_from_biguint(&s.amount_in)?,
+                        amount_out: u256_from_biguint(&s.amount_out)?,
+                        gas_estimate: u256_from_biguint(&s.gas_estimate)?,
                     })
                 })
                 .collect::<Result<Vec<_>, FyndClientError>>()
@@ -241,9 +245,9 @@ fn from_wire_order_solution(w: WireOrderSolution) -> Result<OrderSolution, FyndC
 
     Ok(OrderSolution {
         order_id: w.order_id,
-        amount_in: u256_from_biguint(&w.amount_in),
-        amount_out: u256_from_biguint(&w.amount_out),
-        gas_estimate: u256_from_biguint(&w.gas_estimate),
+        amount_in: u256_from_biguint(&w.amount_in)?,
+        amount_out: u256_from_biguint(&w.amount_out)?,
+        gas_estimate: u256_from_biguint(&w.gas_estimate)?,
         price_impact_bps: w.price_impact_bps,
         block: BlockInfo {
             number: w.block.number,
@@ -380,7 +384,7 @@ mod tests {
     fn test_biguint_u256_roundtrip() {
         let original = U256::from(1_000_000_000_000_000_000u64);
         let biguint = biguint_from_u256(original);
-        let back = u256_from_biguint(&biguint);
+        let back = u256_from_biguint(&biguint).expect("valid U256");
         assert_eq!(original, back);
     }
 
@@ -388,7 +392,15 @@ mod tests {
     fn test_biguint_u256_zero() {
         let original = U256::ZERO;
         let biguint = biguint_from_u256(original);
-        let back = u256_from_biguint(&biguint);
+        let back = u256_from_biguint(&biguint).expect("valid U256");
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_biguint_u256_overflow_returns_error() {
+        // 33 bytes of 0xff exceeds U256 (32 bytes)
+        let oversized = BigUint::from_bytes_be(&[0xffu8; 33]);
+        let err = u256_from_biguint(&oversized).expect_err("should be an error");
+        assert!(matches!(err, FyndClientError::UnexpectedResponse(_)));
     }
 }

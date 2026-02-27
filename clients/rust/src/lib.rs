@@ -5,11 +5,11 @@
 //! 2. **Sign** — [`FyndClient::signable_payload`] — build an unsigned transaction; sign externally
 //! 3. **Execute** — [`FyndClient::execute`] — broadcast the signed transaction to the blockchain
 
-pub mod client;
-pub mod error;
-pub mod execution;
-pub mod signing;
-pub mod types;
+mod client;
+mod error;
+mod execution;
+mod signing;
+mod types;
 mod wire;
 
 pub use client::FyndClient;

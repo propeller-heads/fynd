@@ -15,21 +15,15 @@ serde_with = { version = "3", features = ["std"] }
 
 # Ethereum types and signing
 alloy = { version = "1.0", features = ["providers", "rpc-types-eth", "network", "transport-http", "rpc-client", "consensus", "eips"] }
-alloy-chains = "0.2"
 
 # Async
 tokio = { version = "1", features = ["full"] }
-futures = "0.3"
 
 # Big integers
 num-bigint = { version = "0.4", features = ["serde"] }
-num-traits = "0.2"
 
 # Error handling
 thiserror = "1"
-
-# Logging
-tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -29,12 +29,17 @@ pub struct TurbinePayload {
 
 impl SignablePayload {
     /// Returns the hash the caller should sign.
-    pub fn signing_hash(&self) -> alloy::primitives::B256 {
+    ///
+    /// # Errors
+    ///
+    /// Returns `FyndClientError::UnexpectedResponse` if called on the `Turbine` variant,
+    /// which is not yet implemented.
+    pub fn signing_hash(&self) -> Result<alloy::primitives::B256, crate::error::FyndClientError> {
         match self {
-            SignablePayload::Fynd(p) => p.tx.signature_hash(),
-            SignablePayload::Turbine(_) => {
-                unimplemented!("Turbine signing not yet implemented")
-            }
+            SignablePayload::Fynd(p) => Ok(p.tx.signature_hash()),
+            SignablePayload::Turbine(_) => Err(crate::error::FyndClientError::UnexpectedResponse(
+                "Turbine signing not yet implemented".to_string(),
+            )),
         }
     }
 }

@@ -7,6 +7,7 @@ use alloy::providers::Provider;
 use crate::error::FyndClientError;
 
 /// A handle to a submitted transaction, resolves to a `SettledOrder`.
+#[derive(Clone)]
 pub struct TransactionHandle {
     pub(crate) tx_hash: TxHash,
     pub(crate) provider: Arc<dyn Provider<Ethereum>>,
