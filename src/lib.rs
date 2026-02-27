@@ -69,6 +69,8 @@
 pub mod algorithm;
 pub mod builder;
 pub mod config;
+#[cfg(feature = "encoding")]
+pub mod encoding;
 pub mod types;
 
 // Internal modules - public for main.rs and internal use, but not re-exported
@@ -92,7 +94,9 @@ pub use derived::{
 };
 pub use types::{
     native_token,
-    solution::{Order, SolutionOptions, SolutionRequest},
+    solution::{
+        EncodedSwapData, EncodingOptions, Order, SolutionOptions, SolutionRequest, TransferType,
+    },
     ComponentId, HealthStatus, OrderSolution, Route, Solution, SolutionStatus, SolveError, Swap,
     UnsupportedChainError,
 };

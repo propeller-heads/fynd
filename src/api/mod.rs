@@ -26,8 +26,8 @@ use crate::{
     order_manager::OrderManager,
     types::{
         solution::{
-            BlockInfo, Order, OrderSide, OrderSolution, Route, Solution, SolutionOptions,
-            SolutionRequest, SolutionStatus, Swap,
+            BlockInfo, EncodedSwapData, EncodingOptions, Order, OrderSide, OrderSolution, Route,
+            Solution, SolutionOptions, SolutionRequest, SolutionStatus, Swap, TransferType,
         },
         HealthStatus,
     },
@@ -41,12 +41,15 @@ use crate::{
         Order,
         OrderSide,
         SolutionOptions,
+        EncodingOptions,
+        TransferType,
         Solution,
         OrderSolution,
         SolutionStatus,
         Route,
         Swap,
         BlockInfo,
+        EncodedSwapData,
         HealthStatus,
         ErrorResponse,
     ))

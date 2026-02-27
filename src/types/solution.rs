@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -60,6 +60,38 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    /// Encoding options. When set, the response includes encoded calldata
+    /// for on-chain execution via the Tycho router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodingOptions>,
+}
+
+/// Options for encoding swap calldata for on-chain execution.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodingOptions {
+    /// Slippage tolerance in basis points (1 bps = 0.01%).
+    /// Applied to the output amount to calculate the minimum acceptable amount.
+    #[schema(example = 50)]
+    pub slippage_bps: u32,
+    /// How the router receives input tokens.
+    ///
+    /// - `transfer_from`: the adapter pulls tokens from the sender via `transferFrom` during pool
+    ///   callbacks (requires ERC-20 approval).
+    /// - `none`: tokens are already present in the router before the swap call (e.g. a settlement
+    ///   contract pre-transfers them).
+    #[serde(default)]
+    pub transfer_type: TransferType,
+}
+
+/// How the Tycho router receives input tokens for a swap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferType {
+    /// The adapter pulls tokens from the sender via `transferFrom`.
+    #[default]
+    TransferFrom,
+    /// Tokens are already in the router (pre-transferred by the caller).
+    None,
 }
 
 /// A single swap order to be solved.
@@ -222,6 +254,11 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Encoded swap data for on-chain execution. Only present when
+    /// `encoding` options are provided in the request and Fynd is running with the `encoding`
+    /// feature activated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodedSwapData>,
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     #[schema(ignore)]
@@ -452,6 +489,53 @@ impl Swap {
         gas_estimate: BigUint,
     ) -> Self {
         Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+    }
+}
+
+/// Encoded swap data for on-chain execution via the Tycho router.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodedSwapData {
+    /// Address of the Tycho router contract (hex with 0x prefix).
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub router_address: Address,
+    /// ABI-encoded swap calldata. Serialized as 0x-prefixed hex string.
+    #[serde(serialize_with = "hex_0x::serialize", deserialize_with = "hex_0x::deserialize")]
+    #[schema(value_type = String, example = "0xabcdef...")]
+    pub encoded_calldata: Vec<u8>,
+    /// Minimum acceptable output amount after slippage (decimal string).
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub checked_amount: BigUint,
+}
+
+#[cfg(feature = "encoding")]
+impl EncodedSwapData {
+    pub fn new(
+        encoded_solution: &tycho_execution::encoding::models::EncodedSolution,
+        checked_amount: BigUint,
+    ) -> Self {
+        let router_address = encoded_solution
+            .interacting_with
+            .clone();
+        let encoded_calldata = encoded_solution.swaps.to_vec();
+        Self { router_address, encoded_calldata, checked_amount }
+    }
+}
+
+/// Serde helpers for `Vec<u8>` as `0x`-prefixed hex strings.
+mod hex_0x {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let hex_string = format!("0x{}", hex::encode(bytes));
+        serializer.serialize_str(&hex_string)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(s).map_err(de::Error::custom)
     }
 }
 

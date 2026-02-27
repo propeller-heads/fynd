@@ -103,6 +103,8 @@ Submit one or more swap orders and receive optimal routes.
 | `options.timeout_ms` | integer | No | Solve timeout override                 |
 | `options.min_responses` | integer | No | Early return threshold                 |
 | `options.max_gas` | string | No | Max gas filter                         |
+| `options.encoding.slippage_bps` | integer | No | Slippage tolerance in basis points (1 bps = 0.01%). When `encoding` is set, the response includes encoded calldata for on-chain execution. Requires the `encoding` feature. |
+| `options.encoding.transfer_type` | string | No | `"transfer_from"` (default) or `"none"`. `transfer_from`: the router pulls tokens via `transferFrom`. `none`: tokens are already in the router (pre-transferred). |
 
 **Response:**
 
@@ -129,7 +131,12 @@ Submit one or more swap orders and receive optimal routes.
       "amount_out": "3200000000",
       "gas_estimate": "150000",
       "amount_out_net_gas": "3199500000",
-      "block": { "number": 19000000, "hash": "0x...", "timestamp": 1700000000 }
+      "block": { "number": 19000000, "hash": "0x...", "timestamp": 1700000000 },
+      "encoding": {
+        "router_address": "0x...",
+        "encoded_calldata": "0xabcdef...",
+        "checked_amount": "3184000000"
+      }
     }
   ],
   "total_gas_estimate": "150000",

@@ -5,6 +5,9 @@ edition = "2021"
 description = "High-performance DEX router built on Tycho"
 license = "MIT"
 
+[features]
+encoding = ["dep:tycho-execution"]
+
 [dependencies]
 # HTTP
 actix-web = "4"
@@ -42,10 +45,11 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.234.0"
+tycho-simulation = { version = ">=0.234.0", default-features = false, features = ["evm", "rfq"] }
+tycho-execution = { version = ">=0.155.0", default-features = false, features = ["evm"], optional = true }
 
 # Graph algorithms
-petgraph = "0.6"
+petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
 
 # Utilities
 num-bigint = { version = "0.4", features = ["serde"] }
@@ -60,6 +64,7 @@ chrono = "0.4"
 itertools = "0.14.0"
 rayon = { version = "1.10", default-features = false }
 time = ">=0.3.47"  # Fix RUSTSEC-2026-0009
+hex = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 rstest = "0.18"
@@ -77,3 +82,6 @@ hex = "0.4"
 [[example]]
 name = "tutorial"
 path = "examples/tutorial/main.rs"
+
+[profile.release]
+debug = true

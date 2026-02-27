@@ -237,6 +237,7 @@ where
                     price_impact_bps: None, // TODO: Calculate price impact
                     amount_out_net_gas,
                     block: block_info.clone(),
+                    encoding: None,
                     algorithm: self.algorithm.name().to_string(),
                 }
             }

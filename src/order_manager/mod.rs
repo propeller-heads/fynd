@@ -25,10 +25,12 @@ use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
 
+#[cfg(feature = "encoding")]
+use crate::encoding::SwapEncoder;
 use crate::{
     types::{
-        solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
         OrderSolution, Solution, SolutionStatus, SolveError,
+        solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
     },
     worker_pool::task_queue::TaskQueueHandle,
 };
@@ -67,12 +69,24 @@ pub struct OrderManager {
     solver_pools: Vec<SolverPoolHandle>,
     /// Configuration for the order manager.
     config: OrderManagerConfig,
+    /// Swap encoder for producing on-chain calldata.
+    #[cfg(feature = "encoding")]
+    swap_encoder: SwapEncoder,
 }
 
 impl OrderManager {
     /// Creates a new OrderManager with the given solver pools and config.
-    pub fn new(solver_pools: Vec<SolverPoolHandle>, config: OrderManagerConfig) -> Self {
-        Self { solver_pools, config }
+    pub fn new(
+        solver_pools: Vec<SolverPoolHandle>,
+        config: OrderManagerConfig,
+        #[cfg(feature = "encoding")] swap_encoder: SwapEncoder,
+    ) -> Self {
+        Self {
+            solver_pools,
+            config,
+            #[cfg(feature = "encoding")]
+            swap_encoder,
+        }
     }
 
     /// Returns the number of registered solver pools.
@@ -121,7 +135,26 @@ impl OrderManager {
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
 
-        Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
+        #[allow(unused_mut)]
+        let mut solution = Solution { orders: order_solutions, total_gas_estimate, solve_time_ms };
+
+        #[cfg(feature = "encoding")]
+        if let Some(ref opts) = request.options.encoding {
+            match self
+                .swap_encoder
+                .encode_solution(&request.orders, solution.clone(), opts)
+                .await
+            {
+                Err(e) => {
+                    warn!(error = %e, "swap encoding failed, returning solution without calldata");
+                }
+                Ok(s) => {
+                    solution = s;
+                }
+            }
+        }
+
+        Ok(solution)
     }
 
     /// Solves a single order by fanning out to all solver pools.
@@ -310,6 +343,7 @@ impl OrderManager {
                 price_impact_bps: None,
                 amount_out_net_gas: BigUint::ZERO,
                 block: any_sol.block.clone(),
+                encoding: None,
                 algorithm: String::new(),
             }
         } else {
@@ -354,6 +388,7 @@ impl OrderManager {
                 price_impact_bps: None,
                 amount_out_net_gas: BigUint::ZERO,
                 block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
+                encoding: None,
                 algorithm: String::new(),
             }
         }
@@ -407,6 +442,7 @@ mod tests {
                 price_impact_bps: None,
                 amount_out_net_gas: BigUint::from(amount_out_net_gas),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
+                encoding: None,
                 algorithm: "test".to_string(),
             },
             solve_time_ms: 5,
@@ -434,6 +470,27 @@ mod tests {
         (SolverPoolHandle::new(name, handle), worker)
     }
 
+    fn make_manager(pools: Vec<SolverPoolHandle>, config: OrderManagerConfig) -> OrderManager {
+        #[cfg(feature = "encoding")]
+        {
+            use std::sync::Arc;
+
+            use tokio::sync::RwLock;
+            use tycho_simulation::tycho_common::models::Chain;
+
+            use crate::{encoding::SwapEncoder, feed::market_data::SharedMarketData};
+
+            let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+            let encoder = SwapEncoder::new(Chain::Ethereum, market_data)
+                .expect("failed to create test encoder");
+            OrderManager::new(pools, config, encoder)
+        }
+        #[cfg(not(feature = "encoding"))]
+        {
+            OrderManager::new(pools, config)
+        }
+    }
+
     #[test]
     fn test_config_default() {
         let config = OrderManagerConfig::default();
@@ -452,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_order_manager_no_pools() {
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = make_manager(vec![], OrderManagerConfig::default());
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -464,7 +521,7 @@ mod tests {
     async fn test_order_manager_single_pool_success() {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_solution(900)), 0);
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager = make_manager(vec![pool], OrderManagerConfig::default());
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -489,7 +546,7 @@ mod tests {
 
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = make_manager(vec![pool_a, pool_b], config);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -512,7 +569,7 @@ mod tests {
         let (pool, worker) = create_mock_pool("slow_pool", Ok(make_single_solution(900)), 500);
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
-        let manager = OrderManager::new(vec![pool], config);
+        let manager = make_manager(vec![pool], config);
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -541,7 +598,7 @@ mod tests {
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(1000))
             .with_min_responses(1);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = make_manager(vec![pool_a, pool_b], config);
 
         let start = Instant::now();
         let request =
@@ -588,6 +645,7 @@ mod tests {
                     price_impact_bps: None,
                     amount_out_net_gas: BigUint::from(900u64),
                     block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
+                    encoding: None,
                     algorithm: "test".to_string(),
                 },
             )],
@@ -598,9 +656,10 @@ mod tests {
             timeout_ms: None,
             min_responses: None,
             max_gas: max_gas.map(BigUint::from),
+            ..Default::default()
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = make_manager(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &options);
 
         if should_pass {
@@ -619,7 +678,7 @@ mod tests {
             0,
         );
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager = make_manager(vec![pool], OrderManagerConfig::default());
         let request =
             SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
 
@@ -646,7 +705,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = make_manager(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         assert_eq!(result.status, SolutionStatus::Timeout);
@@ -663,7 +722,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = make_manager(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
@@ -678,10 +737,154 @@ mod tests {
             failed_solvers: vec![],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = make_manager(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // No failures but also no solutions means NoRouteFound
         assert_eq!(result.status, SolutionStatus::NoRouteFound);
+    }
+
+    // -----------------------------------------------------------------
+    // Encoding integration tests (only when encoding feature is active)
+    // -----------------------------------------------------------------
+
+    #[cfg(feature = "encoding")]
+    mod encoding_tests {
+        use std::{collections::HashMap, sync::Arc};
+
+        use chrono::NaiveDateTime;
+        use num_bigint::BigUint;
+        use tokio::sync::RwLock;
+        use tycho_simulation::tycho_common::models::{Chain, protocol::ProtocolComponent};
+
+        use super::*;
+        use crate::{
+            encoding::SwapEncoder,
+            feed::market_data::SharedMarketData,
+            types::solution::{
+                EncodingOptions, OrderSide, Route, SolutionOptions, SolutionRequest,
+                Swap as FyndSwap, TransferType,
+            },
+        };
+
+        fn usdc_address() -> Address {
+            let mut b = [0u8; 20];
+            b.copy_from_slice(
+                &hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").expect("valid hex"),
+            );
+            Address::from(b)
+        }
+
+        fn dai_address() -> Address {
+            let mut b = [0u8; 20];
+            b.copy_from_slice(
+                &hex::decode("6B175474E89094C44Da98b954EedeAC495271d0F").expect("valid hex"),
+            );
+            Address::from(b)
+        }
+        const POOL_ID: &str = "0xae461ca67b15dc8dc81ce7615e0320da1a9ab8d5";
+
+        fn make_manager_with_component(
+            pools: Vec<SolverPoolHandle>,
+            config: OrderManagerConfig,
+            component: ProtocolComponent,
+        ) -> OrderManager {
+            let mut market_data = SharedMarketData::new();
+            market_data.upsert_components(vec![component]);
+            let shared = Arc::new(RwLock::new(market_data));
+            let encoder = SwapEncoder::new(Chain::Ethereum, Arc::clone(&shared))
+                .expect("failed to create encoder");
+            OrderManager::new(pools, config, encoder)
+        }
+
+        fn make_univ2_component() -> ProtocolComponent {
+            ProtocolComponent::new(
+                POOL_ID,
+                "uniswap_v2",
+                "uniswap_v2_pool",
+                Chain::Ethereum,
+                vec![dai_address(), usdc_address()],
+                vec![],
+                HashMap::new(),
+                Default::default(),
+                Default::default(),
+                NaiveDateTime::default(),
+            )
+        }
+
+        fn make_solution_with_route() -> SingleOrderSolution {
+            SingleOrderSolution {
+                order: OrderSolution {
+                    order_id: "test-order".to_string(),
+                    status: SolutionStatus::Success,
+                    route: Some(Route::new(vec![FyndSwap::new(
+                        POOL_ID.to_string(),
+                        "uniswap_v2".to_string(),
+                        usdc_address(),
+                        dai_address(),
+                        BigUint::from(100_000_000u64),
+                        BigUint::from(99_795_590u64),
+                        BigUint::from(120_000u64),
+                    )])),
+                    amount_in: BigUint::from(100_000_000u64),
+                    amount_out: BigUint::from(99_795_590u64),
+                    gas_estimate: BigUint::from(120_000u64),
+                    price_impact_bps: None,
+                    amount_out_net_gas: BigUint::from(99_795_590u64),
+                    block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
+                    encoding: None,
+                    algorithm: "test".to_string(),
+                },
+                solve_time_ms: 5,
+            }
+        }
+
+        #[tokio::test]
+        async fn solve_with_encoding_produces_calldata() {
+            let (pool, worker) = create_mock_pool("pool_a", Ok(make_solution_with_route()), 0);
+
+            let manager = make_manager_with_component(
+                vec![pool],
+                OrderManagerConfig::default(),
+                make_univ2_component(),
+            );
+
+            let request = SolutionRequest {
+                orders: vec![Order {
+                    id: "test-order".to_string(),
+                    token_in: usdc_address(),
+                    token_out: dai_address(),
+                    amount: BigUint::from(100_000_000u64),
+                    side: OrderSide::Sell,
+                    sender: Address::from([0xAA; 20]),
+                    receiver: None,
+                }],
+                options: SolutionOptions {
+                    encoding: Some(EncodingOptions {
+                        slippage_bps: 50,
+                        transfer_type: TransferType::default(),
+                    }),
+                    ..Default::default()
+                },
+            };
+
+            let result = manager.solve(request).await;
+            assert!(result.is_ok());
+
+            let solution = result.expect("already checked");
+            assert_eq!(solution.orders.len(), 1);
+            assert_eq!(solution.orders[0].status, SolutionStatus::Success);
+
+            let encoded = solution.orders[0]
+                .encoding
+                .as_ref()
+                .expect("encoded should be present");
+            assert!(!encoded.encoded_calldata.is_empty());
+            // 99_795_590 * 9950 / 10000 = 99_296_612
+            assert_eq!(encoded.checked_amount, BigUint::from(99_296_612u64),);
+
+            drop(manager);
+            worker.abort();
+        }
     }
 }
