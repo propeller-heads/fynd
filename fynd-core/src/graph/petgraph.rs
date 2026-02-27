@@ -271,8 +271,8 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
             // Determine if we should update this edge based on edge tokens and bidirectional flag
             let should_update = if bidirectional {
                 // Update both directions
-                (edge_from == from_idx && edge_to == to_idx) ||
-                    (edge_from == to_idx && edge_to == from_idx)
+                (edge_from == from_idx && edge_to == to_idx)
+                    || (edge_from == to_idx && edge_to == from_idx)
             } else {
                 // Update only forward direction
                 edge_from == from_idx && edge_to == to_idx

@@ -357,9 +357,9 @@ impl MarketEventHandler for ComputationManager {
                 added_components,
                 removed_components,
                 updated_components,
-            } if !added_components.is_empty() ||
-                !removed_components.is_empty() ||
-                !updated_components.is_empty() =>
+            } if !added_components.is_empty()
+                || !removed_components.is_empty()
+                || !updated_components.is_empty() =>
             {
                 trace!(
                     added = added_components.len(),

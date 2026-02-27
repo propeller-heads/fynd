@@ -6,6 +6,9 @@ description = "Rust client for the Fynd DEX router"
 license = "MIT"
 
 [dependencies]
+# Shared RPC wire types
+fynd-rpc-types = { workspace = true }
+
 # Alloy (Ethereum primitives, providers, consensus)
 alloy = { workspace = true }
 
@@ -15,6 +18,9 @@ num-traits = { workspace = true }
 
 # Raw bytes for addresses
 bytes = { workspace = true }
+
+# Tycho address type (used in fynd-rpc-types wire format)
+tycho-simulation = { workspace = true }
 
 # Async
 tokio = { workspace = true }

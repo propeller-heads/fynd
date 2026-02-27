@@ -27,9 +27,27 @@ use crate::{
 // ============================================================================
 
 pub struct RetryConfig {
-    pub max_attempts: u32,
-    pub initial_backoff: Duration,
-    pub max_backoff: Duration,
+    max_attempts: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+}
+
+impl RetryConfig {
+    pub fn new(max_attempts: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
+        Self { max_attempts, initial_backoff, max_backoff }
+    }
+
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub fn initial_backoff(&self) -> Duration {
+        self.initial_backoff
+    }
+
+    pub fn max_backoff(&self) -> Duration {
+        self.max_backoff
+    }
 }
 
 impl Default for RetryConfig {
@@ -65,26 +83,22 @@ pub struct FyndClientBuilder {
     base_url: String,
     timeout: Duration,
     retry: RetryConfig,
-    router_address: String,
-    chain_id: u64,
+    /// Optional router contract address. Defaults to `Address::ZERO` if not set.
+    ///
+    /// TODO: Replace with the actual RouterV3 contract address once deployed.
+    router_address: Option<Address>,
     rpc_url: String,
     submit_url: Option<String>,
     sender: Option<Address>,
 }
 
 impl FyndClientBuilder {
-    pub fn new(
-        base_url: impl Into<String>,
-        router_address: impl Into<String>,
-        chain_id: u64,
-        rpc_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(base_url: impl Into<String>, rpc_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
             timeout: Duration::from_secs(30),
             retry: RetryConfig::default(),
-            router_address: router_address.into(),
-            chain_id,
+            router_address: None,
             rpc_url: rpc_url.into(),
             submit_url: None,
             sender: None,
@@ -111,7 +125,12 @@ impl FyndClientBuilder {
         self
     }
 
-    pub fn build(self) -> Result<FyndClient, FyndError> {
+    pub fn with_router_address(mut self, addr: Address) -> Self {
+        self.router_address = Some(addr);
+        self
+    }
+
+    pub async fn build(self) -> Result<FyndClient, FyndError> {
         // Validate base_url scheme.
         let parsed_base = self
             .base_url
@@ -123,12 +142,6 @@ impl FyndClientBuilder {
                 "base URL must use http or https scheme, got '{scheme}'"
             )));
         }
-
-        // Parse router address.
-        let router_address: Address = self
-            .router_address
-            .parse()
-            .map_err(|e| FyndError::Config(format!("invalid router address: {e}")))?;
 
         // Build HTTP providers.
         let rpc_url = self
@@ -146,6 +159,17 @@ impl FyndClientBuilder {
             .map_err(|e| FyndError::Config(format!("invalid submit URL: {e}")))?;
         let submit_provider = ProviderBuilder::default().connect_http(submit_url);
 
+        // Fetch chain_id from the RPC node.
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|e| FyndError::Config(format!("failed to fetch chain_id from RPC: {e}")))?;
+
+        // TODO: Replace with the actual RouterV3 contract address once deployed.
+        let router_address = self
+            .router_address
+            .unwrap_or(Address::ZERO);
+
         // Build HTTP client.
         let http = HttpClient::builder()
             .timeout(self.timeout)
@@ -157,7 +181,7 @@ impl FyndClientBuilder {
             base_url: self.base_url,
             retry: self.retry,
             router_address,
-            chain_id: self.chain_id,
+            chain_id,
             default_sender: self.sender,
             provider,
             submit_provider,
@@ -182,11 +206,35 @@ pub struct FyndClient {
 
 impl FyndClient {
     /// Request a quote for one or more swap orders.
+    ///
+    /// The returned `Quote` has `token_out` and `receiver` populated on each
+    /// `OrderSolution` from the corresponding input `Order` (matched by index).
     pub async fn quote(&self, params: QuoteParams) -> Result<Quote, FyndError> {
+        // Snapshot token_out and receiver before consuming params.
+        // Orders and solutions are parallel arrays — matched by index.
+        let order_token_outs: Vec<Bytes> = params
+            .orders
+            .iter()
+            .map(|o| o.token_out().clone())
+            .collect();
+        let order_receivers: Vec<Bytes> = params
+            .orders
+            .iter()
+            .map(|o| {
+                o.receiver()
+                    .cloned()
+                    .unwrap_or_else(|| o.sender().clone())
+            })
+            .collect();
+
         let wire_request = mapping::quote_params_to_wire(params)?;
+
         let mut delay = self.retry.initial_backoff;
         for attempt in 0..self.retry.max_attempts {
-            match self.do_quote(&wire_request).await {
+            match self
+                .do_quote(&wire_request, &order_token_outs, &order_receivers)
+                .await
+            {
                 Ok(quote) => return Ok(quote),
                 Err(e) if e.is_retryable() && attempt + 1 < self.retry.max_attempts => {
                     tracing::debug!(attempt, "quote request failed, retrying");
@@ -201,7 +249,9 @@ impl FyndClient {
 
     async fn do_quote(
         &self,
-        wire_request: &mapping::WireSolutionRequest,
+        wire_request: &fynd_rpc_types::SolutionRequest,
+        order_token_outs: &[Bytes],
+        order_receivers: &[Bytes],
     ) -> Result<Quote, FyndError> {
         let url = format!("{}/v1/solve", self.base_url);
         let response = self
@@ -211,11 +261,33 @@ impl FyndClient {
             .send()
             .await?;
         if !response.status().is_success() {
-            let wire_err: mapping::WireErrorResponse = response.json().await?;
+            let wire_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::wire_error_to_fynd(wire_err));
         }
-        let wire_solution: mapping::WireSolution = response.json().await?;
-        mapping::wire_to_quote(wire_solution)
+        let wire_solution: fynd_rpc_types::Solution = response.json().await?;
+        let total_gas_estimate = wire_solution.total_gas_estimate.clone();
+        let solve_time_ms = wire_solution.solve_time_ms;
+
+        // Convert wire order solutions and populate token_out/receiver by index.
+        let orders: Vec<OrderSolution> = wire_solution
+            .orders
+            .into_iter()
+            .enumerate()
+            .map(|(i, ws)| {
+                let solution = OrderSolution::try_from(ws)?;
+                let token_out = order_token_outs
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                let receiver = order_receivers
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(solution.with_token_out_and_receiver(token_out, receiver))
+            })
+            .collect::<Result<Vec<_>, FyndError>>()?;
+
+        Ok(Quote::new(orders, total_gas_estimate, solve_time_ms))
     }
 
     /// Get the health status of the Fynd RPC server.
@@ -223,27 +295,25 @@ impl FyndClient {
         let url = format!("{}/v1/health", self.base_url);
         let response = self.http.get(&url).send().await?;
         if !response.status().is_success() {
-            let wire_err: mapping::WireErrorResponse = response.json().await?;
+            let wire_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::wire_error_to_fynd(wire_err));
         }
-        let wh: mapping::WireHealthStatus = response.json().await?;
-        Ok(mapping::wire_to_health(wh))
+        let wh: fynd_rpc_types::HealthStatus = response.json().await?;
+        Ok(HealthStatus::from(wh))
     }
 
     /// Build a signable payload for a given order solution.
     ///
-    /// `token_out` and `receiver` are the raw 20-byte addresses from the original order.
-    /// They are stored in the payload and used later by `execute()` to decode settlement logs.
+    /// `token_out` and `receiver` are read directly from the `solution` (populated during
+    /// `quote()`). Pass `&SigningHints::default()` to auto-resolve all transaction parameters.
     pub async fn signable_payload(
         &self,
         solution: OrderSolution,
-        token_out: Bytes,
-        receiver: Bytes,
-        hints: SigningHints,
+        hints: &SigningHints,
     ) -> Result<SignablePayload, FyndError> {
         match solution.backend() {
             BackendKind::Fynd => {
-                self.fynd_signable_payload(solution, token_out, receiver, hints)
+                self.fynd_signable_payload(solution, hints)
                     .await
             }
             BackendKind::Turbine => {
@@ -255,10 +325,12 @@ impl FyndClient {
     async fn fynd_signable_payload(
         &self,
         solution: OrderSolution,
-        token_out: Bytes,
-        receiver: Bytes,
-        hints: SigningHints,
+        hints: &SigningHints,
     ) -> Result<SignablePayload, FyndError> {
+        // Read token_out and receiver from the solution (populated during quote()).
+        let token_out = solution.token_out().clone();
+        let receiver = solution.receiver().clone();
+
         // Resolve sender.
         let sender = hints
             .sender
@@ -327,7 +399,7 @@ impl FyndClient {
 
     /// Broadcast a signed order and return an `ExecutionReceipt` that resolves once confirmed.
     pub async fn execute(&self, order: SignedOrder) -> Result<ExecutionReceipt, FyndError> {
-        let SignedOrder { payload, signature } = order;
+        let (payload, signature) = order.into_parts();
         let (_solution, tx, token_out, receiver) = payload.into_fynd_parts()?;
 
         let TypedTransaction::Eip1559(tx_eip1559) = tx else {
@@ -362,7 +434,7 @@ impl FyndClient {
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
                         let gas_cost = BigUint::from(receipt.gas_used)
                             * BigUint::from(receipt.effective_gas_price);
-                        return Ok(SettledOrder { tx_receipt: receipt, settled_amount, gas_cost });
+                        return Ok(SettledOrder::new(receipt, settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
                 }

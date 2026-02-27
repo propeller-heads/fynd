@@ -16,10 +16,8 @@ use crate::types::OrderSolution;
 pub struct FyndPayload {
     order_solution: OrderSolution,
     tx: TypedTransaction,
-    /// The output token address from the original order (20 raw bytes).
-    pub(crate) token_out: bytes::Bytes,
-    /// The receiver address from the original order (20 raw bytes), or sender if not set.
-    pub(crate) receiver: bytes::Bytes,
+    token_out: bytes::Bytes,
+    receiver: bytes::Bytes,
 }
 
 impl FyndPayload {
@@ -40,7 +38,7 @@ impl FyndPayload {
         &self.tx
     }
 
-    /// Consume the payload and return the inner `OrderSolution`.
+    /// Consume the payload and return the inner parts for use in `execute()`.
     pub(crate) fn into_parts(
         self,
     ) -> (OrderSolution, TypedTransaction, bytes::Bytes, bytes::Bytes) {
@@ -106,13 +104,25 @@ impl SignablePayload {
 // ============================================================================
 
 pub struct SignedOrder {
-    pub(crate) payload: SignablePayload,
-    pub(crate) signature: Signature,
+    payload: SignablePayload,
+    signature: Signature,
 }
 
 impl SignedOrder {
     pub fn assemble(payload: SignablePayload, signature: Signature) -> Self {
         Self { payload, signature }
+    }
+
+    pub fn payload(&self) -> &SignablePayload {
+        &self.payload
+    }
+
+    pub fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    pub(crate) fn into_parts(self) -> (SignablePayload, Signature) {
+        (self.payload, self.signature)
     }
 }
 
@@ -121,9 +131,31 @@ impl SignedOrder {
 // ============================================================================
 
 pub struct SettledOrder {
-    pub tx_receipt: alloy::rpc::types::TransactionReceipt,
-    pub settled_amount: Option<BigUint>,
-    pub gas_cost: BigUint,
+    tx_receipt: alloy::rpc::types::TransactionReceipt,
+    settled_amount: Option<BigUint>,
+    gas_cost: BigUint,
+}
+
+impl SettledOrder {
+    pub(crate) fn new(
+        tx_receipt: alloy::rpc::types::TransactionReceipt,
+        settled_amount: Option<BigUint>,
+        gas_cost: BigUint,
+    ) -> Self {
+        Self { tx_receipt, settled_amount, gas_cost }
+    }
+
+    pub fn tx_receipt(&self) -> &alloy::rpc::types::TransactionReceipt {
+        &self.tx_receipt
+    }
+
+    pub fn settled_amount(&self) -> Option<&BigUint> {
+        self.settled_amount.as_ref()
+    }
+
+    pub fn gas_cost(&self) -> &BigUint {
+        &self.gas_cost
+    }
 }
 
 // ============================================================================

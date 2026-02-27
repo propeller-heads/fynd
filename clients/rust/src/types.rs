@@ -62,9 +62,9 @@ impl Order {
 
 #[derive(Default)]
 pub struct QuoteOptions {
-    pub timeout_ms: Option<u64>,
-    pub min_responses: Option<usize>,
-    pub max_gas: Option<BigUint>,
+    pub(crate) timeout_ms: Option<u64>,
+    pub(crate) min_responses: Option<usize>,
+    pub(crate) max_gas: Option<BigUint>,
 }
 
 impl QuoteOptions {
@@ -85,8 +85,14 @@ impl QuoteOptions {
 }
 
 pub struct QuoteParams {
-    pub orders: Vec<Order>,
-    pub options: QuoteOptions,
+    pub(crate) orders: Vec<Order>,
+    pub(crate) options: QuoteOptions,
+}
+
+impl QuoteParams {
+    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
+        Self { orders, options }
+    }
 }
 
 // ============================================================================
@@ -199,15 +205,22 @@ impl Route {
 }
 
 pub struct OrderSolution {
-    pub(crate) order_id: String,
-    pub(crate) status: SolutionStatus,
-    pub(crate) backend: BackendKind,
-    pub(crate) route: Option<Route>,
-    pub(crate) amount_in: BigUint,
-    pub(crate) amount_out: BigUint,
-    pub(crate) gas_estimate: BigUint,
-    pub(crate) price_impact_bps: Option<i32>,
-    pub(crate) block: BlockInfo,
+    order_id: String,
+    status: SolutionStatus,
+    backend: BackendKind,
+    route: Option<Route>,
+    amount_in: BigUint,
+    amount_out: BigUint,
+    gas_estimate: BigUint,
+    price_impact_bps: Option<i32>,
+    block: BlockInfo,
+    /// Output token address from the original order (20 raw bytes).
+    /// Populated by `quote()` from the corresponding `Order`.
+    token_out: Bytes,
+    /// Receiver address from the original order (20 raw bytes).
+    /// Defaults to `sender` if the order had no explicit receiver.
+    /// Populated by `quote()` from the corresponding `Order`.
+    receiver: Bytes,
 }
 
 impl OrderSolution {
@@ -245,6 +258,47 @@ impl OrderSolution {
 
     pub fn block(&self) -> &BlockInfo {
         &self.block
+    }
+
+    pub fn token_out(&self) -> &Bytes {
+        &self.token_out
+    }
+
+    pub fn receiver(&self) -> &Bytes {
+        &self.receiver
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        order_id: String,
+        status: SolutionStatus,
+        backend: BackendKind,
+        route: Option<Route>,
+        amount_in: BigUint,
+        amount_out: BigUint,
+        gas_estimate: BigUint,
+        price_impact_bps: Option<i32>,
+        block: BlockInfo,
+    ) -> Self {
+        Self {
+            order_id,
+            status,
+            backend,
+            route,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            price_impact_bps,
+            block,
+            token_out: Bytes::new(),
+            receiver: Bytes::new(),
+        }
+    }
+
+    pub(crate) fn with_token_out_and_receiver(mut self, token_out: Bytes, receiver: Bytes) -> Self {
+        self.token_out = token_out;
+        self.receiver = receiver;
+        self
     }
 }
 

@@ -54,7 +54,7 @@ num-traits = { workspace = true }
 tycho-execution = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "clients/rust"]
+members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -126,6 +126,7 @@ itertools = "0.14.0"
 # Internal crates
 fynd-core = { path = "fynd-core" }
 fynd-rpc = { path = "fynd-rpc" }
+fynd-rpc-types = { path = "fynd-rpc-types" }
 
 # Dev dependencies
 rstest = "0.18"

@@ -33,8 +33,8 @@ impl TimingStats {
                 let diff = x as f64 - mean as f64;
                 diff * diff
             })
-            .sum::<f64>() /
-            sorted.len() as f64;
+            .sum::<f64>()
+            / sorted.len() as f64;
         let std_dev = variance.sqrt();
 
         Some(Self { min, max, mean, median, p95, p99, std_dev })
