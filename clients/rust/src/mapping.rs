@@ -84,6 +84,7 @@ struct WireOrderSolution {
     #[serde(default)]
     price_impact_bps: Option<i32>,
     // Intentionally deserialized but dropped — internal server ranking field, not exposed to clients.
+    #[serde(rename = "amount_out_net_gas")]
     #[serde_as(as = "DisplayFromStr")]
     _amount_out_net_gas: BigUint,
     block: WireBlockInfo,
