@@ -108,5 +108,5 @@ pub mod defaults {
     /// Default price guard tolerance in basis points (3% = 300 bps)
     pub const PRICE_GUARD_TOLERANCE_BPS: u32 = 300;
     pub const PRICE_GUARD_ENABLED: bool = true;
-    pub const PRICE_GUARD_ALLOW_ON_PROVIDER_ERROR: bool = true;
+    pub const PRICE_GUARD_ALLOW_ON_PROVIDER_ERROR: bool = false;
 }

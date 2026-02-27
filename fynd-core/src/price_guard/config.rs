@@ -10,7 +10,7 @@ pub struct PriceGuardConfig {
 
     /// If `true`, solutions pass through when external prices are unavailable.
     /// If `false`, solutions are rejected when prices cannot be verified.
-    /// Default: `true`.
+    /// Default: `false`.
     allow_on_provider_error: bool,
 
     /// Whether the price guard is enabled.
@@ -20,7 +20,7 @@ pub struct PriceGuardConfig {
 
 impl Default for PriceGuardConfig {
     fn default() -> Self {
-        Self { tolerance_bps: 300, allow_on_provider_error: true, enabled: true }
+        Self { tolerance_bps: 300, allow_on_provider_error: false, enabled: true }
     }
 }
 

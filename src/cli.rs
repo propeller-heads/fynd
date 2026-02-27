@@ -90,7 +90,7 @@ pub struct Cli {
     #[arg(long, env, default_value_t = defaults::PRICE_GUARD_TOLERANCE_BPS)]
     pub price_guard_tolerance_bps: u32,
 
-    /// Price guard fail-open behavior (pass through on provider error)
+    /// Allow solutions through when all price providers error
     #[arg(long, env, default_value_t = defaults::PRICE_GUARD_ALLOW_ON_PROVIDER_ERROR)]
     pub price_guard_allow_on_provider_error: bool,
 }
