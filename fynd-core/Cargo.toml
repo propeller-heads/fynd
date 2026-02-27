@@ -27,6 +27,7 @@ thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

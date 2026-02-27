@@ -2,6 +2,7 @@
 name = "fynd"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.91.0"
 
 [dependencies]
 fynd-rpc = { workspace = true }
@@ -105,6 +106,7 @@ async-channel = "2.5.0"
 async-trait = "0.1"
 chrono = "0.4"
 itertools = "0.14.0"
+rayon = { version = "1.10", default-features = false }
 
 # Internal crates
 fynd-core = { path = "fynd-core" }
