@@ -13,14 +13,15 @@ use std::{
 };
 
 use num_bigint::BigUint;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    BlockInfo, Order, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError,
     algorithm::Algorithm,
     derived::{
-        computation::DerivedComputation, computations::PoolDepthComputation,
-        events::DerivedDataEvent, tracker::ReadinessTracker, SharedDerivedDataRef,
+        SharedDerivedDataRef, computation::DerivedComputation, computations::PoolDepthComputation,
+        events::DerivedDataEvent, tracker::ReadinessTracker,
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
@@ -28,7 +29,6 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
-    BlockInfo, Order, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError,
 };
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -234,6 +234,7 @@ where
                     price_impact_bps: None, // TODO: Calculate price impact
                     amount_out_net_gas,
                     block: block_info.clone(),
+                    // If enabled, encoding is set by the order manager
                     encoding: None,
                     algorithm: self.algorithm.name().to_string(),
                 }
@@ -489,9 +490,9 @@ mod tests {
     use crate::{
         algorithm::{most_liquid::DepthAndPrice, test_utils::setup_market},
         derived::{
+            DerivedData,
             computation::ComputationRequirements,
             computations::{SpotPriceComputation, TokenGasPriceComputation},
-            DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
     };

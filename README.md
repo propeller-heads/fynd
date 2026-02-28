@@ -55,6 +55,12 @@ cargo run --release -- \
 
 The solver starts on `http://localhost:3000` by default.
 
+To enable on-chain swap encoding using Tycho Execution, build with the `encoding` feature:
+
+```bash
+cargo build --release --features encoding
+```
+
 ### Including RFQ Protocols
 
 You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
@@ -111,17 +117,19 @@ Submit one or more swap orders and receive optimal routes.
 
 **Request:**
 
-| Field                   | Type    | Required | Description                            |
-|-------------------------|---------|----------|----------------------------------------|
-| `orders[].token_in`     | address | Yes      | Token to sell                          |
-| `orders[].token_out`    | address | Yes      | Token to buy                           |
-| `orders[].amount`       | string  | Yes      | Amount in token units (integer string) |
-| `orders[].side`         | string  | Yes      | `"sell"` (exact input)                 |
-| `orders[].sender`       | address | Yes      | Sender address                         |
-| `orders[].receiver`     | address | No       | Receiver (defaults to sender)          |
-| `options.timeout_ms`    | integer | No       | Solve timeout override                 |
-| `options.min_responses` | integer | No       | Early return threshold                 |
-| `options.max_gas`       | string  | No       | Max gas filter                         |
+| Field                            | Type    | Required | Description                                                      |
+|----------------------------------|---------|----------|------------------------------------------------------------------|
+| `orders[].token_in`              | address | Yes      | Token to sell                                                    |
+| `orders[].token_out`             | address | Yes      | Token to buy                                                     |
+| `orders[].amount`                | string  | Yes      | Amount in token units (integer string)                           |
+| `orders[].side`                  | string  | Yes      | `"sell"` (exact input)                                           |
+| `orders[].sender`                | address | Yes      | Sender address                                                   |
+| `orders[].receiver`              | address | No       | Receiver (defaults to sender)                                    |
+| `options.timeout_ms`             | integer | No       | Solve timeout override                                           |
+| `options.min_responses`          | integer | No       | Early return threshold                                           |
+| `options.max_gas`                | string  | No       | Max gas filter                                                   |
+| `options.encoding.slippage_bps`  | integer | No       | Slippage tolerance in basis points (requires `encoding` feature) |
+| `options.encoding.transfer_type` | string  | No       | `"transfer_from"` (default) or `"none"`                          |
 
 **Response:**
 
@@ -152,6 +160,11 @@ Submit one or more swap orders and receive optimal routes.
         "number": 19000000,
         "hash": "0x...",
         "timestamp": 1700000000
+      },
+      "encoding": {
+        "router_address": "0x...",
+        "encoded_calldata": "0xabcdef...",
+        "checked_amount": "3184000000"
       }
     }
   ],
@@ -168,18 +181,18 @@ Returns service health status. HTTP 200 if healthy, 503 if stale.
 
 ### CLI / Environment Variables
 
-| Flag                         | Env Var               | Default             | Description                                |
-|------------------------------|-----------------------|---------------------|--------------------------------------------|
-| `--rpc-url`                  | `RPC_URL`             | (required)          | Ethereum RPC endpoint for the target chain |
-| `--tycho-url`                | `TYCHO_URL`           | `localhost:4242`    | Tycho WebSocket URL                        |
-| `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                              |
-| `--chain`                    | -                     | `Ethereum`          | Target chain                               |
-| `-p, --protocols`            | -                     | -                   | Protocols to index (comma-separated)       |
-| `--http-port`                | `HTTP_PORT`           | `3000`              | API port                                   |
-| `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token           |
-| `--order-manager-timeout-ms` | -                     | `100`               | Default solve timeout                      |
-| `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
-| `--blacklist-config`         | `BLACKLIST_CONFIG`    | `blacklist.toml`    | Blacklist config                           |
+| Flag                         | Env Var               | Default             | Description                                   |
+|------------------------------|-----------------------|---------------------|-----------------------------------------------|
+| `--rpc-url`                  | `RPC_URL`             | (required)          | Ethereum RPC endpoint for the target chain    |
+| `--tycho-url`                | `TYCHO_URL`           | `localhost:4242`    | Tycho WebSocket URL                           |
+| `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                                 |
+| `--chain`                    | -                     | `Ethereum`          | Target chain                                  |
+| `-p, --protocols`            | -                     | -                   | Protocols to index (comma-separated)          |
+| `--http-port`                | `HTTP_PORT`           | `3000`              | API port                                      |
+| `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token              |
+| `--order-manager-timeout-ms` | -                     | `100`               | Default solve timeout                         |
+| `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                           |
+| `--blacklist-config`         | `BLACKLIST_CONFIG`    | `blacklist.toml`    | Blacklist config                              |
 | `--enable-metrics`           | `ENABLE_METRICS`      | `false`             | Enable Prometheus metrics server on port 9898 |
 
 See `--help` for the full list.
