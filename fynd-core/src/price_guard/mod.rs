@@ -55,12 +55,10 @@ impl PriceGuard {
     ///
     /// # Error semantics
     ///
-    /// Two distinct failure modes:
-    /// - **Per-solution**: When providers return prices but none validate within tolerance, the
-    ///   solution's status is set to `PriceCheckFailed` and processing continues with the remaining
-    ///   solutions.
-    /// - **Catastrophic**: When *all* providers error and `allow_on_provider_error` is `false`,
-    ///   returns `Err(SolveError::PriceCheckFailed)` immediately, aborting the entire batch.
+    /// Always per-solution: when validation fails (providers return prices but none
+    /// validate, or all providers error with `allow_on_provider_error=false`), the
+    /// solution's status is set to `PriceCheckFailed` and processing continues with
+    /// the remaining solutions. Never aborts the batch.
     pub async fn validate(
         &self,
         solutions: Vec<OrderSolution>,
@@ -160,15 +158,9 @@ impl PriceGuard {
                 }
             }
 
-            if all_errors {
-                if !self.config.allow_on_provider_error() {
-                    return Err(SolveError::PriceCheckFailed {
-                        order_id: solution.order_id.clone(),
-                        reason: "all price providers failed".to_string(),
-                    });
-                }
-                // All providers errored but allow_on_provider_error is true — pass through
-            } else if !any_validated {
+            if all_errors && !self.config.allow_on_provider_error() {
+                solution.status = SolutionStatus::PriceCheckFailed;
+            } else if !all_errors && !any_validated {
                 solution.status = SolutionStatus::PriceCheckFailed;
             }
 
@@ -436,17 +428,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_providers_error_deny_on_error_returns_err() {
+    async fn all_providers_error_deny_on_error_marks_solution() {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(false);
         let guard = make_guard(vec![failing(), failing()], config);
 
         let solutions = vec![make_solution(1000, 500)];
-        let err = guard
-            .validate(solutions)
-            .await
-            .unwrap_err();
+        let result = guard.validate(solutions).await.unwrap();
 
-        assert!(matches!(err, SolveError::PriceCheckFailed { .. }));
+        assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }
 
     #[tokio::test]
@@ -556,12 +545,9 @@ mod tests {
         let guard = make_guard(vec![], config);
 
         let solutions = vec![make_solution(1000, 500)];
-        let err = guard
-            .validate(solutions)
-            .await
-            .unwrap_err();
+        let result = guard.validate(solutions).await.unwrap();
 
-        assert!(matches!(err, SolveError::PriceCheckFailed { .. }));
+        assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }
 
     #[tokio::test]
