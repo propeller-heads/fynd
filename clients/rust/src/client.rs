@@ -4,6 +4,7 @@ use alloy::{
     consensus::{TxEip1559, TypedTransaction},
     eips::eip2718::Encodable2718,
     eips::eip2930::AccessList,
+    network::Ethereum,
     primitives::{Address, Bytes as AlloyBytes, TxKind, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
 };
@@ -245,18 +246,57 @@ impl FyndClientBuilder {
 /// The main entry point for interacting with the Fynd DEX router.
 ///
 /// Construct via [`FyndClientBuilder`]. All methods are `async` and require a Tokio runtime.
-pub struct FyndClient {
+///
+/// The type parameter `P` is the alloy provider used for Ethereum RPC calls. In production code
+/// this is `RootProvider<Ethereum>` (the default). In tests a mocked provider can be used.
+pub struct FyndClient<P = RootProvider<Ethereum>>
+where
+    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
+{
     http: HttpClient,
     base_url: String,
     retry: RetryConfig,
     router_address: Address,
     chain_id: u64,
     default_sender: Option<Address>,
-    provider: RootProvider<alloy::network::Ethereum>,
-    submit_provider: RootProvider<alloy::network::Ethereum>,
+    provider: P,
+    submit_provider: P,
 }
 
-impl FyndClient {
+impl<P> FyndClient<P>
+where
+    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
+{
+    /// Construct a client directly from its individual fields.
+    ///
+    /// This is intended for testing; production code should use [`FyndClientBuilder`].
+    /// Construct a client directly from its individual fields.
+    ///
+    /// Intended for testing only. Use [`FyndClientBuilder`] for production code.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_providers(
+        http: HttpClient,
+        base_url: String,
+        retry: RetryConfig,
+        router_address: Address,
+        chain_id: u64,
+        default_sender: Option<Address>,
+        provider: P,
+        submit_provider: P,
+    ) -> Self {
+        Self {
+            http,
+            base_url,
+            retry,
+            router_address,
+            chain_id,
+            default_sender,
+            provider,
+            submit_provider,
+        }
+    }
+
     /// Request a quote for one or more swap orders.
     ///
     /// The returned `Quote` has `token_out` and `receiver` populated on each
@@ -528,5 +568,486 @@ mod tests {
         assert!(hints.sender.is_none());
         assert!(hints.nonce.is_none());
         assert!(!hints.simulate);
+    }
+
+    // ========================================================================
+    // Helpers shared by the HTTP-level tests below
+    // ========================================================================
+
+    /// Build a minimal valid [`FyndClient<RootProvider<Ethereum>>`] pointing at a mock HTTP
+    /// server URL, using the alloy mock transport for the provider.
+    ///
+    /// Returns the client and the alloy asserter so tests can pre-load RPC responses.
+    fn make_test_client(
+        base_url: String,
+        retry: RetryConfig,
+        default_sender: Option<Address>,
+    ) -> (FyndClient<alloy::providers::RootProvider<Ethereum>>, alloy::providers::mock::Asserter)
+    {
+        use alloy::providers::{mock::Asserter, ProviderBuilder};
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
+        let submit_provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
+
+        let http = HttpClient::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client");
+
+        let client = FyndClient::new_with_providers(
+            http,
+            base_url,
+            retry,
+            Address::ZERO,
+            1,
+            default_sender,
+            provider,
+            submit_provider,
+        );
+
+        (client, asserter)
+    }
+
+    /// Build a minimal valid `OrderSolution` for use in tests.
+    fn make_order_solution() -> crate::types::OrderSolution {
+        use crate::types::{BackendKind, BlockInfo, SolutionStatus};
+        use num_bigint::BigUint;
+
+        crate::types::OrderSolution::new(
+            "test-order-id".to_string(),
+            SolutionStatus::Success,
+            BackendKind::Fynd,
+            None,
+            BigUint::from(1_000_000u64),
+            BigUint::from(990_000u64),
+            BigUint::from(50_000u64),
+            Some(10),
+            BlockInfo::new(1_234_567, "0xabcdef".to_string(), 1_700_000_000),
+        )
+        .with_token_out_and_receiver(
+            bytes::Bytes::copy_from_slice(&[0xbb; 20]),
+            bytes::Bytes::copy_from_slice(&[0xcc; 20]),
+        )
+    }
+
+    // ========================================================================
+    // quote() tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn quote_returns_parsed_quote_on_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "orders": [{
+                "order_id": "abc-123",
+                "status": "success",
+                "amount_in": "1000000",
+                "amount_out": "990000",
+                "gas_estimate": "50000",
+                "amount_out_net_gas": "940000",
+                "price_impact_bps": 10,
+                "block": {
+                    "number": 1234567,
+                    "hash": "0xabcdef",
+                    "timestamp": 1700000000
+                }
+            }],
+            "total_gas_estimate": "50000",
+            "solve_time_ms": 42
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+
+        let params = make_quote_params();
+        let quote = client
+            .quote(params)
+            .await
+            .expect("quote should succeed");
+
+        assert_eq!(quote.solve_time_ms(), 42);
+        assert_eq!(quote.total_gas_estimate(), &num_bigint::BigUint::from(50_000u64));
+        assert_eq!(quote.orders().len(), 1);
+        let sol = &quote.orders()[0];
+        assert_eq!(sol.order_id(), "abc-123");
+        assert_eq!(sol.amount_out(), &num_bigint::BigUint::from(990_000u64));
+    }
+
+    #[tokio::test]
+    async fn quote_returns_api_error_on_non_retryable_server_error() {
+        use crate::error::ErrorCode;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "bad input",
+                "code": "BAD_REQUEST"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+
+        let err = client
+            .quote(make_quote_params())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FyndError::Api { code: ErrorCode::BadRequest, .. }),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_retries_on_retryable_error_then_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First attempt: service unavailable.
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": "queue full",
+                "code": "QUEUE_FULL"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second attempt: success.
+        let success_body = serde_json::json!({
+            "orders": [{
+                "order_id": "retry-order",
+                "status": "success",
+                "amount_in": "1000000",
+                "amount_out": "990000",
+                "gas_estimate": "50000",
+                "amount_out_net_gas": "940000",
+                "price_impact_bps": null,
+                "block": {
+                    "number": 1234568,
+                    "hash": "0xabcdef01",
+                    "timestamp": 1700000012
+                }
+            }],
+            "total_gas_estimate": "50000",
+            "solve_time_ms": 10
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success_body))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let retry = RetryConfig::new(3, Duration::from_millis(1), Duration::from_millis(10));
+        let (client, _asserter) = make_test_client(server.uri(), retry, None);
+
+        let quote = client
+            .quote(make_quote_params())
+            .await
+            .expect("should succeed after retry");
+        assert_eq!(quote.orders()[0].order_id(), "retry-order");
+    }
+
+    #[tokio::test]
+    async fn quote_exhausts_retries_and_returns_last_error() {
+        use crate::error::ErrorCode;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": "queue full",
+                "code": "QUEUE_FULL"
+            })))
+            .mount(&server)
+            .await;
+
+        let retry = RetryConfig::new(2, Duration::from_millis(1), Duration::from_millis(10));
+        let (client, _asserter) = make_test_client(server.uri(), retry, None);
+
+        let err = client
+            .quote(make_quote_params())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FyndError::Api { code: ErrorCode::ServiceUnavailable, .. }),
+            "expected ServiceUnavailable after retry exhaustion, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_returns_error_on_malformed_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/solve"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"garbage": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+
+        let err = client
+            .quote(make_quote_params())
+            .await
+            .unwrap_err();
+        // Deserialization failure is wrapped as FyndError::Http (from reqwest json decoding).
+        assert!(
+            matches!(err, FyndError::Http(_)),
+            "expected Http deserialization error, got {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // health() tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn health_returns_status_on_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "healthy": true,
+                "last_update_ms": 100,
+                "num_solver_pools": 5
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+
+        let status = client
+            .health()
+            .await
+            .expect("health should succeed");
+        assert!(status.healthy());
+        assert_eq!(status.last_update_ms(), 100);
+        assert_eq!(status.num_solver_pools(), 5);
+    }
+
+    #[tokio::test]
+    async fn health_returns_error_on_server_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/health"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": "service unavailable",
+                "code": "NOT_READY"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+
+        let err = client.health().await.unwrap_err();
+        assert!(matches!(err, FyndError::Api { .. }), "expected Api error, got {err:?}");
+    }
+
+    // ========================================================================
+    // signable_payload() tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn signable_payload_uses_hints_when_all_provided() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, _asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
+
+        let solution = make_order_solution();
+        let hints = SigningHints {
+            sender: Some(sender),
+            nonce: Some(5),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas_limit: Some(100_000),
+            simulate: false,
+        };
+
+        let payload = client
+            .signable_payload(solution, &hints)
+            .await
+            .expect("signable_payload should succeed");
+
+        let SignablePayload::Fynd(fynd) = payload else {
+            panic!("expected Fynd payload");
+        };
+        let TypedTransaction::Eip1559(tx) = fynd.tx() else {
+            panic!("expected EIP-1559 transaction");
+        };
+        assert_eq!(tx.nonce, 5);
+        assert_eq!(tx.max_fee_per_gas, 1_000_000_000);
+        assert_eq!(tx.max_priority_fee_per_gas, 1_000_000);
+        assert_eq!(tx.gas_limit, 100_000);
+    }
+
+    #[tokio::test]
+    async fn signable_payload_fetches_nonce_and_fees_when_hints_absent() {
+        let sender = Address::with_last_byte(0xde);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
+
+        // eth_getTransactionCount → nonce 7
+        asserter.push_success(&7u64);
+        // estimate_eip1559_fees calls eth_feeHistory; push two values for the response
+        // alloy's estimate_eip1559_fees uses eth_feeHistory; we push a plausible response.
+        // The estimate_eip1559_fees method calls eth_feeHistory with 1 block, 25/75 percentiles.
+        let fee_history = serde_json::json!({
+            "oldestBlock": "0x1",
+            "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00"],
+            "gasUsedRatio": [0.5],
+            "reward": [["0xf4240", "0x1e8480"]]
+        });
+        asserter.push_success(&fee_history);
+
+        let solution = make_order_solution();
+        let hints = SigningHints::default();
+
+        let payload = client
+            .signable_payload(solution, &hints)
+            .await
+            .expect("signable_payload should succeed");
+
+        let SignablePayload::Fynd(fynd) = payload else {
+            panic!("expected Fynd payload");
+        };
+        let TypedTransaction::Eip1559(tx) = fynd.tx() else {
+            panic!("expected EIP-1559 transaction");
+        };
+        assert_eq!(tx.nonce, 7, "nonce should come from mock");
+    }
+
+    #[tokio::test]
+    async fn signable_payload_returns_config_error_when_no_sender() {
+        // No sender on client, no sender in hints.
+        let (client, _asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
+
+        let solution = make_order_solution();
+        let hints = SigningHints::default(); // no sender
+
+        let err = client
+            .signable_payload(solution, &hints)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FyndError::Config(_)), "expected Config error, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn signable_payload_with_simulate_true_calls_eth_call_successfully() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
+
+        let solution = make_order_solution();
+        let hints = SigningHints {
+            sender: Some(sender),
+            nonce: Some(1),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas_limit: Some(100_000),
+            simulate: true,
+        };
+
+        // eth_call → success (empty bytes result)
+        asserter.push_success(&alloy::primitives::Bytes::new());
+
+        let payload = client
+            .signable_payload(solution, &hints)
+            .await
+            .expect("signable_payload with simulate=true should succeed");
+
+        assert!(matches!(payload, SignablePayload::Fynd(_)));
+    }
+
+    #[tokio::test]
+    async fn signable_payload_with_simulate_true_returns_simulation_failed_on_revert() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
+
+        let solution = make_order_solution();
+        let hints = SigningHints {
+            sender: Some(sender),
+            nonce: Some(1),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas_limit: Some(100_000),
+            simulate: true,
+        };
+
+        // eth_call → revert (RPC-level execution error)
+        asserter.push_failure_msg("execution reverted");
+
+        let err = client
+            .signable_payload(solution, &hints)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, FyndError::SimulationFailed(_)),
+            "expected SimulationFailed, got {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // Helper to build minimal QuoteParams
+    // ========================================================================
+
+    fn make_quote_params() -> QuoteParams {
+        use crate::types::{Order, OrderSide, QuoteOptions};
+
+        let token_in = bytes::Bytes::copy_from_slice(&[0xaa; 20]);
+        let token_out = bytes::Bytes::copy_from_slice(&[0xbb; 20]);
+        let sender = bytes::Bytes::copy_from_slice(&[0xcc; 20]);
+
+        let order = Order::new(
+            token_in,
+            token_out,
+            num_bigint::BigUint::from(1_000_000u64),
+            OrderSide::Sell,
+            sender,
+            None,
+        );
+
+        QuoteParams::new(vec![order], QuoteOptions::default())
     }
 }

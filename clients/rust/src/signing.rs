@@ -17,6 +17,7 @@ use crate::types::OrderSolution;
 ///
 /// Obtain one via [`FyndClient::signable_payload`](crate::FyndClient::signable_payload) when
 /// the solution's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
+#[derive(Debug)]
 pub struct FyndPayload {
     order_solution: OrderSolution,
     tx: TypedTransaction,
@@ -55,6 +56,7 @@ impl FyndPayload {
 }
 
 /// Turbine payload stub. Fields are `()` placeholders until the Turbine signing story lands.
+#[derive(Debug)]
 pub struct TurbinePayload {
     #[allow(dead_code)]
     // Placeholder: will be populated in the Turbine signing story
@@ -68,6 +70,7 @@ pub struct TurbinePayload {
 ///
 /// Only the [`Fynd`](Self::Fynd) variant is currently executable; calling methods on the
 /// [`Turbine`](Self::Turbine) variant will panic with `unimplemented!`.
+#[derive(Debug)]
 pub enum SignablePayload {
     /// Fynd execution path — an EIP-1559 transaction targeting the RouterV3 contract.
     Fynd(Box<FyndPayload>),

@@ -43,3 +43,5 @@ tracing = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true }
 hex = "0.4"
+wiremock = "0.6"
+serde_json = { workspace = true }

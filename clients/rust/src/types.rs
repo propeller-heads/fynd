@@ -176,6 +176,7 @@ pub enum SolutionStatus {
 ///
 /// Quotes are only valid for the block at which they were produced. Conditions may have changed
 /// by the time you submit the transaction.
+#[derive(Debug, Clone)]
 pub struct BlockInfo {
     number: u64,
     hash: String,
@@ -204,6 +205,7 @@ impl BlockInfo {
 }
 
 /// A single atomic swap on one liquidity pool within a [`Route`].
+#[derive(Debug, Clone)]
 pub struct Swap {
     pool_id: String,
     protocol: String,
@@ -266,6 +268,7 @@ impl Swap {
 /// An ordered sequence of swaps that together execute a complete token swap.
 ///
 /// For multi-hop routes the output of each [`Swap`] is the input of the next.
+#[derive(Debug, Clone)]
 pub struct Route {
     swaps: Vec<Swap>,
 }
@@ -282,6 +285,7 @@ impl Route {
 }
 
 /// The solver's response for a single order within a [`Quote`].
+#[derive(Debug, Clone)]
 pub struct OrderSolution {
     order_id: String,
     status: SolutionStatus,
@@ -399,6 +403,7 @@ impl OrderSolution {
 }
 
 /// The solver's response to a [`QuoteParams`] request, containing solutions for every order.
+#[derive(Debug)]
 pub struct Quote {
     orders: Vec<OrderSolution>,
     total_gas_estimate: BigUint,
@@ -431,6 +436,7 @@ impl Quote {
 }
 
 /// Health information from the Fynd RPC server's `/v1/health` endpoint.
+#[derive(Debug)]
 pub struct HealthStatus {
     healthy: bool,
     last_update_ms: u64,
