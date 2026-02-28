@@ -210,3 +210,185 @@ pub(crate) fn wire_error_to_fynd(we: wire::ErrorResponse) -> FyndError {
     let code = ErrorCode::from_server_code(&we.code);
     FyndError::Api { code, message: we.error }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use num_bigint::BigUint;
+    use tycho_simulation::tycho_common::models::Address as TychoAddress;
+
+    fn make_tycho_addr(bytes: &[u8; 20]) -> TychoAddress {
+        TychoAddress::from(Bytes::copy_from_slice(bytes))
+    }
+
+    fn sample_wire_swap() -> wire::Swap {
+        wire::Swap {
+            component_id: "pool-1".to_string(),
+            protocol: "uniswap-v3".to_string(),
+            token_in: make_tycho_addr(&[0xaa; 20]),
+            token_out: make_tycho_addr(&[0xbb; 20]),
+            amount_in: BigUint::from(100u32),
+            amount_out: BigUint::from(99u32),
+            gas_estimate: BigUint::from(50_000u32),
+        }
+    }
+
+    fn sample_wire_block() -> wire::BlockInfo {
+        wire::BlockInfo {
+            number: 21_000_000,
+            hash: "0xdeadbeef".to_string(),
+            timestamp: 1_730_000_000,
+        }
+    }
+
+    fn sample_wire_order_solution() -> wire::OrderSolution {
+        wire::OrderSolution {
+            order_id: "test-order-id".to_string(),
+            status: wire::SolutionStatus::Success,
+            route: None,
+            amount_in: BigUint::from(1_000u32),
+            amount_out: BigUint::from(999u32),
+            gas_estimate: BigUint::from(100_000u32),
+            price_impact_bps: Some(5),
+            amount_out_net_gas: BigUint::from(998u32),
+            block: sample_wire_block(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // bytes_to_alloy_address
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bytes_to_alloy_address_happy_path() {
+        let b = Bytes::copy_from_slice(&[0xab; 20]);
+        let addr = bytes_to_alloy_address(&b).unwrap();
+        assert_eq!(addr.as_slice(), &[0xab; 20]);
+    }
+
+    #[test]
+    fn bytes_to_alloy_address_wrong_length() {
+        let b = Bytes::copy_from_slice(&[0xab; 4]);
+        assert!(matches!(bytes_to_alloy_address(&b), Err(FyndError::Protocol(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Swap conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn swap_try_from_wire_happy_path() {
+        let client_swap = Swap::try_from(sample_wire_swap()).unwrap();
+        assert_eq!(client_swap.pool_id(), "pool-1");
+        assert_eq!(client_swap.protocol(), "uniswap-v3");
+        assert_eq!(client_swap.token_in(), &Bytes::copy_from_slice(&[0xaa; 20]));
+        assert_eq!(client_swap.token_out(), &Bytes::copy_from_slice(&[0xbb; 20]));
+        assert_eq!(client_swap.amount_in(), &BigUint::from(100u32));
+        assert_eq!(client_swap.amount_out(), &BigUint::from(99u32));
+        assert_eq!(client_swap.gas_estimate(), &BigUint::from(50_000u32));
+    }
+
+    // -----------------------------------------------------------------------
+    // SolutionStatus conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solution_status_all_variants() {
+        use wire::SolutionStatus as Wire;
+        assert!(matches!(SolutionStatus::from(Wire::Success), SolutionStatus::Success));
+        assert!(matches!(SolutionStatus::from(Wire::NoRouteFound), SolutionStatus::NoRouteFound));
+        assert!(matches!(
+            SolutionStatus::from(Wire::InsufficientLiquidity),
+            SolutionStatus::InsufficientLiquidity
+        ));
+        assert!(matches!(SolutionStatus::from(Wire::Timeout), SolutionStatus::Timeout));
+        assert!(matches!(SolutionStatus::from(Wire::NotReady), SolutionStatus::NotReady));
+    }
+
+    // -----------------------------------------------------------------------
+    // BlockInfo conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn block_info_from_wire() {
+        let wire_block = sample_wire_block();
+        let block = BlockInfo::from(wire_block);
+        assert_eq!(block.number(), 21_000_000);
+        assert_eq!(block.hash(), "0xdeadbeef");
+        assert_eq!(block.timestamp(), 1_730_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // OrderSolution conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn order_solution_try_from_wire_drops_amount_out_net_gas_and_defaults_to_fynd() {
+        let ws = sample_wire_order_solution();
+        let solution = OrderSolution::try_from(ws).unwrap();
+        assert_eq!(solution.order_id(), "test-order-id");
+        assert!(matches!(solution.status(), SolutionStatus::Success));
+        assert!(matches!(solution.backend(), BackendKind::Fynd));
+        assert_eq!(solution.amount_in(), &BigUint::from(1_000u32));
+        assert_eq!(solution.amount_out(), &BigUint::from(999u32));
+        assert_eq!(solution.gas_estimate(), &BigUint::from(100_000u32));
+        assert_eq!(solution.price_impact_bps(), Some(5));
+        // token_out and receiver are left empty until populated by quote()
+        assert!(solution.token_out().is_empty());
+        assert!(solution.receiver().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Order → wire::Order conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn order_try_from_client_encodes_addresses_as_tycho() {
+        let order = Order::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(1_000u32),
+            OrderSide::Sell,
+            Bytes::copy_from_slice(&[0xcc; 20]),
+            None,
+        );
+
+        let wire_order = wire::Order::try_from(order).unwrap();
+        // Verify token addresses are correctly represented as Tycho addresses
+        assert_eq!(wire_order.token_in.0, Bytes::copy_from_slice(&[0xaa; 20]));
+        assert_eq!(wire_order.token_out.0, Bytes::copy_from_slice(&[0xbb; 20]));
+        assert_eq!(wire_order.sender.0, Bytes::copy_from_slice(&[0xcc; 20]));
+        assert!(wire_order.receiver.is_none());
+        assert_eq!(wire_order.amount, BigUint::from(1_000u32));
+    }
+
+    #[test]
+    fn order_try_from_client_with_receiver() {
+        let order = Order::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(1u32),
+            OrderSide::Sell,
+            Bytes::copy_from_slice(&[0xcc; 20]),
+            Some(Bytes::copy_from_slice(&[0xdd; 20])),
+        );
+
+        let wire_order = wire::Order::try_from(order).unwrap();
+        let receiver = wire_order.receiver.unwrap();
+        assert_eq!(receiver.0, Bytes::copy_from_slice(&[0xdd; 20]));
+    }
+
+    #[test]
+    fn order_try_from_client_invalid_address_length() {
+        let order = Order::new(
+            Bytes::copy_from_slice(&[0xaa; 4]), // wrong length
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(1u32),
+            OrderSide::Sell,
+            Bytes::copy_from_slice(&[0xcc; 20]),
+            None,
+        );
+        assert!(matches!(wire::Order::try_from(order), Err(FyndError::Protocol(_))));
+    }
+}

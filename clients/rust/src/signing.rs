@@ -13,6 +13,10 @@ use crate::types::OrderSolution;
 // PAYLOADS
 // ============================================================================
 
+/// A ready-to-sign EIP-1559 transaction produced by the Fynd execution path.
+///
+/// Obtain one via [`FyndClient::signable_payload`](crate::FyndClient::signable_payload) when
+/// the solution's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
 pub struct FyndPayload {
     order_solution: OrderSolution,
     tx: TypedTransaction,
@@ -30,10 +34,14 @@ impl FyndPayload {
         Self { order_solution, tx, token_out, receiver }
     }
 
+    /// The order solution this payload was built from.
     pub fn order_solution(&self) -> &OrderSolution {
         &self.order_solution
     }
 
+    /// The unsigned EIP-1559 transaction. Sign its
+    /// [`signature_hash()`](alloy::consensus::SignableTransaction::signature_hash) and pass the
+    /// result to [`SignedOrder::assemble`].
     pub fn tx(&self) -> &TypedTransaction {
         &self.tx
     }
@@ -53,12 +61,28 @@ pub struct TurbinePayload {
     _order_solution: (),
 }
 
+/// A payload that needs to be signed before it can be executed.
+///
+/// Use [`signing_hash`](Self::signing_hash) to obtain the bytes to sign, then pass the resulting
+/// [`alloy::primitives::Signature`] to [`SignedOrder::assemble`].
+///
+/// Only the [`Fynd`](Self::Fynd) variant is currently executable; calling methods on the
+/// [`Turbine`](Self::Turbine) variant will panic with `unimplemented!`.
 pub enum SignablePayload {
+    /// Fynd execution path — an EIP-1559 transaction targeting the RouterV3 contract.
     Fynd(Box<FyndPayload>),
+    /// Turbine execution path — not yet implemented.
     Turbine(TurbinePayload),
 }
 
 impl SignablePayload {
+    /// Returns the 32-byte hash that must be signed.
+    ///
+    /// For the Fynd path this is the EIP-1559 transaction's `signature_hash()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on the `Turbine` variant.
     pub fn signing_hash(&self) -> B256 {
         match self {
             Self::Fynd(p) => {
@@ -69,6 +93,10 @@ impl SignablePayload {
         }
     }
 
+    /// Returns EIP-712 typed data for wallets that support `eth_signTypedData_v4`.
+    ///
+    /// Always returns `None` for EIP-1559 transactions (Fynd path); those use
+    /// [`signing_hash`](Self::signing_hash) instead.
     pub fn typed_data(&self) -> Option<&TypedData> {
         // EIP-1559 transactions use a signing hash, not EIP-712 typed data.
         match self {
@@ -76,6 +104,11 @@ impl SignablePayload {
         }
     }
 
+    /// The order solution embedded in this payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on the `Turbine` variant.
     pub fn order_solution(&self) -> &OrderSolution {
         match self {
             Self::Fynd(p) => &p.order_solution,
@@ -103,20 +136,29 @@ impl SignablePayload {
 // SIGNED ORDER
 // ============================================================================
 
+/// A [`SignablePayload`] paired with its cryptographic signature.
+///
+/// Construct via [`SignedOrder::assemble`] after signing the
+/// [`signing_hash`](SignablePayload::signing_hash). Pass to
+/// [`FyndClient::execute`](crate::FyndClient::execute) to broadcast and settle.
 pub struct SignedOrder {
     payload: SignablePayload,
     signature: Signature,
 }
 
 impl SignedOrder {
+    /// Pair a payload with the signature produced by signing its
+    /// [`signing_hash`](SignablePayload::signing_hash).
     pub fn assemble(payload: SignablePayload, signature: Signature) -> Self {
         Self { payload, signature }
     }
 
+    /// The underlying signable payload.
     pub fn payload(&self) -> &SignablePayload {
         &self.payload
     }
 
+    /// The signature over the payload's signing hash.
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -130,6 +172,9 @@ impl SignedOrder {
 // SETTLED ORDER
 // ============================================================================
 
+/// The result of a successfully mined swap transaction.
+///
+/// Returned by awaiting an [`ExecutionReceipt`].
 pub struct SettledOrder {
     tx_receipt: alloy::rpc::types::TransactionReceipt,
     settled_amount: Option<BigUint>,
@@ -145,14 +190,19 @@ impl SettledOrder {
         Self { tx_receipt, settled_amount, gas_cost }
     }
 
+    /// The full Ethereum transaction receipt.
     pub fn tx_receipt(&self) -> &alloy::rpc::types::TransactionReceipt {
         &self.tx_receipt
     }
 
+    /// The total amount of `token_out` actually received by the receiver, summed across all
+    /// matching ERC-20 and ERC-6909 Transfer logs. Returns `None` when no matching logs are found
+    /// (e.g. the swap reverted or used an unsupported token standard).
     pub fn settled_amount(&self) -> Option<&BigUint> {
         self.settled_amount.as_ref()
     }
 
+    /// The actual gas cost of the transaction in wei (`gas_used * effective_gas_price`).
     pub fn gas_cost(&self) -> &BigUint {
         &self.gas_cost
     }
@@ -162,7 +212,21 @@ impl SettledOrder {
 // EXECUTION RECEIPT
 // ============================================================================
 
+/// A future that resolves once the swap transaction is mined and settled.
+///
+/// Returned by [`FyndClient::execute`](crate::FyndClient::execute). The inner future polls the
+/// RPC node every 2 seconds and **has no built-in timeout** — it will poll indefinitely if the
+/// transaction is never mined. Callers should wrap it with [`tokio::time::timeout`]:
+///
+/// ```rust,no_run
+/// # use fynd_client::ExecutionReceipt;
+/// # use std::time::Duration;
+/// # async fn example(receipt: ExecutionReceipt) {
+/// let result = tokio::time::timeout(Duration::from_secs(120), receipt).await;
+/// # }
+/// ```
 pub enum ExecutionReceipt {
+    /// A pending on-chain transaction.
     Transaction(Pin<Box<dyn Future<Output = Result<SettledOrder, FyndError>> + Send + 'static>>),
 }
 
@@ -241,5 +305,224 @@ pub(crate) fn compute_settled_amount(
         Some(total)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{keccak256, Address, Bytes as AlloyBytes, LogData, B256};
+    use alloy::rpc::types::{Log, TransactionReceipt};
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn make_receipt(logs: Vec<Log>) -> TransactionReceipt {
+        use alloy::consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom};
+        use alloy::primitives::{Bloom, TxHash};
+
+        TransactionReceipt {
+            inner: ReceiptEnvelope::Eip1559(ReceiptWithBloom {
+                receipt: Receipt {
+                    status: alloy::consensus::Eip658Value::Eip658(true),
+                    cumulative_gas_used: 21_000,
+                    logs,
+                },
+                logs_bloom: Bloom::default(),
+            }),
+            transaction_hash: TxHash::default(),
+            transaction_index: None,
+            block_hash: None,
+            block_number: None,
+            gas_used: 21_000,
+            effective_gas_price: 1,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::ZERO,
+            to: None,
+            contract_address: None,
+        }
+    }
+
+    fn erc20_topic() -> B256 {
+        keccak256(b"Transfer(address,address,uint256)")
+    }
+
+    fn erc6909_topic() -> B256 {
+        keccak256(b"Transfer(address,address,address,uint256,uint256)")
+    }
+
+    /// Pad an address into a 32-byte B256 topic (right-align in 32 bytes).
+    fn addr_topic(addr: Address) -> B256 {
+        let mut topic = [0u8; 32];
+        topic[12..].copy_from_slice(addr.as_slice());
+        B256::from(topic)
+    }
+
+    /// Encode a u64 amount as 32 big-endian bytes.
+    fn encode_u256(amount: u64) -> Vec<u8> {
+        let mut buf = [0u8; 32];
+        let bytes = amount.to_be_bytes();
+        buf[24..].copy_from_slice(&bytes);
+        buf.to_vec()
+    }
+
+    fn make_log(address: Address, topics: Vec<B256>, data: Vec<u8>) -> Log {
+        Log {
+            inner: alloy::primitives::Log {
+                address,
+                data: LogData::new_unchecked(topics, AlloyBytes::from(data)),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ERC-20 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erc20_transfer_log_matched() {
+        let token = Address::with_last_byte(0x01);
+        let from = Address::with_last_byte(0x02);
+        let receiver = Address::with_last_byte(0x03);
+
+        let log = make_log(
+            token,
+            vec![erc20_topic(), addr_topic(from), addr_topic(receiver)],
+            encode_u256(500),
+        );
+        let receipt = make_receipt(vec![log]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert_eq!(result, Some(BigUint::from(500u64)));
+    }
+
+    #[test]
+    fn erc20_transfer_log_wrong_token() {
+        let token = Address::with_last_byte(0x01);
+        let other_token = Address::with_last_byte(0x99);
+        let receiver = Address::with_last_byte(0x03);
+
+        let log = make_log(
+            other_token, // different token address
+            vec![erc20_topic(), addr_topic(Address::ZERO), addr_topic(receiver)],
+            encode_u256(500),
+        );
+        let receipt = make_receipt(vec![log]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn erc20_transfer_log_wrong_receiver() {
+        let token = Address::with_last_byte(0x01);
+        let receiver = Address::with_last_byte(0x03);
+        let other_receiver = Address::with_last_byte(0x04);
+
+        let log = make_log(
+            token,
+            vec![erc20_topic(), addr_topic(Address::ZERO), addr_topic(other_receiver)],
+            encode_u256(500),
+        );
+        let receipt = make_receipt(vec![log]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // ERC-6909 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erc6909_transfer_log_matched() {
+        let token = Address::with_last_byte(0x10);
+        let from = Address::with_last_byte(0x11);
+        let receiver = Address::with_last_byte(0x12);
+
+        // ERC-6909: data = (address caller [32 bytes], uint256 amount [32 bytes])
+        let mut data = [0u8; 64];
+        // caller address in first 32 bytes (right-aligned)
+        data[12..32].copy_from_slice(Address::with_last_byte(0xca).as_slice());
+        // amount in last 32 bytes
+        let amount_bytes = encode_u256(750);
+        data[32..].copy_from_slice(&amount_bytes);
+
+        let log = make_log(
+            token,
+            vec![erc6909_topic(), addr_topic(from), addr_topic(receiver)],
+            data.to_vec(),
+        );
+        let receipt = make_receipt(vec![log]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert_eq!(result, Some(BigUint::from(750u64)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_matching_logs_returns_none() {
+        let token = Address::with_last_byte(0x01);
+        let receiver = Address::with_last_byte(0x03);
+
+        // Log with unrelated topic
+        let unrelated_topic = keccak256(b"Approval(address,address,uint256)");
+        let log = make_log(
+            token,
+            vec![unrelated_topic, addr_topic(Address::ZERO), addr_topic(receiver)],
+            encode_u256(100),
+        );
+        let receipt = make_receipt(vec![log]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn empty_logs_returns_none() {
+        let token = Address::with_last_byte(0x01);
+        let receiver = Address::with_last_byte(0x03);
+        let receipt = make_receipt(vec![]);
+        assert!(compute_settled_amount(&receipt, &token, &receiver).is_none());
+    }
+
+    #[test]
+    fn multiple_matching_logs_amounts_summed() {
+        let token = Address::with_last_byte(0x01);
+        let from = Address::with_last_byte(0x02);
+        let receiver = Address::with_last_byte(0x03);
+
+        let log1 = make_log(
+            token,
+            vec![erc20_topic(), addr_topic(from), addr_topic(receiver)],
+            encode_u256(100),
+        );
+        let log2 = make_log(
+            token,
+            vec![erc20_topic(), addr_topic(from), addr_topic(receiver)],
+            encode_u256(200),
+        );
+        // A log to a different receiver that should NOT be counted.
+        let log3 = make_log(
+            token,
+            vec![erc20_topic(), addr_topic(from), addr_topic(Address::with_last_byte(0xff))],
+            encode_u256(999),
+        );
+        let receipt = make_receipt(vec![log1, log2, log3]);
+
+        let result = compute_settled_amount(&receipt, &token, &receiver);
+        assert_eq!(result, Some(BigUint::from(300u64)));
     }
 }

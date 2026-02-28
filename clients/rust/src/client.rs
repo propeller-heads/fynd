@@ -26,6 +26,11 @@ use crate::{
 // RETRY CONFIG
 // ============================================================================
 
+/// Controls how [`FyndClient::quote`] retries transient failures.
+///
+/// Retries use exponential back-off: each attempt doubles the delay, capped at
+/// [`max_backoff`](Self::max_backoff). Only errors where
+/// [`FyndError::is_retryable`](crate::FyndError::is_retryable) returns `true` are retried.
 pub struct RetryConfig {
     max_attempts: u32,
     initial_backoff: Duration,
@@ -33,18 +38,26 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
+    /// Create a custom retry configuration.
+    ///
+    /// - `max_attempts`: total attempts including the first try.
+    /// - `initial_backoff`: sleep duration before the second attempt.
+    /// - `max_backoff`: upper bound on any single sleep duration.
     pub fn new(max_attempts: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
         Self { max_attempts, initial_backoff, max_backoff }
     }
 
+    /// Maximum number of total attempts (default: 3).
     pub fn max_attempts(&self) -> u32 {
         self.max_attempts
     }
 
+    /// Sleep duration before the first retry (default: 100 ms).
     pub fn initial_backoff(&self) -> Duration {
         self.initial_backoff
     }
 
+    /// Upper bound on any single sleep duration (default: 2 s).
     pub fn max_backoff(&self) -> Duration {
         self.max_backoff
     }
@@ -65,13 +78,24 @@ impl Default for RetryConfig {
 // ============================================================================
 
 /// Optional hints to override auto-resolved transaction parameters.
+///
+/// All fields default to `None` / `false`. Unset fields are resolved automatically from the
+/// RPC node during [`FyndClient::signable_payload`].
 #[derive(Default)]
 pub struct SigningHints {
+    /// Override the sender address. If `None`, falls back to the address set on the client via
+    /// [`FyndClientBuilder::with_sender`].
     pub sender: Option<Address>,
+    /// Override the transaction nonce. If `None`, fetched via `eth_getTransactionCount`.
     pub nonce: Option<u64>,
+    /// Override `maxFeePerGas` (wei). If `None`, estimated via `eth_maxPriorityFeePerGas`.
     pub max_fee_per_gas: Option<u128>,
+    /// Override `maxPriorityFeePerGas` (wei). If `None`, estimated alongside `max_fee_per_gas`.
     pub max_priority_fee_per_gas: Option<u128>,
+    /// Override the gas limit. If `None`, taken from the solution's `gas_estimate`.
     pub gas_limit: Option<u64>,
+    /// When `true`, simulate the transaction via `eth_call` before returning. A simulation
+    /// failure results in [`FyndError::SimulationFailed`].
     pub simulate: bool,
 }
 
@@ -79,6 +103,13 @@ pub struct SigningHints {
 // CLIENT BUILDER
 // ============================================================================
 
+/// Builder for [`FyndClient`].
+///
+/// Call [`FyndClientBuilder::new`] with the Fynd RPC URL and an Ethereum JSON-RPC URL, configure
+/// optional settings, then call [`build`](Self::build) to connect and return a ready client.
+///
+/// `build` performs two network calls: one to validate the RPC URL (fetching `chain_id`) and one
+/// to construct the HTTP provider. It does **not** connect to the Fynd API.
 pub struct FyndClientBuilder {
     base_url: String,
     timeout: Duration,
@@ -93,6 +124,11 @@ pub struct FyndClientBuilder {
 }
 
 impl FyndClientBuilder {
+    /// Create a new builder.
+    ///
+    /// - `base_url`: Base URL of the Fynd RPC server (e.g. `"https://rpc.fynd.exchange"`).
+    ///   Must use `http` or `https` scheme.
+    /// - `rpc_url`: Ethereum JSON-RPC endpoint for nonce/fee queries and receipt polling.
     pub fn new(base_url: impl Into<String>, rpc_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -105,31 +141,44 @@ impl FyndClientBuilder {
         }
     }
 
+    /// Set the HTTP request timeout for Fynd API calls (default: 30 s).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Override the retry configuration (default: 3 attempts, 100 ms / 2 s back-off).
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
         self
     }
 
+    /// Use a separate RPC URL for transaction submission and receipt polling.
+    ///
+    /// If not set, the `rpc_url` passed to [`new`](Self::new) is used for both.
     pub fn with_submit_url(mut self, url: impl Into<String>) -> Self {
         self.submit_url = Some(url.into());
         self
     }
 
+    /// Set the default sender address used when [`SigningHints::sender`] is `None`.
     pub fn with_sender(mut self, sender: Address) -> Self {
         self.sender = Some(sender);
         self
     }
 
+    /// Override the RouterV3 contract address (default: `Address::ZERO`).
+    ///
+    /// This address is used as the `to` field of every EIP-1559 transaction.
     pub fn with_router_address(mut self, addr: Address) -> Self {
         self.router_address = Some(addr);
         self
     }
 
+    /// Connect to the Ethereum RPC node and build the [`FyndClient`].
+    ///
+    /// Validates the URLs and fetches the chain ID. Returns [`FyndError::Config`] if any URL is
+    /// invalid or the chain ID cannot be fetched.
     pub async fn build(self) -> Result<FyndClient, FyndError> {
         // Validate base_url scheme.
         let parsed_base = self
@@ -193,6 +242,9 @@ impl FyndClientBuilder {
 // FYND CLIENT
 // ============================================================================
 
+/// The main entry point for interacting with the Fynd DEX router.
+///
+/// Construct via [`FyndClientBuilder`]. All methods are `async` and require a Tokio runtime.
 pub struct FyndClient {
     http: HttpClient,
     base_url: String,
@@ -209,6 +261,8 @@ impl FyndClient {
     ///
     /// The returned `Quote` has `token_out` and `receiver` populated on each
     /// `OrderSolution` from the corresponding input `Order` (matched by index).
+    ///
+    /// Retries automatically on transient failures according to the client's [`RetryConfig`].
     pub async fn quote(&self, params: QuoteParams) -> Result<Quote, FyndError> {
         // Snapshot token_out and receiver before consuming params.
         // Orders and solutions are parallel arrays — matched by index.
@@ -304,6 +358,13 @@ impl FyndClient {
 
     /// Build a signable payload for a given order solution.
     ///
+    /// For [`BackendKind::Fynd`] solutions, this resolves the sender nonce and EIP-1559 fee
+    /// parameters from the RPC node (unless overridden via `hints`), then constructs an
+    /// unsigned EIP-1559 transaction targeting the RouterV3 contract.
+    ///
+    /// [`BackendKind::Turbine`] is not yet implemented and returns
+    /// [`FyndError::Protocol`].
+    ///
     /// `token_out` and `receiver` are read directly from the `solution` (populated during
     /// `quote()`). Pass `&SigningHints::default()` to auto-resolve all transaction parameters.
     pub async fn signable_payload(
@@ -397,7 +458,12 @@ impl FyndClient {
         Ok(SignablePayload::Fynd(Box::new(FyndPayload::new(solution, tx, token_out, receiver))))
     }
 
-    /// Broadcast a signed order and return an `ExecutionReceipt` that resolves once confirmed.
+    /// Broadcast a signed order and return an [`ExecutionReceipt`] that resolves once the
+    /// transaction is mined.
+    ///
+    /// This method returns **immediately** after submitting the transaction. The returned
+    /// [`ExecutionReceipt`] is an unbounded future that polls for the receipt every 2 seconds.
+    /// Wrap it with [`tokio::time::timeout`] to avoid waiting indefinitely.
     pub async fn execute(&self, order: SignedOrder) -> Result<ExecutionReceipt, FyndError> {
         let (payload, signature) = order.into_parts();
         let (_solution, tx, token_out, receiver) = payload.into_fynd_parts()?;
@@ -440,5 +506,27 @@ impl FyndClient {
                 }
             }
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_config_default_values() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_attempts(), 3);
+        assert_eq!(config.initial_backoff(), Duration::from_millis(100));
+        assert_eq!(config.max_backoff(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn signing_hints_default_all_none_and_no_simulate() {
+        let hints = SigningHints::default();
+        assert!(hints.sender.is_none());
+        assert!(hints.nonce.is_none());
+        assert!(!hints.simulate);
     }
 }
