@@ -6,10 +6,12 @@
 use fynd_rpc_types as wire;
 use tycho_simulation::tycho_common::models::Address as TychoAddress;
 
-use crate::error::{ErrorCode, FyndError};
-use crate::types::{
-    BackendKind, BlockInfo, HealthStatus, Order, OrderSide, OrderSolution, Quote, QuoteOptions,
-    QuoteParams, Route, SolutionStatus, Swap,
+use crate::{
+    error::{ErrorCode, FyndError},
+    types::{
+        BackendKind, BlockInfo, HealthStatus, Order, OrderSide, OrderSolution, Quote, QuoteOptions,
+        QuoteParams, Route, SolutionStatus, Swap,
+    },
 };
 
 // ============================================================================
@@ -20,10 +22,7 @@ pub(crate) fn bytes_to_alloy_address(
     b: &bytes::Bytes,
 ) -> Result<alloy::primitives::Address, FyndError> {
     if b.len() != 20 {
-        return Err(FyndError::Protocol(format!(
-            "expected 20-byte address, got {} bytes",
-            b.len()
-        )));
+        return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
     }
     let arr: [u8; 20] = b
         .as_ref()
@@ -35,10 +34,7 @@ pub(crate) fn bytes_to_alloy_address(
 /// Convert a client `bytes::Bytes` address to a tycho wire-format address.
 fn bytes_to_tycho(b: &bytes::Bytes) -> Result<TychoAddress, FyndError> {
     if b.len() != 20 {
-        return Err(FyndError::Protocol(format!(
-            "expected 20-byte address, got {} bytes",
-            b.len()
-        )));
+        return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
     }
     // hex_bytes::Bytes has From<bytes::Bytes>
     Ok(TychoAddress::from(b.clone()))
@@ -213,10 +209,11 @@ pub(crate) fn wire_error_to_fynd(we: wire::ErrorResponse) -> FyndError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
     use num_bigint::BigUint;
     use tycho_simulation::tycho_common::models::Address as TychoAddress;
+
+    use super::*;
 
     fn make_tycho_addr(bytes: &[u8; 20]) -> TychoAddress {
         TychoAddress::from(Bytes::copy_from_slice(bytes))

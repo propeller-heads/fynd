@@ -2,7 +2,8 @@ use thiserror::Error;
 
 /// A structured error code returned by the Fynd RPC API.
 ///
-/// Mapped from the raw string `code` field in [`wire::ErrorResponse`](fynd_rpc_types::ErrorResponse).
+/// Mapped from the raw string `code` field in
+/// [`wire::ErrorResponse`](fynd_rpc_types::ErrorResponse).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
     /// The request was malformed or contained invalid parameters.
@@ -54,8 +55,9 @@ impl ErrorCode {
 
     /// Returns `true` if this error code indicates that the request is safe to retry.
     ///
-    /// Only [`SolveTimeout`](Self::SolveTimeout) and [`ServiceUnavailable`](Self::ServiceUnavailable)
-    /// are retryable; all other codes represent permanent failures.
+    /// Only [`SolveTimeout`](Self::SolveTimeout) and
+    /// [`ServiceUnavailable`](Self::ServiceUnavailable) are retryable; all other codes
+    /// represent permanent failures.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::SolveTimeout | Self::ServiceUnavailable)
     }

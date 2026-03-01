@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use alloy::{
     consensus::{TxEip1559, TypedTransaction},
-    eips::eip2718::Encodable2718,
-    eips::eip2930::AccessList,
+    eips::{eip2718::Encodable2718, eip2930::AccessList},
     network::Ethereum,
     primitives::{Address, Bytes as AlloyBytes, TxKind, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
@@ -127,8 +126,8 @@ pub struct FyndClientBuilder {
 impl FyndClientBuilder {
     /// Create a new builder.
     ///
-    /// - `base_url`: Base URL of the Fynd RPC server (e.g. `"https://rpc.fynd.exchange"`).
-    ///   Must use `http` or `https` scheme.
+    /// - `base_url`: Base URL of the Fynd RPC server (e.g. `"https://rpc.fynd.exchange"`). Must use
+    ///   `http` or `https` scheme.
     /// - `rpc_url`: Ethereum JSON-RPC endpoint for nonce/fee queries and receipt polling.
     pub fn new(base_url: impl Into<String>, rpc_url: impl Into<String>) -> Self {
         Self {
@@ -538,8 +537,8 @@ where
                     Some(receipt) => {
                         let settled_amount =
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
-                        let gas_cost = BigUint::from(receipt.gas_used)
-                            * BigUint::from(receipt.effective_gas_price);
+                        let gas_cost = BigUint::from(receipt.gas_used) *
+                            BigUint::from(receipt.effective_gas_price);
                         return Ok(SettledOrder::new(receipt, settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
@@ -551,8 +550,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     #[test]
     fn retry_config_default_values() {
@@ -611,8 +611,9 @@ mod tests {
 
     /// Build a minimal valid `OrderSolution` for use in tests.
     fn make_order_solution() -> crate::types::OrderSolution {
-        use crate::types::{BackendKind, BlockInfo, SolutionStatus};
         use num_bigint::BigUint;
+
+        use crate::types::{BackendKind, BlockInfo, SolutionStatus};
 
         crate::types::OrderSolution::new(
             "test-order-id".to_string(),
@@ -637,8 +638,10 @@ mod tests {
 
     #[tokio::test]
     async fn quote_returns_parsed_quote_on_success() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let server = MockServer::start().await;
         let body = serde_json::json!({
@@ -685,9 +688,12 @@ mod tests {
 
     #[tokio::test]
     async fn quote_returns_api_error_on_non_retryable_server_error() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
         use crate::error::ErrorCode;
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
@@ -715,8 +721,10 @@ mod tests {
 
     #[tokio::test]
     async fn quote_retries_on_retryable_error_then_succeeds() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let server = MockServer::start().await;
 
@@ -769,9 +777,12 @@ mod tests {
 
     #[tokio::test]
     async fn quote_exhausts_retries_and_returns_last_error() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
         use crate::error::ErrorCode;
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
@@ -799,8 +810,10 @@ mod tests {
 
     #[tokio::test]
     async fn quote_returns_error_on_malformed_response() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let server = MockServer::start().await;
 
@@ -831,8 +844,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_status_on_success() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let server = MockServer::start().await;
 
@@ -860,8 +875,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_error_on_server_failure() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let server = MockServer::start().await;
 

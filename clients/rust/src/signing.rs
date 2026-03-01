@@ -1,13 +1,13 @@
 use std::{future::Future, pin::Pin};
 
-use alloy::consensus::TypedTransaction;
-use alloy::dyn_abi::TypedData;
-use alloy::primitives::Signature;
-use alloy::primitives::{Address, B256};
+use alloy::{
+    consensus::TypedTransaction,
+    dyn_abi::TypedData,
+    primitives::{Address, Signature, B256},
+};
 use num_bigint::BigUint;
 
-use crate::error::FyndError;
-use crate::types::OrderSolution;
+use crate::{error::FyndError, types::OrderSolution};
 
 // ============================================================================
 // PAYLOADS
@@ -313,17 +313,22 @@ pub(crate) fn compute_settled_amount(
 
 #[cfg(test)]
 mod tests {
+    use alloy::{
+        primitives::{keccak256, Address, Bytes as AlloyBytes, LogData, B256},
+        rpc::types::{Log, TransactionReceipt},
+    };
+
     use super::*;
-    use alloy::primitives::{keccak256, Address, Bytes as AlloyBytes, LogData, B256};
-    use alloy::rpc::types::{Log, TransactionReceipt};
 
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
     fn make_receipt(logs: Vec<Log>) -> TransactionReceipt {
-        use alloy::consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom};
-        use alloy::primitives::{Bloom, TxHash};
+        use alloy::{
+            consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom},
+            primitives::{Bloom, TxHash},
+        };
 
         TransactionReceipt {
             inner: ReceiptEnvelope::Eip1559(ReceiptWithBloom {

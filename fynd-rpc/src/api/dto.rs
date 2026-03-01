@@ -120,9 +120,10 @@ fn swap_from_core(core: fynd_core::Swap) -> Swap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use num_bigint::BigUint;
     use tycho_simulation::tycho_common::models::Address;
+
+    use super::*;
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])

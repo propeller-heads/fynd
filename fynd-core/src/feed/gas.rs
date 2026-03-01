@@ -49,8 +49,8 @@ impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
 
                     if last_block_info
                         .number
-                        .abs_diff(update_block_number)
-                        > 3
+                        .abs_diff(update_block_number) >
+                        3
                     {
                         warn!("Gas price update is out of sync with the last block info. Gas price: {}, Last block info: {}", update_block_number, last_block_info.number);
                     }

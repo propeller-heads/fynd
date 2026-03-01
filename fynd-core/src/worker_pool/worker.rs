@@ -140,8 +140,8 @@ where
         // Check readiness before solving
         if self
             .readiness_tracker
-            .has_requirements()
-            && !self.readiness_tracker.is_ready()
+            .has_requirements() &&
+            !self.readiness_tracker.is_ready()
         {
             return Err(SolveError::NotReady(format!(
                 "derived data not ready: missing {:?}",
@@ -284,8 +284,8 @@ where
         // Fast path: no requirements or already ready
         if !self
             .readiness_tracker
-            .has_requirements()
-            || self.readiness_tracker.is_ready()
+            .has_requirements() ||
+            self.readiness_tracker.is_ready()
         {
             return Ok(());
         }

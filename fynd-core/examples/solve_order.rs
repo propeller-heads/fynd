@@ -197,8 +197,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .amount_out
             .to_string()
             .parse::<f64>()
-            .unwrap_or(0.0)
-            / 10f64.powi(final_token_out.decimals as i32);
+            .unwrap_or(0.0) /
+            10f64.powi(final_token_out.decimals as i32);
 
         println!("Result: {:.2} {}", final_amount_out, final_token_out.symbol);
         println!("Gas:    {}\n", route.total_gas());
@@ -216,14 +216,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .amount_in
                 .to_string()
                 .parse::<f64>()
-                .unwrap_or(0.0)
-                / 10f64.powi(token_in.decimals as i32);
+                .unwrap_or(0.0) /
+                10f64.powi(token_in.decimals as i32);
             let amount_out_f64 = swap
                 .amount_out
                 .to_string()
                 .parse::<f64>()
-                .unwrap_or(0.0)
-                / 10f64.powi(token_out.decimals as i32);
+                .unwrap_or(0.0) /
+                10f64.powi(token_out.decimals as i32);
 
             println!(
                 "  {}. {:.6} {} → {:.6} {} ({})",

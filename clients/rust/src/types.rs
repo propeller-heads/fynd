@@ -466,8 +466,9 @@ impl HealthStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use num_bigint::BigUint;
+
+    use super::*;
 
     fn addr(bytes: &[u8; 20]) -> Bytes {
         Bytes::copy_from_slice(bytes)
