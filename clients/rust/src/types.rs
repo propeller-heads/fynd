@@ -133,14 +133,14 @@ impl QuoteOptions {
 
 /// All inputs needed to call [`FyndClient::quote`](crate::FyndClient::quote).
 pub struct QuoteParams {
-    pub(crate) orders: Vec<Order>,
+    pub(crate) order: Order,
     pub(crate) options: QuoteOptions,
 }
 
 impl QuoteParams {
     /// Create a new request from a list of orders and optional solver options.
-    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
-        Self { orders, options }
+    pub fn new(order: Order, options: QuoteOptions) -> Self {
+        Self { order, options }
     }
 }
 
@@ -284,9 +284,9 @@ impl Route {
     }
 }
 
-/// The solver's response for a single order within a [`Quote`].
+/// The solver's response for a single order.
 #[derive(Debug, Clone)]
-pub struct OrderSolution {
+pub struct Quote {
     order_id: String,
     status: SolutionStatus,
     backend: BackendKind,
@@ -305,7 +305,7 @@ pub struct OrderSolution {
     receiver: Bytes,
 }
 
-impl OrderSolution {
+impl Quote {
     /// The server-assigned order ID (UUID v4).
     pub fn order_id(&self) -> &str {
         &self.order_id
@@ -379,6 +379,8 @@ impl OrderSolution {
         gas_estimate: BigUint,
         price_impact_bps: Option<i32>,
         block: BlockInfo,
+        token_out: Bytes,
+        receiver: Bytes,
     ) -> Self {
         Self {
             order_id,
@@ -390,48 +392,42 @@ impl OrderSolution {
             gas_estimate,
             price_impact_bps,
             block,
-            token_out: Bytes::new(),
-            receiver: Bytes::new(),
+            token_out,
+            receiver,
         }
-    }
-
-    pub(crate) fn with_token_out_and_receiver(mut self, token_out: Bytes, receiver: Bytes) -> Self {
-        self.token_out = token_out;
-        self.receiver = receiver;
-        self
     }
 }
 
 /// The solver's response to a [`QuoteParams`] request, containing solutions for every order.
 #[derive(Debug)]
-pub struct Quote {
-    orders: Vec<OrderSolution>,
+pub(crate) struct BatchQuote {
+    quotes: Vec<Quote>,
+    #[allow(dead_code)]
     total_gas_estimate: BigUint,
+    #[allow(dead_code)]
     solve_time_ms: u64,
 }
 
-impl Quote {
+impl BatchQuote {
     /// Solutions for each order, in the same order as the request.
-    pub fn orders(&self) -> &[OrderSolution] {
-        &self.orders
+    pub fn quotes(&self) -> &[Quote] {
+        &self.quotes
     }
 
     /// Aggregate estimated gas units for executing all solutions.
+    #[allow(dead_code)]
     pub fn total_gas_estimate(&self) -> &BigUint {
         &self.total_gas_estimate
     }
 
     /// Wall-clock time the server took to compute this quote, in milliseconds.
+    #[allow(dead_code)]
     pub fn solve_time_ms(&self) -> u64 {
         self.solve_time_ms
     }
 
-    pub(crate) fn new(
-        orders: Vec<OrderSolution>,
-        total_gas_estimate: BigUint,
-        solve_time_ms: u64,
-    ) -> Self {
-        Self { orders, total_gas_estimate, solve_time_ms }
+    pub(crate) fn new(quotes: Vec<Quote>, total_gas_estimate: BigUint, solve_time_ms: u64) -> Self {
+        Self { quotes, total_gas_estimate, solve_time_ms }
     }
 }
 

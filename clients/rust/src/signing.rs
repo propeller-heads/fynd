@@ -7,7 +7,7 @@ use alloy::{
 };
 use num_bigint::BigUint;
 
-use crate::{error::FyndError, types::OrderSolution};
+use crate::{error::FyndError, Quote};
 
 // ============================================================================
 // PAYLOADS
@@ -19,25 +19,18 @@ use crate::{error::FyndError, types::OrderSolution};
 /// the solution's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
 #[derive(Debug)]
 pub struct FyndPayload {
-    order_solution: OrderSolution,
+    quote: Quote,
     tx: TypedTransaction,
-    token_out: bytes::Bytes,
-    receiver: bytes::Bytes,
 }
 
 impl FyndPayload {
-    pub(crate) fn new(
-        order_solution: OrderSolution,
-        tx: TypedTransaction,
-        token_out: bytes::Bytes,
-        receiver: bytes::Bytes,
-    ) -> Self {
-        Self { order_solution, tx, token_out, receiver }
+    pub(crate) fn new(quote: Quote, tx: TypedTransaction) -> Self {
+        Self { quote, tx }
     }
 
     /// The order solution this payload was built from.
-    pub fn order_solution(&self) -> &OrderSolution {
-        &self.order_solution
+    pub fn quote(&self) -> &Quote {
+        &self.quote
     }
 
     /// The unsigned EIP-1559 transaction. Sign its
@@ -48,10 +41,8 @@ impl FyndPayload {
     }
 
     /// Consume the payload and return the inner parts for use in `execute()`.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (OrderSolution, TypedTransaction, bytes::Bytes, bytes::Bytes) {
-        (self.order_solution, self.tx, self.token_out, self.receiver)
+    pub(crate) fn into_parts(self) -> (Quote, TypedTransaction) {
+        (self.quote, self.tx)
     }
 }
 
@@ -112,9 +103,9 @@ impl SignablePayload {
     /// # Panics
     ///
     /// Panics if called on the `Turbine` variant.
-    pub fn order_solution(&self) -> &OrderSolution {
+    pub fn quote(&self) -> &Quote {
         match self {
-            Self::Fynd(p) => &p.order_solution,
+            Self::Fynd(p) => &p.quote,
             Self::Turbine(_) => unimplemented!("Turbine signing not yet implemented"),
         }
     }
@@ -122,10 +113,7 @@ impl SignablePayload {
     /// Consume the payload and return its inner parts for use in `execute()`.
     pub(crate) fn into_fynd_parts(
         self,
-    ) -> Result<
-        (OrderSolution, TypedTransaction, bytes::Bytes, bytes::Bytes),
-        crate::error::FyndError,
-    > {
+    ) -> Result<(Quote, TypedTransaction), crate::error::FyndError> {
         match self {
             Self::Fynd(p) => Ok(p.into_parts()),
             Self::Turbine(_) => Err(crate::error::FyndError::Protocol(

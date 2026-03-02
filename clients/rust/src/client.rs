@@ -15,13 +15,13 @@ use reqwest::Client as HttpClient;
 use crate::{
     error::FyndError,
     mapping,
+    mapping::wire_to_batch_quote,
     signing::{
         compute_settled_amount, ExecutionReceipt, FyndPayload, SettledOrder, SignablePayload,
         SignedOrder,
     },
-    types::{BackendKind, HealthStatus, OrderSolution, Quote, QuoteParams},
+    types::{BackendKind, HealthStatus, Quote, QuoteParams},
 };
-
 // ============================================================================
 // RETRY CONFIG
 // ============================================================================
@@ -303,29 +303,18 @@ where
     ///
     /// Retries automatically on transient failures according to the client's [`RetryConfig`].
     pub async fn quote(&self, params: QuoteParams) -> Result<Quote, FyndError> {
-        // Snapshot token_out and receiver before consuming params.
-        // Orders and solutions are parallel arrays — matched by index.
-        let order_token_outs: Vec<Bytes> = params
-            .orders
-            .iter()
-            .map(|o| o.token_out().clone())
-            .collect();
-        let order_receivers: Vec<Bytes> = params
-            .orders
-            .iter()
-            .map(|o| {
-                o.receiver()
-                    .cloned()
-                    .unwrap_or_else(|| o.sender().clone())
-            })
-            .collect();
-
+        let token_out = params.order.token_out().clone();
+        let receiver = params
+            .order
+            .receiver()
+            .unwrap_or_else(|| params.order.sender())
+            .clone();
         let wire_request = mapping::quote_params_to_wire(params)?;
 
         let mut delay = self.retry.initial_backoff;
         for attempt in 0..self.retry.max_attempts {
             match self
-                .do_quote(&wire_request, &order_token_outs, &order_receivers)
+                .do_quote(&wire_request, token_out.clone(), receiver.clone())
                 .await
             {
                 Ok(quote) => return Ok(quote),
@@ -343,8 +332,8 @@ where
     async fn do_quote(
         &self,
         wire_request: &fynd_rpc_types::SolutionRequest,
-        order_token_outs: &[Bytes],
-        order_receivers: &[Bytes],
+        token_out: Bytes,
+        receiver: Bytes,
     ) -> Result<Quote, FyndError> {
         let url = format!("{}/v1/solve", self.base_url);
         let response = self
@@ -358,29 +347,13 @@ where
             return Err(mapping::wire_error_to_fynd(wire_err));
         }
         let wire_solution: fynd_rpc_types::Solution = response.json().await?;
-        let total_gas_estimate = wire_solution.total_gas_estimate.clone();
-        let solve_time_ms = wire_solution.solve_time_ms;
+        let batch_quote = wire_to_batch_quote(wire_solution, token_out, receiver)?;
 
-        // Convert wire order solutions and populate token_out/receiver by index.
-        let orders: Vec<OrderSolution> = wire_solution
-            .orders
-            .into_iter()
-            .enumerate()
-            .map(|(i, ws)| {
-                let solution = OrderSolution::try_from(ws)?;
-                let token_out = order_token_outs
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_default();
-                let receiver = order_receivers
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_default();
-                Ok(solution.with_token_out_and_receiver(token_out, receiver))
-            })
-            .collect::<Result<Vec<_>, FyndError>>()?;
-
-        Ok(Quote::new(orders, total_gas_estimate, solve_time_ms))
+        batch_quote
+            .quotes()
+            .first()
+            .cloned()
+            .ok_or_else(|| FyndError::Protocol("Received empty solution".into()))
     }
 
     /// Get the health status of the Fynd RPC server.
@@ -408,12 +381,12 @@ where
     /// `quote()`). Pass `&SigningHints::default()` to auto-resolve all transaction parameters.
     pub async fn signable_payload(
         &self,
-        solution: OrderSolution,
+        quote: Quote,
         hints: &SigningHints,
     ) -> Result<SignablePayload, FyndError> {
-        match solution.backend() {
+        match quote.backend() {
             BackendKind::Fynd => {
-                self.fynd_signable_payload(solution, hints)
+                self.fynd_signable_payload(quote, hints)
                     .await
             }
             BackendKind::Turbine => {
@@ -424,13 +397,9 @@ where
 
     async fn fynd_signable_payload(
         &self,
-        solution: OrderSolution,
+        quote: Quote,
         hints: &SigningHints,
     ) -> Result<SignablePayload, FyndError> {
-        // Read token_out and receiver from the solution (populated during quote()).
-        let token_out = solution.token_out().clone();
-        let receiver = solution.receiver().clone();
-
         // Resolve sender.
         let sender = hints
             .sender
@@ -464,7 +433,7 @@ where
         // Resolve gas limit.
         let gas_limit = match hints.gas_limit {
             Some(g) => g,
-            None => solution
+            None => quote
                 .gas_estimate()
                 .to_u64()
                 .ok_or_else(|| FyndError::Protocol("gas estimate exceeds u64".into()))?,
@@ -494,7 +463,7 @@ where
         }
 
         let tx = TypedTransaction::Eip1559(tx_eip1559);
-        Ok(SignablePayload::Fynd(Box::new(FyndPayload::new(solution, tx, token_out, receiver))))
+        Ok(SignablePayload::Fynd(Box::new(FyndPayload::new(quote, tx))))
     }
 
     /// Broadcast a signed order and return an [`ExecutionReceipt`] that resolves once the
@@ -505,7 +474,7 @@ where
     /// Wrap it with [`tokio::time::timeout`] to avoid waiting indefinitely.
     pub async fn execute(&self, order: SignedOrder) -> Result<ExecutionReceipt, FyndError> {
         let (payload, signature) = order.into_parts();
-        let (_solution, tx, token_out, receiver) = payload.into_fynd_parts()?;
+        let (solution, tx) = payload.into_fynd_parts()?;
 
         let TypedTransaction::Eip1559(tx_eip1559) = tx else {
             return Err(FyndError::Protocol(
@@ -523,8 +492,8 @@ where
             .map_err(FyndError::Provider)?;
         let tx_hash = *pending.tx_hash();
 
-        let token_out_addr = mapping::bytes_to_alloy_address(&token_out)?;
-        let receiver_addr = mapping::bytes_to_alloy_address(&receiver)?;
+        let token_out_addr = mapping::bytes_to_alloy_address(solution.token_out())?;
+        let receiver_addr = mapping::bytes_to_alloy_address(solution.receiver())?;
         let provider = self.submit_provider.clone();
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move {
@@ -610,12 +579,12 @@ mod tests {
     }
 
     /// Build a minimal valid `OrderSolution` for use in tests.
-    fn make_order_solution() -> crate::types::OrderSolution {
+    fn make_order_solution() -> crate::types::Quote {
         use num_bigint::BigUint;
 
         use crate::types::{BackendKind, BlockInfo, SolutionStatus};
 
-        crate::types::OrderSolution::new(
+        crate::types::Quote::new(
             "test-order-id".to_string(),
             SolutionStatus::Success,
             BackendKind::Fynd,
@@ -625,8 +594,6 @@ mod tests {
             BigUint::from(50_000u64),
             Some(10),
             BlockInfo::new(1_234_567, "0xabcdef".to_string(), 1_700_000_000),
-        )
-        .with_token_out_and_receiver(
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
             bytes::Bytes::copy_from_slice(&[0xcc; 20]),
         )
@@ -678,12 +645,8 @@ mod tests {
             .await
             .expect("quote should succeed");
 
-        assert_eq!(quote.solve_time_ms(), 42);
-        assert_eq!(quote.total_gas_estimate(), &num_bigint::BigUint::from(50_000u64));
-        assert_eq!(quote.orders().len(), 1);
-        let sol = &quote.orders()[0];
-        assert_eq!(sol.order_id(), "abc-123");
-        assert_eq!(sol.amount_out(), &num_bigint::BigUint::from(990_000u64));
+        assert_eq!(quote.order_id(), "abc-123");
+        assert_eq!(quote.amount_out(), &num_bigint::BigUint::from(990_000u64));
     }
 
     #[tokio::test]
@@ -772,7 +735,7 @@ mod tests {
             .quote(make_quote_params())
             .await
             .expect("should succeed after retry");
-        assert_eq!(quote.orders()[0].order_id(), "retry-order");
+        assert_eq!(quote.order_id(), "retry-order");
     }
 
     #[tokio::test]
@@ -1065,6 +1028,6 @@ mod tests {
             None,
         );
 
-        QuoteParams::new(vec![order], QuoteOptions::default())
+        QuoteParams::new(order, QuoteOptions::default())
     }
 }

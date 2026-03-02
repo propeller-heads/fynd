@@ -67,7 +67,7 @@ fn make_quote_params() -> QuoteParams {
 
     let order =
         Order::new(token_in, token_out, BigUint::from(1_000_000u64), OrderSide::Sell, sender, None);
-    QuoteParams::new(vec![order], QuoteOptions::default())
+    QuoteParams::new(order, QuoteOptions::default())
 }
 
 /// Return a minimal valid wire `Solution` JSON with one order.
@@ -114,21 +114,16 @@ async fn full_quote_roundtrip() {
         .await
         .expect("quote should succeed");
 
-    assert_eq!(quote.solve_time_ms(), 42);
-    assert_eq!(quote.total_gas_estimate(), &BigUint::from(50_000u64));
-    assert_eq!(quote.orders().len(), 1);
-
-    let sol = &quote.orders()[0];
-    assert_eq!(sol.order_id(), "order-1");
-    assert_eq!(sol.amount_out(), &BigUint::from(990_000u64));
-    assert_eq!(sol.amount_in(), &BigUint::from(1_000_000u64));
-    assert_eq!(sol.gas_estimate(), &BigUint::from(50_000u64));
-    assert_eq!(sol.price_impact_bps(), Some(10));
+    assert_eq!(quote.order_id(), "order-1");
+    assert_eq!(quote.amount_out(), &BigUint::from(990_000u64));
+    assert_eq!(quote.amount_in(), &BigUint::from(1_000_000u64));
+    assert_eq!(quote.gas_estimate(), &BigUint::from(50_000u64));
+    assert_eq!(quote.price_impact_bps(), Some(10));
 
     // token_out and receiver should be populated from the request Order.
-    assert_eq!(sol.token_out(), &bytes::Bytes::copy_from_slice(&[0xbb; 20]));
+    assert_eq!(quote.token_out(), &bytes::Bytes::copy_from_slice(&[0xbb; 20]));
     // receiver defaults to sender when not explicitly set.
-    assert_eq!(sol.receiver(), &bytes::Bytes::copy_from_slice(&[0xcc; 20]));
+    assert_eq!(quote.receiver(), &bytes::Bytes::copy_from_slice(&[0xcc; 20]));
 
     server.verify().await;
 }
@@ -194,7 +189,7 @@ async fn quote_retries_once_then_succeeds() {
         .await
         .expect("quote should succeed after one retry");
 
-    assert_eq!(quote.orders()[0].order_id(), "retry-ok");
+    assert_eq!(quote.order_id(), "retry-ok");
 }
 
 /// Quote with a multi-hop route: verify all swaps are deserialized correctly.
@@ -257,8 +252,7 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
         .await
         .expect("multi-hop quote should succeed");
 
-    let sol = &quote.orders()[0];
-    let route = sol
+    let route = quote
         .route()
         .expect("route should be present");
     assert_eq!(route.swaps().len(), 2);
@@ -340,16 +334,15 @@ async fn quote_populates_token_out_and_receiver_from_order() {
         Some(receiver.clone()),
     );
 
-    let params = QuoteParams::new(vec![order], QuoteOptions::default());
+    let params = QuoteParams::new(order, QuoteOptions::default());
     let (client, _asserter) = make_client(server.uri(), RetryConfig::default(), None);
     let quote = client
         .quote(params)
         .await
         .expect("quote should succeed");
 
-    let sol = &quote.orders()[0];
-    assert_eq!(sol.token_out(), &token_out);
-    assert_eq!(sol.receiver(), &receiver);
+    assert_eq!(quote.token_out(), &token_out);
+    assert_eq!(quote.receiver(), &receiver);
 
     server.verify().await;
 }
@@ -378,15 +371,14 @@ async fn quote_receiver_defaults_to_sender_when_none() {
         None, // no receiver
     );
 
-    let params = QuoteParams::new(vec![order], QuoteOptions::default());
+    let params = QuoteParams::new(order, QuoteOptions::default());
     let (client, _asserter) = make_client(server.uri(), RetryConfig::default(), None);
     let quote = client
         .quote(params)
         .await
         .expect("quote should succeed");
 
-    let sol = &quote.orders()[0];
-    assert_eq!(sol.receiver(), &sender, "receiver should default to sender");
+    assert_eq!(quote.receiver(), &sender, "receiver should default to sender");
 
     server.verify().await;
 }
@@ -416,8 +408,6 @@ async fn full_quote_then_signable_payload_with_all_hints() {
         .await
         .expect("quote should succeed");
 
-    let solution = quote.orders()[0].clone();
-
     let hints = SigningHints {
         sender: Some(sender),
         nonce: Some(7),
@@ -428,7 +418,7 @@ async fn full_quote_then_signable_payload_with_all_hints() {
     };
 
     let payload = client
-        .signable_payload(solution, &hints)
+        .signable_payload(quote, &hints)
         .await
         .expect("signable_payload should succeed");
 
@@ -481,11 +471,10 @@ async fn full_quote_then_signable_payload_resolves_from_provider() {
     });
     asserter.push_success(&fee_history); // eth_feeHistory
 
-    let solution = quote.orders()[0].clone();
     let hints = SigningHints::default(); // no overrides — resolved from provider
 
     let payload = client
-        .signable_payload(solution, &hints)
+        .signable_payload(quote, &hints)
         .await
         .expect("signable_payload should succeed");
 

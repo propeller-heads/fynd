@@ -4,16 +4,16 @@
 //! compatibility guarantees with the server.
 
 use fynd_rpc_types as wire;
+use fynd_rpc_types::{OrderSolution, Solution};
 use tycho_simulation::tycho_common::models::Address as TychoAddress;
 
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BlockInfo, HealthStatus, Order, OrderSide, OrderSolution, Quote, QuoteOptions,
+        BackendKind, BatchQuote, BlockInfo, HealthStatus, Order, OrderSide, Quote, QuoteOptions,
         QuoteParams, Route, SolutionStatus, Swap,
     },
 };
-
 // ============================================================================
 // ADDRESS CONVERSION HELPERS
 // ============================================================================
@@ -53,12 +53,8 @@ fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
 pub(crate) fn quote_params_to_wire(
     params: QuoteParams,
 ) -> Result<wire::SolutionRequest, FyndError> {
-    let orders = params
-        .orders
-        .into_iter()
-        .map(wire::Order::try_from)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(wire::SolutionRequest { orders, options: params.options.into() })
+    let order = wire::Order::try_from(params.order)?;
+    Ok(wire::SolutionRequest { orders: vec![order], options: params.options.into() })
 }
 
 impl TryFrom<Order> for wire::Order {
@@ -106,41 +102,43 @@ impl From<QuoteOptions> for wire::SolutionOptions {
 // WIRE FORMAT → CLIENT TYPES
 // ============================================================================
 
-impl TryFrom<wire::Solution> for Quote {
-    type Error = FyndError;
-
-    fn try_from(wire: wire::Solution) -> Result<Self, Self::Error> {
-        let orders = wire
-            .orders
-            .into_iter()
-            .map(OrderSolution::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Quote::new(orders, wire.total_gas_estimate, wire.solve_time_ms))
-    }
+pub(crate) fn wire_to_quote(
+    ws: OrderSolution,
+    token_out: bytes::Bytes,
+    receiver: bytes::Bytes,
+) -> Result<Quote, FyndError> {
+    let status = SolutionStatus::from(ws.status);
+    let route = ws
+        .route
+        .map(Route::try_from)
+        .transpose()?;
+    let block = BlockInfo::from(ws.block);
+    Ok(Quote::new(
+        ws.order_id,
+        status,
+        BackendKind::Fynd,
+        route,
+        ws.amount_in,
+        ws.amount_out,
+        ws.gas_estimate,
+        ws.price_impact_bps,
+        block,
+        token_out,
+        receiver,
+    ))
 }
 
-impl TryFrom<wire::OrderSolution> for OrderSolution {
-    type Error = FyndError;
-
-    fn try_from(ws: wire::OrderSolution) -> Result<Self, Self::Error> {
-        let status = SolutionStatus::from(ws.status);
-        let route = ws
-            .route
-            .map(Route::try_from)
-            .transpose()?;
-        let block = BlockInfo::from(ws.block);
-        Ok(OrderSolution::new(
-            ws.order_id,
-            status,
-            BackendKind::Fynd,
-            route,
-            ws.amount_in,
-            ws.amount_out,
-            ws.gas_estimate,
-            ws.price_impact_bps,
-            block,
-        ))
-    }
+pub(crate) fn wire_to_batch_quote(
+    ws: Solution,
+    token_out: bytes::Bytes,
+    receiver: bytes::Bytes,
+) -> Result<BatchQuote, FyndError> {
+    let quotes = ws
+        .orders
+        .into_iter()
+        .map(|os| wire_to_quote(os, token_out.clone(), receiver.clone()))
+        .collect::<Result<Vec<Quote>, _>>()?;
+    Ok(BatchQuote::new(quotes, ws.total_gas_estimate, ws.solve_time_ms))
 }
 
 impl From<wire::SolutionStatus> for SolutionStatus {
@@ -321,9 +319,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn order_solution_try_from_wire_drops_amount_out_net_gas_and_defaults_to_fynd() {
+    fn quote_try_from_wire_drops_amount_out_net_gas_and_defaults_to_fynd() {
         let ws = sample_wire_order_solution();
-        let solution = OrderSolution::try_from(ws).unwrap();
+        let solution = wire_to_quote(ws, Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(solution.order_id(), "test-order-id");
         assert!(matches!(solution.status(), SolutionStatus::Success));
         assert!(matches!(solution.backend(), BackendKind::Fynd));
