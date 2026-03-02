@@ -39,7 +39,7 @@ pub const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 // TODO: Consider moving MockProtocolSim to the tycho-common
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MockProtocolSim {
-    /// Sport price is a pre-fee ration of token with larger address to smaller address
+    /// Pre-fee exchange rate from smaller-address token to larger-address token
     /// (e.g., if token A address < token B address, amount_B = amount_A * spot_price * (1 - fee))
     pub spot_price: u32,
     /// Gas to report for each swap
@@ -88,14 +88,14 @@ impl ProtocolSim for MockProtocolSim {
         self.fee
     }
 
-    /// Note that spot_price does not account for swap direction
+    /// Returns a direction-dependent spot price with fee markup applied.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let post_fee_spot_price = self.spot_price.to_f64().unwrap() / (1.0 - self.fee);
         // In order to have asymmetric spot prices based on token order, we define:
         if base.address < quote.address {
-            Ok(1.0 / post_fee_spot_price)
-        } else {
             Ok(post_fee_spot_price)
+        } else {
+            Ok(1.0 / post_fee_spot_price)
         }
     }
 
@@ -426,17 +426,17 @@ mod tests {
         let (token_low, token_high) = ordered_tokens();
         let sim = MockProtocolSim::new(4); // spot_price = 4, no fee
 
-        // When base < quote: returns 1/spot_price
+        // When base < quote: returns spot_price
         let price_low_to_high = sim
             .spot_price(&token_low, &token_high)
             .unwrap();
-        assert_eq!(price_low_to_high, 0.25); // 1/4
+        assert_eq!(price_low_to_high, 4.0);
 
-        // When base > quote: returns spot_price
+        // When base > quote: returns 1/spot_price
         let price_high_to_low = sim
             .spot_price(&token_high, &token_low)
             .unwrap();
-        assert_eq!(price_high_to_low, 4.0);
+        assert_eq!(price_high_to_low, 0.25); // 1/4
     }
 
     #[test]
@@ -446,17 +446,17 @@ mod tests {
         // post_fee_spot_price = 2 / (1 - 0.5) = 4
         let sim = MockProtocolSim::new(2).with_fee(0.5);
 
-        // When base < quote: returns 1/post_fee_spot_price = 1/4 = 0.25
+        // When base < quote: returns post_fee_spot_price = 4.0
         let price_low_to_high = sim
             .spot_price(&token_low, &token_high)
             .unwrap();
-        assert_eq!(price_low_to_high, 0.25);
+        assert_eq!(price_low_to_high, 4.0);
 
-        // When base > quote: returns post_fee_spot_price = 4.0
+        // When base > quote: returns 1/post_fee_spot_price = 1/4 = 0.25
         let price_high_to_low = sim
             .spot_price(&token_high, &token_low)
             .unwrap();
-        assert_eq!(price_high_to_low, 4.0);
+        assert_eq!(price_high_to_low, 0.25);
     }
 
     // ==================== get_amount_out() Tests ====================

@@ -520,7 +520,7 @@ mod tests {
 
         let comp = PoolDepthComputation::new(0.5).unwrap();
 
-        // spot_price=2: new_state has spot_price=3, impact = |1/3 - 1/2| / (1/2) = 1/3 ≈ 33% <= 50%
+        // spot_price=2: new_state has spot_price=3, impact = |3 - 2| / 2 = 1/2 = 50%
         let sim = MockProtocolSim::new(2).with_liquidity(1_000_000);
         let depth = comp
             .find_depth_binary_search(&sim, &token_a, &token_b, &"mock_pool".into())
@@ -538,11 +538,11 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // spot_price=100, fee=1%. The mock's spot_price() includes fee markup: raw/(1-fee).
-        // After swap: new spot_price=101. Price impact based on spot prices:
-        // initial = 1/(100/0.99), new = 1/(101/0.99) → impact = |new-initial|/initial = 1/100 = 1%
+        // spot_price=200, fee=1%. The mock's spot_price() includes fee markup: raw/(1-fee).
+        // After swap: new spot_price=201. Price impact based on spot prices:
+        // initial = 200/0.99, new = 201/0.99 → impact = |new-initial|/initial = 1/200 = 0.5%
         // With default threshold 1%, this should pass (impact <= threshold).
-        let sim = MockProtocolSim::new(100)
+        let sim = MockProtocolSim::new(200)
             .with_liquidity(1_000_000)
             .with_fee(0.01);
         let comp = PoolDepthComputation::default();

@@ -1447,7 +1447,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // MockProtocolSim multiplies by spot_price for ALL directions (doesn't use reciprocal).
+        // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out.
         // After the first swap, spot_price increments to 3.
         let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
