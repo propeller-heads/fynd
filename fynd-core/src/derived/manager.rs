@@ -409,7 +409,7 @@ mod tests {
         let usdc = token(2, "USDC");
 
         let (market, _) =
-            setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000).with_gas(0))]);
+            setup_market(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0).with_gas(0))]);
 
         let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
         let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();

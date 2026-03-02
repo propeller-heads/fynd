@@ -622,7 +622,7 @@ mod tests {
         let usdc = token(1, "USDC");
 
         let (graph_manager, spot_prices) =
-            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))])
+            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))])
                 .await;
 
         let computation = computation_for(&eth.address);
@@ -649,8 +649,8 @@ mod tests {
         let target = token(3, "TARGET");
 
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("hop1", &eth, &mid, MockProtocolSim::new(2)),
-            ("hop2", &mid, &target, MockProtocolSim::new(3)),
+            ("hop1", &eth, &mid, MockProtocolSim::new(2.0)),
+            ("hop2", &mid, &target, MockProtocolSim::new(3.0)),
         ])
         .await;
 
@@ -683,9 +683,9 @@ mod tests {
         let c = token(4, "C");
 
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2)),
-            ("a_b", &a, &b, MockProtocolSim::new(2)),
-            ("b_c", &b, &c, MockProtocolSim::new(2)),
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_b", &a, &b, MockProtocolSim::new(2.0)),
+            ("b_c", &b, &c, MockProtocolSim::new(2.0)),
         ])
         .await;
 
@@ -721,8 +721,8 @@ mod tests {
 
         // Two pools with different spot prices
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000)),
-            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000)),
+            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
+            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
         ])
         .await;
 
@@ -787,7 +787,7 @@ mod tests {
             "pool",
             &eth,
             &usdc,
-            MockProtocolSim::new(2000)
+            MockProtocolSim::new(2000.0)
                 .with_gas(gas_units)
                 .with_fee(0.1),
         )])
@@ -837,7 +837,7 @@ mod tests {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let spot_price: u32 = 2000;
+        let spot_price: f64 = 2000.0;
         let gas_units: u64 = 50_000;
 
         let (market, derived) = setup_test_env(vec![(
@@ -918,20 +918,20 @@ mod tests {
                 "eth_a",
                 &eth,
                 &a,
-                MockProtocolSim::new(2)
+                MockProtocolSim::new(2.0)
                     .with_fee(0.1)
                     .with_gas(0),
             ),
-            ("a_c", &a, &c, MockProtocolSim::new(5).with_gas(0)),
+            ("a_c", &a, &c, MockProtocolSim::new(5.0).with_gas(0)),
             (
                 "eth_b",
                 &eth,
                 &b,
-                MockProtocolSim::new(3)
+                MockProtocolSim::new(3.0)
                     .with_fee(0.05)
                     .with_gas(0),
             ),
-            ("b_c", &b, &c, MockProtocolSim::new(2).with_gas(0)),
+            ("b_c", &b, &c, MockProtocolSim::new(2.0).with_gas(0)),
         ])
         .await;
         let changed = ChangedComponents::default();
@@ -997,7 +997,7 @@ mod tests {
         let usdc = token(1, "USDC");
 
         // Create market without spot prices set
-        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
         let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
@@ -1020,7 +1020,7 @@ mod tests {
 
         // Create a pool that doesn't include ETH (gas token)
         let (market, derived) =
-            setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1))]).await;
+            setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1.0))]).await;
         let changed = ChangedComponents::default();
 
         let computation = computation_for(&eth.address);
@@ -1049,7 +1049,7 @@ mod tests {
         let mut market = SharedMarketData::new();
         let comp = component("pool", &[eth.clone(), usdc.clone()]);
         market.upsert_components(std::iter::once(comp));
-        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000)) as _)]);
+        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth.clone(), usdc.clone()]);
         let market = SharedMarketData::new_shared();
 

@@ -243,8 +243,8 @@ mod tests {
         ]);
         market.upsert_tokens([token_a.clone(), token_b.clone(), token_c.clone()]);
         market.update_states([
-            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2)) as Box<dyn ProtocolSim>),
-            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3)) as Box<dyn ProtocolSim>),
+            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>),
+            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
         ]);
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
