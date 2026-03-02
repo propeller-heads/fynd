@@ -648,7 +648,7 @@ mod tests {
         let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
 
         let (sell_limit, buy_limit) = sim
-            .get_limits(addr(1).into(), addr(2).into())
+            .get_limits(addr(1), addr(2))
             .unwrap();
 
         assert_eq!(buy_limit, BigUint::from(8_000u64));
@@ -665,7 +665,7 @@ mod tests {
             .with_fee(0.5);
 
         let (sell_limit, buy_limit) = sim
-            .get_limits(addr(1).into(), addr(2).into())
+            .get_limits(addr(1), addr(2))
             .unwrap();
 
         assert_eq!(buy_limit, BigUint::from(1_000u64));
@@ -795,7 +795,7 @@ mod tests {
         let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
 
         let (sell_limit, _) = sim
-            .get_limits(addr(1).into(), addr(2).into())
+            .get_limits(addr(1), addr(2))
             .unwrap();
 
         assert_eq!(sell_limit, BigUint::from(2_000u64));
@@ -808,7 +808,7 @@ mod tests {
         let sim = MockProtocolSim::new(4.0).with_liquidity(8_000);
 
         let (sell_limit, buy_limit) = sim
-            .get_limits(addr(2).into(), addr(1).into())
+            .get_limits(addr(2), addr(1))
             .unwrap();
 
         assert_eq!(buy_limit, BigUint::from(8_000u64));
