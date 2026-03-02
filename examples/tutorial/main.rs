@@ -480,8 +480,9 @@ async fn fetch_amm_components(
     // TODO: Remove balancerv3 filtering
     let amm_protocols: Vec<_> = protocol_systems
         .iter()
-        .filter(|p| !p.starts_with("rfq:") && !p.contains("balancer_v3"))
-        .cloned()
+        .filter(|p| {
+            !p.starts_with("rfq:") && !p.contains("balancer_v3") && !p.contains("rocketpool")
+        })
         .collect();
 
     for protocol in amm_protocols {
