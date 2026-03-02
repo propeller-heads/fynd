@@ -20,13 +20,12 @@ pub struct Encoder {
 impl Encoder {
     pub fn new(
         chain: Chain,
-        transfer_type: UserTransferType,
         swap_encoder_registry: SwapEncoderRegistry,
     ) -> Result<Self, SolveError> {
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
                 .chain(chain)
-                .user_transfer_type(transfer_type.clone())
+                .user_transfer_type(UserTransferType::TransferFrom)
                 .swap_encoder_registry(swap_encoder_registry)
                 .build()?,
         })
@@ -41,7 +40,7 @@ impl Encoder {
         //   use the self.market_data to get the ProtocolComponent and ProtocolSim
         // call self.tycho_encoder.encode_solutions()
         // Encode the full tycho call,
-        //   - use signer if it's not None for permit2
+        //   - use permit2 options if they are passed
         //   - set a meaningful min amount out with the slippage value
         //   - create a Transaction and put it in the OrderSolution
         // return all the OrderSolutions

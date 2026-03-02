@@ -30,6 +30,8 @@ use tycho_simulation::{
 };
 use uuid::Uuid;
 
+use tycho_execution::encoding::models::UserTransferType;
+
 use super::primitives::ComponentId;
 use crate::AlgorithmError;
 
@@ -68,11 +70,48 @@ pub struct SolutionOptions {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingOptions {
     pub slippage: f64,
-    // Only needed for permit2 signing
-    pub swapper_pk: Option<String>,
+    /// Token transfer method. Defaults to `TransferFrom`.
+    #[serde(default = "default_transfer_type")]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `TransferFromPermit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Bytes>,
+}
+
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    pub nonce: BigUint,
 }
 
 // ============================================================================
@@ -483,6 +522,10 @@ impl Swap {
 // ============================================================================
 
 /// Generates a unique order ID using UUID v4.
+fn default_transfer_type() -> UserTransferType {
+    UserTransferType::TransferFrom
+}
+
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()
 }

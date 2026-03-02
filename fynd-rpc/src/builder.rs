@@ -15,9 +15,7 @@ use fynd_core::{
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
-use tycho_execution::encoding::{
-    evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry, models::UserTransferType,
-};
+use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
@@ -52,7 +50,6 @@ pub struct FyndBuilder {
     order_manager_min_responses: usize,
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
-    user_transfer_type: UserTransferType,
 }
 
 impl FyndBuilder {
@@ -82,7 +79,6 @@ impl FyndBuilder {
             order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
-            user_transfer_type: UserTransferType::TransferFrom,
         }
     }
 
@@ -155,12 +151,6 @@ impl FyndBuilder {
     /// Sets the blacklist configuration for filtering components.
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.blacklist = blacklist;
-        self
-    }
-
-    /// Sets user transfer type (to use during encoding)
-    pub fn user_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
-        self.user_transfer_type = transfer_type;
         self
     }
 
@@ -283,7 +273,7 @@ impl FyndBuilder {
             .add_default_encoders(None)
             .expect("Failed to get default SwapEncoderRegistry");
 
-        let encoder = Encoder::new(self.chain, self.user_transfer_type, swap_encoder_registry)?;
+        let encoder = Encoder::new(self.chain, swap_encoder_registry)?;
 
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)

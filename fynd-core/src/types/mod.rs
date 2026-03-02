@@ -18,7 +18,8 @@ pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
 // Re-export public solution types
 pub use solution::{
-    BlockInfo, EncodingOptions, Order, OrderSide, OrderSolution, OrderValidationError, Route,
-    RouteResult, RouteValidationError, SingleOrderSolution, Solution, SolutionOptions,
-    SolutionRequest, SolutionStatus, Swap, Transaction,
+    BlockInfo, EncodingOptions, Order, OrderSide, OrderSolution, OrderValidationError,
+    PermitDetails, PermitSingle, Route, RouteResult, RouteValidationError, SingleOrderSolution,
+    Solution, SolutionOptions, SolutionRequest, SolutionStatus, Swap, Transaction,
 };
+pub use tycho_execution::encoding::models::UserTransferType;

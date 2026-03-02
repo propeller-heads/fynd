@@ -622,6 +622,7 @@ mod tests {
             timeout_ms: None,
             min_responses: None,
             max_gas: max_gas.map(BigUint::from),
+            encoding_options: None,
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());

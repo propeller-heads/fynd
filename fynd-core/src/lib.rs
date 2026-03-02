@@ -35,8 +35,9 @@ pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgori
 pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
     BlockInfo, ComponentId, EncodingOptions, Order, OrderSide, OrderSolution, OrderValidationError,
-    Route, RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
-    SolutionStatus, SolveError, SolveResult, Swap, TaskId, Transaction,
+    PermitDetails, PermitSingle, Route, RouteValidationError, SingleOrderSolution, Solution,
+    SolutionOptions, SolutionRequest, SolutionStatus, SolveError, SolveResult, Swap, TaskId,
+    Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

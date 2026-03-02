@@ -45,16 +45,71 @@ pub struct SolutionOptions {
     pub max_gas: Option<BigUint>,
     pub encoding_options: Option<EncodingOptions>,
 }
+/// Token transfer method for moving funds into Tycho execution.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTransferType {
+    /// Use Permit2 for token transfer. Requires `permit` and `signature`.
+    TransferFromPermit2,
+    /// Use standard ERC-20 approval and `transferFrom`. Default.
+    #[default]
+    TransferFrom,
+    /// Use funds already present in the Tycho Router (no transfer performed).
+    None,
+}
+
 #[serde_as]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EncodingOptions {
-    #[schema(example = "true")]
     #[serde_as(as = "DisplayFromStr")]
     #[schema(example = "0.001")]
     pub slippage: f64,
-    // Only needed for permit2 signing
-    #[schema(value_type = Option<String>, example = "None")]
-    pub swapper_pk: Option<String>,
+    /// Token transfer method. Defaults to `transfer_from`.
+    #[serde(default)]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `transfer_from_permit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "0xabcd...")]
+    pub signature: Option<Bytes>,
+}
+
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "0")]
+    pub nonce: BigUint,
 }
 
 // ============================================================================
@@ -306,9 +361,36 @@ impl From<SolutionOptions> for fynd_core::SolutionOptions {
     }
 }
 
+impl From<UserTransferType> for fynd_core::UserTransferType {
+    fn from(dto: UserTransferType) -> Self {
+        match dto {
+            UserTransferType::TransferFromPermit2 => Self::TransferFromPermit2,
+            UserTransferType::TransferFrom => Self::TransferFrom,
+            UserTransferType::None => Self::None,
+        }
+    }
+}
+
 impl From<EncodingOptions> for fynd_core::EncodingOptions {
     fn from(dto: EncodingOptions) -> Self {
-        Self { slippage: dto.slippage, swapper_pk: dto.swapper_pk }
+        Self {
+            slippage: dto.slippage,
+            transfer_type: dto.transfer_type.into(),
+            permit: dto.permit.map(Into::into),
+            signature: dto.signature,
+        }
+    }
+}
+
+impl From<PermitSingle> for fynd_core::PermitSingle {
+    fn from(dto: PermitSingle) -> Self {
+        Self { details: dto.details.into(), spender: dto.spender, sig_deadline: dto.sig_deadline }
+    }
+}
+
+impl From<PermitDetails> for fynd_core::PermitDetails {
+    fn from(dto: PermitDetails) -> Self {
+        Self { token: dto.token, amount: dto.amount, expiration: dto.expiration, nonce: dto.nonce }
     }
 }
 
@@ -498,7 +580,12 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
+            options: SolutionOptions {
+                timeout_ms: Some(5000),
+                min_responses: None,
+                max_gas: None,
+                encoding_options: None,
+            },
         };
 
         let core: fynd_core::SolutionRequest = dto.clone().into();
