@@ -230,6 +230,9 @@ pub struct OrderSolution {
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub gas_price: Option<BigUint>,
     pub transaction: Option<Transaction>,
 }
 
@@ -310,6 +313,8 @@ pub struct RouteResult {
     pub route: Route,
     /// Net amount out after accounting for gas costs in output token terms.
     pub net_amount_out: BigInt,
+    /// Effective gas price (in wei) at the time the route was computed.
+    pub gas_price: BigUint,
 }
 
 impl Route {

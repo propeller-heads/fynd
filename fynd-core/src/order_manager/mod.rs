@@ -308,6 +308,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: any_sol.block.clone(),
                 algorithm: String::new(),
+                gas_price: None,
                 transaction: None,
             }
         } else {
@@ -353,6 +354,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
                 algorithm: String::new(),
+                gas_price: None,
                 transaction: None,
             }
         }
@@ -404,6 +406,7 @@ mod tests {
                 amount_out_net_gas: BigUint::from(amount_out_net_gas),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                 algorithm: "test".to_string(),
+                gas_price: None,
                 transaction: None,
             },
             solve_time_ms: 5,
@@ -586,6 +589,7 @@ mod tests {
                     amount_out_net_gas: BigUint::from(900u64),
                     block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                     algorithm: "test".to_string(),
+                    gas_price: None,
                     transaction: None,
                 },
             )],

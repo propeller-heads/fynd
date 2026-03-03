@@ -193,6 +193,11 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "20000000000")]
+    pub gas_price: Option<BigUint>,
     pub transaction: Option<Transaction>,
 }
 
@@ -439,6 +444,7 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
             price_impact_bps: core.price_impact_bps,
             amount_out_net_gas: core.amount_out_net_gas,
             block: core.block.into(),
+            gas_price: core.gas_price,
             transaction: core.transaction.map(Into::into),
         }
     }
