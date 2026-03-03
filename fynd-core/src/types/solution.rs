@@ -70,15 +70,20 @@ pub struct SolutionOptions {
 /// Per-request price guard options.
 ///
 /// All fields are optional; omitted fields use defaults
-/// (enabled: true, tolerance_bps: 300, allow_on_provider_error: false).
+/// (enabled: true, lower_tolerance_bps: 300, upper_tolerance_bps: 10_000, allow_on_provider_error:
+/// false).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PriceGuardOptions {
     /// Whether price guard validation is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// Maximum allowed deviation in basis points (1 bps = 0.01%).
+    /// Maximum allowed deviation below external price in basis points (1 bps = 0.01%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tolerance_bps: Option<u32>,
+    pub lower_tolerance_bps: Option<u32>,
+    /// Maximum allowed deviation above external price in basis points (1 bps = 0.01%).
+    /// Rejects suspiciously high outputs (stale external price or simulation bug).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_tolerance_bps: Option<u32>,
     /// Allow solutions through when all price providers error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_on_provider_error: Option<bool>,

@@ -141,8 +141,11 @@ impl OrderManager {
             if let Some(enabled) = opts.enabled {
                 config = config.with_enabled(enabled);
             }
-            if let Some(bps) = opts.tolerance_bps {
-                config = config.with_tolerance_bps(bps);
+            if let Some(bps) = opts.lower_tolerance_bps {
+                config = config.with_lower_tolerance_bps(bps);
+            }
+            if let Some(bps) = opts.upper_tolerance_bps {
+                config = config.with_upper_tolerance_bps(bps);
             }
             if let Some(allow) = opts.allow_on_provider_error {
                 config = config.with_allow_on_provider_error(allow);

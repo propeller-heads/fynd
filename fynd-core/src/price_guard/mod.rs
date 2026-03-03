@@ -114,24 +114,24 @@ impl PriceGuard {
                             break;
                         }
 
-                        if solution.amount_out >= *external_price.expected_amount_out() {
-                            // User gets more than or equal to expected — always passes
-                            any_validated = true;
-                            debug!(
-                                source = external_price.source(),
-                                "price check passed (amount_out >= expected)"
-                            );
-                            break;
-                        }
-
-                        let diff = external_price.expected_amount_out() - &solution.amount_out;
-                        let deviation_bps = (&diff * BigUint::from(10_000u32)) /
-                            external_price.expected_amount_out();
+                        let expected = external_price.expected_amount_out();
+                        let above = solution.amount_out >= *expected;
+                        let diff = if above {
+                            &solution.amount_out - expected
+                        } else {
+                            expected - &solution.amount_out
+                        };
+                        let deviation_bps = (&diff * BigUint::from(10_000u32)) / expected;
                         let deviation_bps_u32: u32 = deviation_bps
                             .try_into()
                             .unwrap_or(u32::MAX);
+                        let tolerance = if above {
+                            config.upper_tolerance_bps()
+                        } else {
+                            config.lower_tolerance_bps()
+                        };
 
-                        if deviation_bps_u32 <= config.tolerance_bps() {
+                        if deviation_bps_u32 <= tolerance {
                             any_validated = true;
                             debug!(
                                 source = external_price.source(),
@@ -139,14 +139,15 @@ impl PriceGuard {
                                 "price check passed"
                             );
                             break;
-                        } else {
-                            warn!(
-                                source = external_price.source(),
-                                deviation_bps = deviation_bps_u32,
-                                tolerance_bps = config.tolerance_bps(),
-                                "price check failed for provider"
-                            );
                         }
+                        let bound = if above { "upper" } else { "lower" };
+                        warn!(
+                            source = external_price.source(),
+                            deviation_bps = deviation_bps_u32,
+                            tolerance,
+                            bound,
+                            "price check failed for provider"
+                        );
                     }
                     Err(e) => {
                         warn!(error = %e, "price provider error");
@@ -333,7 +334,7 @@ mod tests {
     async fn provider_agrees_within_tolerance_passes() {
         // Solution: amount_out = 970. Provider expects 1000. Deviation = 30/1000 = 300 bps.
         // Tolerance = 300 bps → passes exactly.
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 970)];
@@ -347,7 +348,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_rejects_beyond_tolerance() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 960)];
@@ -360,8 +361,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn amount_out_exceeds_expected_always_passes() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(0);
+    async fn amount_out_exceeds_expected_within_upper_tolerance_passes() {
+        // amount_out=950, expected=900 → excess=50/900 ≈ 555 bps, within default 10_000 bps
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(0);
         let guard = make_guard(vec![fixed(900)]);
 
         let solutions = vec![make_solution(1000, 950)];
@@ -375,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn amount_out_equals_expected_passes() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(0);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(0);
         let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 1000)];
@@ -389,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_provider_validates_despite_other_rejecting() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed_named(1000, "strict"), fixed_named(970, "lenient")]);
 
         let solutions = vec![make_solution(1000, 960)];
@@ -403,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_provider_fails_other_validates() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![failing(), fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 980)];
@@ -493,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_expected_amount_treated_as_pass() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(0);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(0);
         let guard = make_guard(vec![zero_price()]);
 
         let solutions = vec![make_solution(1000, 1)];
@@ -507,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_solutions_validated_independently() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed(1000)]);
 
         let solution_a = {
@@ -560,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn boundary_deviation_exactly_at_tolerance_passes() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed(10_000)]);
 
         let solutions = vec![make_solution(10_000, 9700)];
@@ -574,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn boundary_deviation_one_above_tolerance_fails() {
-        let config = PriceGuardConfig::default().with_tolerance_bps(300);
+        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = make_guard(vec![fixed(10_000)]);
 
         let solutions = vec![make_solution(10_000, 9699)];
@@ -584,5 +586,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
+    }
+
+    #[tokio::test]
+    async fn amount_out_within_upper_tolerance_passes() {
+        // expected=1000, amount_out=1500 → excess=500/1000 = 5000 bps
+        // upper_tolerance=10_000 bps (100%) → passes
+        let config = PriceGuardConfig::default().with_upper_tolerance_bps(10_000);
+        let guard = make_guard(vec![fixed(1000)]);
+
+        let solutions = vec![make_solution(1000, 1500)];
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(result[0].status, SolutionStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn amount_out_exceeds_upper_tolerance_fails() {
+        // expected=1000, amount_out=2500 → excess=1500/1000 = 15000 bps
+        // upper_tolerance=10_000 bps (100%) → rejected
+        let config = PriceGuardConfig::default().with_upper_tolerance_bps(10_000);
+        let guard = make_guard(vec![fixed(1000)]);
+
+        let solutions = vec![make_solution(1000, 2500)];
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
+    }
+
+    #[tokio::test]
+    async fn amount_out_exactly_at_upper_tolerance_passes() {
+        // expected=1000, amount_out=2000 → excess=1000/1000 = 10000 bps
+        // upper_tolerance=10_000 bps (100%) → boundary, should pass
+        let config = PriceGuardConfig::default().with_upper_tolerance_bps(10_000);
+        let guard = make_guard(vec![fixed(1000)]);
+
+        let solutions = vec![make_solution(1000, 2000)];
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(result[0].status, SolutionStatus::Success);
     }
 }
