@@ -191,6 +191,11 @@ fn create_default_request() -> Result<SolutionRequest, Box<dyn std::error::Error
             sender: Address::from_str("0x0000000000000000000000000000000000000001")?,
             receiver: None,
         }],
-        options: SolutionOptions { timeout_ms: Some(10000), min_responses: None, max_gas: None },
+        options: SolutionOptions {
+            timeout_ms: Some(10000),
+            min_responses: None,
+            max_gas: None,
+            encoding_options: None,
+        },
     })
 }

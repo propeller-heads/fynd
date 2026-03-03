@@ -6,7 +6,7 @@
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{tycho_common::models::Address, tycho_core::Bytes};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -43,6 +43,38 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+
+/// Token transfer method for moving funds into Tycho execution.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTransferType {
+    /// Use Permit2 for token transfer. Requires `permit` and `signature`.
+    TransferFromPermit2,
+    /// Use standard ERC-20 approval and `transferFrom`. Default.
+    #[default]
+    TransferFrom,
+    /// Use funds already present in the Tycho Router (no transfer performed).
+    None,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodingOptions {
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(example = "0.001")]
+    pub slippage: f64,
+    /// Token transfer method. Defaults to `transfer_from`.
+    #[serde(default)]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `transfer_from_permit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "0xabcd...")]
+    pub signature: Option<Bytes>,
 }
 
 // ============================================================================
@@ -335,7 +367,23 @@ impl From<SolutionRequest> for fynd_core::SolutionRequest {
 
 impl From<SolutionOptions> for fynd_core::SolutionOptions {
     fn from(dto: SolutionOptions) -> Self {
-        Self { timeout_ms: dto.timeout_ms, min_responses: dto.min_responses, max_gas: dto.max_gas }
+        Self {
+            timeout_ms: dto.timeout_ms,
+            min_responses: dto.min_responses,
+            max_gas: dto.max_gas,
+            encoding_options: dto.encoding_options.map(Into::into),
+        }
+    }
+}
+
+impl From<EncodingOptions> for fynd_core::EncodingOptions {
+    fn from(dto: EncodingOptions) -> Self {
+        Self {
+            slippage: dto.slippage,
+            transfer_type: dto.transfer_type.into(),
+            permit: dto.permit.map(Into::into),
+            signature: dto.signature,
+        }
     }
 }
 
@@ -469,7 +517,12 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
+            options: SolutionOptions {
+                timeout_ms: Some(5000),
+                min_responses: None,
+                max_gas: None,
+                encoding_options: None,
+            },
         };
 
         let core: fynd_core::SolutionRequest = dto.clone().into();

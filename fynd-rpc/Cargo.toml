@@ -26,6 +26,7 @@ tracing.workspace = true
 tracing-actix-web.workspace = true
 metrics.workspace = true
 hex.workspace = true
+tycho-execution = { version = ">=0.155.0", features = ["evm"] }
 
 [dev-dependencies]
 rstest.workspace = true

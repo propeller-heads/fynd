@@ -20,7 +20,11 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
+pub use tycho_execution::encoding::models::UserTransferType;
+use tycho_simulation::{
+    tycho_common::models::Address,
+    tycho_core::{models::token::Token, Bytes},
+};
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
@@ -57,6 +61,22 @@ pub struct SolutionOptions {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodingOptions {
+    pub slippage: f64,
+    /// Token transfer method. Defaults to `TransferFrom`.
+    #[serde(default = "default_transfer_type")]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `TransferFromPermit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Bytes>,
 }
 
 // ============================================================================
@@ -447,6 +467,10 @@ pub struct Transaction {
 // PRIVATE HELPERS
 // ============================================================================
 
+/// Generates a unique order ID using UUID v4.
+fn default_transfer_type() -> UserTransferType {
+    UserTransferType::TransferFrom
+}
 /// Generates a unique order ID using UUID v4.
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()
