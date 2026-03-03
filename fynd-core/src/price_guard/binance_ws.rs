@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    common::{check_staleness, compute_expected_out, normalize_symbol, resolve_token},
+    common::{check_staleness, compute_expected_out, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
 use crate::feed::market_data::SharedMarketData;
@@ -133,8 +133,7 @@ impl BinanceWsProvider {
 impl PriceProvider for BinanceWsProvider {
     fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
-        let worker =
-            BinanceWsWorker { cache: Arc::clone(&self.cache), market_data, client: Client::new() };
+        let worker = BinanceWsWorker { cache: Arc::clone(&self.cache), client: Client::new() };
         tokio::spawn(async move { worker.run().await })
     }
 
@@ -173,7 +172,6 @@ impl PriceProvider for BinanceWsProvider {
 /// to additional streams on the live connection.
 struct BinanceWsWorker {
     cache: PriceCache,
-    market_data: Arc<RwLock<SharedMarketData>>,
     client: Client,
 }
 
@@ -205,7 +203,7 @@ impl BinanceWsWorker {
 
                     let (mut write, mut read) = ws_stream.split();
 
-                    let streams = self.build_streams(&valid_symbols).await;
+                    let streams = Self::build_streams(&valid_symbols);
                     let mut subscribed: HashSet<String> = streams.iter().cloned().collect();
 
                     if streams.is_empty() {
@@ -242,7 +240,7 @@ impl BinanceWsWorker {
                                 }
                             }
                             _ = resync.tick() => {
-                                let new_streams = self.build_streams(&valid_symbols).await;
+                                let new_streams = Self::build_streams(&valid_symbols);
                                 let additions: Vec<String> = new_streams
                                     .into_iter()
                                     .filter(|s| !subscribed.contains(s))
@@ -286,42 +284,26 @@ impl BinanceWsWorker {
             .json()
             .await?;
 
+        let quotes: HashSet<&str> = QUOTE_CURRENCIES.iter().copied().collect();
         let symbols = resp
             .symbols
             .into_iter()
-            .filter(|s| s.status == "TRADING")
+            .filter(|s| {
+                s.status == "TRADING" && quotes.contains(s.quote_asset.as_str())
+            })
             .map(|s| s.symbol)
             .collect();
 
         Ok(symbols)
     }
 
-    /// Reads all token symbols from market data and builds bookTicker stream names
-    /// for pairs that exist on Binance.
-    async fn build_streams(&self, valid_symbols: &HashSet<String>) -> Vec<String> {
-        let market_data = self.market_data.read().await;
-        let token_symbols: HashSet<String> = market_data
-            .token_registry_ref()
-            .values()
-            .map(|t| normalize_symbol(&t.symbol).to_uppercase())
+    /// Builds bookTicker stream names for all actively-trading Binance pairs.
+    fn build_streams(valid_symbols: &HashSet<String>) -> Vec<String> {
+        let mut streams: Vec<String> = valid_symbols
+            .iter()
+            .map(|s| format!("{}@bookTicker", s.to_lowercase()))
             .collect();
-        drop(market_data);
-
-        let mut streams = Vec::new();
-        for symbol in &token_symbols {
-            for &quote in QUOTE_CURRENCIES {
-                if symbol == quote {
-                    continue;
-                }
-                let pair = format!("{}{}", symbol, quote);
-                if valid_symbols.contains(&pair) {
-                    streams.push(format!("{}@bookTicker", pair.to_lowercase()));
-                }
-            }
-        }
-
         streams.sort();
-        streams.dedup();
         streams
     }
 
@@ -401,6 +383,8 @@ struct ExchangeInfoResponse {
 struct SymbolInfo {
     symbol: String,
     status: String,
+    #[serde(rename = "quoteAsset")]
+    quote_asset: String,
 }
 
 #[cfg(test)]
@@ -483,111 +467,23 @@ mod tests {
         assert!(matches!(result, Err(PriceProviderError::StaleData { .. })));
     }
 
-    #[tokio::test]
-    async fn test_build_streams_filters_by_valid_symbols() {
-        let weth = Token {
-            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-                .parse()
-                .unwrap(),
-            symbol: "WETH".to_string(),
-            decimals: 18,
-            tax: Default::default(),
-            gas: vec![],
-            chain: Chain::Ethereum,
-            quality: 100,
-        };
-        let link = Token {
-            address: "514910771AF9Ca656af840dff83E8264EcF986CA"
-                .parse()
-                .unwrap(),
-            symbol: "LINK".to_string(),
-            decimals: 18,
-            tax: Default::default(),
-            gas: vec![],
-            chain: Chain::Ethereum,
-            quality: 100,
-        };
-        let obscure = Token {
-            address: "0000000000000000000000000000000000000001"
-                .parse()
-                .unwrap(),
-            symbol: "OBSCURE".to_string(),
-            decimals: 18,
-            tax: Default::default(),
-            gas: vec![],
-            chain: Chain::Ethereum,
-            quality: 100,
-        };
-
-        let mut market_data = SharedMarketData::new();
-        market_data.upsert_tokens([weth, link, obscure]);
-        let market_data = Arc::new(RwLock::new(market_data));
-
+    #[test]
+    fn test_build_streams_filters_by_quote_currency() {
         let valid_symbols: HashSet<String> = [
-            "ETHUSDT", "ETHUSDC", "ETHBTC", "LINKUSDT",
-            "LINKETH",
-            // OBSCURE pairs intentionally missing
+            "ETHUSDT", "ETHUSDC", "ETHBTC", "LINKUSDT", "LINKETH",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
 
-        let worker = BinanceWsWorker {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            market_data,
-            client: Client::new(),
-        };
-
-        let streams = worker
-            .build_streams(&valid_symbols)
-            .await;
+        let streams = BinanceWsWorker::build_streams(&valid_symbols);
 
         assert!(streams.contains(&"ethusdt@bookTicker".to_string()));
         assert!(streams.contains(&"ethusdc@bookTicker".to_string()));
         assert!(streams.contains(&"ethbtc@bookTicker".to_string()));
         assert!(streams.contains(&"linkusdt@bookTicker".to_string()));
         assert!(streams.contains(&"linketh@bookTicker".to_string()));
-
-        // OBSCURE has no valid pairs — should not appear
-        assert!(!streams
-            .iter()
-            .any(|s| s.contains("obscure")));
-    }
-
-    #[tokio::test]
-    async fn test_build_streams_deduplicates_wrapped_tokens() {
-        // WETH normalizes to ETH — should not produce duplicate streams
-        let weth = Token {
-            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-                .parse()
-                .unwrap(),
-            symbol: "WETH".to_string(),
-            decimals: 18,
-            tax: Default::default(),
-            gas: vec![],
-            chain: Chain::Ethereum,
-            quality: 100,
-        };
-
-        let mut market_data = SharedMarketData::new();
-        market_data.upsert_tokens([weth]);
-        let market_data = Arc::new(RwLock::new(market_data));
-
-        let valid_symbols: HashSet<String> = ["ETHUSDT", "ETHUSDC"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let worker = BinanceWsWorker {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            market_data,
-            client: Client::new(),
-        };
-
-        let streams = worker
-            .build_streams(&valid_symbols)
-            .await;
-        assert_eq!(streams.len(), 2);
+        assert_eq!(streams.len(), 5);
     }
 
     #[tokio::test]
