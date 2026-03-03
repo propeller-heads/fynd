@@ -158,20 +158,12 @@ impl OrderManager {
         if request.options.include_encoding {
             match &self.encoder {
                 Some(encoder) => {
-                    // Encode only successful solutions, preserving original order
-                    let mut to_encode = Vec::new();
-                    let mut encode_indices = Vec::new();
-                    for (i, sol) in order_solutions.iter().enumerate() {
+                    for sol in &mut order_solutions {
                         if sol.status == SolutionStatus::Success {
-                            to_encode.push(sol.clone());
-                            encode_indices.push(i);
+                            *sol = encoder
+                                .encode(sol.clone(), request.options.slippage)
+                                .await?;
                         }
-                    }
-                    let encoded = encoder
-                        .encode(to_encode, request.options.slippage)
-                        .await?;
-                    for (idx, sol) in encode_indices.into_iter().zip(encoded) {
-                        order_solutions[idx] = sol;
                     }
                 }
                 None => {

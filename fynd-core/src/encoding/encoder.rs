@@ -41,18 +41,17 @@ impl Encoder {
 
     pub async fn encode(
         &self,
-        solutions: Vec<OrderSolution>,
+        solution: OrderSolution,
         slippage: f64,
-    ) -> Result<Vec<OrderSolution>, SolveError> {
-        // loop through solutions and convert into the execution Solution model
+    ) -> Result<OrderSolution, SolveError> {
+        // Convert into the execution Solution model
         //   use the self.market_data to get the ProtocolComponent and ProtocolSim
         // call self.tycho_encoder.encode_solutions()
         // Encode the full tycho call,
         //   - use signer if it's not None for permit2
         //   - set a meaningful min amount out with the slippage value
         //   - create a Transaction and put it in the OrderSolution
-        // return all the OrderSolutions
-        Ok(solutions)
+        Ok(solution)
     }
 
     async fn get_component(&mut self, id: &str) -> Result<ProtocolComponent, SolveError> {
