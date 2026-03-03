@@ -95,7 +95,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Tycho
 tycho-simulation = ">=0.234.0"
-tycho-execution = { git = "https://github.com/propeller-heads/tycho-execution", branch = "kt/make_use_transfer_type_serde", features = ["evm"] }
+tycho-execution = { version = ">=0.164.0", features = ["evm"] }
 typetag = "0.2"
 
 # Graph algorithms
