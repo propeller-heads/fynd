@@ -243,6 +243,61 @@ pub struct Swap {
 }
 
 // ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// An encoded EVM transaction ready to be submitted on-chain.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Transaction {
+    /// Contract address to call.
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub to: Bytes,
+
+    /// Native token value to send with the transaction (as decimal string).
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "0")]
+    pub value: BigUint,
+
+    /// ABI-encoded calldata as hex string.
+    #[schema(value_type = String, example = "0x1234567890abcdef")]
+    #[serde(serialize_with = "serialize_bytes_hex", deserialize_with = "deserialize_bytes_hex")]
+    pub data: Vec<u8>,
+}
+
+// ============================================================================
+// CUSTOM SERIALIZATION
+// ============================================================================
+
+/// Serializes Vec<u8> to hex string with 0x prefix.
+fn serialize_bytes_hex<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
+}
+
+/// Deserializes hex string (with or without 0x prefix) to Vec<u8>.
+fn deserialize_bytes_hex<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let s = s.strip_prefix("0x").unwrap_or(&s);
+    hex::decode(s).map_err(serde::de::Error::custom)
+}
+
+// ============================================================================
+// CONVERSIONS: Transaction DTO <-> Core
+// ============================================================================
+
+impl From<fynd_core::types::Transaction> for Transaction {
+    fn from(core: fynd_core::Transaction) -> Self {
+        Self { to: core.to, value: core.value, data: core.data }
+    }
+}
+
+// ============================================================================
 // HEALTH CHECK TYPES
 // ============================================================================
 

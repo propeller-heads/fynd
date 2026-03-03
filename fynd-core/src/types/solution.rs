@@ -429,6 +429,19 @@ impl Swap {
     }
 }
 
+/// An encoded EVM transaction ready to be submitted on-chain.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    /// Contract address to call.
+    pub to: Bytes,
+    /// Native token value to send with the transaction.
+    #[serde_as(as = "DisplayFromStr")]
+    pub value: num_bigint::BigUint,
+    /// ABI-encoded calldata.
+    pub data: Vec<u8>,
+}
+
 // ============================================================================
 // PRIVATE HELPERS
 // ============================================================================
