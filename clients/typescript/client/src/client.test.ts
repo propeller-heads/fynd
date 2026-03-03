@@ -53,7 +53,6 @@ function makeClientWithHttpMock(
       return Promise.resolve({ data: undefined, error: undefined, response: {} });
     }),
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (client as any).http = httpMock;
   return client;
 }
@@ -167,7 +166,6 @@ describe('FyndClient.quote — retry path', () => {
       }),
       GET: vi.fn(),
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (client as any).http = httpMock;
 
     const quote = await client.quote({
@@ -198,7 +196,6 @@ describe('FyndClient.quote — retry path', () => {
       }),
       GET: vi.fn(),
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (client as any).http = httpMock;
 
     await expect(
@@ -207,6 +204,38 @@ describe('FyndClient.quote — retry path', () => {
       }),
     ).rejects.toThrow(FyndError);
     expect(callCount).toBe(1);
+  });
+
+  it('exhausts all retries and throws on all-retryable failure', async () => {
+    const client = new FyndClient({
+      baseUrl:       'http://localhost:8080',
+      chainId:       1,
+      routerAddress: ROUTER,
+      sender:        SENDER,
+      retry:         { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 5 },
+    });
+
+    let callCount = 0;
+    const httpMock = {
+      POST: vi.fn().mockImplementation(() => {
+        callCount++;
+        return Promise.resolve({
+          data:     undefined,
+          error:    { code: 'QUEUE_FULL', error: 'queue full' },
+          response: {},
+        });
+      }),
+      GET: vi.fn(),
+    };
+    (client as any).http = httpMock;
+
+    await expect(
+      client.quote({
+        order: { tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT, amount: 1000n, side: 'sell', sender: SENDER },
+      }),
+    ).rejects.toThrow(FyndError);
+    // All attempts should have been made before giving up
+    expect(callCount).toBe(2);
   });
 });
 
@@ -232,6 +261,21 @@ describe('FyndClient.health', () => {
 });
 
 describe('FyndClient.signablePayload', () => {
+  it('throws for turbine backend (not yet implemented)', async () => {
+    const provider = makeMockProvider();
+    const client = new FyndClient({
+      baseUrl:       'http://localhost:8080',
+      chainId:       1,
+      routerAddress: ROUTER,
+      sender:        SENDER,
+      provider,
+    });
+    const turbineQuote = { ...makeDummyQuote(), backend: 'turbine' as const };
+    await expect(client.signablePayload(turbineQuote)).rejects.toThrow(
+      'not implemented: Turbine backend signing',
+    );
+  });
+
   it('throws CONFIG error when provider is not set', async () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',

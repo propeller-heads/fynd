@@ -143,7 +143,7 @@ export class FyndClient {
   }
 
   private async fyndSignablePayload(quote: Quote, hints: SigningHints): Promise<SignablePayload> {
-    const senderOpt = hints.sender ?? (this.options.sender ? this.options.sender : undefined);
+    const senderOpt = hints.sender ?? this.options.sender;
     if (senderOpt === undefined) {
       throw FyndError.config(
         "sender is required: set FyndClientOptions.sender or SigningHints.sender"
