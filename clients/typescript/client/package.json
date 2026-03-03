@@ -1,0 +1,28 @@
+{
+  "name": "@fynd/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript client for the Fynd DEX router",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build":     "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint":      "oxlint src/",
+    "test":      "vitest run"
+  },
+  "dependencies": {
+    "@fynd/autogen": "workspace:*",
+    "viem": "2.46.3"
+  },
+  "devDependencies": {
+    "typescript": "5.8.2",
+    "oxlint":     "1.51.0",
+    "vitest":     "4.0.18"
+  }
+}
