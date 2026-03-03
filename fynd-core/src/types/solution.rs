@@ -210,6 +210,7 @@ pub struct OrderSolution {
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
+    pub transaction: Option<Transaction>,
 }
 
 /// Status of an order solution.

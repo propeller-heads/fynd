@@ -161,6 +161,7 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    pub transaction: Option<Transaction>,
 }
 
 /// Status of an order solution.
@@ -390,6 +391,7 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
             price_impact_bps: core.price_impact_bps,
             amount_out_net_gas: core.amount_out_net_gas,
             block: core.block.into(),
+            transaction: core.transaction.map(Into::into),
         }
     }
 }

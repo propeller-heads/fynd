@@ -308,6 +308,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: any_sol.block.clone(),
                 algorithm: String::new(),
+                transaction: None,
             }
         } else {
             // No responses at all - determine status from failure types
@@ -352,6 +353,7 @@ impl OrderManager {
                 amount_out_net_gas: BigUint::ZERO,
                 block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
                 algorithm: String::new(),
+                transaction: None,
             }
         }
     }
@@ -402,6 +404,7 @@ mod tests {
                 amount_out_net_gas: BigUint::from(amount_out_net_gas),
                 block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                 algorithm: "test".to_string(),
+                transaction: None,
             },
             solve_time_ms: 5,
         }
@@ -583,6 +586,7 @@ mod tests {
                     amount_out_net_gas: BigUint::from(900u64),
                     block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
                     algorithm: "test".to_string(),
+                    transaction: None,
                 },
             )],
             failed_solvers: vec![],
