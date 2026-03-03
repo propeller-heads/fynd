@@ -3246,7 +3246,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber 0.3.22",
- "tycho-execution",
  "tycho-simulation",
 ]
 
@@ -3274,6 +3273,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tycho-execution",
  "tycho-simulation",
  "typetag",
  "uuid",
@@ -3300,6 +3300,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-actix-web",
+ "tycho-execution",
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
