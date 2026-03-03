@@ -3286,6 +3286,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "fynd-core",
+ "hex",
  "metrics",
  "num-bigint",
  "num-traits",
