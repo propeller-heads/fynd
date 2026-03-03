@@ -42,7 +42,7 @@
 //! );
 //!
 //! let quote = client
-//!     .quote(QuoteParams::new(vec![order], QuoteOptions::default()))
+//!     .quote(QuoteParams::new(order, QuoteOptions::default()))
 //!     .await?;
 //!
 //! for solution in quote.orders() {
@@ -51,7 +51,9 @@
 //! # Ok(()) }
 //! ```
 
-pub use client::{FyndClient, FyndClientBuilder, RetryConfig, SigningHints};
+pub use client::{
+    ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints, StorageOverrides,
+};
 pub use error::{ErrorCode, FyndError};
 pub use signing::{ExecutionReceipt, FyndPayload, SettledOrder, SignablePayload, SignedOrder};
 pub use types::{

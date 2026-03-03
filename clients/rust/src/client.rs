@@ -1,11 +1,15 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use alloy::{
     consensus::{TxEip1559, TypedTransaction},
     eips::{eip2718::Encodable2718, eip2930::AccessList},
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, U256},
+    primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
+    rpc::types::{
+        state::{AccountOverride, StateOverride},
+        TransactionRequest,
+    },
 };
 use bytes::Bytes;
 use num_bigint::BigUint;
@@ -97,6 +101,89 @@ pub struct SigningHints {
     /// When `true`, simulate the transaction via `eth_call` before returning. A simulation
     /// failure results in [`FyndError::SimulationFailed`].
     pub simulate: bool,
+}
+
+// ============================================================================
+// STORAGE OVERRIDES
+// ============================================================================
+
+/// Per-account EVM storage slot overrides for dry-run simulations.
+///
+/// Maps 20-byte contract addresses to a set of 32-byte slot → value pairs. Passed via
+/// [`ExecutionOptions::storage_overrides`] to override on-chain state during a
+/// [`FyndClient::execute`] dry run.
+///
+/// # Example
+///
+/// ```rust
+/// use fynd_client::StorageOverrides;
+/// use bytes::Bytes;
+///
+/// let mut overrides = StorageOverrides::default();
+/// let contract = Bytes::copy_from_slice(&[0xAA; 20]);
+/// let slot    = Bytes::copy_from_slice(&[0x00; 32]);
+/// let value   = Bytes::copy_from_slice(&[0x01; 32]);
+/// overrides.insert(contract, slot, value);
+/// ```
+#[derive(Clone, Default)]
+pub struct StorageOverrides {
+    /// address (20 bytes) → { slot (32 bytes) → value (32 bytes) }
+    slots: HashMap<Bytes, HashMap<Bytes, Bytes>>,
+}
+
+impl StorageOverrides {
+    /// Add a storage slot override for a contract.
+    ///
+    /// - `address`: 20-byte contract address.
+    /// - `slot`: 32-byte storage slot key.
+    /// - `value`: 32-byte replacement value.
+    pub fn insert(&mut self, address: Bytes, slot: Bytes, value: Bytes) {
+        self.slots
+            .entry(address)
+            .or_default()
+            .insert(slot, value);
+    }
+}
+
+fn storage_overrides_to_alloy(so: &StorageOverrides) -> Result<StateOverride, FyndError> {
+    let mut result = StateOverride::default();
+    for (addr_bytes, slot_map) in &so.slots {
+        let addr = mapping::bytes_to_alloy_address(addr_bytes)?;
+        let state_diff = slot_map
+            .iter()
+            .map(|(slot, val)| Ok((bytes_to_b256(slot)?, bytes_to_b256(val)?)))
+            .collect::<Result<alloy::primitives::map::B256HashMap<B256>, FyndError>>()?;
+        result.insert(addr, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
+    }
+    Ok(result)
+}
+
+fn bytes_to_b256(b: &Bytes) -> Result<B256, FyndError> {
+    if b.len() != 32 {
+        return Err(FyndError::Protocol(format!("expected 32-byte slot, got {} bytes", b.len())));
+    }
+    let arr: [u8; 32] = b
+        .as_ref()
+        .try_into()
+        .expect("length checked above");
+    Ok(B256::from(arr))
+}
+
+// ============================================================================
+// EXECUTION OPTIONS
+// ============================================================================
+
+/// Options controlling the behaviour of [`FyndClient::execute`].
+#[derive(Default)]
+pub struct ExecutionOptions {
+    /// When `true`, simulate the transaction via `eth_call` and `estimate_gas` instead of
+    /// broadcasting it. The returned [`ExecutionReceipt`] resolves immediately with the
+    /// simulated settled amount (decoded from the call return data) and the estimated gas cost.
+    /// No transaction is submitted to the network.
+    pub dry_run: bool,
+    /// Storage slot overrides to apply during dry-run simulation. Ignored when `dry_run` is
+    /// `false`.
+    pub storage_overrides: Option<StorageOverrides>,
 }
 
 // ============================================================================
@@ -469,10 +556,18 @@ where
     /// Broadcast a signed order and return an [`ExecutionReceipt`] that resolves once the
     /// transaction is mined.
     ///
-    /// This method returns **immediately** after submitting the transaction. The returned
-    /// [`ExecutionReceipt`] is an unbounded future that polls for the receipt every 2 seconds.
-    /// Wrap it with [`tokio::time::timeout`] to avoid waiting indefinitely.
-    pub async fn execute(&self, order: SignedOrder) -> Result<ExecutionReceipt, FyndError> {
+    /// Pass [`ExecutionOptions::default`] for standard on-chain submission. Set
+    /// [`ExecutionOptions::dry_run`] to `true` to simulate only — the receipt resolves immediately
+    /// with values derived from `eth_call` (settled amount) and `eth_estimateGas` (gas cost).
+    ///
+    /// For real submissions, this method returns **immediately** after broadcasting. The inner
+    /// future polls every 2 seconds and has no built-in timeout; wrap with
+    /// [`tokio::time::timeout`] to bound the wait.
+    pub async fn execute(
+        &self,
+        order: SignedOrder,
+        options: &ExecutionOptions,
+    ) -> Result<ExecutionReceipt, FyndError> {
         let (payload, signature) = order.into_parts();
         let (solution, tx) = payload.into_fynd_parts()?;
 
@@ -481,6 +576,12 @@ where
                 "only EIP-1559 transactions are supported for execution".into(),
             ));
         };
+
+        if options.dry_run {
+            return self
+                .dry_run_execute(tx_eip1559, options)
+                .await;
+        }
 
         let envelope = TypedTransaction::Eip1559(tx_eip1559).into_envelope(signature);
         let raw = envelope.encoded_2718();
@@ -508,12 +609,54 @@ where
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
                         let gas_cost = BigUint::from(receipt.gas_used) *
                             BigUint::from(receipt.effective_gas_price);
-                        return Ok(SettledOrder::new(receipt, settled_amount, gas_cost));
+                        return Ok(SettledOrder::new(settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
                 }
             }
         })))
+    }
+
+    async fn dry_run_execute(
+        &self,
+        tx_eip1559: TxEip1559,
+        options: &ExecutionOptions,
+    ) -> Result<ExecutionReceipt, FyndError> {
+        let mut req: TransactionRequest = tx_eip1559.clone().into();
+        if let Some(sender) = self.default_sender {
+            req.from = Some(sender);
+        }
+        let overrides = options
+            .storage_overrides
+            .as_ref()
+            .map(storage_overrides_to_alloy)
+            .transpose()?;
+
+        let return_data = self
+            .provider
+            .call(req.clone())
+            .overrides_opt(overrides.clone())
+            .await
+            .map_err(|e| FyndError::SimulationFailed(format!("dry run simulation failed: {e}")))?;
+
+        let gas_used = self
+            .provider
+            .estimate_gas(req)
+            .overrides_opt(overrides)
+            .await
+            .map_err(|e| {
+                FyndError::SimulationFailed(format!("dry run gas estimation failed: {e}"))
+            })?;
+
+        let settled_amount = if return_data.len() >= 32 {
+            Some(BigUint::from_bytes_be(&return_data[0..32]))
+        } else {
+            None
+        };
+        let gas_cost = BigUint::from(gas_used) * BigUint::from(tx_eip1559.max_fee_per_gas);
+        let settled = SettledOrder::new(settled_amount, gas_cost);
+
+        Ok(ExecutionReceipt::Transaction(Box::pin(async move { Ok(settled) })))
     }
 }
 
@@ -1005,6 +1148,139 @@ mod tests {
         assert!(
             matches!(err, FyndError::SimulationFailed(_)),
             "expected SimulationFailed, got {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // execute() dry-run tests
+    // ========================================================================
+
+    /// Build a [`SignedOrder`] from a minimal [`Quote`] and a dummy transaction.
+    ///
+    /// Suitable for dry-run tests where neither the signature nor the transaction
+    /// contents are validated on-chain.
+    fn make_signed_order() -> SignedOrder {
+        use alloy::{
+            eips::eip2930::AccessList,
+            primitives::{Bytes as AlloyBytes, Signature, TxKind, U256},
+        };
+
+        use crate::signing::FyndPayload;
+
+        let quote = make_order_solution();
+        let tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 1,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            gas_limit: 100_000,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: AlloyBytes::new(),
+            access_list: AccessList::default(),
+        };
+        let payload =
+            SignablePayload::Fynd(Box::new(FyndPayload::new(quote, TypedTransaction::Eip1559(tx))));
+        SignedOrder::assemble(payload, Signature::test_signature())
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_returns_settled_order_without_broadcast() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
+
+        // Encode 990_000 as ABI uint256 (32-byte big-endian).
+        let mut amount_bytes = vec![0u8; 32];
+        amount_bytes[24..32].copy_from_slice(&990_000u64.to_be_bytes());
+        asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&amount_bytes));
+        asserter.push_success(&50_000u64); // estimate_gas response
+
+        let order = make_signed_order();
+        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let receipt = client
+            .execute(order, &opts)
+            .await
+            .expect("execute should succeed");
+        let settled = receipt
+            .await
+            .expect("should resolve immediately");
+
+        assert_eq!(settled.settled_amount(), Some(&num_bigint::BigUint::from(990_000u64)),);
+        let expected_gas_cost =
+            num_bigint::BigUint::from(50_000u64) * num_bigint::BigUint::from(1_000_000_000u64);
+        assert_eq!(settled.gas_cost(), &expected_gas_cost);
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_with_storage_overrides_succeeds() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
+
+        let mut overrides = StorageOverrides::default();
+        overrides.insert(
+            bytes::Bytes::copy_from_slice(&[0u8; 20]),
+            bytes::Bytes::copy_from_slice(&[0u8; 32]),
+            bytes::Bytes::copy_from_slice(&[1u8; 32]),
+        );
+
+        let mut amount_bytes = vec![0u8; 32];
+        amount_bytes[24..32].copy_from_slice(&100u64.to_be_bytes());
+        asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&amount_bytes));
+        asserter.push_success(&21_000u64);
+
+        let order = make_signed_order();
+        let opts = ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) };
+        let receipt = client
+            .execute(order, &opts)
+            .await
+            .expect("execute with overrides should succeed");
+        receipt.await.expect("should resolve");
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_returns_simulation_failed_on_call_error() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
+
+        asserter.push_failure_msg("execution reverted");
+
+        let order = make_signed_order();
+        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let result = client.execute(order, &opts).await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected SimulationFailed error"),
+        };
+
+        assert!(
+            matches!(err, FyndError::SimulationFailed(_)),
+            "expected SimulationFailed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_with_empty_return_data_has_no_settled_amount() {
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
+
+        asserter.push_success(&alloy::primitives::Bytes::new());
+        asserter.push_success(&21_000u64);
+
+        let order = make_signed_order();
+        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let receipt = client
+            .execute(order, &opts)
+            .await
+            .expect("execute should succeed");
+        let settled = receipt.await.expect("should resolve");
+
+        assert!(
+            settled.settled_amount().is_none(),
+            "empty return data should yield None settled_amount"
         );
     }
 
