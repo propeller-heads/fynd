@@ -19,6 +19,7 @@ pub use primitives::*;
 // Re-export public solution types
 pub use solution::{
     BlockInfo, EncodingOptions, Order, OrderSide, OrderSolution, OrderValidationError,
-    PermitSingle, Route, RouteResult, RouteValidationError, SingleOrderSolution, Solution,
-    SolutionOptions, SolutionRequest, SolutionStatus, Swap, Transaction,
+    PermitDetails, PermitSingle, Route, RouteResult, RouteValidationError, SingleOrderSolution,
+    Solution, SolutionOptions, SolutionRequest, SolutionStatus, Swap, Transaction,
+    UserTransferType,
 };

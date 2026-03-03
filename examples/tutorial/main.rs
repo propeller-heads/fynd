@@ -27,7 +27,7 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest};
+use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest, Transaction};
 use fynd_rpc::{builder::parse_chain, HealthStatus};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -38,7 +38,7 @@ use tycho_execution::encoding::{
         approvals::permit2::PermitSingle, encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
-    models::{EncodedSolution, Solution as ExecutionSolution, Transaction, UserTransferType},
+    models::{EncodedSolution, Solution as ExecutionSolution, UserTransferType},
 };
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256,
