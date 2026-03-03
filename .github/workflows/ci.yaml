@@ -127,6 +127,7 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: clients/typescript/pnpm-lock.yaml
       - run: pnpm --dir clients/typescript install --frozen-lockfile
+      - run: pnpm --dir clients/typescript --filter @fynd/autogen run build
       - run: pnpm --dir clients/typescript --filter @fynd/client run typecheck
       - run: pnpm --dir clients/typescript --filter @fynd/client run lint
       - run: pnpm --dir clients/typescript --filter @fynd/client run test
