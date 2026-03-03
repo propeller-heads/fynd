@@ -7374,7 +7374,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.161.0"
+version = "0.163.1"
+source = "git+https://github.com/propeller-heads/tycho-execution?branch=kt%2Fmake_use_transfer_type_serde#45acf8084e6cdc2369877e82eb4fd994d90cf38a"
 dependencies = [
  "alloy",
  "chrono",
