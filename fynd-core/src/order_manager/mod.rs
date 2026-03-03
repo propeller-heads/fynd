@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 
 use crate::{
     encoding::encoder::Encoder,
-    price_guard::PriceGuard,
+    price_guard::{config::PriceGuardConfig, PriceGuard},
     types::{
         solution::{BlockInfo, Order, SolutionOptions, SolutionRequest},
         OrderSolution, Solution, SolutionStatus, SolveError,
@@ -132,7 +132,24 @@ impl OrderManager {
 
         // Validate against external prices (if configured)
         if let Some(ref guard) = self.price_guard {
-            order_solutions = guard.validate(order_solutions).await?;
+            let opts = request
+                .options
+                .price_guard
+                .clone()
+                .unwrap_or_default();
+            let mut config = PriceGuardConfig::default();
+            if let Some(enabled) = opts.enabled {
+                config = config.with_enabled(enabled);
+            }
+            if let Some(bps) = opts.tolerance_bps {
+                config = config.with_tolerance_bps(bps);
+            }
+            if let Some(allow) = opts.allow_on_provider_error {
+                config = config.with_allow_on_provider_error(allow);
+            }
+            order_solutions = guard
+                .validate(order_solutions, &config)
+                .await?;
         }
 
         if request.options.include_encoding {
@@ -637,6 +654,7 @@ mod tests {
             max_gas: max_gas.map(BigUint::from),
             slippage: 0.0,
             include_encoding: false,
+            price_guard: None,
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default(), None, None);

@@ -14,7 +14,7 @@ use alloy::{
 };
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{debug, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
 
@@ -22,7 +22,6 @@ use super::{
     common::{compute_expected_out, normalize_symbol, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
-use tokio::task::JoinHandle;
 use crate::feed::market_data::SharedMarketData;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -86,10 +85,7 @@ impl ChainlinkProvider {
 
 #[async_trait]
 impl PriceProvider for ChainlinkProvider {
-    fn start(
-        &mut self,
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> JoinHandle<()> {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
         let worker = ChainlinkWorker {
             cache: Arc::clone(&self.cache),

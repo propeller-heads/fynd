@@ -82,6 +82,7 @@ impl Default for MockProtocolSim {
     }
 }
 
+#[typetag::serde]
 impl ProtocolSim for MockProtocolSim {
     fn fee(&self) -> f64 {
         self.fee

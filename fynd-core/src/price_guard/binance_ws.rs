@@ -131,16 +131,10 @@ impl BinanceWsProvider {
 
 #[async_trait]
 impl PriceProvider for BinanceWsProvider {
-    fn start(
-        &mut self,
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> JoinHandle<()> {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
-        let worker = BinanceWsWorker {
-            cache: Arc::clone(&self.cache),
-            market_data,
-            client: Client::new(),
-        };
+        let worker =
+            BinanceWsWorker { cache: Arc::clone(&self.cache), market_data, client: Client::new() };
         tokio::spawn(async move { worker.run().await })
     }
 
@@ -212,8 +206,7 @@ impl BinanceWsWorker {
                     let (mut write, mut read) = ws_stream.split();
 
                     let streams = self.build_streams(&valid_symbols).await;
-                    let mut subscribed: HashSet<String> =
-                        streams.iter().cloned().collect();
+                    let mut subscribed: HashSet<String> = streams.iter().cloned().collect();
 
                     if streams.is_empty() {
                         warn!("no Binance streams to subscribe to");
@@ -493,7 +486,9 @@ mod tests {
     #[tokio::test]
     async fn test_build_streams_filters_by_valid_symbols() {
         let weth = Token {
-            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap(),
+            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+                .parse()
+                .unwrap(),
             symbol: "WETH".to_string(),
             decimals: 18,
             tax: Default::default(),
@@ -502,7 +497,9 @@ mod tests {
             quality: 100,
         };
         let link = Token {
-            address: "514910771AF9Ca656af840dff83E8264EcF986CA".parse().unwrap(),
+            address: "514910771AF9Ca656af840dff83E8264EcF986CA"
+                .parse()
+                .unwrap(),
             symbol: "LINK".to_string(),
             decimals: 18,
             tax: Default::default(),
@@ -511,7 +508,9 @@ mod tests {
             quality: 100,
         };
         let obscure = Token {
-            address: "0000000000000000000000000000000000000001".parse().unwrap(),
+            address: "0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
             symbol: "OBSCURE".to_string(),
             decimals: 18,
             tax: Default::default(),
@@ -525,8 +524,8 @@ mod tests {
         let market_data = Arc::new(RwLock::new(market_data));
 
         let valid_symbols: HashSet<String> = [
-            "ETHUSDT", "ETHUSDC", "ETHBTC",
-            "LINKUSDT", "LINKETH",
+            "ETHUSDT", "ETHUSDC", "ETHBTC", "LINKUSDT",
+            "LINKETH",
             // OBSCURE pairs intentionally missing
         ]
         .iter()
@@ -539,7 +538,9 @@ mod tests {
             client: Client::new(),
         };
 
-        let streams = worker.build_streams(&valid_symbols).await;
+        let streams = worker
+            .build_streams(&valid_symbols)
+            .await;
 
         assert!(streams.contains(&"ethusdt@bookTicker".to_string()));
         assert!(streams.contains(&"ethusdc@bookTicker".to_string()));
@@ -548,14 +549,18 @@ mod tests {
         assert!(streams.contains(&"linketh@bookTicker".to_string()));
 
         // OBSCURE has no valid pairs — should not appear
-        assert!(!streams.iter().any(|s| s.contains("obscure")));
+        assert!(!streams
+            .iter()
+            .any(|s| s.contains("obscure")));
     }
 
     #[tokio::test]
     async fn test_build_streams_deduplicates_wrapped_tokens() {
         // WETH normalizes to ETH — should not produce duplicate streams
         let weth = Token {
-            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap(),
+            address: "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+                .parse()
+                .unwrap(),
             symbol: "WETH".to_string(),
             decimals: 18,
             tax: Default::default(),
@@ -568,8 +573,10 @@ mod tests {
         market_data.upsert_tokens([weth]);
         let market_data = Arc::new(RwLock::new(market_data));
 
-        let valid_symbols: HashSet<String> =
-            ["ETHUSDT", "ETHUSDC"].iter().map(|s| s.to_string()).collect();
+        let valid_symbols: HashSet<String> = ["ETHUSDT", "ETHUSDC"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let worker = BinanceWsWorker {
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -577,7 +584,9 @@ mod tests {
             client: Client::new(),
         };
 
-        let streams = worker.build_streams(&valid_symbols).await;
+        let streams = worker
+            .build_streams(&valid_symbols)
+            .await;
         assert_eq!(streams.len(), 2);
     }
 

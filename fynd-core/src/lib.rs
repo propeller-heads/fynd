@@ -35,9 +35,9 @@ pub mod worker_pool;
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
-    BlockInfo, ComponentId, Order, OrderSide, OrderSolution, OrderValidationError, Route,
-    RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
-    SolutionStatus, SolveError, SolveResult, Swap, TaskId, Transaction,
+    BlockInfo, ComponentId, Order, OrderSide, OrderSolution, OrderValidationError,
+    PriceGuardOptions, Route, RouteValidationError, SingleOrderSolution, Solution, SolutionOptions,
+    SolutionRequest, SolutionStatus, SolveError, SolveResult, Swap, TaskId, Transaction,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

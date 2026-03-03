@@ -18,7 +18,7 @@ pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
 // Re-export public solution types
 pub use solution::{
-    BlockInfo, Order, OrderSide, OrderSolution, OrderValidationError, Route, RouteResult,
-    RouteValidationError, SingleOrderSolution, Solution, SolutionOptions, SolutionRequest,
-    SolutionStatus, Swap, Transaction,
+    BlockInfo, Order, OrderSide, OrderSolution, OrderValidationError, PriceGuardOptions, Route,
+    RouteResult, RouteValidationError, SingleOrderSolution, Solution, SolutionOptions,
+    SolutionRequest, SolutionStatus, Swap, Transaction,
 };

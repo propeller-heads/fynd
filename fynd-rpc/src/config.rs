@@ -105,8 +105,4 @@ pub mod defaults {
     pub const ORDER_MANAGER_MIN_RESPONSES: usize = 0;
     /// Slippage threshold for pool depth computation (1%)
     pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
-    /// Default price guard tolerance in basis points (3% = 300 bps)
-    pub const PRICE_GUARD_TOLERANCE_BPS: u32 = 300;
-    pub const PRICE_GUARD_ENABLED: bool = true;
-    pub const PRICE_GUARD_ALLOW_ON_PROVIDER_ERROR: bool = false;
 }

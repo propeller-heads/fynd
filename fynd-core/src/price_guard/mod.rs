@@ -22,7 +22,6 @@ use crate::types::{OrderSolution, SolutionStatus, SolveError};
 /// Owns the background worker handles for each provider and aborts them on drop.
 pub struct PriceGuard {
     registry: PriceProviderRegistry,
-    config: PriceGuardConfig,
     worker_handles: Vec<JoinHandle<()>>,
 }
 
@@ -35,12 +34,8 @@ impl Drop for PriceGuard {
 }
 
 impl PriceGuard {
-    pub fn new(
-        registry: PriceProviderRegistry,
-        config: PriceGuardConfig,
-        worker_handles: Vec<JoinHandle<()>>,
-    ) -> Self {
-        Self { registry, config, worker_handles }
+    pub fn new(registry: PriceProviderRegistry, worker_handles: Vec<JoinHandle<()>>) -> Self {
+        Self { registry, worker_handles }
     }
 
     /// Validates a list of order solutions against external prices.
@@ -62,8 +57,9 @@ impl PriceGuard {
     pub async fn validate(
         &self,
         solutions: Vec<OrderSolution>,
+        config: &PriceGuardConfig,
     ) -> Result<Vec<OrderSolution>, SolveError> {
-        if !self.config.enabled() {
+        if !config.enabled() {
             return Ok(solutions);
         }
 
@@ -135,7 +131,7 @@ impl PriceGuard {
                             .try_into()
                             .unwrap_or(u32::MAX);
 
-                        if deviation_bps_u32 <= self.config.tolerance_bps() {
+                        if deviation_bps_u32 <= config.tolerance_bps() {
                             any_validated = true;
                             debug!(
                                 source = external_price.source(),
@@ -147,7 +143,7 @@ impl PriceGuard {
                             warn!(
                                 source = external_price.source(),
                                 deviation_bps = deviation_bps_u32,
-                                tolerance_bps = self.config.tolerance_bps(),
+                                tolerance_bps = config.tolerance_bps(),
                                 "price check failed for provider"
                             );
                         }
@@ -158,7 +154,7 @@ impl PriceGuard {
                 }
             }
 
-            if all_errors && !self.config.allow_on_provider_error() {
+            if all_errors && !config.allow_on_provider_error() {
                 solution.status = SolutionStatus::PriceCheckFailed;
             } else if !all_errors && !any_validated {
                 solution.status = SolutionStatus::PriceCheckFailed;
@@ -189,7 +185,7 @@ mod tests {
         feed::market_data::SharedMarketData,
         types::{
             solution::{BlockInfo, Route, Swap},
-            OrderSolution, SolutionStatus, SolveError,
+            OrderSolution, SolutionStatus,
         },
     };
 
@@ -203,10 +199,7 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for FixedProvider {
-        fn start(
-            &mut self,
-            _market_data: Arc<RwLock<SharedMarketData>>,
-        ) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
@@ -225,10 +218,7 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for FailingProvider {
-        fn start(
-            &mut self,
-            _market_data: Arc<RwLock<SharedMarketData>>,
-        ) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
@@ -247,10 +237,7 @@ mod tests {
 
     #[async_trait]
     impl PriceProvider for ZeroPriceProvider {
-        fn start(
-            &mut self,
-            _market_data: Arc<RwLock<SharedMarketData>>,
-        ) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
@@ -296,12 +283,12 @@ mod tests {
         }
     }
 
-    fn make_guard(providers: Vec<Box<dyn PriceProvider>>, config: PriceGuardConfig) -> PriceGuard {
+    fn make_guard(providers: Vec<Box<dyn PriceProvider>>) -> PriceGuard {
         let mut registry = PriceProviderRegistry::new();
         for p in providers {
             registry = registry.register(p);
         }
-        PriceGuard::new(registry, config, vec![])
+        PriceGuard::new(registry, vec![])
     }
 
     fn fixed(expected_out: u64) -> Box<dyn PriceProvider> {
@@ -330,10 +317,13 @@ mod tests {
     async fn disabled_guard_passes_everything_through() {
         let config = PriceGuardConfig::default().with_enabled(false);
         // Provider that would reject — but guard is disabled, so it's never called.
-        let guard = make_guard(vec![fixed(10_000)], config);
+        let guard = make_guard(vec![fixed(10_000)]);
 
         let solutions = vec![make_solution(1000, 50)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status, SolutionStatus::Success);
@@ -344,35 +334,41 @@ mod tests {
         // Solution: amount_out = 970. Provider expects 1000. Deviation = 30/1000 = 300 bps.
         // Tolerance = 300 bps → passes exactly.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![fixed(1000)], config);
+        let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 970)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn provider_rejects_beyond_tolerance() {
-        // Solution: amount_out = 960. Provider expects 1000. Deviation = 40/1000 = 400 bps.
-        // Tolerance = 300 bps → fails.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![fixed(1000)], config);
+        let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 960)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }
 
     #[tokio::test]
     async fn amount_out_exceeds_expected_always_passes() {
-        // Solution gets more than the provider expects — no-loss scenario.
         let config = PriceGuardConfig::default().with_tolerance_bps(0);
-        let guard = make_guard(vec![fixed(900)], config);
+        let guard = make_guard(vec![fixed(900)]);
 
         let solutions = vec![make_solution(1000, 950)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
@@ -380,37 +376,41 @@ mod tests {
     #[tokio::test]
     async fn amount_out_equals_expected_passes() {
         let config = PriceGuardConfig::default().with_tolerance_bps(0);
-        let guard = make_guard(vec![fixed(1000)], config);
+        let guard = make_guard(vec![fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 1000)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn one_provider_validates_despite_other_rejecting() {
-        // Provider A expects 1000, solution gives 960 → 400 bps deviation → fails.
-        // Provider B expects 970, solution gives 960 → ~103 bps → passes.
-        // "At least one validates" → passes.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard =
-            make_guard(vec![fixed_named(1000, "strict"), fixed_named(970, "lenient")], config);
+        let guard = make_guard(vec![fixed_named(1000, "strict"), fixed_named(970, "lenient")]);
 
         let solutions = vec![make_solution(1000, 960)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn one_provider_fails_other_validates() {
-        // First provider errors, second validates → passes.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![failing(), fixed(1000)], config);
+        let guard = make_guard(vec![failing(), fixed(1000)]);
 
         let solutions = vec![make_solution(1000, 980)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
@@ -418,22 +418,27 @@ mod tests {
     #[tokio::test]
     async fn all_providers_error_allow_on_error_passes_through() {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(true);
-        let guard = make_guard(vec![failing(), failing()], config);
+        let guard = make_guard(vec![failing(), failing()]);
 
         let solutions = vec![make_solution(1000, 500)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
-        // Passed through despite no validation — fail-open.
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn all_providers_error_deny_on_error_marks_solution() {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(false);
-        let guard = make_guard(vec![failing(), failing()], config);
+        let guard = make_guard(vec![failing(), failing()]);
 
         let solutions = vec![make_solution(1000, 500)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }
@@ -441,14 +446,13 @@ mod tests {
     #[tokio::test]
     async fn non_success_solutions_pass_through_unchanged() {
         let config = PriceGuardConfig::default();
-        // Provider that would fail any price check — but non-success solutions skip it.
-        let guard = make_guard(vec![fixed(10_000_000)], config);
+        let guard = make_guard(vec![fixed(10_000_000)]);
 
         let mut solution = make_solution(1000, 1);
         solution.status = SolutionStatus::NoRouteFound;
 
         let result = guard
-            .validate(vec![solution])
+            .validate(vec![solution], &config)
             .await
             .unwrap();
 
@@ -458,13 +462,13 @@ mod tests {
     #[tokio::test]
     async fn solution_without_route_passes_through() {
         let config = PriceGuardConfig::default();
-        let guard = make_guard(vec![fixed(10_000_000)], config);
+        let guard = make_guard(vec![fixed(10_000_000)]);
 
         let mut solution = make_solution(1000, 1);
         solution.route = None;
 
         let result = guard
-            .validate(vec![solution])
+            .validate(vec![solution], &config)
             .await
             .unwrap();
 
@@ -474,13 +478,13 @@ mod tests {
     #[tokio::test]
     async fn solution_with_empty_swaps_passes_through() {
         let config = PriceGuardConfig::default();
-        let guard = make_guard(vec![fixed(10_000_000)], config);
+        let guard = make_guard(vec![fixed(10_000_000)]);
 
         let mut solution = make_solution(1000, 1);
         solution.route = Some(Route::new(vec![]));
 
         let result = guard
-            .validate(vec![solution])
+            .validate(vec![solution], &config)
             .await
             .unwrap();
 
@@ -489,23 +493,22 @@ mod tests {
 
     #[tokio::test]
     async fn zero_expected_amount_treated_as_pass() {
-        // Provider returns zero expected_amount_out → can't validate, treat as pass.
         let config = PriceGuardConfig::default().with_tolerance_bps(0);
-        let guard = make_guard(vec![zero_price()], config);
+        let guard = make_guard(vec![zero_price()]);
 
         let solutions = vec![make_solution(1000, 1)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn multiple_solutions_validated_independently() {
-        // Provider expects 1000. Tolerance 300 bps.
-        // Solution A: amount_out = 980 → 20/1000 = 200 bps → passes.
-        // Solution B: amount_out = 500 → 500/1000 = 5000 bps → fails.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![fixed(1000)], config);
+        let guard = make_guard(vec![fixed(1000)]);
 
         let solution_a = {
             let mut s = make_solution(1000, 980);
@@ -519,7 +522,7 @@ mod tests {
         };
 
         let result = guard
-            .validate(vec![solution_a, solution_b])
+            .validate(vec![solution_a, solution_b], &config)
             .await
             .unwrap();
 
@@ -529,12 +532,14 @@ mod tests {
 
     #[tokio::test]
     async fn no_providers_registered_with_allow_on_error() {
-        // Empty registry → get_all_expected_out returns empty vec → all_errors stays true.
         let config = PriceGuardConfig::default().with_allow_on_provider_error(true);
-        let guard = make_guard(vec![], config);
+        let guard = make_guard(vec![]);
 
         let solutions = vec![make_solution(1000, 500)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
@@ -542,36 +547,41 @@ mod tests {
     #[tokio::test]
     async fn no_providers_registered_deny_on_error() {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(false);
-        let guard = make_guard(vec![], config);
+        let guard = make_guard(vec![]);
 
         let solutions = vec![make_solution(1000, 500)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }
 
     #[tokio::test]
     async fn boundary_deviation_exactly_at_tolerance_passes() {
-        // amount_out = 9700, expected = 10000 → deviation = 300/10000 = 300 bps.
-        // Tolerance = 300 bps → passes (<=, not <).
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![fixed(10_000)], config);
+        let guard = make_guard(vec![fixed(10_000)]);
 
         let solutions = vec![make_solution(10_000, 9700)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::Success);
     }
 
     #[tokio::test]
     async fn boundary_deviation_one_above_tolerance_fails() {
-        // amount_out = 9699, expected = 10000 → deviation = 301/10000 = 301 bps.
-        // Tolerance = 300 bps → fails.
         let config = PriceGuardConfig::default().with_tolerance_bps(300);
-        let guard = make_guard(vec![fixed(10_000)], config);
+        let guard = make_guard(vec![fixed(10_000)]);
 
         let solutions = vec![make_solution(10_000, 9699)];
-        let result = guard.validate(solutions).await.unwrap();
+        let result = guard
+            .validate(solutions, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result[0].status, SolutionStatus::PriceCheckFailed);
     }

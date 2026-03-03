@@ -62,6 +62,26 @@ pub struct SolutionOptions {
     pub max_gas: Option<BigUint>,
     pub slippage: f64,
     pub include_encoding: bool,
+    /// Per-request price guard configuration. If `None`, uses defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_guard: Option<PriceGuardOptions>,
+}
+
+/// Per-request price guard options.
+///
+/// All fields are optional; omitted fields use defaults
+/// (enabled: true, tolerance_bps: 300, allow_on_provider_error: false).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PriceGuardOptions {
+    /// Whether price guard validation is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Maximum allowed deviation in basis points (1 bps = 0.01%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance_bps: Option<u32>,
+    /// Allow solutions through when all price providers error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_on_provider_error: Option<bool>,
 }
 
 // ============================================================================

@@ -75,10 +75,7 @@ pub trait PriceProvider: Send + Sync + 'static {
     ///
     /// Called once during server startup. Returns the background task handle so
     /// the caller can abort it on shutdown.
-    fn start(
-        &mut self,
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> JoinHandle<()>;
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()>;
 
     /// Returns the expected output amount for a given input.
     ///

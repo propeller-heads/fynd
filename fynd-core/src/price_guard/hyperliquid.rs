@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use reqwest::Client;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
 
@@ -17,7 +17,6 @@ use super::{
     common::{check_staleness, compute_expected_out, resolve_token},
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
-use tokio::task::JoinHandle;
 use crate::feed::market_data::SharedMarketData;
 
 const API_URL: &str = "https://api.hyperliquid.xyz/info";
@@ -54,10 +53,7 @@ impl HyperliquidProvider {
 
 #[async_trait]
 impl PriceProvider for HyperliquidProvider {
-    fn start(
-        &mut self,
-        market_data: Arc<RwLock<SharedMarketData>>,
-    ) -> JoinHandle<()> {
+    fn start(&mut self, market_data: Arc<RwLock<SharedMarketData>>) -> JoinHandle<()> {
         self.market_data = Some(Arc::clone(&market_data));
         let worker = HyperliquidWorker { cache: Arc::clone(&self.cache), client: Client::new() };
         tokio::spawn(async move { worker.run().await })

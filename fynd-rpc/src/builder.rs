@@ -13,7 +13,6 @@ use fynd_core::{
     price_guard::{
         binance_ws::BinanceWsProvider,
         chainlink::ChainlinkProvider,
-        config::PriceGuardConfig,
         hyperliquid::HyperliquidProvider,
         provider::{PriceProvider, PriceProviderRegistry},
         PriceGuard,
@@ -61,11 +60,12 @@ pub struct FyndBuilder {
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
     user_transfer_type: UserTransferType,
-    price_guard_config: PriceGuardConfig,
     /// Price providers for the price guard.
     /// Populated with built-in providers by default via [`add_default_price_providers`].
     /// Each provider's [`start`](PriceProvider::start) is called during `build()`.
     price_providers: Vec<Box<dyn PriceProvider>>,
+    /// When true, skip all provider registration and pass `None` as price guard.
+    disable_price_guard: bool,
     swapper_pk: Option<String>,
 }
 
@@ -97,8 +97,8 @@ impl FyndBuilder {
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
             user_transfer_type: UserTransferType::TransferFrom,
-            price_guard_config: PriceGuardConfig::default(),
             price_providers: Vec::new(),
+            disable_price_guard: false,
             swapper_pk: None,
         }
     }
@@ -181,12 +181,6 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the price guard configuration.
-    pub fn price_guard_config(mut self, config: PriceGuardConfig) -> Self {
-        self.price_guard_config = config;
-        self
-    }
-
     /// Registers the built-in price providers (Hyperliquid, Binance, Chainlink).
     ///
     /// Called automatically during [`build`](Self::build) if no providers have been
@@ -213,6 +207,16 @@ impl FyndBuilder {
         self
     }
 
+    /// Disables the price guard entirely.
+    ///
+    /// No providers are started and no validation is performed, regardless
+    /// of per-request `price_guard` options. Use this when price validation
+    /// is not needed and you want to avoid running provider background tasks.
+    pub fn disable_price_guard(mut self) -> Self {
+        self.disable_price_guard = true;
+        self
+    }
+
     /// Sets swapper pk (used for permit2 signing).
     pub fn swapper_pk(mut self, swapper_pk: String) -> Self {
         self.swapper_pk = Some(swapper_pk);
@@ -220,8 +224,8 @@ impl FyndBuilder {
     }
 
     pub fn build(mut self) -> Result<Fynd> {
-        // Add built-in providers if none were explicitly registered and the guard is enabled.
-        if self.price_guard_config.enabled() && self.price_providers.is_empty() {
+        // Add built-in providers if none were explicitly registered.
+        if self.price_providers.is_empty() && !self.disable_price_guard {
             self = self.add_default_price_providers();
         }
 
@@ -352,16 +356,16 @@ impl FyndBuilder {
         )?;
 
         // Price guard with provider registry (pass if at least one validates)
-        let price_guard = if self.price_guard_config.enabled() {
+        let price_guard = if self.disable_price_guard {
+            None
+        } else {
             let mut registry = PriceProviderRegistry::new();
             let mut worker_handles = Vec::new();
             for mut provider in self.price_providers {
                 worker_handles.push(provider.start(Arc::clone(&market_data)));
                 registry = registry.register(provider);
             }
-            Some(PriceGuard::new(registry, self.price_guard_config, worker_handles))
-        } else {
-            None
+            Some(PriceGuard::new(registry, worker_handles))
         };
 
         let order_manager_config = OrderManagerConfig::default()

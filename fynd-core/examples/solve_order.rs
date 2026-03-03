@@ -24,6 +24,13 @@ use fynd_core::{
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
+    price_guard::{
+        binance_ws::BinanceWsProvider,
+        chainlink::ChainlinkProvider,
+        hyperliquid::HyperliquidProvider,
+        provider::{PriceProvider, PriceProviderRegistry},
+        PriceGuard,
+    },
     types::{constants::native_token, Order, OrderSide},
     OrderManager, OrderManagerConfig, SolutionRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
@@ -100,13 +107,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             derived_event_tx.subscribe(),
         )?;
 
-    // 7. OrderManager to coordinate solving
+    // 7. Price guard with built-in providers
+    let mut registry = PriceProviderRegistry::new();
+    let mut provider_handles = Vec::new();
+    let mut providers: Vec<Box<dyn PriceProvider>> = vec![
+        Box::new(HyperliquidProvider::new()),
+        Box::new(BinanceWsProvider::new()),
+        Box::new(ChainlinkProvider::new(rpc_url)),
+    ];
+    for provider in &mut providers {
+        provider_handles.push(provider.start(Arc::clone(&market_data)));
+    }
+    for provider in providers {
+        registry = registry.register(provider);
+    }
+
+    let price_guard = PriceGuard::new(registry, provider_handles);
+
+    // 8. OrderManager to coordinate solving
     let order_manager = OrderManager::new(
         vec![SolverPoolHandle::new("solver", task_handle)],
         OrderManagerConfig::default().with_timeout(Duration::from_secs(10)),
+        None,
+        Some(price_guard),
     );
 
-    // 8. Spawn background tasks
+    // 9. Spawn background tasks
     let feed_handle = tokio::spawn(async move {
         if let Err(e) = tycho_feed.run().await {
             eprintln!("Tycho feed error: {:?}", e);
@@ -125,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    // 9. Wait for fresh market data and derived computations
+    // 10. Wait for fresh market data and derived computations
     print!("Loading market data and computing derived data...");
     std::io::Write::flush(&mut std::io::stdout())?;
 
@@ -161,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_secs(60)).await;
     println!(" done");
 
-    // 10. Create and solve an order: Sell 1000 USDC for WBTC
+    // 11. Create and solve an order: Sell 1000 USDC for WBTC
     let usdc_addr = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?;
     let wbtc_addr = Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599")?;
 
@@ -183,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(" done ({}ms)\n", solution.solve_time_ms);
 
-    // 11. Display results
+    // 12. Display results
     let order_solution = &solution.orders[0];
 
     if let Some(route) = &order_solution.route {

@@ -48,6 +48,27 @@ pub struct SolutionOptions {
     pub slippage: f64,
     #[schema(value_type = bool, example = "true")]
     pub include_encoding: bool,
+    /// Per-request price guard configuration. Omit to use defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_guard: Option<PriceGuardOptions>,
+}
+
+/// Per-request price guard options.
+///
+/// All fields are optional; omitted fields use defaults
+/// (enabled: true, tolerance_bps: 300, allow_on_provider_error: false).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PriceGuardOptions {
+    /// Whether price guard validation is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Maximum allowed deviation in basis points (1 bps = 0.01%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 300)]
+    pub tolerance_bps: Option<u32>,
+    /// Allow solutions through when all price providers error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_on_provider_error: Option<bool>,
 }
 
 // ============================================================================
@@ -293,6 +314,17 @@ impl From<SolutionOptions> for fynd_core::SolutionOptions {
             max_gas: dto.max_gas,
             include_encoding: dto.include_encoding,
             slippage: dto.slippage,
+            price_guard: dto.price_guard.map(Into::into),
+        }
+    }
+}
+
+impl From<PriceGuardOptions> for fynd_core::PriceGuardOptions {
+    fn from(dto: PriceGuardOptions) -> Self {
+        Self {
+            enabled: dto.enabled,
+            tolerance_bps: dto.tolerance_bps,
+            allow_on_provider_error: dto.allow_on_provider_error,
         }
     }
 }
@@ -487,7 +519,9 @@ mod tests {
                 timeout_ms: Some(5000),
                 min_responses: None,
                 max_gas: None,
+                slippage: 0.001,
                 include_encoding: true,
+                price_guard: None,
             },
         };
 

@@ -19,7 +19,6 @@ use std::time::Duration;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
-use fynd_core::price_guard::config::PriceGuardConfig;
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
     config::{BlacklistConfig, WorkerPoolsConfig},
@@ -178,13 +177,7 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
     .gas_refresh_interval(Duration::from_secs(cli.gas_refresh_interval_secs))
     .reconnect_delay(Duration::from_secs(cli.reconnect_delay_secs))
     .order_manager_timeout(Duration::from_millis(cli.order_manager_timeout_ms))
-    .order_manager_min_responses(cli.order_manager_min_responses)
-    .price_guard_config(
-        PriceGuardConfig::default()
-            .with_enabled(cli.price_guard_enabled)
-            .with_tolerance_bps(cli.price_guard_tolerance_bps)
-            .with_allow_on_provider_error(cli.price_guard_allow_on_provider_error),
-    );
+    .order_manager_min_responses(cli.order_manager_min_responses);
 
     if cli.disable_tls {
         builder = builder.disable_tls();
@@ -197,6 +190,9 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
             SolverError::SetupError(format!("failed to load blacklist config: {}", e))
         })?;
         builder = builder.blacklist(blacklist);
+    }
+    if cli.disable_price_guard {
+        builder = builder.disable_price_guard();
     }
 
     // Build and start solver
