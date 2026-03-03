@@ -77,6 +77,42 @@ pub struct EncodingOptions {
     pub signature: Option<Bytes>,
 }
 
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "0")]
+    pub nonce: BigUint,
+}
+
 // ============================================================================
 // RESPONSE TYPES
 // ============================================================================
@@ -381,6 +417,16 @@ impl From<SolutionOptions> for fynd_core::SolutionOptions {
     }
 }
 
+impl From<UserTransferType> for fynd_core::UserTransferType {
+    fn from(dto: UserTransferType) -> Self {
+        match dto {
+            UserTransferType::TransferFromPermit2 => Self::TransferFromPermit2,
+            UserTransferType::TransferFrom => Self::TransferFrom,
+            UserTransferType::None => Self::None,
+        }
+    }
+}
+
 impl From<EncodingOptions> for fynd_core::EncodingOptions {
     fn from(dto: EncodingOptions) -> Self {
         Self {
@@ -389,6 +435,18 @@ impl From<EncodingOptions> for fynd_core::EncodingOptions {
             permit: dto.permit.map(Into::into),
             signature: dto.signature,
         }
+    }
+}
+
+impl From<PermitSingle> for fynd_core::PermitSingle {
+    fn from(dto: PermitSingle) -> Self {
+        Self { details: dto.details.into(), spender: dto.spender, sig_deadline: dto.sig_deadline }
+    }
+}
+
+impl From<PermitDetails> for fynd_core::PermitDetails {
+    fn from(dto: PermitDetails) -> Self {
+        Self { token: dto.token, amount: dto.amount, expiration: dto.expiration, nonce: dto.nonce }
     }
 }
 

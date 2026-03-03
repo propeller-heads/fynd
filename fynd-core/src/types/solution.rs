@@ -79,6 +79,36 @@ pub struct EncodingOptions {
     pub signature: Option<Bytes>,
 }
 
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    pub nonce: BigUint,
+}
+
 // ============================================================================
 // RESPONSE TYPES
 // ============================================================================
