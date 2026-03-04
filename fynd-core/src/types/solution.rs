@@ -80,7 +80,7 @@ pub struct EncodingOptions {
     pub permit: Option<PermitSingle>,
     /// Permit2 signature (65 bytes). Required when `permit` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<Bytes>,
+    pub permit2_signature: Option<Bytes>,
 }
 
 /// A single permit for permit2 token transfer authorization.

@@ -77,7 +77,7 @@ pub struct EncodingOptions {
     /// Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "0xabcd...")]
-    pub signature: Option<Bytes>,
+    pub permit2_signature: Option<Bytes>,
 }
 
 /// A single permit for permit2 token transfer authorization.
@@ -440,7 +440,7 @@ impl From<EncodingOptions> for fynd_core::EncodingOptions {
             slippage: dto.slippage,
             transfer_type: dto.transfer_type.into(),
             permit: dto.permit.map(Into::into),
-            signature: dto.signature,
+            permit2_signature: dto.permit2_signature,
         }
     }
 }
