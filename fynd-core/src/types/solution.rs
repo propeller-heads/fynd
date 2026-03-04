@@ -23,7 +23,11 @@ use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
 use tycho_simulation::{
     tycho_common::models::Address,
-    tycho_core::{models::token::Token, Bytes},
+    tycho_core::{
+        models::{protocol::ProtocolComponent, token::Token},
+        simulation::protocol_sim::ProtocolSim,
+        Bytes,
+    },
 };
 use uuid::Uuid;
 
@@ -468,10 +472,14 @@ pub struct Swap {
     /// Estimated gas cost for this swap (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
+    pub protocol_component: ProtocolComponent,
+    pub protocol_state: Box<dyn ProtocolSim>,
 }
 
 impl Swap {
     /// Creates a new swap with an auto-calculated gas estimate.
+    // All arguments correspond directly to struct fields; no grouping makes sense here.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         component_id: ComponentId,
         protocol: String,
@@ -480,8 +488,20 @@ impl Swap {
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
+        protocol_component: ProtocolComponent,
+        protocol_state: Box<dyn ProtocolSim>,
     ) -> Self {
-        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self {
+            component_id,
+            protocol,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            protocol_component,
+            protocol_state,
+        }
     }
 }
 
@@ -516,6 +536,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
@@ -534,6 +555,8 @@ mod tests {
     }
 
     fn make_swap(token_in_byte: u8, token_out_byte: u8, amount_in: u64, amount_out: u64) -> Swap {
+        let token_in = token(token_in_byte, "TIN");
+        let token_out = token(token_out_byte, "TOUT");
         Swap {
             component_id: "pool-1".to_string(),
             protocol: "uniswap_v2".to_string(),
@@ -542,6 +565,8 @@ mod tests {
             amount_in: BigUint::from(amount_in),
             amount_out: BigUint::from(amount_out),
             gas_estimate: BigUint::from(100_000u64),
+            protocol_component: component("test-pool", &[token_in, token_out]),
+            protocol_state: Box::new(MockProtocolSim::default()),
         }
     }
 

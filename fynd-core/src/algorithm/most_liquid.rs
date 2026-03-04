@@ -317,6 +317,8 @@ impl MostLiquidAlgorithm {
                 amount_in: current_amount.clone(),
                 amount_out: result.amount.clone(),
                 gas_estimate: result.gas,
+                protocol_component: component.clone(),
+                protocol_state: state.clone_box(),
             });
 
             // Store new state as override for next hops
@@ -1130,6 +1132,7 @@ mod tests {
         assert_eq!(result.route.swaps.len(), 1);
         assert_eq!(result.route.swaps[0].amount_in, BigUint::from(ONE_ETH));
         assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.gas_price, BigUint::from(100u128));
     }
 
     #[tokio::test]
@@ -1172,6 +1175,7 @@ mod tests {
         assert_eq!(result.route.swaps[0].component_id, "best");
         assert_eq!(result.route.swaps[0].amount_out, BigUint::from(3000u64));
         assert_eq!(result.net_amount_out, BigInt::from(2000)); // 3000 - 1000
+        assert_eq!(result.gas_price, BigUint::from(100u128));
     }
 
     #[tokio::test]
@@ -1220,6 +1224,7 @@ mod tests {
         assert_eq!(result.route.swaps[0].component_id, "pool1".to_string());
         assert_eq!(result.route.swaps[1].amount_out, BigUint::from(ONE_ETH * 2 * 3));
         assert_eq!(result.route.swaps[1].component_id, "pool2".to_string());
+        assert_eq!(result.gas_price, BigUint::from(100u128));
     }
 
     #[tokio::test]
