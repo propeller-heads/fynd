@@ -319,8 +319,10 @@ pub struct Swap {
     #[serde_as(as = "DisplayFromStr")]
     #[schema(value_type = String, example = "150000")]
     pub gas_estimate: BigUint,
+    /// Protocol component description.
     #[schema(value_type = Object)]
     pub protocol_component: ProtocolComponent,
+    /// Protocol state used to perform the swap.
     #[schema(value_type = Object)]
     pub protocol_state: Box<dyn ProtocolSim>,
 }
