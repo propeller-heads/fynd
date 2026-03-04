@@ -493,7 +493,8 @@ mod tests {
         }
 
         fn fee(&self) -> f64 {
-            // We use .fee() to get the id of the FeedMockProtocolSim in the tests for our assertions.
+            // We use .fee() to get the id of the FeedMockProtocolSim in the tests for our
+            // assertions.
             self.id
         }
 
