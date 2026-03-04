@@ -68,6 +68,7 @@ pub struct SolutionOptions {
     pub encoding_options: Option<EncodingOptions>,
 }
 
+/// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingOptions {
@@ -267,6 +268,7 @@ pub struct OrderSolution {
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub gas_price: Option<BigUint>,
+    /// An encoded EVM transaction ready to be submitted on-chain.
     pub transaction: Option<Transaction>,
 }
 

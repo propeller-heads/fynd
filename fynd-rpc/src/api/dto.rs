@@ -62,6 +62,7 @@ pub enum UserTransferType {
     None,
 }
 
+/// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EncodingOptions {
@@ -237,6 +238,7 @@ pub struct OrderSolution {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "20000000000")]
     pub gas_price: Option<BigUint>,
+    /// An encoded EVM transaction ready to be submitted on-chain.
     pub transaction: Option<Transaction>,
 }
 
