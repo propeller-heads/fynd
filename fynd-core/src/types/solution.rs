@@ -522,7 +522,7 @@ pub struct Transaction {
 // PRIVATE HELPERS
 // ============================================================================
 
-/// Generates a unique order ID using UUID v4.
+/// Generates a default UserTransferType value.
 fn default_transfer_type() -> UserTransferType {
     UserTransferType::TransferFrom
 }
