@@ -467,18 +467,18 @@ mod tests {
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    struct MockProtocolSim {
+    struct FeedMockProtocolSim {
         id: f64,
     }
 
-    impl MockProtocolSim {
+    impl FeedMockProtocolSim {
         fn new(id: f64) -> Self {
             Self { id }
         }
     }
 
     #[typetag::serde]
-    impl ProtocolSim for MockProtocolSim {
+    impl ProtocolSim for FeedMockProtocolSim {
         fn get_amount_out(
             &self,
             amount_in: BigUint,
@@ -493,7 +493,7 @@ mod tests {
         }
 
         fn fee(&self) -> f64 {
-            // We use .fee() to get the id of the MockProtocolSim in the tests for our assertions.
+            // We use .fee() to get the id of the FeedMockProtocolSim in the tests for our assertions.
             self.id
         }
 
@@ -783,7 +783,7 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             component_id.to_string(),
-            Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+            Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
         );
 
         let update = Update::new(12345, states.clone(), new_pairs);
@@ -826,7 +826,7 @@ mod tests {
         // Now update its state
 
         // Create an update with state information
-        let new_state = Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>;
+        let new_state = Box::new(FeedMockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>;
         let update = Update::new(
             12345,
             HashMap::from([(component_id.to_string(), new_state)]),
@@ -1234,7 +1234,7 @@ mod tests {
         let mut initial_states = HashMap::new();
         initial_states.insert(
             allowed_id.to_string(),
-            Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+            Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
         );
 
         let update = Update::new(12345, initial_states, new_pairs);
@@ -1249,11 +1249,11 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             blacklisted_id.to_string(),
-            Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+            Box::new(FeedMockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
         );
         states.insert(
             allowed_id.to_string(),
-            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+            Box::new(FeedMockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
         );
 
         let update = Update::new(12346, states, HashMap::new());
