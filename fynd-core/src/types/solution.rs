@@ -765,7 +765,31 @@ mod tests {
             "token_out": "0x0202020202020202020202020202020202020202",
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
-            "gas_estimate": "150000"
+            "gas_estimate": "150000",
+            "protocol_component": {
+                "id": "test-pool",
+                "protocol_system": "uniswap_v2",
+                "protocol_type_name": "swap",
+                "chain": "ethereum",
+                "tokens": [
+                    "0x0101010101010101010101010101010101010101",
+                    "0x0202020202020202020202020202020202020202"
+                ],
+                "contract_addresses": [],
+                "static_attributes": {},
+                "change": "Update",
+                "creation_tx": "0x",
+                "created_at": "1970-01-01T00:00:00"
+            },
+            "protocol_state": {
+                "protocol": "MockProtocolSim",
+                "state": {
+                    "spot_price": 2,
+                    "gas": 50000,
+                    "liquidity": 340282366920938463463374607431768211455,
+                    "fee": 0.0
+                }
+            }
         }"#;
 
         let swap: Swap = serde_json::from_str(json).unwrap();
