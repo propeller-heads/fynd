@@ -474,7 +474,7 @@ pub struct Swap {
     /// Estimated gas cost for this swap (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
-    /// Protocol component description.
+    /// Protocol component to perform the swap.
     pub protocol_component: ProtocolComponent,
     /// Protocol state used to perform the swap.
     pub protocol_state: Box<dyn ProtocolSim>,
