@@ -239,6 +239,10 @@ pub struct SingleOrderSolution {
 pub struct OrderSolution {
     /// ID of the order this solution corresponds to.
     pub order_id: String,
+    /// Input token address (the token being sold).
+    pub token_in: Address,
+    /// Output token address (the token being bought).
+    pub token_out: Address,
     /// Status indicating whether a route was found.
     pub status: SolutionStatus,
     /// The route to execute, if a valid route was found.
@@ -270,6 +274,14 @@ pub struct OrderSolution {
     pub gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
     pub transaction: Option<Transaction>,
+    /// Address of the sender.
+    pub sender: Bytes,
+    /// Address of the receiver.
+    pub receiver: Bytes,
+    /// False if the solution is an exact input solution. Currently only exact input solutions are
+    /// supported.
+    #[serde(default)]
+    pub exact_out: bool,
 }
 
 /// Status of an order solution.

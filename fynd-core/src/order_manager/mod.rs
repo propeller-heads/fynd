@@ -24,6 +24,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
+use tycho_simulation::tycho_common::{models::Address, Bytes};
 
 use crate::{
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderSolution, Solution,
@@ -299,6 +300,8 @@ impl OrderManager {
             counter!("order_manager_orders_total", "status" => "no_route").increment(1);
             OrderSolution {
                 order_id: responses.order_id.clone(),
+                token_in: any_sol.token_in.clone(),
+                token_out: any_sol.token_out.clone(),
                 status: SolutionStatus::NoRouteFound,
                 route: None,
                 amount_in: any_sol.amount_in.clone(),
@@ -310,6 +313,9 @@ impl OrderManager {
                 algorithm: String::new(),
                 gas_price: None,
                 transaction: None,
+                sender: any_sol.sender.clone(),
+                receiver: Bytes::from(any_sol.receiver.as_ref()),
+                exact_out: any_sol.exact_out,
             }
         } else {
             // No responses at all - determine status from failure types
@@ -345,6 +351,8 @@ impl OrderManager {
 
             OrderSolution {
                 order_id: responses.order_id.clone(),
+                token_in: Address::default(),
+                token_out: Address::default(),
                 status,
                 route: None,
                 amount_in: BigUint::ZERO,
@@ -356,6 +364,9 @@ impl OrderManager {
                 algorithm: String::new(),
                 gas_price: None,
                 transaction: None,
+                sender: Bytes::default(),
+                receiver: Bytes::default(),
+                exact_out: false,
             }
         }
     }
@@ -397,6 +408,8 @@ mod tests {
         SingleOrderSolution {
             order: OrderSolution {
                 order_id: "test-order".to_string(),
+                token_in: make_address(0x01),
+                token_out: make_address(0x02),
                 status: SolutionStatus::Success,
                 route: None,
                 amount_in: BigUint::from(1000u64),
@@ -408,6 +421,9 @@ mod tests {
                 algorithm: "test".to_string(),
                 gas_price: None,
                 transaction: None,
+                sender: Bytes::from(make_address(0xAA).as_ref()),
+                receiver: Bytes::from(make_address(0xAA).as_ref()),
+                exact_out: false,
             },
             solve_time_ms: 5,
         }
@@ -580,6 +596,8 @@ mod tests {
                 "pool".to_string(),
                 OrderSolution {
                     order_id: "test".to_string(),
+                    token_in: make_address(0x01),
+                    token_out: make_address(0x02),
                     status: SolutionStatus::Success,
                     route: None,
                     amount_in: BigUint::from(1000u64),
@@ -591,6 +609,9 @@ mod tests {
                     algorithm: "test".to_string(),
                     gas_price: None,
                     transaction: None,
+                    sender: Bytes::from(make_address(0xAA).as_ref()),
+                    receiver: Bytes::from(make_address(0xAA).as_ref()),
+                    exact_out: false,
                 },
             )],
             failed_solvers: vec![],

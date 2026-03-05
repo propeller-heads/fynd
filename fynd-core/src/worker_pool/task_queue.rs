@@ -119,7 +119,7 @@ impl TaskQueue {
 mod tests {
     use num_bigint::BigUint;
     use rstest::rstest;
-    use tycho_simulation::tycho_core::models::Address;
+    use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
     use crate::{BlockInfo, Order, OrderSide, OrderSolution, SingleOrderSolution, SolutionStatus};
@@ -148,6 +148,8 @@ mod tests {
         SingleOrderSolution {
             order: OrderSolution {
                 order_id: "test-order".to_string(),
+                token_in: make_address(0x01),
+                token_out: make_address(0x02),
                 status: SolutionStatus::Success,
                 route: None,
                 amount_in: BigUint::from(1000u64),
@@ -159,6 +161,9 @@ mod tests {
                 algorithm: "test".to_string(),
                 gas_price: None,
                 transaction: None,
+                sender: Bytes::from(make_address(0xAA).as_ref()),
+                receiver: Bytes::from(make_address(0xAA).as_ref()),
+                exact_out: false,
             },
             solve_time_ms: 5,
         }

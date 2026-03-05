@@ -28,6 +28,7 @@ tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
 tycho-execution.workspace = true
+alloy = { version = "1.0", default-features = false, features = ["sol-types"] }
 
 [dev-dependencies]
 alloy = { version = "1.0", default-features = false }

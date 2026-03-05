@@ -226,6 +226,8 @@ where
 
                 OrderSolution {
                     order_id: order.id.clone(),
+                    token_in: order.token_in.clone(),
+                    token_out: order.token_out.clone(),
                     status: SolutionStatus::Success,
                     route: Some(route),
                     amount_in,
@@ -237,6 +239,9 @@ where
                     algorithm: self.algorithm.name().to_string(),
                     gas_price: Some(result.gas_price),
                     transaction: None,
+                    sender: order.sender.clone(),
+                    receiver: order.effective_receiver().clone(),
+                    exact_out: !order.is_sell(),
                 }
             }
             Err(err) => {
