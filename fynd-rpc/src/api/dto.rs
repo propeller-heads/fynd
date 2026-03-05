@@ -6,10 +6,7 @@
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::{
-    tycho_common::models::Address,
-    tycho_core::{dto::ProtocolComponent, simulation::protocol_sim::ProtocolSim, Bytes},
-};
+use tycho_simulation::{tycho_common::models::Address, tycho_core::Bytes};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -319,12 +316,6 @@ pub struct Swap {
     #[serde_as(as = "DisplayFromStr")]
     #[schema(value_type = String, example = "150000")]
     pub gas_estimate: BigUint,
-    /// Protocol component to perform the swap.
-    #[schema(value_type = Object)]
-    pub protocol_component: ProtocolComponent,
-    /// Protocol state used to perform the swap.
-    #[schema(value_type = Object)]
-    pub protocol_state: Box<dyn ProtocolSim>,
 }
 
 // ============================================================================
@@ -559,8 +550,6 @@ impl From<fynd_core::Swap> for Swap {
             amount_in: core.amount_in,
             amount_out: core.amount_out,
             gas_estimate: core.gas_estimate,
-            protocol_component: core.protocol_component.into(),
-            protocol_state: core.protocol_state,
         }
     }
 }
