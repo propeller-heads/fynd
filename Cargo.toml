@@ -35,8 +35,13 @@ tycho-simulation = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-tycho-execution = { version = ">=0.155.0", features = ["evm"] }
-alloy = { version = "1.0", features = ["providers", "signer-local", "rpc-types-eth", "eip712", "node-bindings"] }
+alloy = { version = "1.0", features = [
+    "providers",
+    "signer-local",
+    "rpc-types-eth",
+    "eip712",
+    "node-bindings",
+] }
 alloy-chains = "0.2"
 dialoguer = "0.11"
 dotenv = "0.15"
@@ -46,6 +51,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
+tycho-execution = { workspace = true }
 
 [workspace]
 members = ["fynd-core", "fynd-rpc"]
@@ -89,6 +95,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Tycho
 tycho-simulation = ">=0.234.0"
+tycho-execution = { version = ">=0.164.0", features = ["evm"] }
 typetag = "0.2"
 
 # Graph algorithms

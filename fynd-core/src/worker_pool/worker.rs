@@ -235,6 +235,8 @@ where
                     amount_out_net_gas,
                     block: block_info.clone(),
                     algorithm: self.algorithm.name().to_string(),
+                    gas_price: Some(result.gas_price),
+                    transaction: None,
                 }
             }
             Err(err) => {

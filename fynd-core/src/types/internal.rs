@@ -83,6 +83,10 @@ pub enum SolveError {
     /// No workers are ready to solve.
     #[error("no workers ready: {0}")]
     NotReady(String),
+
+    /// Error when encoding
+    #[error("failed to encode: {0}")]
+    FailedEncoding(String),
 }
 
 impl SolveError {

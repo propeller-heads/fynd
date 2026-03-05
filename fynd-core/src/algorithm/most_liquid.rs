@@ -317,6 +317,8 @@ impl MostLiquidAlgorithm {
                 amount_in: current_amount.clone(),
                 amount_out: result.amount.clone(),
                 gas_estimate: result.gas,
+                protocol_component: component.clone(),
+                protocol_state: state.clone_box(),
             });
 
             // Store new state as override for next hops
@@ -336,13 +338,15 @@ impl MostLiquidAlgorithm {
             .map(|s| s.amount_out.clone())
             .unwrap_or_else(|| BigUint::ZERO);
 
+        let gas_price = market
+            .gas_price()
+            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+            .effective_gas_price()
+            .clone();
+
         let net_amount_out = if let Some(last_swap) = route.swaps.last() {
             let total_gas = route.total_gas();
-            let gas_price = market
-                .gas_price()
-                .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-                .effective_gas_price();
-            let gas_cost_wei = &total_gas * gas_price;
+            let gas_cost_wei = &total_gas * &gas_price;
 
             // Convert gas cost to output token terms using token prices
             let gas_cost_in_output_token: Option<BigUint> = token_prices
@@ -365,7 +369,7 @@ impl MostLiquidAlgorithm {
             BigInt::from(output_amount)
         };
 
-        Ok(RouteResult { route, net_amount_out })
+        Ok(RouteResult { route, net_amount_out, gas_price })
     }
 }
 

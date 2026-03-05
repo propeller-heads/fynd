@@ -6,7 +6,10 @@
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::Address,
+    tycho_core::{dto::ProtocolComponent, simulation::protocol_sim::ProtocolSim, Bytes},
+};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -43,6 +46,75 @@ pub struct SolutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "500000")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+
+/// Token transfer method for moving funds into Tycho execution.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTransferType {
+    /// Use Permit2 for token transfer. Requires `permit` and `signature`.
+    TransferFromPermit2,
+    /// Use standard ERC-20 approval and `transferFrom`. Default.
+    #[default]
+    TransferFrom,
+    /// Use funds already present in the Tycho Router (no transfer performed).
+    None,
+}
+
+/// Options to customize the encoding behavior.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncodingOptions {
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(example = "0.001")]
+    pub slippage: f64,
+    /// Token transfer method. Defaults to `transfer_from`.
+    #[serde(default)]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `transfer_from_permit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "0xabcd...")]
+    pub permit2_signature: Option<Bytes>,
+}
+
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "1893456000")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "0")]
+    pub nonce: BigUint,
 }
 
 // ============================================================================
@@ -161,6 +233,13 @@ pub struct OrderSolution {
     pub amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     pub block: BlockInfo,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "20000000000")]
+    pub gas_price: Option<BigUint>,
+    /// An encoded EVM transaction ready to be submitted on-chain.
+    pub transaction: Option<Transaction>,
 }
 
 /// Status of an order solution.
@@ -240,6 +319,67 @@ pub struct Swap {
     #[serde_as(as = "DisplayFromStr")]
     #[schema(value_type = String, example = "150000")]
     pub gas_estimate: BigUint,
+    /// Protocol component to perform the swap.
+    #[schema(value_type = Object)]
+    pub protocol_component: ProtocolComponent,
+    /// Protocol state used to perform the swap.
+    #[schema(value_type = Object)]
+    pub protocol_state: Box<dyn ProtocolSim>,
+}
+
+// ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// An encoded EVM transaction ready to be submitted on-chain.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Transaction {
+    /// Contract address to call.
+    #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    pub to: Bytes,
+
+    /// Native token value to send with the transaction (as decimal string).
+    #[serde_as(as = "DisplayFromStr")]
+    #[schema(value_type = String, example = "0")]
+    pub value: BigUint,
+
+    /// ABI-encoded calldata as hex string.
+    #[schema(value_type = String, example = "0x1234567890abcdef")]
+    #[serde(serialize_with = "serialize_bytes_hex", deserialize_with = "deserialize_bytes_hex")]
+    pub data: Vec<u8>,
+}
+
+// ============================================================================
+// CUSTOM SERIALIZATION
+// ============================================================================
+
+/// Serializes Vec<u8> to hex string with 0x prefix.
+fn serialize_bytes_hex<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
+}
+
+/// Deserializes hex string (with or without 0x prefix) to Vec<u8>.
+fn deserialize_bytes_hex<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let s = s.strip_prefix("0x").unwrap_or(&s);
+    hex::decode(s).map_err(serde::de::Error::custom)
+}
+
+// ============================================================================
+// CONVERSIONS: Transaction DTO <-> Core
+// ============================================================================
+
+impl From<fynd_core::types::Transaction> for Transaction {
+    fn from(core: fynd_core::Transaction) -> Self {
+        Self { to: core.to, value: core.value, data: core.data }
+    }
 }
 
 // ============================================================================
@@ -279,7 +419,45 @@ impl From<SolutionRequest> for fynd_core::SolutionRequest {
 
 impl From<SolutionOptions> for fynd_core::SolutionOptions {
     fn from(dto: SolutionOptions) -> Self {
-        Self { timeout_ms: dto.timeout_ms, min_responses: dto.min_responses, max_gas: dto.max_gas }
+        Self {
+            timeout_ms: dto.timeout_ms,
+            min_responses: dto.min_responses,
+            max_gas: dto.max_gas,
+            encoding_options: dto.encoding_options.map(Into::into),
+        }
+    }
+}
+
+impl From<UserTransferType> for fynd_core::UserTransferType {
+    fn from(dto: UserTransferType) -> Self {
+        match dto {
+            UserTransferType::TransferFromPermit2 => Self::TransferFromPermit2,
+            UserTransferType::TransferFrom => Self::TransferFrom,
+            UserTransferType::None => Self::None,
+        }
+    }
+}
+
+impl From<EncodingOptions> for fynd_core::EncodingOptions {
+    fn from(dto: EncodingOptions) -> Self {
+        Self {
+            slippage: dto.slippage,
+            transfer_type: dto.transfer_type.into(),
+            permit: dto.permit.map(Into::into),
+            permit2_signature: dto.permit2_signature,
+        }
+    }
+}
+
+impl From<PermitSingle> for fynd_core::PermitSingle {
+    fn from(dto: PermitSingle) -> Self {
+        Self { details: dto.details.into(), spender: dto.spender, sig_deadline: dto.sig_deadline }
+    }
+}
+
+impl From<PermitDetails> for fynd_core::PermitDetails {
+    fn from(dto: PermitDetails) -> Self {
+        Self { token: dto.token, amount: dto.amount, expiration: dto.expiration, nonce: dto.nonce }
     }
 }
 
@@ -335,6 +513,8 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
             price_impact_bps: core.price_impact_bps,
             amount_out_net_gas: core.amount_out_net_gas,
             block: core.block.into(),
+            gas_price: core.gas_price,
+            transaction: core.transaction.map(Into::into),
         }
     }
 }
@@ -379,6 +559,8 @@ impl From<fynd_core::Swap> for Swap {
             amount_in: core.amount_in,
             amount_out: core.amount_out,
             gas_estimate: core.gas_estimate,
+            protocol_component: core.protocol_component.into(),
+            protocol_state: core.protocol_state,
         }
     }
 }
@@ -412,7 +594,12 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
+            options: SolutionOptions {
+                timeout_ms: Some(5000),
+                min_responses: None,
+                max_gas: None,
+                encoding_options: None,
+            },
         };
 
         let core: fynd_core::SolutionRequest = dto.clone().into();

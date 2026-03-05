@@ -3274,6 +3274,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tycho-execution",
  "tycho-simulation",
  "typetag",
  "uuid",
@@ -3286,6 +3287,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "fynd-core",
+ "hex",
  "metrics",
  "num-bigint",
  "num-traits",
@@ -3299,6 +3301,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-actix-web",
+ "tycho-execution",
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
@@ -7371,18 +7374,16 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.160.0"
+version = "0.164.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45694f91323ec97a2dafc200b34f9286988fa704b0fa3cef71254e2e314028e9"
+checksum = "705d52bcdd86c43d5a1027be5537b26541ee43a252bd6a21e242050e8916794b"
 dependencies = [
  "alloy",
  "chrono",
  "clap",
  "dotenv",
  "hex",
- "lazy_static",
  "num-bigint",
- "num-traits",
  "once_cell",
  "reqwest",
  "serde",

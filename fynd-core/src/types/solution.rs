@@ -20,7 +20,15 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::{tycho_common::models::Address, tycho_core::models::token::Token};
+pub use tycho_execution::encoding::models::UserTransferType;
+use tycho_simulation::{
+    tycho_common::models::Address,
+    tycho_core::{
+        models::{protocol::ProtocolComponent, token::Token},
+        simulation::protocol_sim::ProtocolSim,
+        Bytes,
+    },
+};
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
@@ -57,6 +65,53 @@ pub struct SolutionOptions {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas: Option<BigUint>,
+    pub encoding_options: Option<EncodingOptions>,
+}
+
+/// Options to customize the encoding behavior.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodingOptions {
+    pub slippage: f64,
+    /// Token transfer method. Defaults to `TransferFrom`.
+    #[serde(default = "default_transfer_type")]
+    pub transfer_type: UserTransferType,
+    /// Permit2 single-token authorization. Required when using `TransferFromPermit2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<PermitSingle>,
+    /// Permit2 signature (65 bytes). Required when `permit` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit2_signature: Option<Bytes>,
+}
+
+/// A single permit for permit2 token transfer authorization.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitSingle {
+    /// The permit details (token, amount, expiration, nonce).
+    pub details: PermitDetails,
+    /// Address authorized to spend the tokens (typically the router).
+    pub spender: Bytes,
+    /// Deadline timestamp for the permit signature.
+    #[serde_as(as = "DisplayFromStr")]
+    pub sig_deadline: BigUint,
+}
+
+/// Details for a permit2 single-token permit.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermitDetails {
+    /// Token address for which the permit is granted.
+    pub token: Bytes,
+    /// Amount of tokens approved.
+    #[serde_as(as = "DisplayFromStr")]
+    pub amount: BigUint,
+    /// Expiration timestamp for the permit.
+    #[serde_as(as = "DisplayFromStr")]
+    pub expiration: BigUint,
+    /// Nonce to prevent replay attacks.
+    #[serde_as(as = "DisplayFromStr")]
+    pub nonce: BigUint,
 }
 
 // ============================================================================
@@ -210,6 +265,11 @@ pub struct OrderSolution {
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
     pub algorithm: String,
+    /// Effective gas price (in wei) at the time the route was computed.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub gas_price: Option<BigUint>,
+    /// An encoded EVM transaction ready to be submitted on-chain.
+    pub transaction: Option<Transaction>,
 }
 
 /// Status of an order solution.
@@ -289,6 +349,8 @@ pub struct RouteResult {
     pub route: Route,
     /// Net amount out after accounting for gas costs in output token terms.
     pub net_amount_out: BigInt,
+    /// Effective gas price (in wei) at the time the route was computed.
+    pub gas_price: BigUint,
 }
 
 impl Route {
@@ -412,10 +474,16 @@ pub struct Swap {
     /// Estimated gas cost for this swap (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     pub gas_estimate: BigUint,
+    /// Protocol component to perform the swap.
+    pub protocol_component: ProtocolComponent,
+    /// Protocol state used to perform the swap.
+    pub protocol_state: Box<dyn ProtocolSim>,
 }
 
 impl Swap {
     /// Creates a new swap with an auto-calculated gas estimate.
+    // All arguments correspond directly to struct fields; no grouping makes sense here.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         component_id: ComponentId,
         protocol: String,
@@ -424,15 +492,44 @@ impl Swap {
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
+        protocol_component: ProtocolComponent,
+        protocol_state: Box<dyn ProtocolSim>,
     ) -> Self {
-        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self {
+            component_id,
+            protocol,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            protocol_component,
+            protocol_state,
+        }
     }
+}
+
+/// An encoded EVM transaction ready to be submitted on-chain.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    /// Contract address to call.
+    pub to: Bytes,
+    /// Native token value to send with the transaction.
+    #[serde_as(as = "DisplayFromStr")]
+    pub value: num_bigint::BigUint,
+    /// ABI-encoded calldata.
+    pub data: Vec<u8>,
 }
 
 // ============================================================================
 // PRIVATE HELPERS
 // ============================================================================
 
+/// Generates a default UserTransferType value.
+fn default_transfer_type() -> UserTransferType {
+    UserTransferType::TransferFrom
+}
 /// Generates a unique order ID using UUID v4.
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()
@@ -443,6 +540,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
@@ -461,6 +559,8 @@ mod tests {
     }
 
     fn make_swap(token_in_byte: u8, token_out_byte: u8, amount_in: u64, amount_out: u64) -> Swap {
+        let token_in = token(token_in_byte, "TIN");
+        let token_out = token(token_out_byte, "TOUT");
         Swap {
             component_id: "pool-1".to_string(),
             protocol: "uniswap_v2".to_string(),
@@ -469,6 +569,8 @@ mod tests {
             amount_in: BigUint::from(amount_in),
             amount_out: BigUint::from(amount_out),
             gas_estimate: BigUint::from(100_000u64),
+            protocol_component: component("test-pool", &[token_in, token_out]),
+            protocol_state: Box::new(MockProtocolSim::default()),
         }
     }
 
@@ -665,7 +767,31 @@ mod tests {
             "token_out": "0x0202020202020202020202020202020202020202",
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
-            "gas_estimate": "150000"
+            "gas_estimate": "150000",
+            "protocol_component": {
+                "id": "test-pool",
+                "protocol_system": "uniswap_v2",
+                "protocol_type_name": "swap",
+                "chain": "ethereum",
+                "tokens": [
+                    "0x0101010101010101010101010101010101010101",
+                    "0x0202020202020202020202020202020202020202"
+                ],
+                "contract_addresses": [],
+                "static_attributes": {},
+                "change": "Update",
+                "creation_tx": "0x",
+                "created_at": "1970-01-01T00:00:00"
+            },
+            "protocol_state": {
+                "protocol": "MockProtocolSim",
+                "state": {
+                    "spot_price": 2,
+                    "gas": 50000,
+                    "liquidity": 340282366920938463463374607431768211455,
+                    "fee": 0.0
+                }
+            }
         }"#;
 
         let swap: Swap = serde_json::from_str(json).unwrap();
