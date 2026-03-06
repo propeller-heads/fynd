@@ -1,7 +1,7 @@
 //! HTTP API layer using Actix Web.
 //!
 //! This module provides the HTTP endpoints for the solver:
-//! - POST /solve - Submit solve requests
+//! - POST /quote - Submit solve requests
 //! - GET /health - Health check endpoint
 
 pub mod dto;
@@ -25,7 +25,7 @@ use crate::api::error::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::solve, handlers::health),
+    paths(handlers::quote, handlers::health),
     components(schemas(
         dto::SolutionRequest,
         dto::Order,

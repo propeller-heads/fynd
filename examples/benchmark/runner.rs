@@ -70,7 +70,7 @@ async fn run_sequential(
         let request = fastrand::choice(requests).unwrap();
         let start = Instant::now();
         let response = client
-            .post(format!("{}/v1/solve", solver_url))
+            .post(format!("{}/v1/quote", solver_url))
             .json(request)
             .send()
             .await;
@@ -140,7 +140,7 @@ async fn run_fixed_concurrency(
             let request = fastrand::choice(requests.as_slice()).unwrap();
             let start = Instant::now();
             let response = client
-                .post(format!("{}/v1/solve", solver_url))
+                .post(format!("{}/v1/quote", solver_url))
                 .json(&request)
                 .send()
                 .await;
@@ -256,7 +256,7 @@ async fn run_rate_based(
             let request = fastrand::choice(requests.as_slice()).unwrap();
             let start = Instant::now();
             let response = client
-                .post(format!("{}/v1/solve", solver_url))
+                .post(format!("{}/v1/quote", solver_url))
                 .json(&request)
                 .send()
                 .await;

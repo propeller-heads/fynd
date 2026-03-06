@@ -123,8 +123,8 @@ where
         }
     }
 
-    /// Solves an order and returns the solution.
-    pub async fn solve(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
+    /// Returns a quote for an order.
+    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
         let start_time = Instant::now();
 
         // Log order details once at entry
@@ -455,7 +455,7 @@ where
                             // Process the task
                             let result = {
                                 let order = task.order();
-                                self.solve(order).await
+                                self.quote(order).await
                             };
 
                             if let Err(ref e) = result {

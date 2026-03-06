@@ -40,7 +40,7 @@ This modular architecture allows users to:
 │                         Async I/O - Non-blocking                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                           RouterApi                                  │   │
-│  │    POST /v1/solve            GET /v1/health          GET /metrics    │   │
+│  │    POST /v1/quote            GET /v1/health          GET /metrics    │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
@@ -141,7 +141,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 
 **Endpoints:**
 
-- `POST /v1/solve` -- Submit solve requests
+- `POST /v1/quote` -- Submit quote requests
 - `GET /v1/health` -- Health check (data freshness + pool count)
 - `GET /metrics` -- Prometheus metrics (separate server, port 9898)
 
@@ -152,7 +152,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/order_manager/`
 
-Orchestrates solve requests across multiple worker pools:
+Orchestrates quote requests across multiple worker pools:
 
 1. Fans out each order to all pools in parallel
 2. Manages per-request timeouts with optional early return
@@ -289,10 +289,10 @@ to run the complete routing service.
 
 ## Data Flow
 
-### Solve Request Flow
+### Quote Request Flow
 
 ```
-Client POST /v1/solve
+Client POST /v1/quote
     │
     ▼
 RouterApi (validate)

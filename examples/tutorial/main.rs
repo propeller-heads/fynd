@@ -526,7 +526,7 @@ async fn get_solver_quote(
     amount: &BigUint,
     sender: &str,
 ) -> Result<Solution, Box<dyn std::error::Error>> {
-    let url = format!("{}/v1/solve", solver_url);
+    let url = format!("{}/v1/quote", solver_url);
 
     let request = SolutionRequest::new(
         vec![Order::new(

@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let request = SolutionRequest::new(vec![order], Default::default());
-    let solution = order_manager.solve(request).await?;
+    let solution = order_manager.quote(request).await?;
 
     println!(" done ({}ms)\n", solution.solve_time_ms());
 

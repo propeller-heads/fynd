@@ -76,10 +76,10 @@ cargo run --release -- \
   the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the
   specific variables each protocol needs.
 
-## Make a Solve Request
+## Request a Quote
 
 ```bash
-curl -X POST http://localhost:3000/v1/solve \
+curl -X POST http://localhost:3000/v1/quote \
   -H "Content-Type: application/json" \
   -d '{
     "orders": [
@@ -105,7 +105,7 @@ curl http://localhost:3000/v1/health
 
 ## API Reference
 
-### POST /v1/solve
+### POST /v1/quote
 
 Submit one or more swap orders and receive optimal routes.
 

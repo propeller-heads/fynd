@@ -10,12 +10,12 @@ use crate::api::{dto::HealthStatus, error::ErrorResponse};
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/v1")
-            .route("/solve", web::post().to(solve))
+            .route("/quote", web::post().to(quote))
             .route("/health", web::get().to(health)),
     );
 }
 
-/// POST /v1/solve - Submit a solve request.
+/// POST /v1/quote - Request a quote.
 ///
 /// Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error
 /// if the request could not be filled.
@@ -25,22 +25,22 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 400 Bad Request: Invalid request format
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
-/// - 504 Gateway Timeout: Solve timeout
+/// - 504 Gateway Timeout: Quote timeout
 #[utoipa::path(
     post,
-    path = "/v1/solve",
+    path = "/v1/quote",
     tag = "solver",
     request_body = dto::SolutionRequest,
     responses(
-        (status = 200, description = "Solve completed", body = dto::Solution),
+        (status = 200, description = "Quote completed", body = dto::Solution),
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
-        (status = 504, description = "Solve timeout", body = ErrorResponse),
+        (status = 504, description = "Quote timeout", body = ErrorResponse),
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
-pub async fn solve(
+pub async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::SolutionRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -63,14 +63,14 @@ pub async fn solve(
 
     let core_solution = state
         .order_manager
-        .solve(core_request)
+        .quote(core_request)
         .await?;
 
     info!(
         solve_time_ms = core_solution.solve_time_ms(),
         num_orders = core_solution.orders().len(),
         num_pools = state.order_manager.num_pools(),
-        "solve completed"
+        "quote completed"
     );
 
     let dto_solution: dto::Solution = core_solution.into();

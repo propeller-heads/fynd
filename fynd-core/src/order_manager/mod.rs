@@ -87,13 +87,13 @@ impl OrderManager {
         self.solver_pools.len()
     }
 
-    /// Solves a request by fanning out to all solver pools.
+    /// Returns a quote by fanning out to all solver pools.
     ///
     /// For each order in the request:
     /// 1. Sends the order to all solver pools in parallel
     /// 2. Waits for responses with timeout
     /// 3. Selects the best solution based on `amount_out_net_gas`
-    pub async fn solve(&self, request: SolutionRequest) -> Result<Solution, SolveError> {
+    pub async fn quote(&self, request: SolutionRequest) -> Result<Solution, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -451,7 +451,7 @@ mod tests {
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         assert!(matches!(result, Err(SolveError::Internal(_))));
     }
 
@@ -462,7 +462,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
@@ -486,7 +486,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool_a, pool_b], config);
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
@@ -508,7 +508,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool], config);
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
@@ -538,7 +538,7 @@ mod tests {
         let start = Instant::now();
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok());
@@ -610,7 +610,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
         let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
-        let result = manager.solve(request).await;
+        let result = manager.quote(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
