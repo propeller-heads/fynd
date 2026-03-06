@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
 
     // 6. Worker pool with most_liquid algorithm
-    let algorithm_config = AlgorithmConfig::new(1, 2, Duration::from_millis(5000))?;
+    let algorithm_config = AlgorithmConfig::new(1, 2, Duration::from_millis(5000), None)?;
 
     let (worker_pool, task_handle) = WorkerPoolBuilder::new()
         .name("solver".to_string())

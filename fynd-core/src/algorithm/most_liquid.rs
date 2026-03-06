@@ -36,6 +36,7 @@ pub struct MostLiquidAlgorithm {
     min_hops: usize,
     max_hops: usize,
     timeout: Duration,
+    max_routes: Option<usize>,
 }
 
 /// Algorithm-specific edge data for liquidity-based routing.
@@ -112,15 +113,16 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
 impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {
-        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(500) }
+        Self { min_hops: 1, max_hops: 3, timeout: Duration::from_millis(500), max_routes: None }
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
     pub fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
         Ok(Self {
-            min_hops: config.min_hops(),
-            max_hops: config.max_hops(),
-            timeout: config.timeout(),
+            min_hops: config.min_hops,
+            max_hops: config.max_hops,
+            timeout: config.timeout,
+            max_routes: config.max_routes,
         })
     }
 
@@ -472,6 +474,10 @@ impl Algorithm for MostLiquidAlgorithm {
                 .partial_cmp(a_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        if let Some(max_routes) = self.max_routes {
+            scored_paths.truncate(max_routes);
+        }
 
         let paths_to_simulate = scored_paths.len();
         let scoring_failures = paths_candidates - paths_to_simulate;
@@ -1120,7 +1126,7 @@ mod tests {
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
@@ -1156,7 +1162,7 @@ mod tests {
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
@@ -1206,7 +1212,7 @@ mod tests {
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 2, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(1, 2, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
@@ -1276,7 +1282,7 @@ mod tests {
 
         // Use max_hops=1 to focus only on direct 1-hop paths
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
@@ -1458,7 +1464,7 @@ mod tests {
 
         // Use min_hops=2 to require at least 2 hops (circular)
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(2, 2, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
 
@@ -1504,7 +1510,7 @@ mod tests {
 
         // min_hops=2 should skip the 1-hop direct path
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(2, 3, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(2, 3, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
@@ -1539,7 +1545,7 @@ mod tests {
 
         // max_hops=1 cannot reach C from A (needs 2 hops)
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 1, Duration::from_millis(100)).unwrap(),
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
@@ -1572,7 +1578,7 @@ mod tests {
 
         // timeout=0ms should timeout after processing some paths
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(1, 1, Duration::from_millis(0)).unwrap(),
+            AlgorithmConfig::new(1, 1, Duration::from_millis(0), None).unwrap(),
         )
         .unwrap();
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
@@ -1613,7 +1619,8 @@ mod tests {
         use crate::algorithm::Algorithm;
 
         let algorithm = MostLiquidAlgorithm::with_config(
-            AlgorithmConfig::new(min_hops, max_hops, Duration::from_millis(timeout_ms)).unwrap(),
+            AlgorithmConfig::new(min_hops, max_hops, Duration::from_millis(timeout_ms), None)
+                .unwrap(),
         )
         .unwrap();
 
@@ -1635,9 +1642,90 @@ mod tests {
 
     // ==================== Configuration Validation Tests ====================
 
+    #[tokio::test]
+    async fn find_best_route_respects_max_routes_cap() {
+        // 4 parallel pools. Score = spot_price * min_depth.
+        // In tests, depth comes from get_limits().0 (sell_limit), which is
+        // liquidity / (spot_price * (1 - fee)). With fee=0: depth = liquidity / spot_price.
+        // We vary liquidity to create a clear score ranking:
+        //   pool4 (score = 1.0 * 4M/1.0 = 4M)
+        //   pool3 (score = 2.0 * 3M/2.0 = 3M)
+        //   pool2 (score = 3.0 * 2M/3.0 = 2M)
+        //   pool1 (score = 4.0 * 1M/4.0 = 1M)
+        //
+        // With max_routes=2, only pool4 and pool3 are simulated.
+        // pool1 has the best simulation output (4x) but the lowest score,
+        // so it's excluded by the cap.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market(vec![
+            ("pool1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
+            ("pool2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
+            ("pool3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
+            ("pool4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
+        ]);
+
+        // Cap at 2: only the two highest-scored paths are simulated
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), Some(2)).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
+            .await
+            .unwrap();
+
+        // pool1 has the best simulation output (4x) but lowest score, so it's
+        // excluded by the cap. Among the top-2 scored (pool4=4M, pool3=3M),
+        // pool3 gives the best simulation output (2x vs 1x).
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].component_id, "pool3");
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(2000u64));
+    }
+
+    #[tokio::test]
+    async fn find_best_route_no_cap_when_max_routes_is_none() {
+        // Same setup but no cap — pool1 (best output) should win.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market(vec![
+            ("pool1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
+            ("pool2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
+            ("pool3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
+            ("pool4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, &order)
+            .await
+            .unwrap();
+
+        // All 4 paths simulated, pool1 wins with best output (4x)
+        assert_eq!(result.route.swaps.len(), 1);
+        assert_eq!(result.route.swaps[0].component_id, "pool1");
+        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(4000u64));
+    }
+
+    #[test]
+    fn algorithm_config_rejects_zero_max_routes() {
+        let result = AlgorithmConfig::new(1, 3, Duration::from_millis(100), Some(0));
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("max_routes must be at least 1")
+        ));
+    }
+
     #[test]
     fn algorithm_config_rejects_zero_min_hops() {
-        let result = AlgorithmConfig::new(0, 3, Duration::from_millis(100));
+        let result = AlgorithmConfig::new(0, 3, Duration::from_millis(100), None);
         assert!(matches!(
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("min_hops must be at least 1")
@@ -1646,7 +1734,7 @@ mod tests {
 
     #[test]
     fn algorithm_config_rejects_min_greater_than_max() {
-        let result = AlgorithmConfig::new(5, 3, Duration::from_millis(100));
+        let result = AlgorithmConfig::new(5, 3, Duration::from_millis(100), None);
         assert!(matches!(
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("cannot exceed")

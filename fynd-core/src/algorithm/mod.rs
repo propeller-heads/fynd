@@ -38,6 +38,8 @@ pub struct AlgorithmConfig {
     pub max_hops: usize,
     /// Timeout for solving.
     pub timeout: Duration,
+    /// Maximum number of paths to simulate. `None` means no cap.
+    pub max_routes: Option<usize>,
 }
 
 impl AlgorithmConfig {
@@ -52,6 +54,7 @@ impl AlgorithmConfig {
         min_hops: usize,
         max_hops: usize,
         timeout: Duration,
+        max_routes: Option<usize>,
     ) -> Result<Self, AlgorithmError> {
         if min_hops == 0 {
             return Err(AlgorithmError::InvalidConfiguration {
@@ -63,29 +66,20 @@ impl AlgorithmConfig {
                 reason: format!("min_hops ({}) cannot exceed max_hops ({})", min_hops, max_hops),
             });
         }
-        Ok(Self { min_hops, max_hops, timeout })
+        if max_routes == Some(0) {
+            return Err(AlgorithmError::InvalidConfiguration {
+                reason: "max_routes must be at least 1".to_string(),
+            });
+        }
+        Ok(Self { min_hops, max_hops, timeout, max_routes })
     }
 
-    /// Returns the minimum number of hops to search.
-    pub(crate) fn min_hops(&self) -> usize {
-        self.min_hops
-    }
-
-    /// Returns the maximum number of hops to search.
-    pub(crate) fn max_hops(&self) -> usize {
-        self.max_hops
-    }
-
-    /// Returns the timeout for solving.
-    pub(crate) fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 impl Default for AlgorithmConfig {
     fn default() -> Self {
         // Default values are valid, so we can unwrap safely
-        Self::new(1, 3, Duration::from_millis(100)).unwrap()
+        Self::new(1, 3, Duration::from_millis(100), None).unwrap()
     }
 }
 
