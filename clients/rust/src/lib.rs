@@ -45,9 +45,7 @@
 //!     .quote(QuoteParams::new(order, QuoteOptions::default()))
 //!     .await?;
 //!
-//! for solution in quote.orders() {
-//!     println!("amount out: {}", solution.amount_out());
-//! }
+//! println!("amount out: {}", quote.amount_out());
 //! # Ok(()) }
 //! ```
 

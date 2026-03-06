@@ -35,6 +35,7 @@ use crate::{
 /// Retries use exponential back-off: each attempt doubles the delay, capped at
 /// [`max_backoff`](Self::max_backoff). Only errors where
 /// [`FyndError::is_retryable`](crate::FyndError::is_retryable) returns `true` are retried.
+#[derive(Clone)]
 pub struct RetryConfig {
     max_attempts: u32,
     initial_backoff: Duration,
@@ -262,6 +263,51 @@ impl FyndClientBuilder {
         self
     }
 
+    /// Build a [`FyndClient`] without connecting to an Ethereum RPC node.
+    ///
+    /// Suitable for [`FyndClient::quote`] and [`FyndClient::health`] calls only.
+    /// [`FyndClient::signable_payload`] and [`FyndClient::execute`] require a live RPC URL and
+    /// will fail if called on a client built this way.
+    ///
+    /// Returns [`FyndError::Config`] if `base_url` is invalid.
+    pub fn build_quote_only(self) -> Result<FyndClient, FyndError> {
+        let parsed_base = self
+            .base_url
+            .parse::<reqwest::Url>()
+            .map_err(|e| FyndError::Config(format!("invalid base URL: {e}")))?;
+        let scheme = parsed_base.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(FyndError::Config(format!(
+                "base URL must use http or https scheme, got '{scheme}'"
+            )));
+        }
+
+        // Use dummy providers pointing at the base URL.
+        // These are never invoked for quote/health operations.
+        let provider = ProviderBuilder::default().connect_http(parsed_base.clone());
+        let submit_provider = ProviderBuilder::default().connect_http(parsed_base);
+
+        let router_address = self
+            .router_address
+            .unwrap_or(Address::ZERO);
+
+        let http = HttpClient::builder()
+            .timeout(self.timeout)
+            .build()
+            .map_err(|e| FyndError::Config(format!("failed to build HTTP client: {e}")))?;
+
+        Ok(FyndClient {
+            http,
+            base_url: self.base_url,
+            retry: self.retry,
+            router_address,
+            chain_id: 1,
+            default_sender: self.sender,
+            provider,
+            submit_provider,
+        })
+    }
+
     /// Connect to the Ethereum RPC node and build the [`FyndClient`].
     ///
     /// Validates the URLs and fetches the chain ID. Returns [`FyndError::Config`] if any URL is
@@ -434,13 +480,16 @@ where
             return Err(mapping::wire_error_to_fynd(wire_err));
         }
         let wire_solution: fynd_rpc_types::Solution = response.json().await?;
+        let solve_time_ms = wire_solution.solve_time_ms;
         let batch_quote = wire_to_batch_quote(wire_solution, token_out, receiver)?;
 
-        batch_quote
+        let mut quote = batch_quote
             .quotes()
             .first()
             .cloned()
-            .ok_or_else(|| FyndError::Protocol("Received empty solution".into()))
+            .ok_or_else(|| FyndError::Protocol("Received empty solution".into()))?;
+        quote.solve_time_ms = solve_time_ms;
+        Ok(quote)
     }
 
     /// Get the health status of the Fynd RPC server.

@@ -3252,10 +3252,12 @@ dependencies = [
  "alloy",
  "alloy-chains",
  "anyhow",
+ "bytes",
  "clap",
  "dialoguer 0.11.0",
  "dotenv",
  "fastrand",
+ "fynd-client",
  "fynd-core",
  "fynd-rpc",
  "hex",
@@ -3274,7 +3276,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber 0.3.22",
- "tycho-execution",
  "tycho-simulation",
 ]
 

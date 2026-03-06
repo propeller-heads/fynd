@@ -303,6 +303,9 @@ pub struct Quote {
     /// Defaults to `sender` if the order had no explicit receiver.
     /// Populated by `quote()` from the corresponding `Order`.
     receiver: Bytes,
+    /// Wall-clock time the server spent solving this request, in milliseconds.
+    /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
+    pub(crate) solve_time_ms: u64,
 }
 
 impl Quote {
@@ -368,6 +371,13 @@ impl Quote {
         &self.receiver
     }
 
+    /// Wall-clock time the server spent solving this request, in milliseconds.
+    ///
+    /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
+    pub fn solve_time_ms(&self) -> u64 {
+        self.solve_time_ms
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         order_id: String,
@@ -394,6 +404,7 @@ impl Quote {
             block,
             token_out,
             receiver,
+            solve_time_ms: 0,
         }
     }
 }
