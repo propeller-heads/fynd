@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use fynd_core::{Order, OrderSide, SolutionOptions, SolutionRequest};
+use fynd_core::{Order, OrderSide, QuoteOptions, QuoteRequest};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::models::Address;
@@ -76,7 +76,7 @@ pub struct BenchmarkConfig {
 #[derive(Debug, Serialize)]
 pub struct BenchmarkResults {
     pub config: BenchmarkConfig,
-    pub request_templates: Vec<SolutionRequest>,
+    pub request_templates: Vec<QuoteRequest>,
     pub successful_requests: usize,
     pub failed_requests: usize,
     pub orders_solved: usize,
@@ -95,7 +95,7 @@ impl BenchmarkResults {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: BenchmarkConfig,
-        requests: Vec<SolutionRequest>,
+        requests: Vec<QuoteRequest>,
         successful_requests: usize,
         failed_requests: usize,
         orders_solved: usize,
@@ -152,11 +152,11 @@ pub struct TimingStats {
 /// Load request templates from file or use default
 pub fn load_requests(
     requests_file: Option<&str>,
-) -> Result<(Vec<SolutionRequest>, Option<String>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<QuoteRequest>, Option<String>), Box<dyn std::error::Error>> {
     let requests = if let Some(file_path) = requests_file {
         tracing::info!("Loading requests from: {}", file_path);
         let content = std::fs::read_to_string(file_path)?;
-        let loaded_requests: Vec<SolutionRequest> = serde_json::from_str(&content)?;
+        let loaded_requests: Vec<QuoteRequest> = serde_json::from_str(&content)?;
         if loaded_requests.is_empty() {
             return Err("Requests file contains no requests".into());
         }
@@ -180,8 +180,8 @@ pub fn load_requests(
     Ok((requests, requests_file.map(|s| s.to_string())))
 }
 
-fn create_default_request() -> Result<SolutionRequest, Box<dyn std::error::Error>> {
-    Ok(SolutionRequest::new(
+fn create_default_request() -> Result<QuoteRequest, Box<dyn std::error::Error>> {
+    Ok(QuoteRequest::new(
         vec![Order::new(
             Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?, // WETH
             Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?, // USDC
@@ -189,6 +189,6 @@ fn create_default_request() -> Result<SolutionRequest, Box<dyn std::error::Error
             OrderSide::Sell,
             Address::from_str("0x0000000000000000000000000000000000000001")?,
         )],
-        SolutionOptions::default().with_timeout_ms(10000),
+        QuoteOptions::default().with_timeout_ms(10000),
     ))
 }

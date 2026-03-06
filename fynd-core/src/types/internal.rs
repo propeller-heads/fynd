@@ -6,13 +6,13 @@ use num_bigint::BigUint;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::{Order, SingleOrderSolution};
+use super::{Order, SingleOrderQuote};
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;
 
 /// Result type for solve operations.
-pub type SolveResult = Result<SingleOrderSolution, SolveError>;
+pub type SolveResult = Result<SingleOrderQuote, SolveError>;
 
 /// A task representing a order request in the queue.
 pub struct SolveTask {

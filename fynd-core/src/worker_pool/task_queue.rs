@@ -7,7 +7,7 @@
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::{types::internal::SolveTask, Order, SingleOrderSolution, SolveError};
+use crate::{types::internal::SolveTask, Order, SingleOrderQuote, SolveError};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -34,7 +34,7 @@ impl TaskQueueHandle {
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.
-    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderSolution, SolveError> {
+    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderQuote, SolveError> {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -122,7 +122,7 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::{BlockInfo, Order, OrderSide, OrderSolution, SingleOrderSolution, SolutionStatus};
+    use crate::{BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote};
 
     // -------------------------------------------------------------------------
     // Test Helpers
@@ -143,11 +143,11 @@ mod tests {
         .with_id("test-order".to_string())
     }
 
-    fn make_single_solution() -> SingleOrderSolution {
-        SingleOrderSolution::new(
-            OrderSolution::new(
+    fn make_single_solution() -> SingleOrderQuote {
+        SingleOrderQuote::new(
+            OrderQuote::new(
                 "test-order".to_string(),
-                SolutionStatus::Success,
+                QuoteStatus::Success,
                 BigUint::from(1000u64),
                 BigUint::from(990u64),
                 BigUint::from(100_000u64),

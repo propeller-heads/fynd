@@ -27,7 +27,7 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest, Transaction};
+use fynd_core::{Order, OrderSide, Quote, QuoteOptions, QuoteRequest, Route, Transaction};
 use fynd_rpc::{builder::parse_chain, HealthStatus};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -241,11 +241,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rpc_url.ok_or("RPC_URL environment variable required for simulation/execution")?;
 
     // Get the route from the quote
-    let order_solution = quote
+    let order_quote = quote
         .orders()
         .first()
         .ok_or("No order solution")?;
-    let route = order_solution
+    let route = order_quote
         .route()
         .ok_or("No route in solution")?;
 
@@ -306,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                order_solution.amount_out(),
+                order_quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                order_solution.amount_out(),
+                order_quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -361,7 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signer.address(),
             chain.id(),
             cli.use_tenderly,
-            order_solution.amount_out(),
+            order_quote.amount_out(),
             &buy_token,
         )
         .await?;
@@ -385,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signer.address(),
                     chain.id(),
                     cli.use_tenderly,
-                    order_solution.amount_out(),
+                    order_quote.amount_out(),
                     &buy_token,
                 )
                 .await?;
@@ -525,10 +525,10 @@ async fn get_solver_quote(
     token_out: &Bytes,
     amount: &BigUint,
     sender: &str,
-) -> Result<Solution, Box<dyn std::error::Error>> {
+) -> Result<Quote, Box<dyn std::error::Error>> {
     let url = format!("{}/v1/quote", solver_url);
 
-    let request = SolutionRequest::new(
+    let request = QuoteRequest::new(
         vec![Order::new(
             token_in.clone(),
             token_out.clone(),
@@ -536,7 +536,7 @@ async fn get_solver_quote(
             OrderSide::Sell,
             Bytes::from_str(sender)?,
         )],
-        SolutionOptions::default().with_timeout_ms(5000),
+        QuoteOptions::default().with_timeout_ms(5000),
     );
 
     let resp = client
@@ -555,7 +555,7 @@ async fn get_solver_quote(
 }
 
 fn display_quote(
-    quote: &Solution,
+    quote: &Quote,
     sell_token: &Token,
     buy_token: &Token,
     amount_in: &BigUint,
@@ -566,7 +566,7 @@ fn display_quote(
     for order in quote.orders() {
         println!("Status: {:?}", order.status());
 
-        if !matches!(order.status(), fynd_core::SolutionStatus::Success) {
+        if !matches!(order.status(), fynd_core::QuoteStatus::Success) {
             println!("No route found for this order.");
             continue;
         }

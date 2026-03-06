@@ -16,18 +16,18 @@ use uuid::Uuid;
 
 /// Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SolutionRequest {
+pub struct QuoteRequest {
     /// Orders to solve.
     pub orders: Vec<Order>,
     /// Optional solving parameters that apply to all orders.
     #[serde(default)]
-    pub options: SolutionOptions,
+    pub options: QuoteOptions,
 }
 
 /// Options to customize the solving behavior.
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct SolutionOptions {
+pub struct QuoteOptions {
     /// Timeout in milliseconds. If `None`, uses server default.
     #[schema(example = 2000)]
     pub timeout_ms: Option<u64>,
@@ -118,15 +118,15 @@ pub struct PermitDetails {
 // RESPONSE TYPES
 // ============================================================================
 
-/// Complete solution for a [`SolutionRequest`].
+/// Complete solution for a [`QuoteRequest`].
 ///
 /// Contains a solution for each order in the request, along with aggregate
 /// gas estimates and timing information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct Solution {
+pub struct Quote {
     /// Solutions for each order, in the same order as the request.
-    pub orders: Vec<OrderSolution>,
+    pub orders: Vec<OrderQuote>,
     /// Total estimated gas for executing all swaps (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     #[schema(value_type = String, example = "150000")]
@@ -182,29 +182,29 @@ pub enum OrderSide {
 
 /// Internal wrapper used by workers when returning a solution.
 ///
-/// This wraps [`OrderSolution`] with per-worker timing information.
+/// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Solution`]).
+/// not the total OrderManager orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SingleOrderSolution {
+pub struct SingleOrderQuote {
     /// The solution for the order.
-    pub order: OrderSolution,
+    pub order: OrderQuote,
     /// Time taken by this specific worker to compute the solution, in milliseconds.
     pub solve_time_ms: u64,
 }
 
-/// Solution for a single [`Order`].
+/// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
 /// gas estimates, and status information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OrderSolution {
+pub struct OrderQuote {
     /// ID of the order this solution corresponds to.
     #[schema(example = "f47ac10b-58cc-4372-a567-0e02b2c3d479")]
     pub order_id: String,
     /// Status indicating whether a route was found.
-    pub status: SolutionStatus,
+    pub status: QuoteStatus,
     /// The route to execute, if a valid route was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<Route>,
@@ -242,7 +242,7 @@ pub struct OrderSolution {
 /// Status of an order solution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum SolutionStatus {
+pub enum QuoteStatus {
     /// A valid route was found.
     Success,
     /// No route exists between the specified tokens.
@@ -395,8 +395,8 @@ pub struct HealthStatus {
 // CONVERSIONS: DTO -> Core
 // ============================================================================
 
-impl From<SolutionRequest> for fynd_core::SolutionRequest {
-    fn from(dto: SolutionRequest) -> Self {
+impl From<QuoteRequest> for fynd_core::QuoteRequest {
+    fn from(dto: QuoteRequest) -> Self {
         Self::new(
             dto.orders
                 .into_iter()
@@ -407,9 +407,9 @@ impl From<SolutionRequest> for fynd_core::SolutionRequest {
     }
 }
 
-impl From<SolutionOptions> for fynd_core::SolutionOptions {
-    fn from(dto: SolutionOptions) -> Self {
-        let mut opts = fynd_core::SolutionOptions::default();
+impl From<QuoteOptions> for fynd_core::QuoteOptions {
+    fn from(dto: QuoteOptions) -> Self {
+        let mut opts = fynd_core::QuoteOptions::default();
         if let Some(ms) = dto.timeout_ms {
             opts = opts.with_timeout_ms(ms);
         }
@@ -491,8 +491,8 @@ impl From<OrderSide> for fynd_core::OrderSide {
 // CONVERSIONS: Core -> DTO
 // ============================================================================
 
-impl From<fynd_core::Solution> for Solution {
-    fn from(core: fynd_core::Solution) -> Self {
+impl From<fynd_core::Quote> for Quote {
+    fn from(core: fynd_core::Quote) -> Self {
         let solve_time_ms = core.solve_time_ms();
         let total_gas_estimate = core.total_gas_estimate().clone();
         Self {
@@ -507,8 +507,8 @@ impl From<fynd_core::Solution> for Solution {
     }
 }
 
-impl From<fynd_core::OrderSolution> for OrderSolution {
-    fn from(core: fynd_core::OrderSolution) -> Self {
+impl From<fynd_core::OrderQuote> for OrderQuote {
+    fn from(core: fynd_core::OrderQuote) -> Self {
         let order_id = core.order_id().to_string();
         let status = core.status().into();
         let amount_in = core.amount_in().clone();
@@ -518,7 +518,10 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
         let amount_out_net_gas = core.amount_out_net_gas().clone();
         let block = core.block().clone().into();
         let gas_price = core.gas_price().cloned();
-        let transaction = core.transaction().cloned().map(Into::into);
+        let transaction = core
+            .transaction()
+            .cloned()
+            .map(Into::into);
         let route = core.into_route().map(Into::into);
         Self {
             order_id,
@@ -536,14 +539,14 @@ impl From<fynd_core::OrderSolution> for OrderSolution {
     }
 }
 
-impl From<fynd_core::SolutionStatus> for SolutionStatus {
-    fn from(core: fynd_core::SolutionStatus) -> Self {
+impl From<fynd_core::QuoteStatus> for QuoteStatus {
+    fn from(core: fynd_core::QuoteStatus) -> Self {
         match core {
-            fynd_core::SolutionStatus::Success => Self::Success,
-            fynd_core::SolutionStatus::NoRouteFound => Self::NoRouteFound,
-            fynd_core::SolutionStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
-            fynd_core::SolutionStatus::Timeout => Self::Timeout,
-            fynd_core::SolutionStatus::NotReady => Self::NotReady,
+            fynd_core::QuoteStatus::Success => Self::Success,
+            fynd_core::QuoteStatus::NoRouteFound => Self::NoRouteFound,
+            fynd_core::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
+            fynd_core::QuoteStatus::Timeout => Self::Timeout,
+            fynd_core::QuoteStatus::NotReady => Self::NotReady,
         }
     }
 }
@@ -599,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_solution_request_conversion_roundtrip() {
-        let dto = SolutionRequest {
+        let dto = QuoteRequest {
             orders: vec![Order {
                 id: "test-id".to_string(),
                 token_in: make_address(0x01),
@@ -609,7 +612,7 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions {
+            options: QuoteOptions {
                 timeout_ms: Some(5000),
                 min_responses: None,
                 max_gas: None,
@@ -617,7 +620,7 @@ mod tests {
             },
         };
 
-        let core: fynd_core::SolutionRequest = dto.clone().into();
+        let core: fynd_core::QuoteRequest = dto.clone().into();
         assert_eq!(core.orders().len(), 1);
         assert_eq!(core.orders()[0].id(), "test-id");
         assert_eq!(core.options().timeout_ms(), Some(5000));
@@ -625,12 +628,12 @@ mod tests {
 
     #[test]
     fn test_solution_conversion() {
-        let core: fynd_core::Solution = serde_json::from_str(
+        let core: fynd_core::Quote = serde_json::from_str(
             r#"{"orders":[],"total_gas_estimate":"100000","solve_time_ms":50}"#,
         )
         .unwrap();
 
-        let dto: Solution = core.into();
+        let dto: Quote = core.into();
         assert_eq!(dto.total_gas_estimate, BigUint::from(100_000u64));
         assert_eq!(dto.solve_time_ms, 50);
     }
@@ -645,18 +648,15 @@ mod tests {
     #[test]
     fn test_status_conversion() {
         let statuses = vec![
-            (fynd_core::SolutionStatus::Success, SolutionStatus::Success),
-            (fynd_core::SolutionStatus::NoRouteFound, SolutionStatus::NoRouteFound),
-            (
-                fynd_core::SolutionStatus::InsufficientLiquidity,
-                SolutionStatus::InsufficientLiquidity,
-            ),
-            (fynd_core::SolutionStatus::Timeout, SolutionStatus::Timeout),
-            (fynd_core::SolutionStatus::NotReady, SolutionStatus::NotReady),
+            (fynd_core::QuoteStatus::Success, QuoteStatus::Success),
+            (fynd_core::QuoteStatus::NoRouteFound, QuoteStatus::NoRouteFound),
+            (fynd_core::QuoteStatus::InsufficientLiquidity, QuoteStatus::InsufficientLiquidity),
+            (fynd_core::QuoteStatus::Timeout, QuoteStatus::Timeout),
+            (fynd_core::QuoteStatus::NotReady, QuoteStatus::NotReady),
         ];
 
         for (core, expected_dto) in statuses {
-            let dto: SolutionStatus = core.into();
+            let dto: QuoteStatus = core.into();
             assert_eq!(dto, expected_dto);
         }
     }

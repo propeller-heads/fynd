@@ -26,8 +26,8 @@ use num_bigint::BigUint;
 use tracing::{debug, warn};
 
 use crate::{
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderSolution, Solution,
-    SolutionOptions, SolutionRequest, SolutionStatus, SolveError,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
+    QuoteRequest, QuoteStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -62,7 +62,7 @@ pub(crate) struct OrderResponses {
     /// ID of the order these responses correspond to.
     order_id: String,
     /// Solutions received from each solver pool (pool_name, solution).
-    solutions: Vec<(String, OrderSolution)>,
+    solutions: Vec<(String, OrderQuote)>,
     /// Solver pools that failed with their respective errors (pool_name, error).
     /// This captures all error types: timeouts, no routes, algorithm errors, etc.
     failed_solvers: Vec<(String, SolveError)>,
@@ -93,7 +93,7 @@ impl OrderManager {
     /// 1. Sends the order to all solver pools in parallel
     /// 2. Waits for responses with timeout
     /// 3. Selects the best solution based on `amount_out_net_gas`
-    pub async fn quote(&self, request: SolutionRequest) -> Result<Solution, SolveError> {
+    pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -115,7 +115,7 @@ impl OrderManager {
         let order_responses = futures::future::join_all(order_futures).await;
 
         // Select best solution for each order
-        let order_solutions: Vec<OrderSolution> = order_responses
+        let order_solutions: Vec<OrderQuote> = order_responses
             .into_iter()
             .map(|responses| self.select_best(&responses, request.options()))
             .collect();
@@ -128,7 +128,7 @@ impl OrderManager {
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
 
-        Ok(Solution::new(order_solutions, total_gas_estimate, solve_time_ms))
+        Ok(Quote::new(order_solutions, total_gas_estimate, solve_time_ms))
     }
 
     /// Solves a single order by fanning out to all solver pools.
@@ -196,7 +196,7 @@ impl OrderManager {
                             // Remove from remaining
                             remaining_pools.remove(&pool_name);
 
-                            // Extract the OrderSolution from SingleOrderSolution
+                            // Extract the OrderQuote from SingleOrderQuote
                             solutions.push((pool_name.clone(), single_solution.order().clone()));
 
                             // Early return if min_responses reached
@@ -269,12 +269,12 @@ impl OrderManager {
     /// Selection criteria:
     /// 1. Filter by constraints (e.g., max_gas)
     /// 2. Select by maximum `amount_out_net_gas`
-    fn select_best(&self, responses: &OrderResponses, options: &SolutionOptions) -> OrderSolution {
+    fn select_best(&self, responses: &OrderResponses, options: &QuoteOptions) -> OrderQuote {
         let valid_solutions: Vec<_> = responses
             .solutions
             .iter()
             // Only consider successful solutions
-            .filter(|(_, sol)| sol.status() == SolutionStatus::Success)
+            .filter(|(_, sol)| sol.status() == QuoteStatus::Success)
             // Filter by max_gas constraint if specified
             .filter(|(_, sol)| {
                 options
@@ -306,9 +306,9 @@ impl OrderManager {
         // Try to get any response to extract block info, or create a placeholder
         if let Some((_, any_sol)) = responses.solutions.first() {
             counter!("order_manager_orders_total", "status" => "no_route").increment(1);
-            OrderSolution::new(
+            OrderQuote::new(
                 responses.order_id.clone(),
-                SolutionStatus::NoRouteFound,
+                QuoteStatus::NoRouteFound,
                 any_sol.amount_in().clone(),
                 BigUint::ZERO,
                 BigUint::ZERO,
@@ -319,7 +319,7 @@ impl OrderManager {
         } else {
             // No responses at all - determine status from failure types
             let status = if responses.failed_solvers.is_empty() {
-                SolutionStatus::NoRouteFound
+                QuoteStatus::NoRouteFound
             } else {
                 // If all failures are timeouts, report as Timeout
                 // Otherwise report as NoRouteFound (more general failure)
@@ -332,23 +332,23 @@ impl OrderManager {
                     .iter()
                     .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
                 if all_timeouts {
-                    SolutionStatus::Timeout
+                    QuoteStatus::Timeout
                 } else if all_not_ready {
-                    SolutionStatus::NotReady
+                    QuoteStatus::NotReady
                 } else {
-                    SolutionStatus::NoRouteFound
+                    QuoteStatus::NoRouteFound
                 }
             };
 
             // Record status metric
             let status_label = match status {
-                SolutionStatus::Timeout => "timeout",
-                SolutionStatus::NotReady => "not_ready",
+                QuoteStatus::Timeout => "timeout",
+                QuoteStatus::NotReady => "not_ready",
                 _ => "no_route",
             };
             counter!("order_manager_orders_total", "status" => status_label).increment(1);
 
-            OrderSolution::new(
+            OrderQuote::new(
                 responses.order_id.clone(),
                 status,
                 BigUint::ZERO,
@@ -362,7 +362,7 @@ impl OrderManager {
     }
 
     /// Returns the effective timeout for a request.
-    fn effective_timeout(&self, options: &SolutionOptions) -> Duration {
+    fn effective_timeout(&self, options: &QuoteOptions) -> Duration {
         options
             .timeout_ms()
             .map(Duration::from_millis)
@@ -376,7 +376,7 @@ mod tests {
     use tycho_simulation::tycho_core::models::Address;
 
     use super::*;
-    use crate::{types::internal::SolveTask, OrderSide, SingleOrderSolution};
+    use crate::{types::internal::SolveTask, OrderSide, SingleOrderQuote};
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
@@ -393,11 +393,11 @@ mod tests {
         .with_id("test-order".to_string())
     }
 
-    fn make_single_solution(amount_out_net_gas: u64) -> SingleOrderSolution {
-        SingleOrderSolution::new(
-            OrderSolution::new(
+    fn make_single_solution(amount_out_net_gas: u64) -> SingleOrderQuote {
+        SingleOrderQuote::new(
+            OrderQuote::new(
                 "test-order".to_string(),
-                SolutionStatus::Success,
+                QuoteStatus::Success,
                 BigUint::from(1000u64),
                 BigUint::from(990u64),
                 BigUint::from(100_000u64),
@@ -412,7 +412,7 @@ mod tests {
     // Helper to create a mock solver pool that responds with a given solution
     fn create_mock_pool(
         name: &str,
-        response: Result<SingleOrderSolution, SolveError>,
+        response: Result<SingleOrderQuote, SolveError>,
         delay_ms: u64,
     ) -> (SolverPoolHandle, tokio::task::JoinHandle<()>) {
         let (tx, rx) = async_channel::bounded::<SolveTask>(10);
@@ -449,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn test_order_manager_no_pools() {
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         assert!(matches!(result, Err(SolveError::Internal(_))));
@@ -460,14 +460,14 @@ mod tests {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_solution(900)), 0);
 
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.orders().len(), 1);
-        assert_eq!(solution.orders()[0].status(), SolutionStatus::Success);
+        assert_eq!(solution.orders()[0].status(), QuoteStatus::Success);
         assert_eq!(*solution.orders()[0].amount_out_net_gas(), BigUint::from(900u64));
 
         drop(manager);
@@ -484,7 +484,7 @@ mod tests {
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
         let manager = OrderManager::new(vec![pool_a, pool_b], config);
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
@@ -506,7 +506,7 @@ mod tests {
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
         let manager = OrderManager::new(vec![pool], config);
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(solution.orders().len(), 1);
         assert!(matches!(
             solution.orders()[0].status(),
-            SolutionStatus::Timeout | SolutionStatus::NoRouteFound
+            QuoteStatus::Timeout | QuoteStatus::NoRouteFound
         ));
 
         drop(manager);
@@ -536,7 +536,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool_a, pool_b], config);
 
         let start = Instant::now();
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         let elapsed = start.elapsed();
@@ -548,7 +548,7 @@ mod tests {
         // Should have pool_a's solution
         let solution = result.unwrap();
         assert_eq!(solution.orders().len(), 1);
-        assert_eq!(solution.orders()[0].status(), SolutionStatus::Success);
+        assert_eq!(solution.orders()[0].status(), QuoteStatus::Success);
 
         drop(manager);
         worker_a.abort();
@@ -569,9 +569,9 @@ mod tests {
             order_id: "test".to_string(),
             solutions: vec![(
                 "pool".to_string(),
-                OrderSolution::new(
+                OrderQuote::new(
                     "test".to_string(),
-                    SolutionStatus::Success,
+                    QuoteStatus::Success,
                     BigUint::from(1000u64),
                     BigUint::from(990u64),
                     BigUint::from(gas_estimate),
@@ -584,17 +584,17 @@ mod tests {
         };
 
         let options = match max_gas {
-            Some(gas) => SolutionOptions::default().with_max_gas(BigUint::from(gas)),
-            None => SolutionOptions::default(),
+            Some(gas) => QuoteOptions::default().with_max_gas(BigUint::from(gas)),
+            None => QuoteOptions::default(),
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &options);
 
         if should_pass {
-            assert_eq!(result.status(), SolutionStatus::Success);
+            assert_eq!(result.status(), QuoteStatus::Success);
         } else {
-            assert_eq!(result.status(), SolutionStatus::NoRouteFound);
+            assert_eq!(result.status(), QuoteStatus::NoRouteFound);
         }
     }
 
@@ -608,7 +608,7 @@ mod tests {
         );
 
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
-        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
@@ -616,7 +616,7 @@ mod tests {
         let solution = result.unwrap();
         assert_eq!(solution.orders().len(), 1);
         // Should be NoRouteFound since the only solver returned an error
-        assert_eq!(solution.orders()[0].status(), SolutionStatus::NoRouteFound);
+        assert_eq!(solution.orders()[0].status(), QuoteStatus::NoRouteFound);
 
         drop(manager);
         worker.abort();
@@ -634,9 +634,9 @@ mod tests {
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
-        let result = manager.select_best(&responses, &SolutionOptions::default());
+        let result = manager.select_best(&responses, &QuoteOptions::default());
 
-        assert_eq!(result.status(), SolutionStatus::Timeout);
+        assert_eq!(result.status(), QuoteStatus::Timeout);
     }
 
     #[test]
@@ -651,10 +651,10 @@ mod tests {
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
-        let result = manager.select_best(&responses, &SolutionOptions::default());
+        let result = manager.select_best(&responses, &QuoteOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
-        assert_eq!(result.status(), SolutionStatus::NoRouteFound);
+        assert_eq!(result.status(), QuoteStatus::NoRouteFound);
     }
 
     #[test]
@@ -666,9 +666,9 @@ mod tests {
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
-        let result = manager.select_best(&responses, &SolutionOptions::default());
+        let result = manager.select_best(&responses, &QuoteOptions::default());
 
         // No failures but also no solutions means NoRouteFound
-        assert_eq!(result.status(), SolutionStatus::NoRouteFound);
+        assert_eq!(result.status(), QuoteStatus::NoRouteFound);
     }
 }

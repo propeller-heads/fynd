@@ -33,7 +33,7 @@ CLI flags take precedence over environment variables.
 
 ## Request Templates
 
-By default, uses a WETH→USDC swap. To use custom requests, create a JSON file with an array of `SolutionRequest` objects and use `--requests-file` to specify it. The benchmark will randomly select from your templates for each request. See `requests_set.json` for the format.
+By default, uses a WETH→USDC swap. To use custom requests, create a JSON file with an array of `QuoteRequest` objects and use `--requests-file` to specify it. The benchmark will randomly select from your templates for each request. See `requests_set.json` for the format.
 
 ## Examples
 

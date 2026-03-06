@@ -28,7 +28,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
-    BlockInfo, Order, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError,
+    BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError,
 };
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -124,7 +124,7 @@ where
     }
 
     /// Returns a quote for an order.
-    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
+    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderQuote, SolveError> {
         let start_time = Instant::now();
 
         // Log order details once at entry
@@ -182,7 +182,7 @@ where
             )
             .await;
 
-        let order_solution = match result {
+        let order_quote = match result {
             Ok(result) => {
                 // Extract scalar values before consuming result with into_route()
                 let amount_out_net_gas = result
@@ -224,9 +224,9 @@ where
                     order.amount().clone()
                 };
 
-                OrderSolution::new(
+                OrderQuote::new(
                     order.id().to_string(),
-                    SolutionStatus::Success,
+                    QuoteStatus::Success,
                     amount_in,
                     amount_out,
                     gas_estimate,
@@ -270,7 +270,7 @@ where
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
-        Ok(SingleOrderSolution::new(order_solution, solve_time_ms))
+        Ok(SingleOrderQuote::new(order_quote, solve_time_ms))
     }
 
     /// Waits for required derived data to become ready, or until timeout.

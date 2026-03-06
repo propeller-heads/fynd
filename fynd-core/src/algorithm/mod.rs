@@ -26,7 +26,7 @@ use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
-    types::{solution::Order, RouteResult},
+    types::{quote::Order, RouteResult},
 };
 
 /// Configuration for an Algorithm instance.

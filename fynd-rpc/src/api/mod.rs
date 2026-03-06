@@ -27,13 +27,13 @@ use crate::api::error::ErrorResponse;
 #[openapi(
     paths(handlers::quote, handlers::health),
     components(schemas(
-        dto::SolutionRequest,
+        dto::QuoteRequest,
         dto::Order,
         dto::OrderSide,
-        dto::SolutionOptions,
-        dto::Solution,
-        dto::OrderSolution,
-        dto::SolutionStatus,
+        dto::QuoteOptions,
+        dto::Quote,
+        dto::OrderQuote,
+        dto::QuoteStatus,
         dto::Route,
         dto::Swap,
         dto::BlockInfo,

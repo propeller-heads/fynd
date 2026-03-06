@@ -3,14 +3,14 @@
 //! This module defines all solution-related request and response types exposed to clients:
 //!
 //! ## Request Types
-//! - [`SolutionRequest`] - Top-level request containing orders to solve
+//! - [`QuoteRequest`] - Top-level request containing orders to solve
 //! - [`Order`] - A single swap order with token pair and amount
-//! - [`SolutionOptions`] - Optional parameters for solving behavior
+//! - [`QuoteOptions`] - Optional parameters for solving behavior
 //!
 //! ## Response Types
-//! - [`Solution`] - Top-level response with solutions for all orders
-//! - [`SingleOrderSolution`] - Solution for a single order with timing information
-//! - [`OrderSolution`] - Solution for a single order including route
+//! - [`Quote`] - Top-level response with solutions for all orders
+//! - [`SingleOrderQuote`] - Quote for a single order with timing information
+//! - [`OrderQuote`] - Quote for a single order including route
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
@@ -40,17 +40,17 @@ use crate::AlgorithmError;
 
 // Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolutionRequest {
+pub struct QuoteRequest {
     /// Orders to solve.
     orders: Vec<Order>,
     /// Optional solving parameters that apply to all orders.
     #[serde(default)]
-    options: SolutionOptions,
+    options: QuoteOptions,
 }
 
-impl SolutionRequest {
+impl QuoteRequest {
     /// Creates a new solution request.
-    pub fn new(orders: Vec<Order>, options: SolutionOptions) -> Self {
+    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
         Self { orders, options }
     }
 
@@ -60,7 +60,7 @@ impl SolutionRequest {
     }
 
     /// Returns the solving options.
-    pub fn options(&self) -> &SolutionOptions {
+    pub fn options(&self) -> &QuoteOptions {
         &self.options
     }
 }
@@ -68,7 +68,7 @@ impl SolutionRequest {
 /// Options to customize the solving behavior.
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SolutionOptions {
+pub struct QuoteOptions {
     /// Timeout in milliseconds. If `None`, uses server default.
     timeout_ms: Option<u64>,
     /// Minimum number of solver responses to wait for before returning.
@@ -87,7 +87,7 @@ pub struct SolutionOptions {
     encoding_options: Option<EncodingOptions>,
 }
 
-impl SolutionOptions {
+impl QuoteOptions {
     /// Sets the timeout in milliseconds.
     pub fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = Some(ms);
@@ -282,15 +282,15 @@ impl PermitDetails {
 // RESPONSE TYPES
 // ============================================================================
 
-/// Complete solution for a [`SolutionRequest`].
+/// Complete solution for a [`QuoteRequest`].
 ///
 /// Contains a solution for each order in the request, along with aggregate
 /// gas estimates and timing information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Solution {
+pub struct Quote {
     /// Solutions for each order, in the same order as the request.
-    orders: Vec<OrderSolution>,
+    orders: Vec<OrderQuote>,
     /// Total estimated gas for executing all swaps (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
     total_gas_estimate: BigUint,
@@ -298,9 +298,9 @@ pub struct Solution {
     solve_time_ms: u64,
 }
 
-impl Solution {
+impl Quote {
     pub(crate) fn new(
-        orders: Vec<OrderSolution>,
+        orders: Vec<OrderQuote>,
         total_gas_estimate: BigUint,
         solve_time_ms: u64,
     ) -> Self {
@@ -308,12 +308,12 @@ impl Solution {
     }
 
     /// Returns the solutions for each order.
-    pub fn orders(&self) -> &[OrderSolution] {
+    pub fn orders(&self) -> &[OrderQuote] {
         &self.orders
     }
 
     /// Consumes this solution and returns the order solutions.
-    pub fn into_orders(self) -> Vec<OrderSolution> {
+    pub fn into_orders(self) -> Vec<OrderQuote> {
         self.orders
     }
 
@@ -471,24 +471,24 @@ pub enum OrderValidationError {
 
 /// Internal wrapper used by workers when returning a solution.
 ///
-/// This wraps [`OrderSolution`] with per-worker timing information.
+/// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Solution`]).
+/// not the total OrderManager orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SingleOrderSolution {
+pub struct SingleOrderQuote {
     /// The solution for the order.
-    order: OrderSolution,
+    order: OrderQuote,
     /// Time taken by this specific worker to compute the solution, in milliseconds.
     solve_time_ms: u64,
 }
 
-impl SingleOrderSolution {
-    pub(crate) fn new(order: OrderSolution, solve_time_ms: u64) -> Self {
+impl SingleOrderQuote {
+    pub(crate) fn new(order: OrderQuote, solve_time_ms: u64) -> Self {
         Self { order, solve_time_ms }
     }
 
     /// Returns the order solution.
-    pub fn order(&self) -> &OrderSolution {
+    pub fn order(&self) -> &OrderQuote {
         &self.order
     }
 
@@ -498,17 +498,17 @@ impl SingleOrderSolution {
     }
 }
 
-/// Solution for a single [`Order`].
+/// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
 /// gas estimates, and status information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderSolution {
+pub struct OrderQuote {
     /// ID of the order this solution corresponds to.
     order_id: String,
     /// Status indicating whether a route was found.
-    status: SolutionStatus,
+    status: QuoteStatus,
     /// The route to execute, if a valid route was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     route: Option<Route>,
@@ -540,11 +540,11 @@ pub struct OrderSolution {
     transaction: Option<Transaction>,
 }
 
-impl OrderSolution {
+impl OrderQuote {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         order_id: String,
-        status: SolutionStatus,
+        status: QuoteStatus,
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
@@ -600,7 +600,7 @@ impl OrderSolution {
     }
 
     /// Returns the solution status.
-    pub fn status(&self) -> SolutionStatus {
+    pub fn status(&self) -> QuoteStatus {
         self.status
     }
 
@@ -663,7 +663,7 @@ impl OrderSolution {
 /// Status of an order solution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SolutionStatus {
+pub enum QuoteStatus {
     /// A valid route was found.
     Success,
     /// No route exists between the specified tokens.
@@ -676,17 +676,17 @@ pub enum SolutionStatus {
     NotReady,
 }
 
-impl From<AlgorithmError> for SolutionStatus {
+impl From<AlgorithmError> for QuoteStatus {
     fn from(err: crate::algorithm::AlgorithmError) -> Self {
         match err {
-            AlgorithmError::NoPath { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::InsufficientLiquidity => SolutionStatus::InsufficientLiquidity,
-            AlgorithmError::Timeout { .. } => SolutionStatus::Timeout,
-            AlgorithmError::ExactOutNotSupported => SolutionStatus::NoRouteFound,
-            AlgorithmError::Other(_) => SolutionStatus::NoRouteFound,
-            AlgorithmError::InvalidConfiguration { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::SimulationFailed { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::DataNotFound { .. } => SolutionStatus::NoRouteFound,
+            AlgorithmError::NoPath { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::InsufficientLiquidity => QuoteStatus::InsufficientLiquidity,
+            AlgorithmError::Timeout { .. } => QuoteStatus::Timeout,
+            AlgorithmError::ExactOutNotSupported => QuoteStatus::NoRouteFound,
+            AlgorithmError::Other(_) => QuoteStatus::NoRouteFound,
+            AlgorithmError::InvalidConfiguration { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::SimulationFailed { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::DataNotFound { .. } => QuoteStatus::NoRouteFound,
         }
     }
 }
@@ -762,7 +762,7 @@ impl Route {
 ///
 /// `net_amount_out` is the output amount after subtracting gas costs converted to output token
 /// units. It can be negative if gas exceeds output (e.g., tiny swaps or inaccurate gas
-/// estimation). Used by the worker to populate `amount_out_net_gas` on `OrderSolution`.
+/// estimation). Used by the worker to populate `amount_out_net_gas` on `OrderQuote`.
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     /// The route (sequence of swaps) to execute.
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn test_solution_serializes_amounts_as_strings() {
-        let solution = Solution::new(vec![], BigUint::from(500_000u64), 10);
+        let solution = Quote::new(vec![], BigUint::from(500_000u64), 10);
 
         let json = serde_json::to_string(&solution).unwrap();
         assert!(json.contains(r#""total_gas_estimate":"500000""#));

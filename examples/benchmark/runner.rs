@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use fynd_core::{Solution, SolutionRequest, SolutionStatus};
+use fynd_core::{Quote, QuoteRequest, QuoteStatus};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::ParallelizationMode;
@@ -20,7 +20,7 @@ impl ParallelizationMode {
         &self,
         client: reqwest::Client,
         solver_url: &str,
-        requests: &[SolutionRequest],
+        requests: &[QuoteRequest],
         num_requests: usize,
     ) -> RunnerResults {
         match self {
@@ -40,7 +40,7 @@ impl ParallelizationMode {
 pub async fn run_benchmark(
     client: reqwest::Client,
     solver_url: &str,
-    requests: &[SolutionRequest],
+    requests: &[QuoteRequest],
     num_requests: usize,
     mode: &ParallelizationMode,
 ) -> RunnerResults {
@@ -52,7 +52,7 @@ pub async fn run_benchmark(
 async fn run_sequential(
     client: reqwest::Client,
     solver_url: &str,
-    requests: &[SolutionRequest],
+    requests: &[QuoteRequest],
     num_requests: usize,
 ) -> RunnerResults {
     let mut round_trip_times = Vec::new();
@@ -101,7 +101,7 @@ async fn run_sequential(
 async fn run_fixed_concurrency(
     client: reqwest::Client,
     solver_url: &str,
-    requests: &[SolutionRequest],
+    requests: &[QuoteRequest],
     num_requests: usize,
     concurrency: usize,
 ) -> RunnerResults {
@@ -217,7 +217,7 @@ async fn run_fixed_concurrency(
 async fn run_rate_based(
     client: reqwest::Client,
     solver_url: &str,
-    requests: &[SolutionRequest],
+    requests: &[QuoteRequest],
     num_requests: usize,
     interval_ms: u64,
 ) -> RunnerResults {
@@ -333,12 +333,12 @@ async fn handle_response(
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
-                match resp.json::<Solution>().await {
+                match resp.json::<Quote>().await {
                     Ok(solution) => {
                         let orders_found = solution
                             .orders()
                             .iter()
-                            .filter(|o| o.status() == SolutionStatus::Success)
+                            .filter(|o| o.status() == QuoteStatus::Success)
                             .count();
                         let orders_not_found = solution.orders().len() - orders_found;
 

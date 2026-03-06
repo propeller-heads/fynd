@@ -25,7 +25,7 @@ This modular architecture allows users to:
   uses `petgraph::StableDiGraph`
 - **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager
   selects the best result
-- **Output Format**: Structured `Solution` objects (routes, amounts, gas estimates)
+- **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates)
 - **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a
   separate computation framework
 - **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
@@ -44,7 +44,7 @@ This modular architecture allows users to:
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
-                                   │ SolutionRequest
+                                   │ QuoteRequest
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            OrderManager                                     │
@@ -300,8 +300,8 @@ RouterApi (validate)
     ▼
 OrderManager (fan-out to all pools)
     │
-    ├──► Pool A Queue ──► Worker ──► Algorithm ──► Solution
-    ├──► Pool B Queue ──► Worker ──► Algorithm ──► Solution
+    ├──► Pool A Queue ──► Worker ──► Algorithm ──► Quote
+    ├──► Pool B Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
     │
     ▼

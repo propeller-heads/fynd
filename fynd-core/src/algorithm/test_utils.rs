@@ -25,7 +25,7 @@ use crate::{
     algorithm::most_liquid::DepthAndPrice,
     feed::market_data::SharedMarketData,
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
-    types::{solution::OrderSide, BlockInfo, Order},
+    types::{quote::OrderSide, BlockInfo, Order},
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.

@@ -25,7 +25,7 @@ use fynd_core::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     types::{constants::native_token, Order, OrderSide},
-    OrderManager, OrderManagerConfig, SolutionRequest, SolverPoolHandle, WorkerPoolBuilder,
+    OrderManager, OrderManagerConfig, QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
@@ -177,15 +177,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("Solving: 1000 USDC → WBTC...");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let request = SolutionRequest::new(vec![order], Default::default());
+    let request = QuoteRequest::new(vec![order], Default::default());
     let solution = order_manager.quote(request).await?;
 
     println!(" done ({}ms)\n", solution.solve_time_ms());
 
     // 11. Display results
-    let order_solution = &solution.orders()[0];
+    let order_quote = &solution.orders()[0];
 
-    if let Some(route) = order_solution.route() {
+    if let Some(route) = order_quote.route() {
         let market = market_data.read().await;
 
         let final_swap = route.swaps().last().unwrap();
@@ -235,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
-        println!("No route found (status: {:?})", order_solution.status());
+        println!("No route found (status: {:?})", order_quote.status());
     }
 
     // Clean shutdown

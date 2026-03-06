@@ -17,7 +17,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
 /// POST /v1/quote - Request a quote.
 ///
-/// Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error
+/// Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error
 /// if the request could not be filled.
 ///
 /// # Errors
@@ -30,9 +30,9 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     post,
     path = "/v1/quote",
     tag = "solver",
-    request_body = dto::SolutionRequest,
+    request_body = dto::QuoteRequest,
     responses(
-        (status = 200, description = "Quote completed", body = dto::Solution),
+        (status = 200, description = "Quote completed", body = dto::Quote),
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
@@ -42,7 +42,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
 pub async fn quote(
     state: web::Data<AppState>,
-    request: web::Json<dto::SolutionRequest>,
+    request: web::Json<dto::QuoteRequest>,
 ) -> Result<HttpResponse, ApiError> {
     let dto_request = request.into_inner();
 
@@ -52,7 +52,7 @@ pub async fn quote(
     }
 
     // Convert DTO to core types
-    let core_request: fynd_core::SolutionRequest = dto_request.into();
+    let core_request: fynd_core::QuoteRequest = dto_request.into();
 
     // Validate orders
     for order in core_request.orders() {
@@ -61,21 +61,21 @@ pub async fn quote(
         }
     }
 
-    let core_solution = state
+    let core_quote = state
         .order_manager
         .quote(core_request)
         .await?;
 
     info!(
-        solve_time_ms = core_solution.solve_time_ms(),
-        num_orders = core_solution.orders().len(),
+        solve_time_ms = core_quote.solve_time_ms(),
+        num_orders = core_quote.orders().len(),
         num_pools = state.order_manager.num_pools(),
         "quote completed"
     );
 
-    let dto_solution: dto::Solution = core_solution.into();
+    let dto_quote: dto::Quote = core_quote.into();
 
-    Ok(HttpResponse::Ok().json(dto_solution))
+    Ok(HttpResponse::Ok().json(dto_quote))
 }
 
 /// GET /v1/health - Health check endpoint.
