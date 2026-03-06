@@ -693,7 +693,7 @@ mod tests {
     // ==================== try_score_path Tests ====================
 
     #[test]
-    fn try_score_path_calculates_correctly() {
+    fn test_try_score_path_calculates_correctly() {
         let (a, b, c, _) = addrs();
         let mut m = linear_graph();
 
@@ -716,13 +716,13 @@ mod tests {
     }
 
     #[test]
-    fn try_score_path_empty_returns_none() {
+    fn test_try_score_path_empty_returns_none() {
         let path: Path<DepthAndPrice> = Path::new();
         assert_eq!(MostLiquidAlgorithm::try_score_path(&path), None);
     }
 
     #[test]
-    fn try_score_path_missing_weight_returns_none() {
+    fn test_try_score_path_missing_weight_returns_none() {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let graph = m.graph();
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn try_score_path_circular_route() {
+    fn test_try_score_path_circular_route() {
         // Test scoring a circular path A -> B -> A
         let (a, b, _, _) = addrs();
         let mut m = linear_graph();
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_linear_forward_and_reverse() {
+    fn test_find_paths_linear_forward_and_reverse() {
         let (a, b, c, d) = addrs();
         let m = linear_graph();
         let g = m.graph();
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_respects_hop_bounds() {
+    fn test_find_paths_respects_hop_bounds() {
         let (a, _, c, d) = addrs();
         let m = linear_graph();
         let g = m.graph();
@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_parallel_pools() {
+    fn test_find_paths_parallel_pools() {
         let (a, b, c, _) = addrs();
         let m = parallel_graph();
         let g = m.graph();
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_diamond_multiple_routes() {
+    fn test_find_paths_diamond_multiple_routes() {
         let (a, _, _, d) = addrs();
         let m = diamond_graph();
         let g = m.graph();
@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_revisit_destination() {
+    fn test_find_paths_revisit_destination() {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_cyclic_same_source_dest() {
+    fn test_find_paths_cyclic_same_source_dest() {
         let (a, _, _, _) = addrs();
         // Use parallel_graph with 3 A<->B pools to verify all combinations
         let m = parallel_graph();
@@ -897,7 +897,7 @@ mod tests {
     #[rstest]
     #[case::source_not_in_graph(false, true)]
     #[case::dest_not_in_graph(true, false)]
-    fn find_paths_token_not_in_graph(#[case] from_exists: bool, #[case] to_exists: bool) {
+    fn test_find_paths_token_not_in_graph(#[case] from_exists: bool, #[case] to_exists: bool) {
         // Graph contains tokens A (0x0A) and B (0x0B) from linear_graph fixture
         let (a, b, _, _) = addrs();
         let non_existent = addr(0x99);
@@ -915,7 +915,7 @@ mod tests {
     #[rstest]
     #[case::min_greater_than_max(3, 1)]
     #[case::min_hops_zero(0, 1)]
-    fn find_paths_invalid_configuration(#[case] min_hops: usize, #[case] max_hops: usize) {
+    fn test_find_paths_invalid_configuration(#[case] min_hops: usize, #[case] max_hops: usize) {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn find_paths_bfs_ordering() {
+    fn test_find_paths_bfs_ordering() {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
@@ -952,7 +952,7 @@ mod tests {
     // downcasts to EVMPoolState<PreCachedDB>, or integration tests with real VM pools.
 
     #[test]
-    fn simulate_path_single_hop() {
+    fn test_simulate_path_single_hop() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn simulate_path_multi_hop_chains_amounts() {
+    fn test_simulate_path_multi_hop_chains_amounts() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn simulate_path_same_pool_twice_uses_updated_state() {
+    fn test_simulate_path_same_pool_twice_uses_updated_state() {
         // Route: A -> B -> A through the same pool
         // First swap uses multiplier=2, second should use multiplier=3 (updated state)
         let token_a = token(0x01, "A");
@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn simulate_path_missing_token_returns_data_not_found() {
+    fn test_simulate_path_missing_token_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn simulate_path_missing_component_returns_data_not_found() {
+    fn test_simulate_path_missing_component_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let (market, manager) =
@@ -1118,7 +1118,7 @@ mod tests {
     // ==================== find_best_route Tests ====================
 
     #[tokio::test]
-    async fn find_best_route_single_path() {
+    async fn test_find_best_route_single_path() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_ranks_by_net_amount_out() {
+    async fn test_find_best_route_ranks_by_net_amount_out() {
         // Tests that route selection is based on net_amount_out (output - gas cost),
         // not just gross output. Three parallel pools with different spot_price/gas combos:
         //
@@ -1183,7 +1183,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_no_path_returns_error() {
+    async fn test_find_best_route_no_path_returns_error() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C"); // Disconnected
@@ -1201,7 +1201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_multi_hop() {
+    async fn test_find_best_route_multi_hop() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1231,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_skips_paths_without_edge_weights() {
+    async fn test_find_best_route_skips_paths_without_edge_weights() {
         // Pool1 has edge weights (scoreable), Pool2 doesn't (filtered out during scoring)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_no_scorable_paths() {
+    async fn test_find_best_route_no_scorable_paths() {
         // All paths exist but none have edge weights (can't be scored)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1344,7 +1344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_gas_exceeds_output_returns_negative_net() {
+    async fn test_find_best_route_gas_exceeds_output_returns_negative_net() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_insufficient_liquidity() {
+    async fn test_find_best_route_insufficient_liquidity() {
         // Pool has limited liquidity (1000 wei) but we try to swap ONE_ETH
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1409,7 +1409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_missing_gas_price_returns_error() {
+    async fn test_find_best_route_missing_gas_price_returns_error() {
         // Test that missing gas price returns DataNotFound error, not InsufficientLiquidity
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1453,7 +1453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_circular_arbitrage() {
+    async fn test_find_best_route_circular_arbitrage() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_respects_min_hops() {
+    async fn test_find_best_route_respects_min_hops() {
         // Setup: A->B (1-hop) and A->C->B (2-hop)
         // With min_hops=2, should only return the 2-hop path
         let token_a = token(0x01, "A");
@@ -1531,7 +1531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_respects_max_hops() {
+    async fn test_find_best_route_respects_max_hops() {
         // Setup: Only path is A->B->C (2 hops)
         // With max_hops=1, should return NoPath error
         let token_a = token(0x01, "A");
@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_timeout_returns_best_so_far() {
+    async fn test_find_best_route_timeout_returns_best_so_far() {
         // Setup: Many parallel paths to process
         // With very short timeout, should return the best route found before timeout
         // or Timeout error if no route was completed
@@ -1611,7 +1611,7 @@ mod tests {
     #[case::multi_hop_min(2, 5, 200)]
     #[case::zero_timeout(1, 3, 0)]
     #[case::large_values(10, 100, 10000)]
-    fn algorithm_config_getters(
+    fn test_algorithm_config_getters(
         #[case] min_hops: usize,
         #[case] max_hops: usize,
         #[case] timeout_ms: u64,
@@ -1630,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_default_config() {
+    fn test_algorithm_default_config() {
         use crate::algorithm::Algorithm;
 
         let algorithm = MostLiquidAlgorithm::new();
@@ -1643,7 +1643,7 @@ mod tests {
     // ==================== Configuration Validation Tests ====================
 
     #[tokio::test]
-    async fn find_best_route_respects_max_routes_cap() {
+    async fn test_find_best_route_respects_max_routes_cap() {
         // 4 parallel pools. Score = spot_price * min_depth.
         // In tests, depth comes from get_limits().0 (sell_limit), which is
         // liquidity / (spot_price * (1 - fee)). With fee=0: depth = liquidity / spot_price.
@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_best_route_no_cap_when_max_routes_is_none() {
+    async fn test_find_best_route_no_cap_when_max_routes_is_none() {
         // Same setup but no cap — pool1 (best output) should win.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_config_rejects_zero_max_routes() {
+    fn test_algorithm_config_rejects_zero_max_routes() {
         let result = AlgorithmConfig::new(1, 3, Duration::from_millis(100), Some(0));
         assert!(matches!(
             result,
@@ -1724,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_config_rejects_zero_min_hops() {
+    fn test_algorithm_config_rejects_zero_min_hops() {
         let result = AlgorithmConfig::new(0, 3, Duration::from_millis(100), None);
         assert!(matches!(
             result,
@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_config_rejects_min_greater_than_max() {
+    fn test_algorithm_config_rejects_min_greater_than_max() {
         let result = AlgorithmConfig::new(5, 3, Duration::from_millis(100), None);
         assert!(matches!(
             result,

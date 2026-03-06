@@ -100,7 +100,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pool_config_minimal_uses_defaults() {
+    fn test_pool_config_minimal_uses_defaults() {
         let toml = r#"
             [pools.basic]
             algorithm = "most_liquid"
@@ -117,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_config_all_fields_explicit() {
+    fn test_pool_config_all_fields_explicit() {
         let toml = r#"
             [pools.custom]
             algorithm = "most_liquid"
