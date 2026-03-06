@@ -36,4 +36,4 @@ COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
 
 EXPOSE 3000 9898
 
-ENTRYPOINT ["/usr/local/bin/fynd"]
+ENTRYPOINT ["/usr/local/bin/fynd", "serve"]
