@@ -3248,6 +3248,7 @@ dependencies = [
  "tracing-subscriber 0.3.22",
  "tycho-execution",
  "tycho-simulation",
+ "utoipa 5.4.0",
 ]
 
 [[package]]
