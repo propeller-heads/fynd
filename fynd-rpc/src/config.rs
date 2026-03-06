@@ -24,16 +24,16 @@ pub struct PoolConfig {
     #[serde(default = "num_cpus::get")]
     pub num_workers: usize,
     /// Task queue capacity for this pool
-    #[serde(default = "usize_val::<1000>")]
+    #[serde(default = "usize_val::<{ defaults::POOL_TASK_QUEUE_CAPACITY }>")]
     pub task_queue_capacity: usize,
     /// Minimum hops to search (must be >= 1)
-    #[serde(default = "usize_val::<1>")]
+    #[serde(default = "usize_val::<{ defaults::POOL_MIN_HOPS }>")]
     pub min_hops: usize,
     /// Maximum hops to search
-    #[serde(default = "usize_val::<3>")]
+    #[serde(default = "usize_val::<{ defaults::POOL_MAX_HOPS }>")]
     pub max_hops: usize,
     /// Timeout for solving in milliseconds
-    #[serde(default = "u64_val::<100>")]
+    #[serde(default = "u64_val::<{ defaults::POOL_TIMEOUT_MS }>")]
     pub timeout_ms: u64,
     /// Maximum number of paths to simulate per solve. Omit to simulate all scored paths.
     #[serde(default)]
@@ -109,10 +109,10 @@ mod tests {
         let pool = &config.pools["basic"];
         assert_eq!(pool.algorithm, "most_liquid");
         assert_eq!(pool.num_workers, num_cpus::get());
-        assert_eq!(pool.task_queue_capacity, 1000);
-        assert_eq!(pool.min_hops, 1);
-        assert_eq!(pool.max_hops, 3);
-        assert_eq!(pool.timeout_ms, 100);
+        assert_eq!(pool.task_queue_capacity, defaults::POOL_TASK_QUEUE_CAPACITY);
+        assert_eq!(pool.min_hops, defaults::POOL_MIN_HOPS);
+        assert_eq!(pool.max_hops, defaults::POOL_MAX_HOPS);
+        assert_eq!(pool.timeout_ms, defaults::POOL_TIMEOUT_MS);
         assert_eq!(pool.max_routes, None);
     }
 
@@ -140,17 +140,30 @@ mod tests {
     }
 }
 
-// Solver defaults
 pub mod defaults {
+    // HTTP server
     pub const HTTP_HOST: &str = "0.0.0.0";
     pub const HTTP_PORT: u16 = 3000;
+
+    // Tycho stream
     pub const MIN_TVL: f64 = 10.0;
     pub const MIN_TOKEN_QUALITY: i32 = 100;
     pub const TVL_BUFFER_MULTIPLIER: f64 = 1.1;
-    pub const GAS_REFRESH_INTERVAL_SECS: u64 = 30;
     pub const RECONNECT_DELAY_SECS: u64 = 5;
+
+    // Gas
+    pub const GAS_REFRESH_INTERVAL_SECS: u64 = 30;
+
+    // Order manager
     pub const ORDER_MANAGER_TIMEOUT_MS: u64 = 100;
     pub const ORDER_MANAGER_MIN_RESPONSES: usize = 0;
-    /// Slippage threshold for pool depth computation (1%)
+
+    // Derived data
     pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
+
+    // Worker pool config
+    pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
+    pub const POOL_MIN_HOPS: usize = 1;
+    pub const POOL_MAX_HOPS: usize = 3;
+    pub const POOL_TIMEOUT_MS: u64 = 100;
 }
