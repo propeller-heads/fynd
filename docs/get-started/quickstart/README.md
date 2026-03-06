@@ -28,7 +28,7 @@ Get Fynd running locally. This guide covers building, running, and tuning the so
 
 * Rust 1.92+ (install via [rustup](https://rustup.rs/))
 * A Tycho API key ([get one here](https://app.gitbook.com/s/jrIe0oInIEt65tHqWn2w/for-solvers/indexer/tycho-client#authentication))
-* An Ethereum RPC endpoint for the target chain
+* An RPC endpoint for the target chain
 
 ### 1. Build
 
@@ -94,7 +94,7 @@ cargo run --release -- \
 curl http://localhost:3000/v1/health
 ```
 
-Returns `"healthy":true` when ready to receive requests.&#x20;
+Returns `"healthy":true` when ready to receive requests.
 
 ### 4. Submit a solve request
 
@@ -126,10 +126,10 @@ The response includes the optimal route, amounts, gas estimates, and the net out
 
 <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td><pre class="language-rust"><code class="lang-rust">options.timeout_ms
 </code></pre></td><td>Overrides the default solve timeout (configured via global config see <a href="./#id-5.-configuration">configuration section</a>).</td></tr><tr><td><pre><code>options.min_responses
-</code></pre></td><td>Return early after <strong>N</strong> solver pools respond. If set to <code>null</code> - it will wait for all solver pools respond until timeout. </td></tr><tr><td><pre><code>options.max_gas
+</code></pre></td><td>Return early after <strong>N</strong> solver pools respond. If set to <code>null</code> - it will wait for all solver pools respond until timeout.</td></tr><tr><td><pre><code>options.max_gas
 </code></pre></td><td>Discard routes above this gas limit</td></tr></tbody></table>
 
-Full interface details: [api-specifications.md](../overview/api-specifications.md "mention")&#x20;
+Full interface details: [api-specifications.md](../overview/api-specifications.md "mention")
 
 ### 5. Configuration
 
@@ -139,11 +139,11 @@ Tune Fynd with the following flags:
 
 <table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Description</th></tr></thead><tbody><tr><td><code>--rpc-url</code></td><td><code>RPC_URL</code></td><td>Ethereum RPC endpoint</td></tr><tr><td><code>--tycho-api-key</code></td><td><code>TYCHO_API_KEY</code></td><td>Tycho API key</td></tr></tbody></table>
 
-#### Optional&#x20;
+#### Optional
 
 <table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--tycho-url</code></td><td><code>TYCHO_URL</code></td><td><code>localhost:4242</code></td><td>Tycho WebSocket URL</td></tr><tr><td><code>--chain</code></td><td>--</td><td><code>Ethereum</code></td><td>Target chain</td></tr><tr><td><code>-p, --protocols</code></td><td>--</td><td><em>(all)</em></td><td>Protocols to index (comma-separated)</td></tr><tr><td><code>--http-port</code></td><td><code>HTTP_PORT</code></td><td><code>3000</code></td><td>API port</td></tr><tr><td><code>--min-tvl</code></td><td>--</td><td><code>10.0</code></td><td>Minimum pool TVL in native token (ETH)</td></tr><tr><td><code>--tvl-buffer-multiplier</code></td><td>--</td><td><code>1.1</code></td><td>Hysteresis buffer for TVL filtering</td></tr><tr><td><code>--order-manager-timeout-ms</code></td><td>--</td><td><code>100</code></td><td>Default solve timeout (ms)</td></tr><tr><td><code>--order-manager-min-responses</code></td><td>--</td><td><code>0</code></td><td>Early return threshold (0 = wait for all pools)</td></tr><tr><td><code>-w, --worker-pools-config</code></td><td><code>WORKER_POOLS_CONFIG</code></td><td><code>worker_pools.toml</code></td><td>Worker pools config file path</td></tr><tr><td><code>--blacklist-config</code></td><td><code>BLACKLIST_CONFIG</code></td><td><code>blacklist.toml</code></td><td>Blacklist config file path</td></tr><tr><td><code>--disable-tls</code></td><td>--</td><td><code>false</code></td><td>Disable TLS for Tycho connection</td></tr><tr><td><code>--min-token-quality</code></td><td>--</td><td><code>100</code></td><td>Minimum <a href="https://docs.propellerheads.xyz/tycho/overview/concepts#token">token quality</a> filter</td></tr><tr><td><code>--gas-refresh-interval-secs</code></td><td>--</td><td><code>30</code></td><td>Gas price refresh interval</td></tr><tr><td><code>--reconnect-delay-secs</code></td><td>--</td><td><code>5</code></td><td>Reconnect delay on connection failure</td></tr></tbody></table>
 
-Run `cargo run --release -- --help`  for the full list.
+Run `cargo run --release -- --help` for the full list.
 
 #### 5.1 - Worker pools file (`worker_pools.toml`)
 
