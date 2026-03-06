@@ -207,7 +207,7 @@ impl BlockInfo {
 /// A single atomic swap on one liquidity pool within a [`Route`].
 #[derive(Debug, Clone)]
 pub struct Swap {
-    pool_id: String,
+    component_id: String,
     protocol: String,
     token_in: Bytes,
     token_out: Bytes,
@@ -218,8 +218,8 @@ pub struct Swap {
 
 impl Swap {
     /// The identifier of the liquidity pool component (e.g. a pool address).
-    pub fn pool_id(&self) -> &str {
-        &self.pool_id
+    pub fn component_id(&self) -> &str {
+        &self.component_id
     }
 
     /// The protocol identifier (e.g. `"uniswap_v3"`, `"vm:balancer"`).
@@ -253,7 +253,7 @@ impl Swap {
     }
 
     pub(crate) fn new(
-        pool_id: String,
+        component_id: String,
         protocol: String,
         token_in: Bytes,
         token_out: Bytes,
@@ -261,7 +261,7 @@ impl Swap {
         amount_out: BigUint,
         gas_estimate: BigUint,
     ) -> Self {
-        Self { pool_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
     }
 }
 
@@ -413,10 +413,6 @@ impl Quote {
 #[derive(Debug)]
 pub(crate) struct BatchQuote {
     quotes: Vec<Quote>,
-    #[allow(dead_code)]
-    total_gas_estimate: BigUint,
-    #[allow(dead_code)]
-    solve_time_ms: u64,
 }
 
 impl BatchQuote {
@@ -425,20 +421,8 @@ impl BatchQuote {
         &self.quotes
     }
 
-    /// Aggregate estimated gas units for executing all solutions.
-    #[allow(dead_code)]
-    pub fn total_gas_estimate(&self) -> &BigUint {
-        &self.total_gas_estimate
-    }
-
-    /// Wall-clock time the server took to compute this quote, in milliseconds.
-    #[allow(dead_code)]
-    pub fn solve_time_ms(&self) -> u64 {
-        self.solve_time_ms
-    }
-
-    pub(crate) fn new(quotes: Vec<Quote>, total_gas_estimate: BigUint, solve_time_ms: u64) -> Self {
-        Self { quotes, total_gas_estimate, solve_time_ms }
+    pub(crate) fn new(quotes: Vec<Quote>) -> Self {
+        Self { quotes }
     }
 }
 

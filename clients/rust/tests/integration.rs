@@ -15,8 +15,8 @@ use alloy::{
     providers::{ProviderBuilder, RootProvider},
 };
 use fynd_client::{
-    FyndClient, Order, OrderSide, QuoteOptions, QuoteParams, RetryConfig, SignablePayload,
-    SigningHints,
+    ErrorCode, FyndClient, FyndError, Order, OrderSide, QuoteOptions, QuoteParams, RetryConfig,
+    SignablePayload, SigningHints,
 };
 use num_bigint::BigUint;
 use wiremock::{
@@ -259,13 +259,13 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
 
     let first = &route.swaps()[0];
     // component_id in wire format maps to pool_id in the client type.
-    assert_eq!(first.pool_id(), "0xpool1111111111111111111111111111111111111111");
+    assert_eq!(first.component_id(), "0xpool1111111111111111111111111111111111111111");
     assert_eq!(first.protocol(), "uniswap_v3");
     assert_eq!(first.amount_in(), &BigUint::from(1_000_000u64));
     assert_eq!(first.amount_out(), &BigUint::from(500_000u64));
 
     let second = &route.swaps()[1];
-    assert_eq!(second.pool_id(), "0xpool2222222222222222222222222222222222222222");
+    assert_eq!(second.component_id(), "0xpool2222222222222222222222222222222222222222");
     assert_eq!(second.protocol(), "uniswap_v2");
     assert_eq!(second.amount_in(), &BigUint::from(500_000u64));
     assert_eq!(second.amount_out(), &BigUint::from(990_000u64));
@@ -277,8 +277,6 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
 /// `FyndError::Api { code: ErrorCode::BadRequest }` without any retry.
 #[tokio::test]
 async fn quote_bad_request_not_retried() {
-    use fynd_client::{ErrorCode, FyndError};
-
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -408,14 +406,12 @@ async fn full_quote_then_signable_payload_with_all_hints() {
         .await
         .expect("quote should succeed");
 
-    let hints = SigningHints {
-        sender: Some(sender),
-        nonce: Some(7),
-        max_fee_per_gas: Some(3_000_000_000),
-        max_priority_fee_per_gas: Some(1_000_000),
-        gas_limit: Some(80_000),
-        simulate: false,
-    };
+    let hints = SigningHints::default()
+        .with_sender(sender)
+        .with_nonce(7)
+        .with_max_fee_per_gas(3_000_000_000)
+        .with_max_priority_fee_per_gas(1_000_000)
+        .with_gas_limit(80_000);
 
     let payload = client
         .signable_payload(quote, &hints)

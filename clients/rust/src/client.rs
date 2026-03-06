@@ -86,22 +86,86 @@ impl Default for RetryConfig {
 ///
 /// All fields default to `None` / `false`. Unset fields are resolved automatically from the
 /// RPC node during [`FyndClient::signable_payload`].
+///
+/// Build via the setter methods; all options are unset by default.
 #[derive(Default)]
 pub struct SigningHints {
-    /// Override the sender address. If `None`, falls back to the address set on the client via
-    /// [`FyndClientBuilder::with_sender`].
-    pub sender: Option<Address>,
-    /// Override the transaction nonce. If `None`, fetched via `eth_getTransactionCount`.
-    pub nonce: Option<u64>,
-    /// Override `maxFeePerGas` (wei). If `None`, estimated via `eth_maxPriorityFeePerGas`.
-    pub max_fee_per_gas: Option<u128>,
-    /// Override `maxPriorityFeePerGas` (wei). If `None`, estimated alongside `max_fee_per_gas`.
-    pub max_priority_fee_per_gas: Option<u128>,
-    /// Override the gas limit. If `None`, taken from the solution's `gas_estimate`.
-    pub gas_limit: Option<u64>,
+    sender: Option<Address>,
+    nonce: Option<u64>,
+    max_fee_per_gas: Option<u128>,
+    max_priority_fee_per_gas: Option<u128>,
+    gas_limit: Option<u64>,
+    simulate: bool,
+}
+
+impl SigningHints {
+    /// Override the sender address. If not set, falls back to the address configured on the
+    /// client via [`FyndClientBuilder::with_sender`].
+    pub fn with_sender(mut self, sender: Address) -> Self {
+        self.sender = Some(sender);
+        self
+    }
+
+    /// Override the transaction nonce. If not set, fetched via `eth_getTransactionCount`.
+    pub fn with_nonce(mut self, nonce: u64) -> Self {
+        self.nonce = Some(nonce);
+        self
+    }
+
+    /// Override `maxFeePerGas` (wei). If not set, estimated via `eth_feeHistory`.
+    pub fn with_max_fee_per_gas(mut self, max_fee_per_gas: u128) -> Self {
+        self.max_fee_per_gas = Some(max_fee_per_gas);
+        self
+    }
+
+    /// Override `maxPriorityFeePerGas` (wei). If not set, estimated alongside `max_fee_per_gas`.
+    pub fn with_max_priority_fee_per_gas(mut self, max_priority_fee_per_gas: u128) -> Self {
+        self.max_priority_fee_per_gas = Some(max_priority_fee_per_gas);
+        self
+    }
+
+    /// Override the gas limit. If not set, taken from the solution's `gas_estimate`.
+    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.gas_limit = Some(gas_limit);
+        self
+    }
+
     /// When `true`, simulate the transaction via `eth_call` before returning. A simulation
     /// failure results in [`FyndError::SimulationFailed`].
-    pub simulate: bool,
+    pub fn with_simulate(mut self, simulate: bool) -> Self {
+        self.simulate = simulate;
+        self
+    }
+
+    /// The configured sender override, or `None` to fall back to the client default.
+    pub fn sender(&self) -> Option<Address> {
+        self.sender
+    }
+
+    /// The configured nonce override, or `None` to fetch from the RPC node.
+    pub fn nonce(&self) -> Option<u64> {
+        self.nonce
+    }
+
+    /// The configured `maxFeePerGas` override (wei), or `None` to estimate.
+    pub fn max_fee_per_gas(&self) -> Option<u128> {
+        self.max_fee_per_gas
+    }
+
+    /// The configured `maxPriorityFeePerGas` override (wei), or `None` to estimate.
+    pub fn max_priority_fee_per_gas(&self) -> Option<u128> {
+        self.max_priority_fee_per_gas
+    }
+
+    /// The configured gas limit override, or `None` to use the solution's estimate.
+    pub fn gas_limit(&self) -> Option<u64> {
+        self.gas_limit
+    }
+
+    /// Whether to simulate the transaction via `eth_call` before returning.
+    pub fn simulate(&self) -> bool {
+        self.simulate
+    }
 }
 
 // ============================================================================
@@ -447,7 +511,7 @@ where
         let mut delay = self.retry.initial_backoff;
         for attempt in 0..self.retry.max_attempts {
             match self
-                .do_quote(&wire_request, token_out.clone(), receiver.clone())
+                .request_quote(&wire_request, token_out.clone(), receiver.clone())
                 .await
             {
                 Ok(quote) => return Ok(quote),
@@ -462,7 +526,7 @@ where
         Err(FyndError::Protocol("retry loop exhausted without result".into()))
     }
 
-    async fn do_quote(
+    async fn request_quote(
         &self,
         wire_request: &fynd_rpc_types::SolutionRequest,
         token_out: Bytes,
@@ -538,12 +602,12 @@ where
     ) -> Result<SignablePayload, FyndError> {
         // Resolve sender.
         let sender = hints
-            .sender
+            .sender()
             .or(self.default_sender)
             .ok_or_else(|| FyndError::Config("no sender configured".into()))?;
 
         // Resolve nonce.
-        let nonce = match hints.nonce {
+        let nonce = match hints.nonce() {
             Some(n) => n,
             None => self
                 .provider
@@ -554,7 +618,7 @@ where
 
         // Resolve EIP-1559 fees.
         let (max_fee_per_gas, max_priority_fee_per_gas) =
-            match (hints.max_fee_per_gas, hints.max_priority_fee_per_gas) {
+            match (hints.max_fee_per_gas(), hints.max_priority_fee_per_gas()) {
                 (Some(mf), Some(mp)) => (mf, mp),
                 _ => {
                     let est = self
@@ -567,7 +631,7 @@ where
             };
 
         // Resolve gas limit.
-        let gas_limit = match hints.gas_limit {
+        let gas_limit = match hints.gas_limit() {
             Some(g) => g,
             None => quote
                 .gas_estimate()
@@ -583,12 +647,13 @@ where
             gas_limit,
             to: TxKind::Call(self.router_address),
             value: U256::ZERO,
+            // TODO: populate with ABI-encoded calldata once RouterV3 interface is finalised.
             input: AlloyBytes::new(),
             access_list: AccessList::default(),
         };
 
         // Optionally simulate the transaction.
-        if hints.simulate {
+        if hints.simulate() {
             let req: alloy::rpc::types::TransactionRequest = tx_eip1559.clone().into();
             self.provider
                 .call(req)
@@ -726,9 +791,9 @@ mod tests {
     #[test]
     fn signing_hints_default_all_none_and_no_simulate() {
         let hints = SigningHints::default();
-        assert!(hints.sender.is_none());
-        assert!(hints.nonce.is_none());
-        assert!(!hints.simulate);
+        assert!(hints.sender().is_none());
+        assert!(hints.nonce().is_none());
+        assert!(!hints.simulate());
     }
 
     // ========================================================================

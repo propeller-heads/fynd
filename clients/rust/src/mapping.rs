@@ -21,13 +21,16 @@ use crate::{
 pub(crate) fn bytes_to_alloy_address(
     b: &bytes::Bytes,
 ) -> Result<alloy::primitives::Address, FyndError> {
-    if b.len() != 20 {
-        return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
-    }
     let arr: [u8; 20] = b
         .as_ref()
         .try_into()
-        .expect("length checked above");
+        .map_err(|_| {
+            FyndError::Protocol(format!(
+                "expected 20-byte address, got {} bytes",
+                b.len()
+            ))
+        })?;
+
     Ok(alloy::primitives::Address::from(arr))
 }
 
@@ -138,7 +141,7 @@ pub(crate) fn wire_to_batch_quote(
         .into_iter()
         .map(|os| wire_to_quote(os, token_out.clone(), receiver.clone()))
         .collect::<Result<Vec<Quote>, _>>()?;
-    Ok(BatchQuote::new(quotes, ws.total_gas_estimate, ws.solve_time_ms))
+    Ok(BatchQuote::new(quotes))
 }
 
 impl From<wire::SolutionStatus> for SolutionStatus {
@@ -275,7 +278,7 @@ mod tests {
     #[test]
     fn swap_try_from_wire_happy_path() {
         let client_swap = Swap::try_from(sample_wire_swap()).unwrap();
-        assert_eq!(client_swap.pool_id(), "pool-1");
+        assert_eq!(client_swap.component_id(), "pool-1");
         assert_eq!(client_swap.protocol(), "uniswap-v3");
         assert_eq!(client_swap.token_in(), &Bytes::copy_from_slice(&[0xaa; 20]));
         assert_eq!(client_swap.token_out(), &Bytes::copy_from_slice(&[0xbb; 20]));
