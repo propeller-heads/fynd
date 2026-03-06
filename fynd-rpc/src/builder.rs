@@ -217,6 +217,7 @@ impl FyndBuilder {
                 pool_cfg.min_hops,
                 pool_cfg.max_hops,
                 Duration::from_millis(pool_cfg.timeout_ms),
+                pool_cfg.max_routes,
             )
             .context(format!("invalid algorithm configuration for pool '{}'", pool_name))?;
 
