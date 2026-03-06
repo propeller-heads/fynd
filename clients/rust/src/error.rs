@@ -3,7 +3,7 @@ use thiserror::Error;
 /// A structured error code returned by the Fynd RPC API.
 ///
 /// Mapped from the raw string `code` field in
-/// [`wire::ErrorResponse`](fynd_rpc_types::ErrorResponse).
+/// [`fynd_rpc_types::ErrorResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
     /// The request was malformed or contained invalid parameters.
