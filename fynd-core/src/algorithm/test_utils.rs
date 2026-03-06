@@ -294,15 +294,14 @@ pub fn component(id: &str, tokens: &[Token]) -> ProtocolComponent {
 
 /// Creates an order for testing.
 pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide) -> Order {
-    Order {
-        id: "test-order".to_string(),
-        token_in: token_in.address.clone(),
-        token_out: token_out.address.clone(),
-        amount: BigUint::from(amount),
+    Order::new(
+        token_in.address.clone(),
+        token_out.address.clone(),
+        BigUint::from(amount),
         side,
-        sender: Address::default(),
-        receiver: None,
-    }
+        Address::default(),
+    )
+    .with_id("test-order".to_string())
 }
 
 /// Sets up market with components and a graph. Returns (market_lock, graph_manager).
@@ -322,7 +321,7 @@ pub fn setup_market(
         block_timestamp: 0,
         pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
     });
-    market.update_last_updated(BlockInfo { number: 1, hash: "0x00".into(), timestamp: 0 });
+    market.update_last_updated(BlockInfo::new(1, "0x00".into(), 0));
 
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];

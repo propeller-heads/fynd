@@ -86,8 +86,8 @@ impl SwapToExecution for fynd_core::Swap {
     ) -> tycho_execution::encoding::models::Swap {
         tycho_execution::encoding::models::Swap::new(
             component.clone(),
-            Bytes::from(self.token_in.as_ref()),
-            Bytes::from(self.token_out.as_ref()),
+            Bytes::from(self.token_in().as_ref()),
+            Bytes::from(self.token_out().as_ref()),
         )
     }
 }

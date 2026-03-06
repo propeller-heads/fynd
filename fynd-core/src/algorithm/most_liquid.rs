@@ -309,17 +309,17 @@ impl MostLiquidAlgorithm {
                 .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
 
             // Record the swap
-            swaps.push(Swap {
-                component_id: component_id.clone(),
-                protocol: component.protocol_system.clone(),
-                token_in: token_in.address.clone(),
-                token_out: token_out.address.clone(),
-                amount_in: current_amount.clone(),
-                amount_out: result.amount.clone(),
-                gas_estimate: result.gas,
-                protocol_component: component.clone(),
-                protocol_state: state.clone_box(),
-            });
+            swaps.push(Swap::new(
+                component_id.clone(),
+                component.protocol_system.clone(),
+                token_in.address.clone(),
+                token_out.address.clone(),
+                current_amount.clone(),
+                result.amount.clone(),
+                result.gas,
+                component.clone(),
+                state.clone_box(),
+            ));
 
             // Store new state as override for next hops
             if is_component_vm {
@@ -333,9 +333,9 @@ impl MostLiquidAlgorithm {
         // Calculate net amount out (output - gas cost in output token terms)
         let route = Route::new(swaps);
         let output_amount = route
-            .swaps
+            .swaps()
             .last()
-            .map(|s| s.amount_out.clone())
+            .map(|s| s.amount_out().clone())
             .unwrap_or_else(|| BigUint::ZERO);
 
         let gas_price = market
@@ -344,13 +344,13 @@ impl MostLiquidAlgorithm {
             .effective_gas_price()
             .clone();
 
-        let net_amount_out = if let Some(last_swap) = route.swaps.last() {
+        let net_amount_out = if let Some(last_swap) = route.swaps().last() {
             let total_gas = route.total_gas();
             let gas_cost_wei = &total_gas * &gas_price;
 
             // Convert gas cost to output token terms using token prices
             let gas_cost_in_output_token: Option<BigUint> = token_prices
-                .and_then(|prices| prices.get(&last_swap.token_out))
+                .and_then(|prices| prices.get(last_swap.token_out()))
                 .map(|price| {
                     // gas_cost_in_token = gas_cost_wei * numerator / denominator
                     // where numerator = tokens per ETH, denominator = 10^18 + path_gas
@@ -369,7 +369,7 @@ impl MostLiquidAlgorithm {
             BigInt::from(output_amount)
         };
 
-        Ok(RouteResult { route, net_amount_out, gas_price })
+        Ok(RouteResult::new(route, net_amount_out, gas_price))
     }
 }
 
@@ -388,7 +388,7 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 
     // TODO: Consider adding token pair symbols to the span for easier interpretation
-    #[instrument(level = "debug", skip_all, fields(order_id = %order.id))]
+    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
@@ -414,13 +414,13 @@ impl Algorithm for MostLiquidAlgorithm {
             None
         };
 
-        let amount_in = order.amount.clone();
+        let amount_in = order.amount().clone();
 
         // Step 1: Find all edge paths using BFS (shorter paths first)
         let all_paths = Self::find_paths(
             graph,
-            &order.token_in,
-            &order.token_out,
+            order.token_in(),
+            order.token_out(),
             self.min_hops,
             self.max_hops,
         )?;
@@ -428,8 +428,8 @@ impl Algorithm for MostLiquidAlgorithm {
         let paths_candidates = all_paths.len();
         if paths_candidates == 0 {
             return Err(AlgorithmError::NoPath {
-                from: order.token_in.clone(),
-                to: order.token_out.clone(),
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
                 reason: NoPathReason::NoGraphPath,
             });
         }
@@ -477,8 +477,8 @@ impl Algorithm for MostLiquidAlgorithm {
         let scoring_failures = paths_candidates - paths_to_simulate;
         if paths_to_simulate == 0 {
             return Err(AlgorithmError::NoPath {
-                from: order.token_in.clone(),
-                to: order.token_out.clone(),
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
                 reason: NoPathReason::NoScorablePaths,
             });
         }
@@ -531,7 +531,7 @@ impl Algorithm for MostLiquidAlgorithm {
             // Check if this is the best result so far
             if best
                 .as_ref()
-                .map(|best| result.net_amount_out > best.net_amount_out)
+                .map(|best| result.net_amount_out() > best.net_amount_out())
                 .unwrap_or(true)
             {
                 best = Some(result);
@@ -542,7 +542,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Log solve result
         let solve_time_ms = start.elapsed().as_millis() as u64;
-        let block_number = market.last_updated().map(|b| b.number);
+        let block_number = market
+            .last_updated()
+            .map(|b| b.number());
         // The proportion of paths simulated to total paths that we filtered to simulate
         let coverage_pct = if paths_to_simulate == 0 {
             100.0
@@ -558,13 +560,12 @@ impl Algorithm for MostLiquidAlgorithm {
         match &best {
             Some(result) => {
                 let tokens = market.token_registry_ref();
-                let path_desc = result.route.path_description(tokens);
+                let path_desc = result.route().path_description(tokens);
                 let protocols = result
-                    .route
-                    .swaps
-                    .as_slice()
+                    .route()
+                    .swaps()
                     .iter()
-                    .map(|s| s.protocol.as_str())
+                    .map(|s| s.protocol())
                     .collect::<Vec<_>>();
 
                 let price = amount_in
@@ -572,7 +573,7 @@ impl Algorithm for MostLiquidAlgorithm {
                     .filter(|&v| v > 0.0)
                     .and_then(|amt_in| {
                         result
-                            .net_amount_out
+                            .net_amount_out()
                             .to_f64()
                             .map(|amt_out| amt_out / amt_in)
                     })
@@ -590,9 +591,9 @@ impl Algorithm for MostLiquidAlgorithm {
                     tokens_considered = market.token_registry_ref().len(),
                     path = %path_desc,
                     amount_in = %amount_in,
-                    net_amount_out = %result.net_amount_out,
+                    net_amount_out = %result.net_amount_out(),
                     price_out_per_in = price,
-                    hop_count = result.route.swaps.len(),
+                    hop_count = result.route().swaps().len(),
                     protocols = ?protocols,
                     "route found"
                 );
@@ -971,10 +972,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].amount_in, BigUint::from(100u64));
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(200u64)); // 100 * 2
-        assert_eq!(result.route.swaps[0].component_id, "pool1");
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(*result.route().swaps()[0].amount_in(), BigUint::from(100u64));
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64)); // 100 * 2
+        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
     }
 
     #[test]
@@ -1006,12 +1007,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.route.swaps.len(), 2);
+        assert_eq!(result.route().swaps().len(), 2);
         // First hop: 10 * 2 = 20
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(20u64));
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(20u64));
         // Second hop: 20 * 3 = 60
-        assert_eq!(result.route.swaps[1].amount_in, BigUint::from(20u64));
-        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(60u64));
+        assert_eq!(*result.route().swaps()[1].amount_in(), BigUint::from(20u64));
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(60u64));
     }
 
     #[test]
@@ -1047,11 +1048,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.route.swaps.len(), 2);
+        assert_eq!(result.route().swaps().len(), 2);
         // First: 10 * 2 = 20
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(20u64));
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(20u64));
         // Second: 20 / 3 = 6 (state updated, multiplier incremented)
-        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(6u64));
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(6u64));
     }
 
     #[test]
@@ -1129,9 +1130,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].amount_in, BigUint::from(ONE_ETH));
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(*result.route().swaps()[0].amount_in(), BigUint::from(ONE_ETH));
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
     }
 
     #[tokio::test]
@@ -1170,10 +1171,10 @@ mod tests {
             .unwrap();
 
         // Should select "best" pool for highest net_amount_out (2000)
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].component_id, "best");
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(3000u64));
-        assert_eq!(result.net_amount_out, BigInt::from(2000)); // 3000 - 1000
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(result.route().swaps()[0].component_id(), "best");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
+        assert_eq!(result.net_amount_out(), &BigInt::from(2000)); // 3000 - 1000
     }
 
     #[tokio::test]
@@ -1217,11 +1218,11 @@ mod tests {
             .unwrap();
 
         // A->B: ONE_ETH*2, B->C: (ONE_ETH*2)*3
-        assert_eq!(result.route.swaps.len(), 2);
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
-        assert_eq!(result.route.swaps[0].component_id, "pool1".to_string());
-        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(ONE_ETH * 2 * 3));
-        assert_eq!(result.route.swaps[1].component_id, "pool2".to_string());
+        assert_eq!(result.route().swaps().len(), 2);
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route().swaps()[0].component_id(), "pool1".to_string());
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(ONE_ETH * 2 * 3));
+        assert_eq!(result.route().swaps()[1].component_id(), "pool2".to_string());
     }
 
     #[tokio::test]
@@ -1287,9 +1288,9 @@ mod tests {
             .unwrap();
 
         // Should use pool1 (only scoreable path), despite pool2 having better multiplier
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].component_id, "pool1");
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
     }
 
     #[tokio::test]
@@ -1372,12 +1373,12 @@ mod tests {
             .expect("should return route even with negative net_amount_out");
 
         // Verify the route has swaps
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(2u64)); // 1 * 2 = 2 wei
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(2u64)); // 1 * 2 = 2 wei
 
         // Verify it's: 2 - 200_000_000_000 = -199_999_999_998
         let expected_net = BigInt::from(2) - BigInt::from(100_000_000_000u64);
-        assert_eq!(result.net_amount_out, expected_net);
+        assert_eq!(result.net_amount_out(), &expected_net);
     }
 
     #[tokio::test]
@@ -1471,20 +1472,20 @@ mod tests {
             .unwrap();
 
         // Should have 2 swaps forming a circle
-        assert_eq!(result.route.swaps.len(), 2, "Should have 2 swaps for circular route");
+        assert_eq!(result.route().swaps().len(), 2, "Should have 2 swaps for circular route");
 
         // First swap: A -> B (100 * 2 = 200)
-        assert_eq!(result.route.swaps[0].token_in, token_a.address);
-        assert_eq!(result.route.swaps[0].token_out, token_b.address);
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(200u64));
+        assert_eq!(*result.route().swaps()[0].token_in(), token_a.address);
+        assert_eq!(*result.route().swaps()[0].token_out(), token_b.address);
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64));
 
         // Second swap: B -> A (200 / 3 = 66, spot_price incremented to 3)
-        assert_eq!(result.route.swaps[1].token_in, token_b.address);
-        assert_eq!(result.route.swaps[1].token_out, token_a.address);
-        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(66u64));
+        assert_eq!(*result.route().swaps()[1].token_in(), token_b.address);
+        assert_eq!(*result.route().swaps()[1].token_out(), token_a.address);
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(66u64));
 
         // Verify the route starts and ends with the same token
-        assert_eq!(result.route.swaps[0].token_in, result.route.swaps[1].token_out);
+        assert_eq!(result.route().swaps()[0].token_in(), result.route().swaps()[1].token_out());
     }
 
     #[tokio::test]
@@ -1519,9 +1520,9 @@ mod tests {
             .unwrap();
 
         // Should use 2-hop path (A->C->B), not the direct 1-hop path
-        assert_eq!(result.route.swaps.len(), 2, "Should use 2-hop path due to min_hops=2");
-        assert_eq!(result.route.swaps[0].component_id, "pool_ac");
-        assert_eq!(result.route.swaps[1].component_id, "pool_cb");
+        assert_eq!(result.route().swaps().len(), 2, "Should use 2-hop path due to min_hops=2");
+        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "pool_cb");
     }
 
     #[tokio::test]
@@ -1588,7 +1589,7 @@ mod tests {
         match result {
             Ok(r) => {
                 // If we got a route, verify it's valid
-                assert_eq!(r.route.swaps.len(), 1);
+                assert_eq!(r.route().swaps().len(), 1);
             }
             Err(AlgorithmError::Timeout { .. }) => {
                 // Timeout is also acceptable

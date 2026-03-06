@@ -17,19 +17,29 @@ pub type SolveResult = Result<SingleOrderSolution, SolveError>;
 /// A task representing a order request in the queue.
 pub struct SolveTask {
     /// Unique identifier for this task.
-    pub id: TaskId,
+    id: TaskId,
     /// The order request to process.
-    pub order: Order,
+    order: Order,
     /// Channel to send the result back.
-    pub response_tx: oneshot::Sender<SolveResult>,
+    response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
-    pub created_at: Instant,
+    created_at: Instant,
 }
 
 impl SolveTask {
     /// Creates a new solve task.
     pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
         Self { id, order, response_tx, created_at: Instant::now() }
+    }
+
+    /// Returns the task ID.
+    pub fn id(&self) -> TaskId {
+        self.id
+    }
+
+    /// Returns the order to process.
+    pub fn order(&self) -> &Order {
+        &self.order
     }
 
     /// Returns how long this task has been waiting.

@@ -181,21 +181,14 @@ pub fn load_requests(
 }
 
 fn create_default_request() -> Result<SolutionRequest, Box<dyn std::error::Error>> {
-    Ok(SolutionRequest {
-        orders: vec![Order {
-            id: String::new(),
-            token_in: Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?, // WETH
-            token_out: Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?, // USDC
-            amount: BigUint::from_str("1000000000000000000")?,                          // 1 WETH
-            side: OrderSide::Sell,
-            sender: Address::from_str("0x0000000000000000000000000000000000000001")?,
-            receiver: None,
-        }],
-        options: SolutionOptions {
-            timeout_ms: Some(10000),
-            min_responses: None,
-            max_gas: None,
-            encoding_options: None,
-        },
-    })
+    Ok(SolutionRequest::new(
+        vec![Order::new(
+            Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?, // WETH
+            Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?, // USDC
+            BigUint::from_str("1000000000000000000")?,                        // 1 WETH
+            OrderSide::Sell,
+            Address::from_str("0x0000000000000000000000000000000000000001")?,
+        )],
+        SolutionOptions::default().with_timeout_ms(10000),
+    ))
 }

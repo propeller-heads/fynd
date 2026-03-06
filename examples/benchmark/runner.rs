@@ -336,35 +336,35 @@ async fn handle_response(
                 match resp.json::<Solution>().await {
                     Ok(solution) => {
                         let orders_found = solution
-                            .orders
+                            .orders()
                             .iter()
-                            .filter(|o| o.status == SolutionStatus::Success)
+                            .filter(|o| o.status() == SolutionStatus::Success)
                             .count();
-                        let orders_not_found = solution.orders.len() - orders_found;
+                        let orders_not_found = solution.orders().len() - orders_found;
 
                         tracing::info!(
                             "✓ Round-trip: {}ms, Server solve time: {}ms, Orders solved: {}/{}",
                             round_trip_ms,
-                            solution.solve_time_ms,
+                            solution.solve_time_ms(),
                             orders_found,
-                            solution.orders.len()
+                            solution.orders().len()
                         );
 
                         if is_first {
                             tracing::info!("First solution details:");
-                            for (idx, order_sol) in solution.orders.iter().enumerate() {
+                            for (idx, order_sol) in solution.orders().iter().enumerate() {
                                 tracing::info!(
                                     "  Order {}: status={:?}, amount_out={}, algorithm={}",
                                     idx,
-                                    order_sol.status,
-                                    order_sol.amount_out,
-                                    order_sol.algorithm
+                                    order_sol.status(),
+                                    order_sol.amount_out(),
+                                    order_sol.algorithm()
                                 );
                             }
                         }
 
                         return Some((
-                            solution.solve_time_ms,
+                            solution.solve_time_ms(),
                             is_first,
                             orders_found,
                             orders_not_found,

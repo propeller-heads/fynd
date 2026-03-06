@@ -34,9 +34,9 @@ use crate::{
 #[derive(Clone)]
 pub struct SolverPoolHandle {
     /// Human-readable name for this pool (used in logging & metrics).
-    pub name: String,
+    name: String,
     /// Queue handle for this pool.
-    pub queue: TaskQueueHandle,
+    queue: TaskQueueHandle,
 }
 
 impl SolverPoolHandle {
@@ -44,18 +44,28 @@ impl SolverPoolHandle {
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
         Self { name: name.into(), queue }
     }
+
+    /// Returns the pool name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the task queue handle.
+    pub fn queue(&self) -> &TaskQueueHandle {
+        &self.queue
+    }
 }
 
 /// Collected responses for a single order from multiple solvers.
 #[derive(Debug)]
 pub(crate) struct OrderResponses {
     /// ID of the order these responses correspond to.
-    pub order_id: String,
+    order_id: String,
     /// Solutions received from each solver pool (pool_name, solution).
-    pub solutions: Vec<(String, OrderSolution)>,
+    solutions: Vec<(String, OrderSolution)>,
     /// Solver pools that failed with their respective errors (pool_name, error).
     /// This captures all error types: timeouts, no routes, algorithm errors, etc.
-    pub failed_solvers: Vec<(String, SolveError)>,
+    failed_solvers: Vec<(String, SolveError)>,
 }
 
 /// Orchestrates multiple solver pools to find the best solution.
@@ -85,11 +95,11 @@ impl OrderManager {
     /// 3. Selects the best solution based on `amount_out_net_gas`
     pub async fn solve(&self, request: SolutionRequest) -> Result<Solution, SolveError> {
         let start = Instant::now();
-        let deadline = start + self.effective_timeout(&request.options);
+        let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
-            .options
-            .min_responses
-            .unwrap_or(self.config.min_responses);
+            .options()
+            .min_responses()
+            .unwrap_or(self.config.min_responses());
 
         if self.solver_pools.is_empty() {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
@@ -97,7 +107,7 @@ impl OrderManager {
 
         // Process each order independently in parallel
         let order_futures: Vec<_> = request
-            .orders
+            .orders()
             .iter()
             .map(|order| self.solve_order(order.clone(), deadline, min_responses))
             .collect();
@@ -107,18 +117,18 @@ impl OrderManager {
         // Select best solution for each order
         let order_solutions: Vec<OrderSolution> = order_responses
             .into_iter()
-            .map(|responses| self.select_best(&responses, &request.options))
+            .map(|responses| self.select_best(&responses, request.options()))
             .collect();
 
         // Calculate totals
         let total_gas_estimate = order_solutions
             .iter()
-            .map(|o| &o.gas_estimate)
+            .map(|o| o.gas_estimate())
             .fold(BigUint::ZERO, |acc, g| acc + g);
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
 
-        Ok(Solution { orders: order_solutions, total_gas_estimate, solve_time_ms })
+        Ok(Solution::new(order_solutions, total_gas_estimate, solve_time_ms))
     }
 
     /// Solves a single order by fanning out to all solver pools.
@@ -129,7 +139,7 @@ impl OrderManager {
         min_responses: usize,
     ) -> OrderResponses {
         let start_time = Instant::now();
-        let order_id = order.id.clone();
+        let order_id = order.id().to_string();
 
         // Fan-out: send order to all solver pools
         // perf: In the future, we can add new distribution algorithms, like sending short-timeout
@@ -139,8 +149,8 @@ impl OrderManager {
             .iter()
             .map(|pool| {
                 let order_clone = order.clone();
-                let pool_name = pool.name.clone();
-                let queue = pool.queue.clone();
+                let pool_name = pool.name().to_string();
+                let queue = pool.queue().clone();
 
                 async move {
                     let result = queue.enqueue(order_clone).await;
@@ -154,7 +164,7 @@ impl OrderManager {
         let mut remaining_pools: HashSet<String> = self
             .solver_pools
             .iter()
-            .map(|p| p.name.clone())
+            .map(|p| p.name().to_string())
             .collect();
 
         // Collect responses with timeout
@@ -187,7 +197,7 @@ impl OrderManager {
                             remaining_pools.remove(&pool_name);
 
                             // Extract the OrderSolution from SingleOrderSolution
-                            solutions.push((pool_name.clone(), single_solution.order));
+                            solutions.push((pool_name.clone(), single_solution.order().clone()));
 
                             // Early return if min_responses reached
                             if min_responses > 0 && solutions.len() >= min_responses {
@@ -264,13 +274,12 @@ impl OrderManager {
             .solutions
             .iter()
             // Only consider successful solutions
-            .filter(|(_, sol)| sol.status == SolutionStatus::Success)
+            .filter(|(_, sol)| sol.status() == SolutionStatus::Success)
             // Filter by max_gas constraint if specified
             .filter(|(_, sol)| {
                 options
-                    .max_gas
-                    .as_ref()
-                    .map(|max| &sol.gas_estimate <= max)
+                    .max_gas()
+                    .map(|max| sol.gas_estimate() <= max)
                     .unwrap_or(true)
             })
             .collect();
@@ -278,16 +287,16 @@ impl OrderManager {
         // Select by max amount_out_net_gas
         if let Some((pool_name, best)) = valid_solutions
             .into_iter()
-            .max_by_key(|(_, sol)| &sol.amount_out_net_gas)
+            .max_by_key(|(_, sol)| sol.amount_out_net_gas())
         {
             // Record metrics for successful selection
             counter!("order_manager_orders_total", "status" => "success").increment(1);
             counter!("order_manager_best_solution_pool", "pool" => pool_name.clone()).increment(1);
 
             debug!(
-                order_id = %best.order_id,
+                order_id = %best.order_id(),
                 pool = %pool_name,
-                amount_out_net_gas = %best.amount_out_net_gas,
+                amount_out_net_gas = %best.amount_out_net_gas(),
                 "selected best solution"
             );
             return best.clone();
@@ -297,20 +306,16 @@ impl OrderManager {
         // Try to get any response to extract block info, or create a placeholder
         if let Some((_, any_sol)) = responses.solutions.first() {
             counter!("order_manager_orders_total", "status" => "no_route").increment(1);
-            OrderSolution {
-                order_id: responses.order_id.clone(),
-                status: SolutionStatus::NoRouteFound,
-                route: None,
-                amount_in: any_sol.amount_in.clone(),
-                amount_out: BigUint::ZERO,
-                gas_estimate: BigUint::ZERO,
-                price_impact_bps: None,
-                amount_out_net_gas: BigUint::ZERO,
-                block: any_sol.block.clone(),
-                algorithm: String::new(),
-                gas_price: None,
-                transaction: None,
-            }
+            OrderSolution::new(
+                responses.order_id.clone(),
+                SolutionStatus::NoRouteFound,
+                any_sol.amount_in().clone(),
+                BigUint::ZERO,
+                BigUint::ZERO,
+                BigUint::ZERO,
+                any_sol.block().clone(),
+                String::new(),
+            )
         } else {
             // No responses at all - determine status from failure types
             let status = if responses.failed_solvers.is_empty() {
@@ -343,29 +348,25 @@ impl OrderManager {
             };
             counter!("order_manager_orders_total", "status" => status_label).increment(1);
 
-            OrderSolution {
-                order_id: responses.order_id.clone(),
+            OrderSolution::new(
+                responses.order_id.clone(),
                 status,
-                route: None,
-                amount_in: BigUint::ZERO,
-                amount_out: BigUint::ZERO,
-                gas_estimate: BigUint::ZERO,
-                price_impact_bps: None,
-                amount_out_net_gas: BigUint::ZERO,
-                block: BlockInfo { number: 0, hash: String::new(), timestamp: 0 },
-                algorithm: String::new(),
-                gas_price: None,
-                transaction: None,
-            }
+                BigUint::ZERO,
+                BigUint::ZERO,
+                BigUint::ZERO,
+                BigUint::ZERO,
+                BlockInfo::new(0, String::new(), 0),
+                String::new(),
+            )
         }
     }
 
     /// Returns the effective timeout for a request.
     fn effective_timeout(&self, options: &SolutionOptions) -> Duration {
         options
-            .timeout_ms
+            .timeout_ms()
             .map(Duration::from_millis)
-            .unwrap_or(self.config.default_timeout)
+            .unwrap_or(self.config.default_timeout())
     }
 }
 
@@ -382,35 +383,30 @@ mod tests {
     }
 
     fn make_order() -> Order {
-        Order {
-            id: "test-order".to_string(),
-            token_in: make_address(0x01),
-            token_out: make_address(0x02),
-            amount: BigUint::from(1000u64),
-            side: OrderSide::Sell,
-            sender: make_address(0xAA),
-            receiver: None,
-        }
+        Order::new(
+            make_address(0x01),
+            make_address(0x02),
+            BigUint::from(1000u64),
+            OrderSide::Sell,
+            make_address(0xAA),
+        )
+        .with_id("test-order".to_string())
     }
 
     fn make_single_solution(amount_out_net_gas: u64) -> SingleOrderSolution {
-        SingleOrderSolution {
-            order: OrderSolution {
-                order_id: "test-order".to_string(),
-                status: SolutionStatus::Success,
-                route: None,
-                amount_in: BigUint::from(1000u64),
-                amount_out: BigUint::from(990u64),
-                gas_estimate: BigUint::from(100_000u64),
-                price_impact_bps: None,
-                amount_out_net_gas: BigUint::from(amount_out_net_gas),
-                block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
-                algorithm: "test".to_string(),
-                gas_price: None,
-                transaction: None,
-            },
-            solve_time_ms: 5,
-        }
+        SingleOrderSolution::new(
+            OrderSolution::new(
+                "test-order".to_string(),
+                SolutionStatus::Success,
+                BigUint::from(1000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                BigUint::from(amount_out_net_gas),
+                BlockInfo::new(1, "0x123".to_string(), 1000),
+                "test".to_string(),
+            ),
+            5,
+        )
     }
 
     // Helper to create a mock solver pool that responds with a given solution
@@ -437,8 +433,8 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = OrderManagerConfig::default();
-        assert_eq!(config.default_timeout, Duration::from_secs(1));
-        assert_eq!(config.min_responses, 1);
+        assert_eq!(config.default_timeout(), Duration::from_secs(1));
+        assert_eq!(config.min_responses(), 1);
     }
 
     #[test]
@@ -446,15 +442,14 @@ mod tests {
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(500))
             .with_min_responses(2);
-        assert_eq!(config.default_timeout, Duration::from_millis(500));
-        assert_eq!(config.min_responses, 2);
+        assert_eq!(config.default_timeout(), Duration::from_millis(500));
+        assert_eq!(config.min_responses(), 2);
     }
 
     #[tokio::test]
     async fn test_order_manager_no_pools() {
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         assert!(matches!(result, Err(SolveError::Internal(_))));
@@ -465,16 +460,15 @@ mod tests {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_solution(900)), 0);
 
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
-        assert_eq!(solution.orders.len(), 1);
-        assert_eq!(solution.orders[0].status, SolutionStatus::Success);
-        assert_eq!(solution.orders[0].amount_out_net_gas, BigUint::from(900u64));
+        assert_eq!(solution.orders().len(), 1);
+        assert_eq!(solution.orders()[0].status(), SolutionStatus::Success);
+        assert_eq!(*solution.orders()[0].amount_out_net_gas(), BigUint::from(900u64));
 
         drop(manager);
         worker.abort();
@@ -490,16 +484,15 @@ mod tests {
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
         let manager = OrderManager::new(vec![pool_a, pool_b], config);
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
-        assert_eq!(solution.orders.len(), 1);
+        assert_eq!(solution.orders().len(), 1);
         // Should select pool_b's solution (higher amount_out_net_gas)
-        assert_eq!(solution.orders[0].amount_out_net_gas, BigUint::from(950u64));
+        assert_eq!(*solution.orders()[0].amount_out_net_gas(), BigUint::from(950u64));
 
         drop(manager);
         worker_a.abort();
@@ -513,17 +506,16 @@ mod tests {
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
         let manager = OrderManager::new(vec![pool], config);
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
         // Should timeout and return NoRouteFound or Timeout status
-        assert_eq!(solution.orders.len(), 1);
+        assert_eq!(solution.orders().len(), 1);
         assert!(matches!(
-            solution.orders[0].status,
+            solution.orders()[0].status(),
             SolutionStatus::Timeout | SolutionStatus::NoRouteFound
         ));
 
@@ -544,8 +536,7 @@ mod tests {
         let manager = OrderManager::new(vec![pool_a, pool_b], config);
 
         let start = Instant::now();
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         let elapsed = start.elapsed();
@@ -556,8 +547,8 @@ mod tests {
 
         // Should have pool_a's solution
         let solution = result.unwrap();
-        assert_eq!(solution.orders.len(), 1);
-        assert_eq!(solution.orders[0].status, SolutionStatus::Success);
+        assert_eq!(solution.orders().len(), 1);
+        assert_eq!(solution.orders()[0].status(), SolutionStatus::Success);
 
         drop(manager);
         worker_a.abort();
@@ -578,38 +569,32 @@ mod tests {
             order_id: "test".to_string(),
             solutions: vec![(
                 "pool".to_string(),
-                OrderSolution {
-                    order_id: "test".to_string(),
-                    status: SolutionStatus::Success,
-                    route: None,
-                    amount_in: BigUint::from(1000u64),
-                    amount_out: BigUint::from(990u64),
-                    gas_estimate: BigUint::from(gas_estimate),
-                    price_impact_bps: None,
-                    amount_out_net_gas: BigUint::from(900u64),
-                    block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
-                    algorithm: "test".to_string(),
-                    gas_price: None,
-                    transaction: None,
-                },
+                OrderSolution::new(
+                    "test".to_string(),
+                    SolutionStatus::Success,
+                    BigUint::from(1000u64),
+                    BigUint::from(990u64),
+                    BigUint::from(gas_estimate),
+                    BigUint::from(900u64),
+                    BlockInfo::new(1, "0x123".to_string(), 1000),
+                    "test".to_string(),
+                ),
             )],
             failed_solvers: vec![],
         };
 
-        let options = SolutionOptions {
-            timeout_ms: None,
-            min_responses: None,
-            max_gas: max_gas.map(BigUint::from),
-            encoding_options: None,
+        let options = match max_gas {
+            Some(gas) => SolutionOptions::default().with_max_gas(BigUint::from(gas)),
+            None => SolutionOptions::default(),
         };
 
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &options);
 
         if should_pass {
-            assert_eq!(result.status, SolutionStatus::Success);
+            assert_eq!(result.status(), SolutionStatus::Success);
         } else {
-            assert_eq!(result.status, SolutionStatus::NoRouteFound);
+            assert_eq!(result.status(), SolutionStatus::NoRouteFound);
         }
     }
 
@@ -623,16 +608,15 @@ mod tests {
         );
 
         let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
-        let request =
-            SolutionRequest { orders: vec![make_order()], options: SolutionOptions::default() };
+        let request = SolutionRequest::new(vec![make_order()], SolutionOptions::default());
 
         let result = manager.solve(request).await;
         assert!(result.is_ok());
 
         let solution = result.unwrap();
-        assert_eq!(solution.orders.len(), 1);
+        assert_eq!(solution.orders().len(), 1);
         // Should be NoRouteFound since the only solver returned an error
-        assert_eq!(solution.orders[0].status, SolutionStatus::NoRouteFound);
+        assert_eq!(solution.orders()[0].status(), SolutionStatus::NoRouteFound);
 
         drop(manager);
         worker.abort();
@@ -652,7 +636,7 @@ mod tests {
         let manager = OrderManager::new(vec![], OrderManagerConfig::default());
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
-        assert_eq!(result.status, SolutionStatus::Timeout);
+        assert_eq!(result.status(), SolutionStatus::Timeout);
     }
 
     #[test]
@@ -670,7 +654,7 @@ mod tests {
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
-        assert_eq!(result.status, SolutionStatus::NoRouteFound);
+        assert_eq!(result.status(), SolutionStatus::NoRouteFound);
     }
 
     #[test]
@@ -685,6 +669,6 @@ mod tests {
         let result = manager.select_best(&responses, &SolutionOptions::default());
 
         // No failures but also no solutions means NoRouteFound
-        assert_eq!(result.status, SolutionStatus::NoRouteFound);
+        assert_eq!(result.status(), SolutionStatus::NoRouteFound);
     }
 }

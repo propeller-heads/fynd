@@ -68,7 +68,7 @@ impl HealthTracker {
                     .unwrap()
                     .as_secs();
                 // Convert block timestamp (seconds) to ms and calculate age
-                now.saturating_sub(block_info.timestamp)
+                now.saturating_sub(block_info.timestamp())
                     .saturating_mul(1000)
             }
             None => u64::MAX, // Never updated

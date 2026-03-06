@@ -55,9 +55,9 @@ pub async fn solve(
     let core_request: fynd_core::SolutionRequest = dto_request.into();
 
     // Validate orders
-    for order in &core_request.orders {
+    for order in core_request.orders() {
         if let Err(e) = order.validate() {
-            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id, e)));
+            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
         }
     }
 
@@ -67,8 +67,8 @@ pub async fn solve(
         .await?;
 
     info!(
-        solve_time_ms = core_solution.solve_time_ms,
-        num_orders = core_solution.orders.len(),
+        solve_time_ms = core_solution.solve_time_ms(),
+        num_orders = core_solution.orders().len(),
         num_pools = state.order_manager.num_pools(),
         "solve completed"
     );

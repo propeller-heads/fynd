@@ -133,35 +133,30 @@ mod tests {
     }
 
     fn make_order() -> Order {
-        Order {
-            id: "test-order".to_string(),
-            token_in: make_address(0x01),
-            token_out: make_address(0x02),
-            amount: BigUint::from(1000u64),
-            side: OrderSide::Sell,
-            sender: make_address(0xAA),
-            receiver: None,
-        }
+        Order::new(
+            make_address(0x01),
+            make_address(0x02),
+            BigUint::from(1000u64),
+            OrderSide::Sell,
+            make_address(0xAA),
+        )
+        .with_id("test-order".to_string())
     }
 
     fn make_single_solution() -> SingleOrderSolution {
-        SingleOrderSolution {
-            order: OrderSolution {
-                order_id: "test-order".to_string(),
-                status: SolutionStatus::Success,
-                route: None,
-                amount_in: BigUint::from(1000u64),
-                amount_out: BigUint::from(990u64),
-                gas_estimate: BigUint::from(100_000u64),
-                price_impact_bps: None,
-                amount_out_net_gas: BigUint::from(990u64),
-                block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
-                algorithm: "test".to_string(),
-                gas_price: None,
-                transaction: None,
-            },
-            solve_time_ms: 5,
-        }
+        SingleOrderSolution::new(
+            OrderSolution::new(
+                "test-order".to_string(),
+                SolutionStatus::Success,
+                BigUint::from(1000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                BigUint::from(990u64),
+                BlockInfo::new(1, "0x123".to_string(), 1000),
+                "test".to_string(),
+            ),
+            5,
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -244,7 +239,7 @@ mod tests {
                 .recv()
                 .await
                 .expect("should receive task");
-            assert_eq!(task.order.id, "test-order");
+            assert_eq!(task.order().id(), "test-order");
             task.respond(Ok(make_single_solution()));
         });
 
@@ -255,7 +250,7 @@ mod tests {
             .await
             .expect("worker should complete");
         let solution = result.expect("should get solution");
-        assert_eq!(solution.solve_time_ms, 5);
+        assert_eq!(solution.solve_time_ms(), 5);
     }
 
     #[tokio::test]
@@ -448,11 +443,11 @@ mod tests {
         // Spawn workers to collect task IDs
         let collector = tokio::spawn(async move {
             let task1 = receiver.recv().await.unwrap();
-            let id1 = task1.id;
+            let id1 = task1.id();
             task1.respond(Ok(make_single_solution()));
 
             let task2 = receiver.recv().await.unwrap();
-            let id2 = task2.id;
+            let id2 = task2.id();
             task2.respond(Ok(make_single_solution()));
 
             (id1, id2)
@@ -462,7 +457,7 @@ mod tests {
         let _ = handle.enqueue(make_order()).await;
         let _ = handle.enqueue(make_order()).await;
 
-        let (id1, id2) = collector
+        let (id1, id2): (Uuid, Uuid) = collector
             .await
             .expect("collector should complete");
         assert_ne!(id1, id2, "Task IDs should be unique");

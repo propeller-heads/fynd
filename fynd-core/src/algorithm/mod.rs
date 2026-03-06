@@ -33,11 +33,11 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct AlgorithmConfig {
     /// Minimum hops to search (must be >= 1).
-    pub min_hops: usize,
+    min_hops: usize,
     /// Maximum hops to search.
-    pub max_hops: usize,
+    max_hops: usize,
     /// Timeout for solving.
-    pub timeout: Duration,
+    timeout: Duration,
 }
 
 impl AlgorithmConfig {
@@ -67,17 +67,17 @@ impl AlgorithmConfig {
     }
 
     /// Returns the minimum number of hops to search.
-    pub(crate) fn min_hops(&self) -> usize {
+    pub fn min_hops(&self) -> usize {
         self.min_hops
     }
 
     /// Returns the maximum number of hops to search.
-    pub(crate) fn max_hops(&self) -> usize {
+    pub fn max_hops(&self) -> usize {
         self.max_hops
     }
 
     /// Returns the timeout for solving.
-    pub(crate) fn timeout(&self) -> Duration {
+    pub fn timeout(&self) -> Duration {
         self.timeout
     }
 }

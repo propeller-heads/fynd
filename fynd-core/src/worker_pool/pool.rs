@@ -25,16 +25,16 @@ use crate::{
 pub struct WorkerPoolConfig {
     /// Human-readable name for this pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
-    pub name: String,
+    name: String,
     /// Algorithm name for this pool (e.g., "most_liquid").
     /// Use `worker_pool::list_algorithms()` to see available options.
-    pub algorithm: String,
+    algorithm: String,
     /// Number of worker threads.
-    pub num_workers: usize,
+    num_workers: usize,
     /// Configuration for the algorithm used by each worker.
-    pub algorithm_config: AlgorithmConfig,
+    algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
-    pub task_queue_capacity: usize,
+    task_queue_capacity: usize,
 }
 
 impl Default for WorkerPoolConfig {
