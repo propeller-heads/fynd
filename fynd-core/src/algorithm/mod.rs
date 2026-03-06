@@ -73,7 +73,6 @@ impl AlgorithmConfig {
         }
         Ok(Self { min_hops, max_hops, timeout, max_routes })
     }
-
 }
 
 impl Default for AlgorithmConfig {
