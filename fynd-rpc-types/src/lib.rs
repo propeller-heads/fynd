@@ -328,3 +328,222 @@ pub struct ErrorResponse {
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()
 }
+
+// ============================================================================
+// CONVERSIONS: fynd-core integration (feature = "core")
+// ============================================================================
+
+/// Conversions between DTO types and [`fynd_core`] domain types.
+///
+/// - [`From<fynd_core::X>`] for DTO types handles the Core → DTO direction.
+/// - [`Into<fynd_core::X>`] for DTO types handles the DTO → Core direction. (`From` cannot be used
+///   in that direction: `fynd_core` types are external, so implementing `From<DTO>` on them would
+///   violate the orphan rule.)
+#[cfg(feature = "core")]
+mod conversions {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // DTO → Core
+    // -------------------------------------------------------------------------
+
+    impl Into<fynd_core::SolutionRequest> for SolutionRequest {
+        fn into(self) -> fynd_core::SolutionRequest {
+            fynd_core::SolutionRequest {
+                orders: self
+                    .orders
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                options: self.options.into(),
+            }
+        }
+    }
+
+    impl Into<fynd_core::SolutionOptions> for SolutionOptions {
+        fn into(self) -> fynd_core::SolutionOptions {
+            fynd_core::SolutionOptions {
+                timeout_ms: self.timeout_ms,
+                min_responses: self.min_responses,
+                max_gas: self.max_gas,
+                encoding_options: None,
+            }
+        }
+    }
+
+    impl Into<fynd_core::Order> for Order {
+        fn into(self) -> fynd_core::Order {
+            fynd_core::Order {
+                id: self.id,
+                token_in: self.token_in,
+                token_out: self.token_out,
+                amount: self.amount,
+                side: self.side.into(),
+                sender: self.sender,
+                receiver: self.receiver,
+            }
+        }
+    }
+
+    impl Into<fynd_core::OrderSide> for OrderSide {
+        fn into(self) -> fynd_core::OrderSide {
+            match self {
+                OrderSide::Sell => fynd_core::OrderSide::Sell,
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Core → DTO
+    // -------------------------------------------------------------------------
+
+    impl From<fynd_core::Solution> for Solution {
+        fn from(core: fynd_core::Solution) -> Self {
+            Solution {
+                orders: core
+                    .orders
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                total_gas_estimate: core.total_gas_estimate,
+                solve_time_ms: core.solve_time_ms,
+            }
+        }
+    }
+
+    impl From<fynd_core::OrderSolution> for OrderSolution {
+        fn from(core: fynd_core::OrderSolution) -> Self {
+            OrderSolution {
+                order_id: core.order_id,
+                status: core.status.into(),
+                route: core.route.map(Into::into),
+                amount_in: core.amount_in,
+                amount_out: core.amount_out,
+                gas_estimate: core.gas_estimate,
+                price_impact_bps: core.price_impact_bps,
+                amount_out_net_gas: core.amount_out_net_gas,
+                block: core.block.into(),
+            }
+        }
+    }
+
+    impl From<fynd_core::SolutionStatus> for SolutionStatus {
+        fn from(core: fynd_core::SolutionStatus) -> Self {
+            match core {
+                fynd_core::SolutionStatus::Success => SolutionStatus::Success,
+                fynd_core::SolutionStatus::NoRouteFound => SolutionStatus::NoRouteFound,
+                fynd_core::SolutionStatus::InsufficientLiquidity => {
+                    SolutionStatus::InsufficientLiquidity
+                }
+                fynd_core::SolutionStatus::Timeout => SolutionStatus::Timeout,
+                fynd_core::SolutionStatus::NotReady => SolutionStatus::NotReady,
+            }
+        }
+    }
+
+    impl From<fynd_core::BlockInfo> for BlockInfo {
+        fn from(core: fynd_core::BlockInfo) -> Self {
+            BlockInfo { number: core.number, hash: core.hash, timestamp: core.timestamp }
+        }
+    }
+
+    impl From<fynd_core::Route> for Route {
+        fn from(core: fynd_core::Route) -> Self {
+            Route {
+                swaps: core
+                    .swaps
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }
+        }
+    }
+
+    impl From<fynd_core::Swap> for Swap {
+        fn from(core: fynd_core::Swap) -> Self {
+            Swap {
+                component_id: core.component_id,
+                protocol: core.protocol,
+                token_in: core.token_in,
+                token_out: core.token_out,
+                amount_in: core.amount_in,
+                amount_out: core.amount_out,
+                gas_estimate: core.gas_estimate,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_common::models::Address;
+
+        use super::*;
+
+        fn make_address(byte: u8) -> Address {
+            Address::from([byte; 20])
+        }
+
+        #[test]
+        fn test_solution_request_roundtrip() {
+            let dto = SolutionRequest {
+                orders: vec![Order {
+                    id: "test-id".to_string(),
+                    token_in: make_address(0x01),
+                    token_out: make_address(0x02),
+                    amount: BigUint::from(1000u64),
+                    side: OrderSide::Sell,
+                    sender: make_address(0xAA),
+                    receiver: None,
+                }],
+                options: SolutionOptions {
+                    timeout_ms: Some(5000),
+                    min_responses: None,
+                    max_gas: None,
+                },
+            };
+
+            let core: fynd_core::SolutionRequest = dto.clone().into();
+            assert_eq!(core.orders.len(), 1);
+            assert_eq!(core.orders[0].id, "test-id");
+            assert_eq!(core.options.timeout_ms, Some(5000));
+        }
+
+        #[test]
+        fn test_solution_from_core() {
+            let core = fynd_core::Solution {
+                orders: vec![],
+                total_gas_estimate: BigUint::from(100_000u64),
+                solve_time_ms: 50,
+            };
+
+            let dto = Solution::from(core);
+            assert_eq!(dto.total_gas_estimate, BigUint::from(100_000u64));
+            assert_eq!(dto.solve_time_ms, 50);
+        }
+
+        #[test]
+        fn test_order_side_into_core() {
+            let core: fynd_core::OrderSide = OrderSide::Sell.into();
+            assert_eq!(core, fynd_core::OrderSide::Sell);
+        }
+
+        #[test]
+        fn test_solution_status_from_core() {
+            let cases = [
+                (fynd_core::SolutionStatus::Success, SolutionStatus::Success),
+                (fynd_core::SolutionStatus::NoRouteFound, SolutionStatus::NoRouteFound),
+                (
+                    fynd_core::SolutionStatus::InsufficientLiquidity,
+                    SolutionStatus::InsufficientLiquidity,
+                ),
+                (fynd_core::SolutionStatus::Timeout, SolutionStatus::Timeout),
+                (fynd_core::SolutionStatus::NotReady, SolutionStatus::NotReady),
+            ];
+
+            for (core, expected) in cases {
+                assert_eq!(SolutionStatus::from(core), expected);
+            }
+        }
+    }
+}

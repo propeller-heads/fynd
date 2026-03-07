@@ -3361,6 +3361,7 @@ dependencies = [
 name = "fynd-rpc-types"
 version = "0.1.0"
 dependencies = [
+ "fynd-core",
  "num-bigint",
  "serde",
  "serde_json",

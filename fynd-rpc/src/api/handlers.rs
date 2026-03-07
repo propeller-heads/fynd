@@ -52,7 +52,7 @@ pub async fn solve(
     }
 
     // Convert DTO to core types
-    let core_request = dto::solution_request_to_core(dto_request);
+    let core_request: fynd_core::SolutionRequest = dto_request.into();
 
     // Validate orders
     for order in &core_request.orders {
@@ -73,7 +73,7 @@ pub async fn solve(
         "solve completed"
     );
 
-    let dto_solution = dto::solution_from_core(core_solution);
+    let dto_solution = dto::Solution::from(core_solution);
 
     Ok(HttpResponse::Ok().json(dto_solution))
 }
