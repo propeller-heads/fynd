@@ -41,7 +41,8 @@ pub async fn run_benchmark(
     num_requests: usize,
     mode: &ParallelizationMode,
 ) -> RunnerResults {
-    mode.run(client, requests, num_requests).await
+    mode.run(client, requests, num_requests)
+        .await
 }
 
 /// Sequential execution: wait for each response before firing the next request

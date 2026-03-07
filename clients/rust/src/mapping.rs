@@ -21,15 +21,9 @@ use crate::{
 pub(crate) fn bytes_to_alloy_address(
     b: &bytes::Bytes,
 ) -> Result<alloy::primitives::Address, FyndError> {
-    let arr: [u8; 20] = b
-        .as_ref()
-        .try_into()
-        .map_err(|_| {
-            FyndError::Protocol(format!(
-                "expected 20-byte address, got {} bytes",
-                b.len()
-            ))
-        })?;
+    let arr: [u8; 20] = b.as_ref().try_into().map_err(|_| {
+        FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len()))
+    })?;
 
     Ok(alloy::primitives::Address::from(arr))
 }
@@ -53,9 +47,7 @@ fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
 // CLIENT TYPES → DTO FORMAT
 // ============================================================================
 
-pub(crate) fn quote_params_to_dto(
-    params: QuoteParams,
-) -> Result<dto::SolutionRequest, FyndError> {
+pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::SolutionRequest, FyndError> {
     let order = dto::Order::try_from(params.order)?;
     Ok(dto::SolutionRequest { orders: vec![order], options: params.options.into() })
 }

@@ -31,6 +31,7 @@ fn solution_options_to_core(dto: SolutionOptions) -> fynd_core::SolutionOptions 
         timeout_ms: dto.timeout_ms,
         min_responses: dto.min_responses,
         max_gas: dto.max_gas,
+        encoding_options: None,
     }
 }
 
@@ -141,11 +142,7 @@ mod tests {
                 sender: make_address(0xAA),
                 receiver: None,
             }],
-            options: SolutionOptions {
-                timeout_ms: Some(5000),
-                min_responses: None,
-                max_gas: None,
-            },
+            options: SolutionOptions { timeout_ms: Some(5000), min_responses: None, max_gas: None },
         };
 
         let core = solution_request_to_core(dto.clone());

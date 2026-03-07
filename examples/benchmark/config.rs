@@ -270,7 +270,7 @@ fn create_default_request() -> RequestTemplate {
             id: String::new(),
             token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(), // WETH
             token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(), // USDC
-            amount: "1000000000000000000".to_string(),                           // 1 WETH
+            amount: "1000000000000000000".to_string(),                          // 1 WETH
             side: "sell".to_string(),
             sender: "0x0000000000000000000000000000000000000001".to_string(),
             receiver: None,
