@@ -4,7 +4,7 @@ use actix_web::{web, HttpResponse};
 use tracing::{info, instrument};
 
 use super::{dto, ApiError, AppState};
-use crate::api::{dto::HealthStatus, error::ErrorResponse};
+use crate::api::error::ErrorResponse;
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -52,7 +52,7 @@ pub async fn solve(
     }
 
     // Convert DTO to core types
-    let core_request: fynd_core::SolutionRequest = dto_request.into();
+    let core_request = dto::solution_request_to_core(dto_request);
 
     // Validate orders
     for order in &core_request.orders {
@@ -73,7 +73,7 @@ pub async fn solve(
         "solve completed"
     );
 
-    let dto_solution: dto::Solution = core_solution.into();
+    let dto_solution = dto::solution_from_core(core_solution);
 
     Ok(HttpResponse::Ok().json(dto_solution))
 }
@@ -86,15 +86,15 @@ pub async fn solve(
     path = "/v1/health",
     tag = "health",
     responses(
-        (status = 200, description = "Service healthy", body = HealthStatus),
-        (status = 503, description = "Data stale", body = HealthStatus),
+        (status = 200, description = "Service healthy", body = dto::HealthStatus),
+        (status = 503, description = "Data stale", body = dto::HealthStatus),
     )
 )]
 pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker.age_ms().await;
     let is_healthy = age_ms < 60_000; // Healthy if data less than 60s old
 
-    let status = HealthStatus {
+    let status = dto::HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
         num_solver_pools: state.order_manager.num_pools(),

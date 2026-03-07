@@ -52,12 +52,24 @@ serde_json = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 tycho-execution = { workspace = true }
+bytes = { workspace = true }
+fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc"]
+members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust"]
 resolver = "2"
 
 [workspace.dependencies]
+bytes = "1"
+alloy = { version = "1", features = [
+    "consensus",
+    "dyn-abi",
+    "eip712",
+    "network",
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+] }
 # HTTP
 actix-web = "4"
 
@@ -116,6 +128,8 @@ itertools = "0.14.0"
 # Internal crates
 fynd-core = { path = "fynd-core" }
 fynd-rpc = { path = "fynd-rpc" }
+fynd-rpc-types = { path = "fynd-rpc-types" }
+fynd-client = { path = "clients/rust" }
 
 # Dev dependencies
 rstest = "0.18"
@@ -123,3 +137,7 @@ rstest = "0.18"
 [[example]]
 name = "tutorial"
 path = "examples/tutorial/main.rs"
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark/main.rs"

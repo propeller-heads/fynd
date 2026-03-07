@@ -1,0 +1,20 @@
+[package]
+name = "fynd-rpc-types"
+version = "0.1.0"
+edition = "2021"
+description = "Shared DTO types for the Fynd RPC API (request/response wire format)"
+license = "MIT"
+
+[features]
+openapi = ["dep:utoipa"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+num-bigint.workspace = true
+uuid.workspace = true
+tycho-simulation.workspace = true
+
+# Optional: OpenAPI schema generation (used by fynd-rpc server)
+utoipa = { version = "5", optional = true }

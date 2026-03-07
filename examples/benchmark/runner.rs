@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Instant};
 
-use fynd_core::{Solution, SolutionRequest, SolutionStatus};
+use fynd_client::{FyndClient, FyndError, Quote, SolutionStatus};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::config::ParallelizationMode;
+use crate::config::{ParallelizationMode, RequestTemplate};
 
 /// Results from a benchmark run.
 pub struct RunnerResults {
@@ -18,19 +18,17 @@ impl ParallelizationMode {
     /// Run benchmark with this parallelization mode
     pub async fn run(
         &self,
-        client: reqwest::Client,
-        solver_url: &str,
-        requests: &[SolutionRequest],
+        client: Arc<FyndClient>,
+        requests: &[RequestTemplate],
         num_requests: usize,
     ) -> RunnerResults {
         match self {
-            Self::Sequential => run_sequential(client, solver_url, requests, num_requests).await,
+            Self::Sequential => run_sequential(client, requests, num_requests).await,
             Self::FixedConcurrency { concurrency } => {
-                run_fixed_concurrency(client, solver_url, requests, num_requests, *concurrency)
-                    .await
+                run_fixed_concurrency(client, requests, num_requests, *concurrency).await
             }
             Self::RateBased { interval_ms } => {
-                run_rate_based(client, solver_url, requests, num_requests, *interval_ms).await
+                run_rate_based(client, requests, num_requests, *interval_ms).await
             }
         }
     }
@@ -38,21 +36,19 @@ impl ParallelizationMode {
 
 /// Main benchmark runner that dispatches to the appropriate parallelization mode
 pub async fn run_benchmark(
-    client: reqwest::Client,
-    solver_url: &str,
-    requests: &[SolutionRequest],
+    client: Arc<FyndClient>,
+    requests: &[RequestTemplate],
     num_requests: usize,
     mode: &ParallelizationMode,
 ) -> RunnerResults {
-    mode.run(client, solver_url, requests, num_requests)
+    mode.run(client, requests, num_requests)
         .await
 }
 
 /// Sequential execution: wait for each response before firing the next request
 async fn run_sequential(
-    client: reqwest::Client,
-    solver_url: &str,
-    requests: &[SolutionRequest],
+    client: Arc<FyndClient>,
+    requests: &[RequestTemplate],
     num_requests: usize,
 ) -> RunnerResults {
     let mut round_trip_times = Vec::new();
@@ -67,17 +63,17 @@ async fn run_sequential(
         print!("Request {}/{}: ", i, num_requests);
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
-        let request = fastrand::choice(requests).unwrap();
+        let template = fastrand::choice(requests).unwrap();
+        let params = template
+            .to_quote_params()
+            .expect("templates validated at load time");
+
         let start = Instant::now();
-        let response = client
-            .post(format!("{}/v1/solve", solver_url))
-            .json(request)
-            .send()
-            .await;
+        let result = client.quote(params).await;
         let round_trip_ms = start.elapsed().as_millis() as u64;
 
         if let Some((solve_time, _is_first, found, not_found)) =
-            handle_response(response, round_trip_ms, i == 1).await
+            handle_result(result, round_trip_ms, i == 1)
         {
             successful_requests += 1;
             round_trip_times.push(round_trip_ms);
@@ -99,9 +95,8 @@ async fn run_sequential(
 /// Fixed concurrency execution: maintain exactly N concurrent requests at all times.
 /// When one request completes, immediately fire a new one to maintain the concurrency level.
 async fn run_fixed_concurrency(
-    client: reqwest::Client,
-    solver_url: &str,
-    requests: &[SolutionRequest],
+    client: Arc<FyndClient>,
+    requests: &[RequestTemplate],
     num_requests: usize,
     concurrency: usize,
 ) -> RunnerResults {
@@ -126,7 +121,6 @@ async fn run_fixed_concurrency(
             .await
             .unwrap();
         let client = client.clone();
-        let solver_url = solver_url.to_string();
         let requests = requests.clone();
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
@@ -137,13 +131,13 @@ async fn run_fixed_concurrency(
         let first_response_printed = first_response_printed.clone();
 
         let task = tokio::spawn(async move {
-            let request = fastrand::choice(requests.as_slice()).unwrap();
+            let template = fastrand::choice(requests.as_slice()).unwrap();
+            let params = template
+                .to_quote_params()
+                .expect("templates validated at load time");
+
             let start = Instant::now();
-            let response = client
-                .post(format!("{}/v1/solve", solver_url))
-                .json(&request)
-                .send()
-                .await;
+            let result = client.quote(params).await;
             let round_trip_ms = start.elapsed().as_millis() as u64;
 
             let mut first_printed = first_response_printed.lock().await;
@@ -162,7 +156,7 @@ async fn run_fixed_concurrency(
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
             if let Some((solve_time, _printed_first, found, not_found)) =
-                handle_response(response, round_trip_ms, is_first).await
+                handle_result(result, round_trip_ms, is_first)
             {
                 round_trip_times
                     .lock()
@@ -215,9 +209,8 @@ async fn run_fixed_concurrency(
 /// Rate-based execution: fire requests at a fixed interval regardless of response timing.
 /// All requests are spawned as independent tasks (fire-and-forget pattern).
 async fn run_rate_based(
-    client: reqwest::Client,
-    solver_url: &str,
-    requests: &[SolutionRequest],
+    client: Arc<FyndClient>,
+    requests: &[RequestTemplate],
     num_requests: usize,
     interval_ms: u64,
 ) -> RunnerResults {
@@ -243,7 +236,6 @@ async fn run_rate_based(
         interval.tick().await;
 
         let client = client.clone();
-        let solver_url = solver_url.to_string();
         let requests = requests.clone();
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
@@ -253,13 +245,13 @@ async fn run_rate_based(
         let first_response_printed = first_response_printed.clone();
 
         let task = tokio::spawn(async move {
-            let request = fastrand::choice(requests.as_slice()).unwrap();
+            let template = fastrand::choice(requests.as_slice()).unwrap();
+            let params = template
+                .to_quote_params()
+                .expect("templates validated at load time");
+
             let start = Instant::now();
-            let response = client
-                .post(format!("{}/v1/solve", solver_url))
-                .json(&request)
-                .send()
-                .await;
+            let result = client.quote(params).await;
             let round_trip_ms = start.elapsed().as_millis() as u64;
 
             let mut first_printed = first_response_printed.lock().await;
@@ -273,7 +265,7 @@ async fn run_rate_based(
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
             if let Some((solve_time, _printed_first, found, not_found)) =
-                handle_response(response, round_trip_ms, is_first).await
+                handle_result(result, round_trip_ms, is_first)
             {
                 round_trip_times
                     .lock()
@@ -321,66 +313,41 @@ async fn run_rate_based(
     }
 }
 
-/// Handles HTTP response from the solver, extracting timing information and logging results.
-/// Returns Some((solve_time, is_first, orders_found, orders_not_found)) on success, None on
-/// failure.
-async fn handle_response(
-    response: Result<reqwest::Response, reqwest::Error>,
+/// Processes the result of a `FyndClient::quote` call, extracting timing and order counts.
+///
+/// Returns `Some((solve_time_ms, is_first, orders_found, orders_not_found))` on success,
+/// `None` on failure.
+fn handle_result(
+    result: Result<Quote, FyndError>,
     round_trip_ms: u64,
     is_first: bool,
 ) -> Option<(u64, bool, usize, usize)> {
-    match response {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
-                match resp.json::<Solution>().await {
-                    Ok(solution) => {
-                        let orders_found = solution
-                            .orders
-                            .iter()
-                            .filter(|o| o.status == SolutionStatus::Success)
-                            .count();
-                        let orders_not_found = solution.orders.len() - orders_found;
+    match result {
+        Ok(quote) => {
+            let orders_found = usize::from(quote.status() == SolutionStatus::Success);
+            let orders_not_found = 1 - orders_found;
 
-                        tracing::info!(
-                            "✓ Round-trip: {}ms, Server solve time: {}ms, Orders solved: {}/{}",
-                            round_trip_ms,
-                            solution.solve_time_ms,
-                            orders_found,
-                            solution.orders.len()
-                        );
+            tracing::info!(
+                "✓ Round-trip: {}ms, Server solve time: {}ms, Orders solved: {}/1",
+                round_trip_ms,
+                quote.solve_time_ms(),
+                orders_found,
+            );
 
-                        if is_first {
-                            tracing::info!("First solution details:");
-                            for (idx, order_sol) in solution.orders.iter().enumerate() {
-                                tracing::info!(
-                                    "  Order {}: status={:?}, amount_out={}, algorithm={}",
-                                    idx,
-                                    order_sol.status,
-                                    order_sol.amount_out,
-                                    order_sol.algorithm
-                                );
-                            }
-                        }
-
-                        return Some((
-                            solution.solve_time_ms,
-                            is_first,
-                            orders_found,
-                            orders_not_found,
-                        ));
-                    }
-                    Err(e) => tracing::error!("✗ Failed to parse response: {}", e),
-                }
-            } else {
-                let error_text = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unable to read error".to_string());
-                tracing::error!("✗ HTTP {}: {}", status, error_text);
+            if is_first {
+                tracing::info!("First solution details:");
+                tracing::info!(
+                    "  Order 0: status={:?}, amount_out={}",
+                    quote.status(),
+                    quote.amount_out(),
+                );
             }
+
+            Some((quote.solve_time_ms(), is_first, orders_found, orders_not_found))
         }
-        Err(e) => tracing::error!("✗ Request failed: {}", e),
+        Err(e) => {
+            tracing::error!("✗ Request failed: {}", e);
+            None
+        }
     }
-    None
 }

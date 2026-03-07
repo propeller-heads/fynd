@@ -2,8 +2,7 @@
 
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use fynd_core::SolveError;
-use serde::Serialize;
-use utoipa::ToSchema;
+pub use fynd_rpc_types::ErrorResponse;
 
 /// API error type that converts to HTTP responses.
 #[derive(Debug, thiserror::Error)]
@@ -27,17 +26,6 @@ pub enum ApiError {
     /// Market data is stale.
     #[error("market data stale: last update {age_ms}ms ago")]
     StaleData { age_ms: u64 },
-}
-
-/// Error response body.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ErrorResponse {
-    #[schema(example = "bad request: no orders provided")]
-    pub error: String,
-    #[schema(example = "BAD_REQUEST")]
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
 }
 
 impl ResponseError for ApiError {
