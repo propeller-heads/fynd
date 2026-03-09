@@ -1,6 +1,6 @@
 [package]
 name = "fynd-rpc-types"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Shared DTO types for the Fynd RPC API (request/response wire format)"
 license = "MIT"

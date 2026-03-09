@@ -1,0 +1,38 @@
+name: Main workflow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests-and-lints:
+    uses: ./.github/workflows/ci.yaml
+
+  check-release:
+    uses: propeller-heads/ci-cd-templates/.github/workflows/release-v2.yaml@main
+    with:
+      args: --dry-run --no-ci
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    secrets:
+      app_id: ${{ secrets.APP_ID }}
+      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+  release:
+    needs:
+      - tests-and-lints
+      - check-release
+    if: needs.check-release.outputs.verify_release_version != ''
+    uses: propeller-heads/ci-cd-templates/.github/workflows/release-v2.yaml@main
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    secrets:
+      app_id: ${{ secrets.APP_ID }}
+      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}

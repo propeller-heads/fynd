@@ -1,6 +1,6 @@
 [package]
 name = "fynd-rpc"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "HTTP RPC server for Fynd DEX router"
 license = "MIT"
