@@ -1,3 +1,11 @@
+## [0.3.0](https://github.com/propeller-heads/fynd/compare/0.2.0...0.3.0) (2026-03-09)
+
+
+### Features
+
+* Add split to Swap ([2abc895](https://github.com/propeller-heads/fynd/commit/2abc895586bfdc1ce9937ce62fbfb850172f1289))
+* Use a public RPC by default ([62fd5d7](https://github.com/propeller-heads/fynd/commit/62fd5d79635d43a81dc9e5d1ce6d1f8ede55f96b))
+
 ## [0.2.0](https://github.com/propeller-heads/fynd/compare/0.1.0...0.2.0) (2026-03-09)
 
 
