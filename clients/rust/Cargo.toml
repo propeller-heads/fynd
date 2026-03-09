@@ -1,6 +1,6 @@
 [package]
 name = "fynd-client"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Rust client for the Fynd DEX router"
 license = "MIT"
