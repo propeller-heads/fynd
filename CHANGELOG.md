@@ -1,3 +1,10 @@
+## [0.1.0](https://github.com/propeller-heads/fynd/compare/0.0.0...0.1.0) (2026-03-09)
+
+
+### Features
+
+* commit produces 0.1.0 ([288aaf8](https://github.com/propeller-heads/fynd/commit/288aaf869eb6dbae5c34f09d535b078fd0b531f4))
+
 ## 1.0.0 (2026-03-09)
 
 
