@@ -921,6 +921,8 @@ pub struct Swap {
     protocol_component: ProtocolComponent,
     /// Protocol state used to perform the swap.
     protocol_state: Box<dyn ProtocolSim>,
+    /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+    split: f64,
 }
 
 impl Swap {
@@ -946,7 +948,14 @@ impl Swap {
             gas_estimate,
             protocol_component,
             protocol_state,
+            split: 0.0,
         }
+    }
+    /// Sets the split of this Swap
+    #[allow(dead_code)]
+    pub(crate) fn with_split(mut self, split: f64) -> Self {
+        self.split = split;
+        self
     }
 
     /// Returns the component ID of the liquidity pool.
@@ -992,6 +1001,11 @@ impl Swap {
     /// Returns the protocol state.
     pub fn protocol_state(&self) -> &dyn ProtocolSim {
         self.protocol_state.as_ref()
+    }
+
+    /// Returns the split of this swap.
+    pub fn split(&self) -> &f64 {
+        &self.split
     }
 }
 
@@ -1277,6 +1291,7 @@ mod tests {
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
             "gas_estimate": "150000",
+            "split": 0,
             "protocol_component": {
                 "id": "test-pool",
                 "protocol_system": "uniswap_v2",

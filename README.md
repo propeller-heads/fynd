@@ -31,7 +31,6 @@ Fynd is organized into three crates:
 
 - Rust 1.92+
 - A Tycho API key ([get one here](https://www.propellerheads.xyz/tycho))
-- An Ethereum RPC endpoint for the target chain
 
 ## Run the Solver
 
@@ -43,15 +42,21 @@ cargo build --release
 
 # Set required environment variables
 export TYCHO_API_KEY=your-api-key
-export RPC_URL=https://eth.llamarpc.com
 export RUST_LOG=info
 
 # Run
 cargo run --release -- \
   --tycho-url tycho-beta.propellerheads.xyz \
-  --rpc-url $RPC_URL \
   --protocols uniswap_v2,uniswap_v3
 ```
+
+> **Note:** `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
+> ```bash
+> cargo run --release -- \
+>   --tycho-url tycho-beta.propellerheads.xyz \
+>   --rpc-url https://your-rpc-provider.com/v1/your_key \
+>   --protocols uniswap_v2,uniswap_v3
+> ```
 
 The solver starts on `http://localhost:3000` by default.
 
@@ -62,7 +67,6 @@ You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
 ```bash
 cargo run --release -- \
   --tycho-url tycho-beta.propellerheads.xyz \
-  --rpc-url $RPC_URL \
   --protocols uniswap_v2,uniswap_v3,rfq:bebop
 ```
 
@@ -170,7 +174,7 @@ Returns service health status. HTTP 200 if healthy, 503 if stale.
 
 | Flag                         | Env Var               | Default             | Description                                |
 |------------------------------|-----------------------|---------------------|--------------------------------------------|
-| `--rpc-url`                  | `RPC_URL`             | (required)          | Ethereum RPC endpoint for the target chain |
+| `--rpc-url`                  | `RPC_URL`             | `https://eth.llamarpc.com` | Ethereum RPC endpoint for the target chain |
 | `--tycho-url`                | `TYCHO_URL`           | `localhost:4242`    | Tycho WebSocket URL                        |
 | `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                              |
 | `--chain`                    | -                     | `Ethereum`          | Target chain                               |

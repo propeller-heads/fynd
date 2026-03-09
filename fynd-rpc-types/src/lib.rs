@@ -365,6 +365,10 @@ pub struct Swap {
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "150000"))]
     pub gas_estimate: BigUint,
+    /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(example = "0.0"))]
+    pub split: f64,
 }
 
 // ============================================================================
@@ -655,6 +659,7 @@ mod conversions {
                 amount_in: core.amount_in().clone(),
                 amount_out: core.amount_out().clone(),
                 gas_estimate: core.gas_estimate().clone(),
+                split: *core.split(),
             }
         }
     }
