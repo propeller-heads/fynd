@@ -176,6 +176,7 @@ impl TryFrom<dto::Swap> for Swap {
             ds.amount_in,
             ds.amount_out,
             ds.gas_estimate,
+            ds.split,
         ))
     }
 }
@@ -222,6 +223,7 @@ mod tests {
             amount_in: BigUint::from(100u32),
             amount_out: BigUint::from(99u32),
             gas_estimate: BigUint::from(50_000u32),
+            split: 0.0,
         }
     }
 

@@ -211,7 +211,8 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
                         "token_out": "0xcccccccccccccccccccccccccccccccccccccccc",
                         "amount_in": "1000000",
                         "amount_out": "500000",
-                        "gas_estimate": "30000"
+                        "gas_estimate": "30000",
+                        "split": "0.0"
                     },
                     {
                         "component_id": "0xpool2222222222222222222222222222222222222222",
@@ -220,7 +221,8 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
                         "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "amount_in": "500000",
                         "amount_out": "990000",
-                        "gas_estimate": "20000"
+                        "gas_estimate": "20000",
+                        "split": "0.0"
                     }
                 ]
             },

@@ -89,5 +89,6 @@ impl SwapToExecution for fynd_core::Swap {
             Bytes::from(self.token_in().as_ref()),
             Bytes::from(self.token_out().as_ref()),
         )
+        .split(*self.split())
     }
 }

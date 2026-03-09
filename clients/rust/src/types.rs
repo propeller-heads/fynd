@@ -214,6 +214,8 @@ pub struct Swap {
     amount_in: BigUint,
     amount_out: BigUint,
     gas_estimate: BigUint,
+    #[allow(dead_code)]
+    split: f64,
 }
 
 impl Swap {
@@ -252,6 +254,7 @@ impl Swap {
         &self.gas_estimate
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         component_id: String,
         protocol: String,
@@ -260,8 +263,18 @@ impl Swap {
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
+        split: f64,
     ) -> Self {
-        Self { component_id, protocol, token_in, token_out, amount_in, amount_out, gas_estimate }
+        Self {
+            component_id,
+            protocol,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            split,
+        }
     }
 }
 
