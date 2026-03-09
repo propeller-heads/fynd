@@ -32,6 +32,40 @@ pub struct Encoder {
     chain: Chain,
 }
 
+impl From<&OrderSolution> for Solution {
+    fn from(order_solution: &OrderSolution) -> Self {
+        let swaps = order_solution
+            .route
+            .as_ref()
+            .map(|r| {
+                r.swaps
+                    .iter()
+                    .map(|s| {
+                        Swap::new(
+                            s.protocol_component.clone(),
+                            Bytes::from(s.token_in.as_ref()),
+                            Bytes::from(s.token_out.as_ref()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Solution {
+            sender: order_solution.sender.clone(),
+            receiver: order_solution.receiver.clone(),
+            given_token: Bytes::from(order_solution.token_in.as_ref()),
+            given_amount: order_solution.amount_in.clone(),
+            checked_token: Bytes::from(order_solution.token_out.as_ref()),
+            exact_out: false,
+            checked_amount: order_solution.amount_out.clone(),
+            swaps,
+            // TODO: remove once router v3 is released
+            native_action: None,
+        }
+    }
+}
+
 impl Encoder {
     /// Creates a new `Encoder` for the given chain.
     ///
@@ -75,7 +109,7 @@ impl Encoder {
                 continue;
             }
 
-            solutions_to_encode.push((i, self.order_solution_to_solution(order_solution)?));
+            solutions_to_encode.push((i, Solution::from(order_solution)));
         }
 
         let encoded_solutions = self.tycho_encoder.encode_solutions(
@@ -99,89 +133,6 @@ impl Encoder {
         }
 
         Ok(solutions)
-    }
-
-    /// Maps an `OrderSolution` to the `Solution` type expected by TychoEncoder.
-    fn order_solution_to_solution(
-        &self,
-        order_solution: &OrderSolution,
-    ) -> Result<Solution, SolveError> {
-        let swaps = &order_solution
-            .route
-            .as_ref()
-            .ok_or_else(|| {
-                SolveError::Internal("cannot encode solution without a route".to_string())
-            })?
-            .swaps;
-        let first_swap = swaps
-            .first()
-            .ok_or_else(|| SolveError::Internal("route has no swaps".to_string()))?;
-        let last_swap = swaps
-            .last()
-            .ok_or_else(|| SolveError::Internal("route has no swaps".to_string()))?;
-
-        let token_in = Bytes::from(first_swap.token_in.as_ref());
-        let token_out = Bytes::from(last_swap.token_out.as_ref());
-
-        let amount_in = order_solution.amount_in.clone();
-        let amount_out = order_solution.amount_out.clone();
-
-        let native_action = self.native_action(order_solution, &token_in, &token_out)?;
-
-        let (given_token, checked_token, given_amount, checked_amount) =
-            (token_in, token_out, amount_in, amount_out);
-
-        let solution_exec = Solution {
-            sender: order_solution.sender.clone(),
-            receiver: order_solution.receiver.clone(),
-            given_token,
-            given_amount,
-            checked_token,
-            exact_out: false,
-            checked_amount,
-            swaps: swaps
-                .iter()
-                .map(|s| {
-                    Swap::new(
-                        s.protocol_component.clone(),
-                        Bytes::from(s.token_in.as_ref()),
-                        Bytes::from(s.token_out.as_ref()),
-                    )
-                })
-                .collect(),
-            native_action,
-        };
-        Ok(solution_exec)
-    }
-
-    /// Determines whether a wrap or unwrap of the native token is required.
-    ///
-    /// Returns `Wrap` when the order sells the native token and the first swap expects the wrapped
-    /// token, `Unwrap` when the order buys the native token and the last swap outputs the wrapped
-    /// token, and `None` otherwise.
-    fn native_action(
-        &self,
-        order_solution: &OrderSolution,
-        first_swap_token_in: &Bytes,
-        last_swap_token_out: &Bytes,
-    ) -> Result<Option<NativeAction>, EncodingError> {
-        if order_solution.token_in == self.chain.native_token().address &&
-            *first_swap_token_in ==
-                self.chain
-                    .wrapped_native_token()
-                    .address
-        {
-            Ok(Some(NativeAction::Wrap))
-        } else if order_solution.token_out == self.chain.native_token().address &&
-            *last_swap_token_out ==
-                self.chain
-                    .wrapped_native_token()
-                    .address
-        {
-            Ok(Some(NativeAction::Unwrap))
-        } else {
-            Ok(None)
-        }
     }
 
     /// Encodes a call using one of its supported swap methods.
@@ -359,13 +310,10 @@ impl From<EncodingError> for SolveError {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use num_bigint::BigUint;
-    use rstest::rstest;
     use tycho_execution::encoding::{
         errors::EncodingError,
-        models::{EncodedSolution, NativeAction, Solution},
+        models::{EncodedSolution, Solution},
         tycho_encoder::TychoEncoder,
     };
     use tycho_simulation::tycho_core::{
@@ -378,14 +326,6 @@ mod tests {
         algorithm::test_utils::{component, MockProtocolSim},
         BlockInfo, OrderSolution, SolutionStatus,
     };
-
-    fn eth() -> Bytes {
-        Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap()
-    }
-
-    fn weth() -> Bytes {
-        Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap()
-    }
 
     fn make_route_swap_addrs(token_in: Address, token_out: Address) -> crate::types::Swap {
         let make_token = |addr: Address| Token {
@@ -414,11 +354,6 @@ mod tests {
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
-    }
-
-    fn addr_from_bytes(b: &Bytes) -> Address {
-        let arr: [u8; 20] = <[u8; 20]>::try_from(b.as_ref()).expect("address must be 20 bytes");
-        Address::from(arr)
     }
 
     fn make_order_solution(token_in: Address, token_out: Address) -> OrderSolution {
@@ -477,136 +412,49 @@ mod tests {
         Encoder { tycho_encoder: Box::new(MockTychoEncoder { encoded_solutions }), chain }
     }
 
-    #[rstest]
-    #[case::wrap(eth(), make_address(0x02), weth(), make_address(0x02), Some(NativeAction::Wrap))]
-    #[case::unwrap(
-        make_address(0x02),
-        eth(),
-        make_address(0x02),
-        weth(),
-        Some(NativeAction::Unwrap)
-    )]
-    #[case::none(
-        make_address(0x01),
-        make_address(0x02),
-        make_address(0x01),
-        make_address(0x02),
-        None
-    )]
+    #[test]
+    fn test_from_without_route_has_empty_swaps() {
+        let order_solution = make_order_solution(make_address(0x01), make_address(0x02));
 
-    fn test_native_action(
-        #[case] token_in: Bytes,
-        #[case] token_out: Bytes,
-        #[case] first_swap_token_in: Bytes,
-        #[case] last_swap_token_out: Bytes,
-        #[case] expected_result: Option<NativeAction>,
-    ) {
-        let chain = Chain::Ethereum;
-        let encoder = test_encoder(chain);
+        let solution = Solution::from(&order_solution);
 
-        let order_solution = make_order_solution(token_in, token_out);
-
-        let result = encoder
-            .native_action(&order_solution, &first_swap_token_in, &last_swap_token_out)
-            .unwrap();
-
-        assert_eq!(result, expected_result);
+        assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
+        assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
+        assert!(solution.swaps.is_empty());
     }
 
     #[test]
-    fn test_order_solution_to_solution_errors_when_route_has_no_swaps() {
-        let encoder = test_encoder(Chain::Ethereum);
-        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
-        order_solution.route = Some(crate::types::Route::new(vec![]));
-
-        let result = encoder.order_solution_to_solution(&order_solution);
-
-        let Err(SolveError::Internal(msg)) = result else {
-            panic!("expected Err(SolveError::Internal)");
-        };
-        assert_eq!(msg, "route has no swaps");
-    }
-
-    #[test]
-    fn test_order_solution_to_solution_exact_in_maps_tokens_and_amounts() {
-        let encoder = test_encoder(Chain::Ethereum);
+    fn test_from_maps_tokens_and_amounts() {
         let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
         order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
             make_address(0x01),
             make_address(0x02),
         )]));
 
-        let solution = encoder
-            .order_solution_to_solution(&order_solution)
-            .unwrap();
+        let solution = Solution::from(&order_solution);
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
         assert_eq!(solution.given_amount, order_solution.amount_in);
         assert_eq!(solution.checked_amount, order_solution.amount_out);
         assert!(!solution.exact_out);
+        assert_eq!(solution.native_action, None);
         assert_eq!(solution.swaps.len(), 1);
     }
 
     #[test]
-    fn test_order_solution_to_solution_multi_hop_uses_boundary_swap_tokens() {
-        let encoder = test_encoder(Chain::Ethereum);
+    fn test_from_multi_hop_uses_boundary_swap_tokens() {
         let mut order_solution = make_order_solution(make_address(0x01), make_address(0x03));
         order_solution.route = Some(crate::types::Route::new(vec![
             make_route_swap_addrs(make_address(0x01), make_address(0x02)),
             make_route_swap_addrs(make_address(0x02), make_address(0x03)),
         ]));
 
-        let solution = encoder
-            .order_solution_to_solution(&order_solution)
-            .unwrap();
+        let solution = Solution::from(&order_solution);
 
-        // given_token = first swap's token_in, checked_token = last swap's token_out
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x03).as_ref()));
         assert_eq!(solution.swaps.len(), 2);
-    }
-
-    #[test]
-    fn test_order_solution_to_solution_with_wrap() {
-        let chain = Chain::Ethereum;
-        let encoder = test_encoder(chain);
-        let native_addr = addr_from_bytes(&eth());
-        let weth_addr = addr_from_bytes(&weth());
-
-        let mut order_solution = make_order_solution(native_addr, make_address(0x03));
-        // First swap token_in = WETH triggers Wrap
-        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
-            weth_addr,
-            make_address(0x03),
-        )]));
-
-        let solution = encoder
-            .order_solution_to_solution(&order_solution)
-            .unwrap();
-
-        assert_eq!(solution.native_action, Some(NativeAction::Wrap));
-    }
-
-    #[test]
-    fn test_order_solution_to_solution_unwrap_with_unwrap() {
-        let chain = Chain::Ethereum;
-        let encoder = test_encoder(chain);
-        let native_addr = addr_from_bytes(&eth());
-        let weth_addr = addr_from_bytes(&weth());
-
-        let mut order_solution = make_order_solution(make_address(0x01), native_addr);
-        // Last swap token_out = WETH triggers Unwrap
-        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
-            make_address(0x01),
-            weth_addr,
-        )]));
-
-        let solution = encoder
-            .order_solution_to_solution(&order_solution)
-            .unwrap();
-
-        assert_eq!(solution.native_action, Some(NativeAction::Unwrap));
     }
 
     #[tokio::test]
