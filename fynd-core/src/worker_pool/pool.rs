@@ -12,7 +12,11 @@ use tracing::{error, info};
 use crate::{
     algorithm::AlgorithmConfig,
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    feed::{
+        events::{MarketEvent, MarketEventHandler},
+        market_data::SharedMarketDataRef,
+    },
+    graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
     worker_pool::{
         registry::{
@@ -30,7 +34,7 @@ pub struct WorkerPoolConfig {
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
     name: String,
     /// How to spawn workers — either a built-in registry lookup or a custom factory.
-    pub(crate) spawner: AlgorithmSpawner,
+    spawner: AlgorithmSpawner,
     /// Number of worker threads.
     num_workers: usize,
     /// Configuration for the algorithm used by each worker.
@@ -202,9 +206,7 @@ impl WorkerPoolBuilder {
     pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
     where
         A: crate::algorithm::Algorithm + 'static,
-        A::GraphManager: crate::feed::events::MarketEventHandler
-            + crate::graph::EdgeWeightUpdaterWithDerived
-            + 'static,
+        A::GraphManager: MarketEventHandler + EdgeWeightUpdaterWithDerived + 'static,
         F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
     {
         let name = name.into();
