@@ -1681,9 +1681,9 @@ mod tests {
         // pool1 has the best simulation output (4x) but lowest score, so it's
         // excluded by the cap. Among the top-2 scored (pool4=4M, pool3=3M),
         // pool3 gives the best simulation output (2x vs 1x).
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].component_id, "pool3");
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(2000u64));
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(result.route().swaps()[0].component_id(), "pool3");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(2000u64));
     }
 
     #[tokio::test]
@@ -1710,9 +1710,9 @@ mod tests {
             .unwrap();
 
         // All 4 paths simulated, pool1 wins with best output (4x)
-        assert_eq!(result.route.swaps.len(), 1);
-        assert_eq!(result.route.swaps[0].component_id, "pool1");
-        assert_eq!(result.route.swaps[0].amount_out, BigUint::from(4000u64));
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(4000u64));
     }
 
     #[test]

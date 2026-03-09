@@ -16,7 +16,7 @@ use crate::{error::FyndError, Quote};
 /// A ready-to-sign EIP-1559 transaction produced by the Fynd execution path.
 ///
 /// Obtain one via [`FyndClient::signable_payload`](crate::FyndClient::signable_payload) when
-/// the solution's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
+/// the quote's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
 #[derive(Debug)]
 pub struct FyndPayload {
     quote: Quote,
@@ -28,7 +28,7 @@ impl FyndPayload {
         Self { quote, tx }
     }
 
-    /// The order solution this payload was built from.
+    /// The order quote this payload was built from.
     pub fn quote(&self) -> &Quote {
         &self.quote
     }
@@ -51,7 +51,7 @@ impl FyndPayload {
 pub struct TurbinePayload {
     #[allow(dead_code)]
     // Placeholder: will be populated in the Turbine signing story
-    _order_solution: (),
+    _order_quote: (),
 }
 
 /// A payload that needs to be signed before it can be executed.
@@ -98,7 +98,7 @@ impl SignablePayload {
         }
     }
 
-    /// The order solution embedded in this payload.
+    /// The order quote embedded in this payload.
     ///
     /// # Panics
     ///

@@ -124,7 +124,7 @@ impl SigningHints {
         self
     }
 
-    /// Override the gas limit. If not set, taken from the solution's `gas_estimate`.
+    /// Override the gas limit. If not set, taken from the quote's `gas_estimate`.
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = Some(gas_limit);
         self
@@ -157,7 +157,7 @@ impl SigningHints {
         self.max_priority_fee_per_gas
     }
 
-    /// The configured gas limit override, or `None` to use the solution's estimate.
+    /// The configured gas limit override, or `None` to use the quote's estimate.
     pub fn gas_limit(&self) -> Option<u64> {
         self.gas_limit
     }
@@ -496,7 +496,7 @@ where
     /// Request a quote for one or more swap orders.
     ///
     /// The returned `Quote` has `token_out` and `receiver` populated on each
-    /// `OrderSolution` from the corresponding input `Order` (matched by index).
+    /// `OrderQuote` from the corresponding input `Order` (matched by index).
     ///
     /// Retries automatically on transient failures according to the client's [`RetryConfig`].
     pub async fn quote(&self, params: QuoteParams) -> Result<Quote, FyndError> {
@@ -528,7 +528,7 @@ where
 
     async fn request_quote(
         &self,
-        dto_request: &fynd_rpc_types::SolutionRequest,
+        dto_request: &fynd_rpc_types::QuoteRequest,
         token_out: Bytes,
         receiver: Bytes,
     ) -> Result<Quote, FyndError> {
@@ -543,15 +543,15 @@ where
             let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
-        let dto_solution: fynd_rpc_types::Solution = response.json().await?;
-        let solve_time_ms = dto_solution.solve_time_ms;
-        let batch_quote = dto_to_batch_quote(dto_solution, token_out, receiver)?;
+        let dto_quote: fynd_rpc_types::Quote = response.json().await?;
+        let solve_time_ms = dto_quote.solve_time_ms;
+        let batch_quote = dto_to_batch_quote(dto_quote, token_out, receiver)?;
 
         let mut quote = batch_quote
             .quotes()
             .first()
             .cloned()
-            .ok_or_else(|| FyndError::Protocol("Received empty solution".into()))?;
+            .ok_or_else(|| FyndError::Protocol("Received empty quote".into()))?;
         quote.solve_time_ms = solve_time_ms;
         Ok(quote)
     }
@@ -568,16 +568,16 @@ where
         Ok(HealthStatus::from(dh))
     }
 
-    /// Build a signable payload for a given order solution.
+    /// Build a signable payload for a given order quote.
     ///
-    /// For [`BackendKind::Fynd`] solutions, this resolves the sender nonce and EIP-1559 fee
+    /// For [`BackendKind::Fynd`] quotes, this resolves the sender nonce and EIP-1559 fee
     /// parameters from the RPC node (unless overridden via `hints`), then constructs an
     /// unsigned EIP-1559 transaction targeting the RouterV3 contract.
     ///
     /// [`BackendKind::Turbine`] is not yet implemented and returns
     /// [`FyndError::Protocol`].
     ///
-    /// `token_out` and `receiver` are read directly from the `solution` (populated during
+    /// `token_out` and `receiver` are read directly from the `quote` (populated during
     /// `quote()`). Pass `&SigningHints::default()` to auto-resolve all transaction parameters.
     pub async fn signable_payload(
         &self,
@@ -683,7 +683,7 @@ where
         options: &ExecutionOptions,
     ) -> Result<ExecutionReceipt, FyndError> {
         let (payload, signature) = order.into_parts();
-        let (solution, tx) = payload.into_fynd_parts()?;
+        let (quote, tx) = payload.into_fynd_parts()?;
 
         let TypedTransaction::Eip1559(tx_eip1559) = tx else {
             return Err(FyndError::Protocol(
@@ -707,8 +707,8 @@ where
             .map_err(FyndError::Provider)?;
         let tx_hash = *pending.tx_hash();
 
-        let token_out_addr = mapping::bytes_to_alloy_address(solution.token_out())?;
-        let receiver_addr = mapping::bytes_to_alloy_address(solution.receiver())?;
+        let token_out_addr = mapping::bytes_to_alloy_address(quote.token_out())?;
+        let receiver_addr = mapping::bytes_to_alloy_address(quote.receiver())?;
         let provider = self.submit_provider.clone();
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move {
@@ -835,15 +835,15 @@ mod tests {
         (client, asserter)
     }
 
-    /// Build a minimal valid `OrderSolution` for use in tests.
-    fn make_order_solution() -> crate::types::Quote {
+    /// Build a minimal valid `OrderQuote` for use in tests.
+    fn make_order_quote() -> crate::types::Quote {
         use num_bigint::BigUint;
 
-        use crate::types::{BackendKind, BlockInfo, SolutionStatus};
+        use crate::types::{BackendKind, BlockInfo, QuoteStatus};
 
         crate::types::Quote::new(
             "test-order-id".to_string(),
-            SolutionStatus::Success,
+            QuoteStatus::Success,
             BackendKind::Fynd,
             None,
             BigUint::from(1_000_000u64),
@@ -1128,7 +1128,7 @@ mod tests {
         let (client, _asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
 
-        let solution = make_order_solution();
+        let quote = make_order_quote();
         let hints = SigningHints {
             sender: Some(sender),
             nonce: Some(5),
@@ -1139,7 +1139,7 @@ mod tests {
         };
 
         let payload = client
-            .signable_payload(solution, &hints)
+            .signable_payload(quote, &hints)
             .await
             .expect("signable_payload should succeed");
 
@@ -1174,11 +1174,11 @@ mod tests {
         });
         asserter.push_success(&fee_history);
 
-        let solution = make_order_solution();
+        let quote = make_order_quote();
         let hints = SigningHints::default();
 
         let payload = client
-            .signable_payload(solution, &hints)
+            .signable_payload(quote, &hints)
             .await
             .expect("signable_payload should succeed");
 
@@ -1197,11 +1197,11 @@ mod tests {
         let (client, _asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
 
-        let solution = make_order_solution();
+        let quote = make_order_quote();
         let hints = SigningHints::default(); // no sender
 
         let err = client
-            .signable_payload(solution, &hints)
+            .signable_payload(quote, &hints)
             .await
             .unwrap_err();
 
@@ -1214,7 +1214,7 @@ mod tests {
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
 
-        let solution = make_order_solution();
+        let quote = make_order_quote();
         let hints = SigningHints {
             sender: Some(sender),
             nonce: Some(1),
@@ -1228,7 +1228,7 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::new());
 
         let payload = client
-            .signable_payload(solution, &hints)
+            .signable_payload(quote, &hints)
             .await
             .expect("signable_payload with simulate=true should succeed");
 
@@ -1241,7 +1241,7 @@ mod tests {
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
 
-        let solution = make_order_solution();
+        let quote = make_order_quote();
         let hints = SigningHints {
             sender: Some(sender),
             nonce: Some(1),
@@ -1255,7 +1255,7 @@ mod tests {
         asserter.push_failure_msg("execution reverted");
 
         let err = client
-            .signable_payload(solution, &hints)
+            .signable_payload(quote, &hints)
             .await
             .unwrap_err();
 
@@ -1281,7 +1281,7 @@ mod tests {
 
         use crate::signing::FyndPayload;
 
-        let quote = make_order_solution();
+        let quote = make_order_quote();
         let tx = TxEip1559 {
             chain_id: 1,
             nonce: 1,

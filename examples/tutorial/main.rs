@@ -11,6 +11,7 @@ mod types;
 use std::{collections::HashMap, env, str::FromStr};
 
 use alloy::{
+    hex,
     network::{Ethereum, EthereumWallet},
     primitives::{Address, Bytes as AlloyBytes, Keccak256, Signature, TxKind, B256, U256},
     providers::{
@@ -38,7 +39,7 @@ use tycho_execution::encoding::{
         approvals::permit2::PermitSingle, encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
-    models::{EncodedSolution, Solution as ExecutionSolution, UserTransferType},
+    models::{EncodedSolution, Solution as ExecutionQuote, UserTransferType},
 };
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256,
@@ -244,10 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let order_quote = quote
         .orders()
         .first()
-        .ok_or("No order solution")?;
+        .ok_or("No order quote")?;
     let route = order_quote
         .route()
-        .ok_or("No route in solution")?;
+        .ok_or("No route in quote")?;
 
     // Determine user address and transfer type based on available credentials
     let (simulation_address, transfer_type, signer) = if let Some(ref pk_str) = private_key {
@@ -262,8 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (sender_addr, UserTransferType::TransferFrom, None)
     };
 
-    // Map solver route to execution solution
-    let execution_solution = map_route_to_execution_solution(
+    // Map solver route to execution quote
+    let execution_quote = map_route_to_execution_quote(
         route,
         &components,
         &sell_token,
@@ -284,18 +285,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .swap_encoder_registry(swap_encoder_registry)
         .build()?;
 
-    let encoded_solutions = encoder.encode_solutions(vec![execution_solution.clone()])?;
-    let encoded_solution = encoded_solutions
+    let encoded_quotes = encoder.encode_solutions(vec![execution_quote.clone()])?;
+    let encoded_quote = encoded_quotes
         .into_iter()
         .next()
-        .ok_or("No encoded solution")?;
+        .ok_or("No encoded quote")?;
 
     // Handle simulation-only mode without private key
     if signer.is_none() {
         // Simulation without signing - use TransferFrom (approval simulated as tx)
         let tx = encode_tycho_router_call_no_permit(
-            encoded_solution.clone(),
-            &execution_solution,
+            encoded_quote.clone(),
+            &execution_quote,
             chain.native_token().address,
         )?;
 
@@ -336,8 +337,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Encode the router call with permit signing
     let tx = encode_tycho_router_call(
         chain.id(),
-        encoded_solution.clone(),
-        &execution_solution,
+        encoded_quote.clone(),
+        &execution_quote,
         chain.native_token().address,
         signer.clone(),
     )?;
@@ -700,7 +701,7 @@ fn calculate_price(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn map_route_to_execution_solution(
+fn map_route_to_execution_quote(
     route: &Route,
     components: &HashMap<String, ProtocolComponent>,
     sell_token: &Token,
@@ -708,7 +709,7 @@ fn map_route_to_execution_solution(
     amount_in: &BigUint,
     user_address: Bytes,
     slippage_bps: u32,
-) -> Result<ExecutionSolution, Box<dyn std::error::Error>> {
+) -> Result<ExecutionQuote, Box<dyn std::error::Error>> {
     let mut swaps = Vec::new();
 
     for solver_swap in route.swaps() {
@@ -735,7 +736,7 @@ fn map_route_to_execution_solution(
         .ok_or("Empty route")?;
     let checked_amount = calculate_min_amount_out(last_swap.amount_out(), slippage_bps);
 
-    Ok(ExecutionSolution {
+    Ok(ExecutionQuote {
         sender: user_address.clone(),
         receiver: user_address,
         given_token: sell_token.address.clone(),
@@ -757,12 +758,12 @@ fn calculate_min_amount_out(expected_amount: &BigUint, slippage_bps: u32) -> Big
 
 fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
-    solution: &ExecutionSolution,
+    encoded_quote: EncodedSolution,
+    quote: &ExecutionQuote,
     native_address: Bytes,
     signer: PrivateKeySigner,
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
-    let permit_data = encoded_solution
+    let permit_data = encoded_quote
         .permit
         .as_ref()
         .ok_or("Permit object must be set")?;
@@ -770,11 +771,11 @@ fn encode_tycho_router_call(
     let permit = PermitSingle::try_from(permit_data)?;
     let signature = sign_permit(chain_id, permit_data, signer)?;
 
-    let given_amount = biguint_to_u256(&solution.given_amount);
-    let min_amount_out = biguint_to_u256(&solution.checked_amount);
-    let given_token = Address::from_slice(&solution.given_token);
-    let checked_token = Address::from_slice(&solution.checked_token);
-    let receiver = Address::from_slice(&solution.receiver);
+    let given_amount = biguint_to_u256(&quote.given_amount);
+    let min_amount_out = biguint_to_u256(&quote.checked_amount);
+    let given_token = Address::from_slice(&quote.given_token);
+    let checked_token = Address::from_slice(&quote.checked_token);
+    let receiver = Address::from_slice(&quote.receiver);
 
     let method_calldata = (
         given_amount,
@@ -786,37 +787,37 @@ fn encode_tycho_router_call(
         receiver,
         permit,
         signature.as_bytes().to_vec(),
-        encoded_solution.swaps.clone(),
+        encoded_quote.swaps.clone(),
     )
         .abi_encode();
 
-    let contract_interaction = encode_input(&encoded_solution.function_signature, method_calldata);
+    let contract_interaction = encode_input(&encoded_quote.function_signature, method_calldata);
 
-    let value = if solution.given_token == native_address {
-        solution.given_amount.clone()
+    let value = if quote.given_token == native_address {
+        quote.given_amount.clone()
     } else {
         BigUint::ZERO
     };
 
-    Ok(Transaction::new(encoded_solution.interacting_with, value, contract_interaction))
+    Ok(Transaction::new(encoded_quote.interacting_with, value, contract_interaction))
 }
 
 /// Encode router call without permit signing (for TransferFrom mode simulation).
 fn encode_tycho_router_call_no_permit(
-    encoded_solution: EncodedSolution,
-    solution: &ExecutionSolution,
+    encoded_quote: EncodedSolution,
+    quote: &ExecutionQuote,
     native_address: Bytes,
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
     println!("\nEncoding for TransferFrom mode:");
-    println!("  Function signature: {}", encoded_solution.function_signature);
-    println!("  Interacting with: 0x{}", hex::encode(&encoded_solution.interacting_with));
-    println!("  Swaps bytes length: {} bytes", encoded_solution.swaps.len());
+    println!("  Function signature: {}", encoded_quote.function_signature);
+    println!("  Interacting with: 0x{}", hex::encode(&encoded_quote.interacting_with));
+    println!("  Swaps bytes length: {} bytes", encoded_quote.swaps.len());
 
-    let given_amount = biguint_to_u256(&solution.given_amount);
-    let min_amount_out = biguint_to_u256(&solution.checked_amount);
-    let given_token = Address::from_slice(&solution.given_token);
-    let checked_token = Address::from_slice(&solution.checked_token);
-    let receiver = Address::from_slice(&solution.receiver);
+    let given_amount = biguint_to_u256(&quote.given_amount);
+    let min_amount_out = biguint_to_u256(&quote.checked_amount);
+    let given_token = Address::from_slice(&quote.given_token);
+    let checked_token = Address::from_slice(&quote.checked_token);
+    let receiver = Address::from_slice(&quote.receiver);
 
     println!("  Given amount: {}", given_amount);
     println!("  Min amount out: {}", min_amount_out);
@@ -838,19 +839,19 @@ fn encode_tycho_router_call_no_permit(
         false, // unwrap (native output)
         receiver,
         true, // transfer_from - IMPORTANT: must be true for TransferFrom mode
-        encoded_solution.swaps.clone(),
+        encoded_quote.swaps.clone(),
     )
         .abi_encode();
 
-    let contract_interaction = encode_input(&encoded_solution.function_signature, method_calldata);
+    let contract_interaction = encode_input(&encoded_quote.function_signature, method_calldata);
 
-    let value = if solution.given_token == native_address {
-        solution.given_amount.clone()
+    let value = if quote.given_token == native_address {
+        quote.given_amount.clone()
     } else {
         BigUint::ZERO
     };
 
-    Ok(Transaction::new(encoded_solution.interacting_with, value, contract_interaction))
+    Ok(Transaction::new(encoded_quote.interacting_with, value, contract_interaction))
 }
 
 fn sign_permit(

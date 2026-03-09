@@ -78,7 +78,7 @@ pub struct QuoteOptions {
     /// Values exceeding the number of active solver pools are clamped internally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min_responses: Option<usize>,
-    /// Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.
+    /// Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_gas: Option<BigUint>,
@@ -289,7 +289,7 @@ impl PermitDetails {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {
-    /// Solutions for each order, in the same order as the request.
+    /// Quotes for each order, in the same order as the request.
     orders: Vec<OrderQuote>,
     /// Total estimated gas for executing all swaps (as decimal string).
     #[serde_as(as = "DisplayFromStr")]

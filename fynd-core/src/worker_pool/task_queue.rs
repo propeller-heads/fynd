@@ -143,7 +143,7 @@ mod tests {
         .with_id("test-order".to_string())
     }
 
-    fn make_single_solution() -> SingleOrderQuote {
+    fn make_single_quote() -> SingleOrderQuote {
         SingleOrderQuote::new(
             OrderQuote::new(
                 "test-order".to_string(),
@@ -240,7 +240,7 @@ mod tests {
                 .await
                 .expect("should receive task");
             assert_eq!(task.order().id(), "test-order");
-            task.respond(Ok(make_single_solution()));
+            task.respond(Ok(make_single_quote()));
         });
 
         // Enqueue an order
@@ -249,8 +249,8 @@ mod tests {
         worker
             .await
             .expect("worker should complete");
-        let solution = result.expect("should get solution");
-        assert_eq!(solution.solve_time_ms(), 5);
+        let quote = result.expect("should get quote");
+        assert_eq!(quote.solve_time_ms(), 5);
     }
 
     #[tokio::test]
@@ -418,7 +418,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("should receive task");
-                task.respond(Ok(make_single_solution()));
+                task.respond(Ok(make_single_quote()));
             }
         });
 
@@ -444,11 +444,11 @@ mod tests {
         let collector = tokio::spawn(async move {
             let task1 = receiver.recv().await.unwrap();
             let id1 = task1.id();
-            task1.respond(Ok(make_single_solution()));
+            task1.respond(Ok(make_single_quote()));
 
             let task2 = receiver.recv().await.unwrap();
             let id2 = task2.id();
-            task2.respond(Ok(make_single_solution()));
+            task2.respond(Ok(make_single_quote()));
 
             (id1, id2)
         });
@@ -484,7 +484,7 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
 
-        task.respond(Ok(make_single_solution()));
+        task.respond(Ok(make_single_quote()));
 
         let result = response_rx
             .await

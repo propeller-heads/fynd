@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use fynd_client::{FyndClient, FyndError, Quote, SolutionStatus};
+use fynd_client::{FyndClient, FyndError, Quote, QuoteStatus};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{ParallelizationMode, RequestTemplate};
@@ -324,7 +324,7 @@ fn handle_result(
 ) -> Option<(u64, bool, usize, usize)> {
     match result {
         Ok(quote) => {
-            let orders_found = usize::from(quote.status() == SolutionStatus::Success);
+            let orders_found = usize::from(quote.status() == QuoteStatus::Success);
             let orders_not_found = 1 - orders_found;
 
             tracing::info!(
@@ -335,7 +335,7 @@ fn handle_result(
             );
 
             if is_first {
-                tracing::info!("First solution details:");
+                tracing::info!("First quote details:");
                 tracing::info!(
                     "  Order 0: status={:?}, amount_out={}",
                     quote.status(),

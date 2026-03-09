@@ -70,8 +70,8 @@ fn make_quote_params() -> QuoteParams {
     QuoteParams::new(order, QuoteOptions::default())
 }
 
-/// Return a minimal valid wire `Solution` JSON with one order.
-fn minimal_solution_json(order_id: &str) -> serde_json::Value {
+/// Return a minimal valid wire `Quote` JSON with one order.
+fn minimal_quote_json(order_id: &str) -> serde_json::Value {
     serde_json::json!({
         "orders": [{
             "order_id": order_id,
@@ -103,7 +103,7 @@ async fn full_quote_roundtrip() {
 
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_solution_json("order-1")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("order-1")))
         .expect(1)
         .mount(&server)
         .await;
@@ -176,7 +176,7 @@ async fn quote_retries_once_then_succeeds() {
     // Second request succeeds.
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_solution_json("retry-ok")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("retry-ok")))
         .up_to_n_times(1)
         .mount(&server)
         .await;
@@ -303,7 +303,7 @@ async fn quote_bad_request_not_retried() {
     server.verify().await;
 }
 
-/// Verify the client correctly populates `token_out` and `receiver` on each `OrderSolution`
+/// Verify the client correctly populates `token_out` and `receiver` on each `OrderQuote`
 /// from the original order list (by index), even when `receiver` is explicit (not sender).
 #[tokio::test]
 async fn quote_populates_token_out_and_receiver_from_order() {
@@ -312,7 +312,7 @@ async fn quote_populates_token_out_and_receiver_from_order() {
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(minimal_solution_json("populated-order")),
+            ResponseTemplate::new(200).set_body_json(minimal_quote_json("populated-order")),
         )
         .expect(1)
         .mount(&server)
@@ -345,16 +345,14 @@ async fn quote_populates_token_out_and_receiver_from_order() {
     server.verify().await;
 }
 
-/// When `receiver` is `None` on the order, `OrderSolution::receiver()` defaults to `sender`.
+/// When `receiver` is `None` on the order, `OrderQuote::receiver()` defaults to `sender`.
 #[tokio::test]
 async fn quote_receiver_defaults_to_sender_when_none() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(minimal_solution_json("recv-default")),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("recv-default")))
         .expect(1)
         .mount(&server)
         .await;
@@ -384,8 +382,8 @@ async fn quote_receiver_defaults_to_sender_when_none() {
 /// Full round-trip: quote, then signable_payload with all hints — no RPC calls needed.
 ///
 /// This test exercises the complete flow that a real user would follow:
-/// 1. Call quote() to get an OrderSolution.
-/// 2. Call signable_payload() on the solution with explicit hints.
+/// 1. Call quote() to get an OrderQuote.
+/// 2. Call signable_payload() on the quote with explicit hints.
 /// 3. Verify the returned EIP-1559 tx has the expected fields.
 #[tokio::test]
 async fn full_quote_then_signable_payload_with_all_hints() {
@@ -393,7 +391,7 @@ async fn full_quote_then_signable_payload_with_all_hints() {
 
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_solution_json("flow-order")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("flow-order")))
         .expect(1)
         .mount(&server)
         .await;
@@ -442,9 +440,7 @@ async fn full_quote_then_signable_payload_resolves_from_provider() {
 
     Mock::given(method("POST"))
         .and(path("/v1/solve"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(minimal_solution_json("provider-flow")),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("provider-flow")))
         .expect(1)
         .mount(&server)
         .await;

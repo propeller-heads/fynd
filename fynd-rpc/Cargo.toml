@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 fynd-core.workspace = true
-fynd-rpc-types = { workspace = true, features = ["openapi"] }
+fynd-rpc-types = { workspace = true, features = ["openapi", "core"] }
 actix-web.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
