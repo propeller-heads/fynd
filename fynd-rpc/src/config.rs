@@ -145,6 +145,9 @@ pub mod defaults {
     pub const HTTP_HOST: &str = "0.0.0.0";
     pub const HTTP_PORT: u16 = 3000;
 
+    // RPC
+    pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
+
     // Tycho stream
     pub const MIN_TVL: f64 = 10.0;
     pub const MIN_TOKEN_QUALITY: i32 = 100;

@@ -33,9 +33,9 @@ pub struct Cli {
     #[arg(long)]
     pub disable_tls: bool,
 
-    /// Node RPC URL for the target chain
+    /// Node RPC URL for the target chain. Defaults to a public endpoint if not set.
     #[arg(long, env)]
-    pub rpc_url: String,
+    pub rpc_url: Option<String>,
 
     /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3)
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
@@ -116,7 +116,7 @@ mod cli_tests {
         assert_eq!(cli.http_host, "127.0.0.1");
         assert_eq!(cli.http_port, 8080);
         assert_eq!(cli.tycho_api_key, Some("test-key".to_string()));
-        assert_eq!(cli.rpc_url, "https://rpc.example.com");
+        assert_eq!(cli.rpc_url, Some("https://rpc.example.com".to_string()));
         assert_eq!(cli.tycho_url, "wss://custom.tycho.url");
         assert_eq!(cli.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(cli.min_tvl, 20.0);
@@ -125,20 +125,13 @@ mod cli_tests {
 
     #[test]
     fn test_arg_parsing_defaults() {
-        let cli = Cli::try_parse_from(vec![
-            "fynd",
-            "--rpc-url",
-            "https://rpc.example.com",
-            "--protocols",
-            "uniswap_v2",
-        ])
-        .expect("parse errored");
+        let cli =
+            Cli::try_parse_from(vec!["fynd", "--protocols", "uniswap_v2"]).expect("parse errored");
 
         assert_eq!(cli.chain, "Ethereum");
         assert_eq!(cli.http_host, "0.0.0.0");
         assert_eq!(cli.http_port, 3000);
         assert_eq!(cli.tycho_api_key, None);
-        assert_eq!(cli.rpc_url, "https://rpc.example.com");
         assert_eq!(cli.tycho_url, "localhost:4242");
         assert_eq!(cli.protocols, vec!["uniswap_v2"]);
         assert_eq!(cli.min_tvl, 10.0);
@@ -155,20 +148,11 @@ mod cli_tests {
             "fynd",
             "--tycho-api-key",
             "test-key",
-            "--rpc-url",
-            "https://rpc.example.com",
             "--protocols",
             "uniswap_v2",
         ])
         .expect("parse errored");
 
         assert_eq!(cli.worker_pools_config, PathBuf::from("worker_pools.toml"));
-    }
-
-    #[test]
-    fn test_arg_parsing_missing_required_args() {
-        // rpc_url required
-        let args = Cli::try_parse_from(vec!["fynd", "--protocols", "uniswap_v2"]);
-        assert!(args.is_err());
     }
 }
