@@ -163,7 +163,6 @@ mod tests {
                 transaction: None,
                 sender: Bytes::from(make_address(0xAA).as_ref()),
                 receiver: Bytes::from(make_address(0xAA).as_ref()),
-                exact_out: false,
             },
             solve_time_ms: 5,
         }

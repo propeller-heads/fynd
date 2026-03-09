@@ -315,7 +315,6 @@ impl OrderManager {
                 transaction: None,
                 sender: any_sol.sender.clone(),
                 receiver: Bytes::from(any_sol.receiver.as_ref()),
-                exact_out: any_sol.exact_out,
             }
         } else {
             // No responses at all - determine status from failure types
@@ -366,7 +365,6 @@ impl OrderManager {
                 transaction: None,
                 sender: Bytes::default(),
                 receiver: Bytes::default(),
-                exact_out: false,
             }
         }
     }
@@ -423,7 +421,6 @@ mod tests {
                 transaction: None,
                 sender: Bytes::from(make_address(0xAA).as_ref()),
                 receiver: Bytes::from(make_address(0xAA).as_ref()),
-                exact_out: false,
             },
             solve_time_ms: 5,
         }
@@ -611,7 +608,6 @@ mod tests {
                     transaction: None,
                     sender: Bytes::from(make_address(0xAA).as_ref()),
                     receiver: Bytes::from(make_address(0xAA).as_ref()),
-                    exact_out: false,
                 },
             )],
             failed_solvers: vec![],

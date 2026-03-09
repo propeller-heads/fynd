@@ -35,7 +35,7 @@ tycho-simulation = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-alloy = { version = "1.0", features = [
+alloy = { workspace = true, features = [
     "providers",
     "signer-local",
     "rpc-types-eth",
@@ -100,6 +100,9 @@ typetag = "0.2"
 
 # Graph algorithms
 petgraph = "0.6"
+
+# Encoding
+alloy = { version = "1.0", default-features = false }
 
 # Utilities
 num-bigint = { version = "0.4", features = ["serde"] }

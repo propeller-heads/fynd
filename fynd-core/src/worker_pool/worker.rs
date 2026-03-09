@@ -241,7 +241,6 @@ where
                     transaction: None,
                     sender: order.sender.clone(),
                     receiver: order.effective_receiver().clone(),
-                    exact_out: !order.is_sell(),
                 }
             }
             Err(err) => {

@@ -278,10 +278,6 @@ pub struct OrderSolution {
     pub sender: Bytes,
     /// Address of the receiver.
     pub receiver: Bytes,
-    /// False if the solution is an exact input solution. Currently only exact input solutions are
-    /// supported.
-    #[serde(default)]
-    pub exact_out: bool,
 }
 
 /// Status of an order solution.

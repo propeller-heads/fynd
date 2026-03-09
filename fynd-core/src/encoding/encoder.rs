@@ -89,11 +89,10 @@ impl Encoder {
             .into_iter()
             .zip(solutions_to_encode)
         {
-            let transaction = encode_tycho_router_call(
+            let transaction = self.encode_tycho_router_call(
                 encoded_solution,
                 &solution,
                 &encoding_options.transfer_type,
-                &self.chain.native_token().address,
                 encoding_options.clone(),
             )?;
             solutions[idx].transaction = Some(transaction);
@@ -107,11 +106,12 @@ impl Encoder {
         &self,
         order_solution: &OrderSolution,
     ) -> Result<Solution, SolveError> {
-        // Can use unwrap since status is successful status which means route exists
         let swaps = &order_solution
             .route
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| {
+                SolveError::Internal("cannot encode solution without a route".to_string())
+            })?
             .swaps;
         let first_swap = swaps
             .first()
@@ -128,12 +128,8 @@ impl Encoder {
 
         let native_action = self.native_action(order_solution, &token_in, &token_out)?;
 
-        let (given_token, checked_token, given_amount, checked_amount) = if order_solution.exact_out
-        {
-            (token_out, token_in, amount_out, amount_in)
-        } else {
-            (token_in, token_out, amount_in, amount_out)
-        };
+        let (given_token, checked_token, given_amount, checked_amount) =
+            (token_in, token_out, amount_in, amount_out);
 
         let solution_exec = Solution {
             sender: order_solution.sender.clone(),
@@ -141,7 +137,7 @@ impl Encoder {
             given_token,
             given_amount,
             checked_token,
-            exact_out: order_solution.exact_out,
+            exact_out: false,
             checked_amount,
             swaps: swaps
                 .iter()
@@ -187,184 +183,178 @@ impl Encoder {
             Ok(None)
         }
     }
+
+    /// Encodes a call using one of its supported swap methods.
+    ///
+    /// Selects the appropriate router function (`singleSwap`, `singleSwapPermit2`,
+    /// `sequentialSwap`, or `sequentialSwapPermit2`) based on the function signature in
+    /// `encoded_solution`, prepends the 4-byte selector, and returns a `Transaction` ready
+    /// for submission.
+    fn encode_tycho_router_call(
+        &self,
+        encoded_solution: EncodedSolution,
+        solution: &Solution,
+        user_transfer_type: &UserTransferType,
+        encoding_options: EncodingOptions,
+    ) -> Result<Transaction, EncodingError> {
+        let (mut unwrap, mut wrap) = (false, false);
+        if let Some(action) = solution.native_action.clone() {
+            match action {
+                NativeAction::Wrap => wrap = true,
+                NativeAction::Unwrap => unwrap = true,
+            }
+        }
+
+        let given_amount = biguint_to_u256(&solution.given_amount);
+        let precision = BigUint::from(1_000_000u64);
+        let slippage_amount = solution.checked_amount.clone() *
+            BigUint::from((encoding_options.slippage * 1_000_000.0) as u64) /
+            &precision;
+        let min_amount_out = biguint_to_u256(&(solution.checked_amount.clone() - slippage_amount));
+        let given_token = bytes_to_address(&solution.given_token)?;
+        let checked_token = bytes_to_address(&solution.checked_token)?;
+        let receiver = bytes_to_address(&solution.receiver)?;
+        let (permit, signature) = if let Some(p) = encoding_options.permit {
+            let models_permit = ModelsPermitSingle {
+                details: ModelsPermitDetails {
+                    token: p.details.token,
+                    amount: p.details.amount,
+                    expiration: p.details.expiration,
+                    nonce: p.details.nonce,
+                },
+                spender: p.spender,
+                sig_deadline: p.sig_deadline,
+            };
+            let permit = Some(
+                PermitSingle::try_from(&models_permit)
+                    .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
+            );
+            let signature = if let Some(sig) = encoding_options.permit2_signature {
+                sig
+            } else {
+                return Err(EncodingError::FatalError(
+                    "Signature must be provided for permit2".to_string(),
+                ));
+            };
+            (permit, signature.to_vec())
+        } else {
+            (None, vec![])
+        };
+
+        let method_calldata = if encoded_solution
+            .function_signature
+            .contains("singleSwapPermit2")
+        {
+            (
+                given_amount,
+                given_token,
+                checked_token,
+                min_amount_out,
+                wrap,
+                unwrap,
+                receiver,
+                permit.ok_or(EncodingError::FatalError(
+                    "permit2 object must be set to use permit2".to_string(),
+                ))?,
+                signature,
+                encoded_solution.swaps,
+            )
+                .abi_encode()
+        } else if encoded_solution
+            .function_signature
+            .contains("singleSwap")
+        {
+            (
+                given_amount,
+                given_token,
+                checked_token,
+                min_amount_out,
+                wrap,
+                unwrap,
+                receiver,
+                user_transfer_type == &UserTransferType::TransferFrom,
+                encoded_solution.swaps,
+            )
+                .abi_encode()
+        } else if encoded_solution
+            .function_signature
+            .contains("sequentialSwapPermit2")
+        {
+            (
+                given_amount,
+                given_token,
+                checked_token,
+                min_amount_out,
+                wrap,
+                unwrap,
+                receiver,
+                permit.ok_or(EncodingError::FatalError(
+                    "permit2 object must be set to use permit2".to_string(),
+                ))?,
+                signature,
+                encoded_solution.swaps,
+            )
+                .abi_encode()
+        } else if encoded_solution
+            .function_signature
+            .contains("sequentialSwap")
+        {
+            (
+                given_amount,
+                given_token,
+                checked_token,
+                min_amount_out,
+                wrap,
+                unwrap,
+                receiver,
+                user_transfer_type == &UserTransferType::TransferFrom,
+                encoded_solution.swaps,
+            )
+                .abi_encode()
+        } else {
+            Err(EncodingError::FatalError(
+                "Invalid function signature for Tycho router".to_string(),
+            ))?
+        };
+
+        let native_address = &self.chain.native_token().address;
+        let contract_interaction =
+            Self::encode_input(&encoded_solution.function_signature, method_calldata);
+        let value = if solution.given_token == *native_address {
+            solution.given_amount.clone()
+        } else {
+            BigUint::ZERO
+        };
+        Ok(Transaction { to: encoded_solution.interacting_with, value, data: contract_interaction })
+    }
+
+    /// Encodes the input data for a function call to the given function selector.
+    fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
+        let mut hasher = Keccak256::new();
+        hasher.update(selector.as_bytes());
+        let selector_bytes = &hasher.finalize()[..4];
+        let mut call_data = selector_bytes.to_vec();
+        // Remove extra prefix if present (32 bytes for dynamic data)
+        // Alloy encoding is including a prefix for dynamic data indicating the offset or length
+        // but at this point we don't want that
+        if encoded_args.len() > 32 &&
+            encoded_args[..32] ==
+                [0u8; 31]
+                    .into_iter()
+                    .chain([32].to_vec())
+                    .collect::<Vec<u8>>()
+        {
+            encoded_args = encoded_args[32..].to_vec();
+        }
+        call_data.extend(encoded_args);
+        call_data
+    }
 }
 
 impl From<EncodingError> for SolveError {
     fn from(err: EncodingError) -> Self {
         SolveError::FailedEncoding(err.to_string())
     }
-}
-
-/// Encodes a call using one of its supported swap methods.
-///
-/// Selects the appropriate router function (`singleSwap`, `singleSwapPermit2`,
-/// `sequentialSwap`, or `sequentialSwapPermit2`) based on the function signature in
-/// `encoded_solution`, prepends the 4-byte selector, and returns a `Transaction` ready
-/// for submission.
-///
-/// # Arguments
-/// * `encoded_solution` - Output of `TychoEncoder::encode_solutions` for one solution.
-/// * `solution` - Original solution providing token addresses, amounts, and native action.
-/// * `user_transfer_type` - How tokens are transferred from the user to the router.
-/// * `native_address` - Address used to identify the native token (e.g. ETH).
-/// * `encoding_options` - Slippage, permit2 data, and other encoding options.
-///
-/// # Returns
-/// A `Transaction` containing the ABI-encoded calldata and ETH value to send.
-pub fn encode_tycho_router_call(
-    encoded_solution: EncodedSolution,
-    solution: &Solution,
-    user_transfer_type: &UserTransferType,
-    native_address: &Bytes,
-    encoding_options: EncodingOptions,
-) -> Result<Transaction, EncodingError> {
-    let (mut unwrap, mut wrap) = (false, false);
-    if let Some(action) = solution.native_action.clone() {
-        match action {
-            NativeAction::Wrap => wrap = true,
-            NativeAction::Unwrap => unwrap = true,
-        }
-    }
-
-    let given_amount = biguint_to_u256(&solution.given_amount);
-    let precision = BigUint::from(1_000_000u64);
-    let slippage_amount = solution.checked_amount.clone() *
-        BigUint::from((encoding_options.slippage * 1_000_000.0) as u64) /
-        &precision;
-    let min_amount_out = biguint_to_u256(&(solution.checked_amount.clone() - slippage_amount));
-    let given_token = bytes_to_address(&solution.given_token)?;
-    let checked_token = bytes_to_address(&solution.checked_token)?;
-    let receiver = bytes_to_address(&solution.receiver)?;
-    let (permit, signature) = if let Some(p) = encoding_options.permit {
-        let models_permit = ModelsPermitSingle {
-            details: ModelsPermitDetails {
-                token: p.details.token,
-                amount: p.details.amount,
-                expiration: p.details.expiration,
-                nonce: p.details.nonce,
-            },
-            spender: p.spender,
-            sig_deadline: p.sig_deadline,
-        };
-        let permit = Some(
-            PermitSingle::try_from(&models_permit)
-                .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
-        );
-        let signature = if let Some(sig) = encoding_options.permit2_signature {
-            sig
-        } else {
-            return Err(EncodingError::FatalError(
-                "Signature must be provided for permit2".to_string(),
-            ));
-        };
-        (permit, signature.to_vec())
-    } else {
-        (None, vec![])
-    };
-
-    let method_calldata = if encoded_solution
-        .function_signature
-        .contains("singleSwapPermit2")
-    {
-        (
-            given_amount,
-            given_token,
-            checked_token,
-            min_amount_out,
-            wrap,
-            unwrap,
-            receiver,
-            permit.ok_or(EncodingError::FatalError(
-                "permit2 object must be set to use permit2".to_string(),
-            ))?,
-            signature,
-            encoded_solution.swaps,
-        )
-            .abi_encode()
-    } else if encoded_solution
-        .function_signature
-        .contains("singleSwap")
-    {
-        (
-            given_amount,
-            given_token,
-            checked_token,
-            min_amount_out,
-            wrap,
-            unwrap,
-            receiver,
-            user_transfer_type == &UserTransferType::TransferFrom,
-            encoded_solution.swaps,
-        )
-            .abi_encode()
-    } else if encoded_solution
-        .function_signature
-        .contains("sequentialSwapPermit2")
-    {
-        (
-            given_amount,
-            given_token,
-            checked_token,
-            min_amount_out,
-            wrap,
-            unwrap,
-            receiver,
-            permit.ok_or(EncodingError::FatalError(
-                "permit2 object must be set to use permit2".to_string(),
-            ))?,
-            signature,
-            encoded_solution.swaps,
-        )
-            .abi_encode()
-    } else if encoded_solution
-        .function_signature
-        .contains("sequentialSwap")
-    {
-        (
-            given_amount,
-            given_token,
-            checked_token,
-            min_amount_out,
-            wrap,
-            unwrap,
-            receiver,
-            user_transfer_type == &UserTransferType::TransferFrom,
-            encoded_solution.swaps,
-        )
-            .abi_encode()
-    } else {
-        Err(EncodingError::FatalError("Invalid function signature for Tycho router".to_string()))?
-    };
-
-    let contract_interaction = encode_input(&encoded_solution.function_signature, method_calldata);
-    let value = if solution.given_token == *native_address {
-        solution.given_amount.clone()
-    } else {
-        BigUint::ZERO
-    };
-    Ok(Transaction { to: encoded_solution.interacting_with, value, data: contract_interaction })
-}
-
-/// Encodes the input data for a function call to the given function selector.
-fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
-    let mut hasher = Keccak256::new();
-    hasher.update(selector.as_bytes());
-    let selector_bytes = &hasher.finalize()[..4];
-    let mut call_data = selector_bytes.to_vec();
-    // Remove extra prefix if present (32 bytes for dynamic data)
-    // Alloy encoding is including a prefix for dynamic data indicating the offset or length
-    // but at this point we don't want that
-    if encoded_args.len() > 32 &&
-        encoded_args[..32] ==
-            [0u8; 31]
-                .into_iter()
-                .chain([32].to_vec())
-                .collect::<Vec<u8>>()
-    {
-        encoded_args = encoded_args[32..].to_vec();
-    }
-    call_data.extend(encoded_args);
-    call_data
 }
 
 #[cfg(test)]
@@ -378,10 +368,16 @@ mod tests {
         models::{EncodedSolution, NativeAction, Solution},
         tycho_encoder::TychoEncoder,
     };
-    use tycho_simulation::tycho_core::{models::Address, Bytes};
+    use tycho_simulation::tycho_core::{
+        models::{token::Token, Address, Chain as SimChain},
+        Bytes,
+    };
 
     use super::*;
-    use crate::{BlockInfo, OrderSolution, SolutionStatus};
+    use crate::{
+        algorithm::test_utils::{component, MockProtocolSim},
+        BlockInfo, OrderSolution, SolutionStatus,
+    };
 
     fn eth() -> Bytes {
         Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap()
@@ -391,15 +387,7 @@ mod tests {
         Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap()
     }
 
-    fn make_route_swap(token_in_byte: u8, token_out_byte: u8) -> crate::types::Swap {
-        make_route_swap_addrs(make_address(token_in_byte), make_address(token_out_byte))
-    }
-
     fn make_route_swap_addrs(token_in: Address, token_out: Address) -> crate::types::Swap {
-        use tycho_simulation::tycho_core::models::{token::Token, Chain as SimChain};
-
-        use crate::algorithm::test_utils::{component, MockProtocolSim};
-
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -451,18 +439,19 @@ mod tests {
             transaction: None,
             sender: Bytes::from(make_address(0xAA).as_ref()),
             receiver: Bytes::from(make_address(0xAA).as_ref()),
-            exact_out: false,
         }
     }
 
-    struct MockTychoEncoder;
+    struct MockTychoEncoder {
+        encoded_solutions: Vec<EncodedSolution>,
+    }
 
     impl TychoEncoder for MockTychoEncoder {
         fn encode_solutions(
             &self,
             _solutions: Vec<Solution>,
         ) -> Result<Vec<EncodedSolution>, EncodingError> {
-            Ok(vec![])
+            Ok(self.encoded_solutions.clone())
         }
 
         fn encode_full_calldata(
@@ -478,7 +467,14 @@ mod tests {
     }
 
     fn test_encoder(chain: Chain) -> Encoder {
-        Encoder { tycho_encoder: Box::new(MockTychoEncoder), chain }
+        test_encoder_with_encoded_solutions(chain, vec![])
+    }
+
+    fn test_encoder_with_encoded_solutions(
+        chain: Chain,
+        encoded_solutions: Vec<EncodedSolution>,
+    ) -> Encoder {
+        Encoder { tycho_encoder: Box::new(MockTychoEncoder { encoded_solutions }), chain }
     }
 
     #[rstest]
@@ -535,8 +531,10 @@ mod tests {
     fn test_order_solution_to_solution_exact_in_maps_tokens_and_amounts() {
         let encoder = test_encoder(Chain::Ethereum);
         let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
-        order_solution.exact_out = false;
-        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap(0x01, 0x02)]));
+        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
+            make_address(0x01),
+            make_address(0x02),
+        )]));
 
         let solution = encoder
             .order_solution_to_solution(&order_solution)
@@ -555,8 +553,8 @@ mod tests {
         let encoder = test_encoder(Chain::Ethereum);
         let mut order_solution = make_order_solution(make_address(0x01), make_address(0x03));
         order_solution.route = Some(crate::types::Route::new(vec![
-            make_route_swap(0x01, 0x02),
-            make_route_swap(0x02, 0x03),
+            make_route_swap_addrs(make_address(0x01), make_address(0x02)),
+            make_route_swap_addrs(make_address(0x02), make_address(0x03)),
         ]));
 
         let solution = encoder
@@ -609,5 +607,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(solution.native_action, Some(NativeAction::Unwrap));
+    }
+
+    #[tokio::test]
+    async fn test_encode_skips_non_successful_solutions() {
+        let encoder = test_encoder(Chain::Ethereum);
+        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
+        order_solution.status = SolutionStatus::NoRouteFound;
+
+        let encoding_options = EncodingOptions {
+            slippage: 0.01,
+            transfer_type: UserTransferType::TransferFrom,
+            permit: None,
+            permit2_signature: None,
+        };
+
+        let result = encoder
+            .encode(vec![order_solution], encoding_options)
+            .await
+            .unwrap();
+
+        assert!(result[0].transaction.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_encode_sets_transaction_on_successful_solution() {
+        let encoded = EncodedSolution {
+            function_signature:
+                "singleSwap(uint256,address,address,uint256,bool,bool,address,bool,bytes)"
+                    .to_string(),
+            swaps: vec![1, 2, 3],
+            interacting_with: Bytes::from(make_address(0xFF).as_ref()),
+            n_tokens: 2,
+            permit: None,
+        };
+        let encoder = test_encoder_with_encoded_solutions(Chain::Ethereum, vec![encoded]);
+
+        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
+        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
+            make_address(0x01),
+            make_address(0x02),
+        )]));
+
+        let encoding_options = EncodingOptions {
+            slippage: 0.01,
+            transfer_type: UserTransferType::TransferFrom,
+            permit: None,
+            permit2_signature: None,
+        };
+
+        let result = encoder
+            .encode(vec![order_solution], encoding_options)
+            .await
+            .unwrap();
+
+        assert!(result[0].transaction.is_some());
+        let tx = result[0].transaction.as_ref().unwrap();
+        assert_eq!(tx.to, Bytes::from(make_address(0xFF).as_ref()));
+        assert!(!tx.data.is_empty());
     }
 }
