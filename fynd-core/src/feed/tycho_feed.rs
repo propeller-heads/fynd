@@ -313,16 +313,12 @@ impl TychoFeed {
             .values()
             .filter_map(|status| {
                 if let SynchronizerState::Ready(header) = status {
-                    Some(BlockInfo {
-                        number: header.number,
-                        hash: header.hash.to_string(),
-                        timestamp: header.timestamp,
-                    })
+                    Some(BlockInfo::new(header.number, header.hash.to_string(), header.timestamp))
                 } else {
                     None
                 }
             })
-            .max_by_key(|b| b.number);
+            .max_by_key(|b| b.number());
 
         info!(
             "received block/timestamp {} with {} new components ({} after blacklist filter), {} removed, {} updated",

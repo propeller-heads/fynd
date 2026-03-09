@@ -218,15 +218,16 @@ impl TokenGasPriceComputation {
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
                 })?;
-        let buy_gas_units = buy_result.route.total_gas();
+        let buy_gas_units = buy_result.route().total_gas();
         let buy_gas_cost = &buy_gas_units * gas_price; // Convert gas units to actual cost
         let buy_out = buy_result
-            .route
-            .swaps
+            .into_route()
+            .into_swaps()
             .into_iter()
             .last()
             .ok_or(ComputationError::Internal("no output from buy simulation".into()))?
-            .amount_out;
+            .amount_out()
+            .clone();
 
         // Reverse: target_token → gas_token
         let reversed_path = path.reversed();
@@ -236,15 +237,16 @@ impl TokenGasPriceComputation {
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
                 })?;
-        let sell_gas_units = sell_result.route.total_gas();
+        let sell_gas_units = sell_result.route().total_gas();
         let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
         let sell_out = sell_result
-            .route
-            .swaps
+            .into_route()
+            .into_swaps()
             .into_iter()
             .last()
             .ok_or(ComputationError::Internal("no output from sell simulation".into()))?
-            .amount_out;
+            .amount_out()
+            .clone();
 
         // Convert to f64 for mid_price calculation
         let buy_out_f = buy_out
@@ -410,7 +412,7 @@ impl TokenGasPriceComputation {
         let market = market.read().await;
         let block = market
             .last_updated()
-            .map(|b| b.number)
+            .map(|b| b.number())
             .unwrap_or(0);
 
         let store_guard = store.read().await;
@@ -490,7 +492,7 @@ impl DerivedComputation for TokenGasPriceComputation {
 
         let block = market
             .last_updated()
-            .map(|b| b.number)
+            .map(|b| b.number())
             .unwrap_or(0);
 
         let spot_prices = store_guard

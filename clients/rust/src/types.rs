@@ -109,7 +109,7 @@ impl QuoteOptions {
         self
     }
 
-    /// Discard solutions whose estimated gas cost exceeds `gas`.
+    /// Discard quotes whose estimated gas cost exceeds `gas`.
     pub fn with_max_gas(mut self, gas: BigUint) -> Self {
         self.max_gas = Some(gas);
         self
@@ -148,7 +148,7 @@ impl QuoteParams {
 // RESPONSE TYPES
 // ============================================================================
 
-/// Which backend solver produced a given [`OrderSolution`].
+/// Which backend solver produced a given [`OrderQuote`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     /// The native Fynd solver.
@@ -157,9 +157,9 @@ pub enum BackendKind {
     Turbine,
 }
 
-/// High-level status of a single-order solution returned by the solver.
+/// High-level status of a single-order quote returned by the solver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SolutionStatus {
+pub enum QuoteStatus {
     /// A valid route was found and `route`, `amount_out`, and `gas_estimate` are populated.
     Success,
     /// No swap path exists between the requested token pair on any available pool.
@@ -288,7 +288,7 @@ impl Route {
 #[derive(Debug, Clone)]
 pub struct Quote {
     order_id: String,
-    status: SolutionStatus,
+    status: QuoteStatus,
     backend: BackendKind,
     route: Option<Route>,
     amount_in: BigUint,
@@ -315,16 +315,16 @@ impl Quote {
     }
 
     /// Whether the solver found a valid route for this order.
-    pub fn status(&self) -> SolutionStatus {
+    pub fn status(&self) -> QuoteStatus {
         self.status
     }
 
-    /// Which backend produced this solution.
+    /// Which backend produced this quote.
     pub fn backend(&self) -> BackendKind {
         self.backend
     }
 
-    /// The route to execute, if [`status`](Self::status) is [`SolutionStatus::Success`].
+    /// The route to execute, if [`status`](Self::status) is [`QuoteStatus::Success`].
     pub fn route(&self) -> Option<&Route> {
         self.route.as_ref()
     }
@@ -344,7 +344,7 @@ impl Quote {
         &self.gas_estimate
     }
 
-    /// Price impact in basis points (1 bps = 0.01%). May be `None` for failed solutions.
+    /// Price impact in basis points (1 bps = 0.01%). May be `None` for quotes without a route.
     pub fn price_impact_bps(&self) -> Option<i32> {
         self.price_impact_bps
     }
@@ -381,7 +381,7 @@ impl Quote {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         order_id: String,
-        status: SolutionStatus,
+        status: QuoteStatus,
         backend: BackendKind,
         route: Option<Route>,
         amount_in: BigUint,
@@ -409,14 +409,14 @@ impl Quote {
     }
 }
 
-/// The solver's response to a [`QuoteParams`] request, containing solutions for every order.
+/// The solver's response to a [`QuoteParams`] request, containing quotes for every order.
 #[derive(Debug)]
 pub(crate) struct BatchQuote {
     quotes: Vec<Quote>,
 }
 
 impl BatchQuote {
-    /// Solutions for each order, in the same order as the request.
+    /// Quotes for each order, in the same order as the request.
     pub fn quotes(&self) -> &[Quote] {
         &self.quotes
     }

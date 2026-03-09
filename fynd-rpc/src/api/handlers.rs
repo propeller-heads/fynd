@@ -10,14 +10,14 @@ use crate::api::error::ErrorResponse;
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/v1")
-            .route("/solve", web::post().to(solve))
+            .route("/quote", web::post().to(quote))
             .route("/health", web::get().to(health)),
     );
 }
 
-/// POST /v1/solve - Submit a solve request.
+/// POST /v1/quote - Request a quote.
 ///
-/// Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error
+/// Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error
 /// if the request could not be filled.
 ///
 /// # Errors
@@ -25,24 +25,24 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 400 Bad Request: Invalid request format
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
-/// - 504 Gateway Timeout: Solve timeout
+/// - 504 Gateway Timeout: Quote timeout
 #[utoipa::path(
     post,
-    path = "/v1/solve",
+    path = "/v1/quote",
     tag = "solver",
-    request_body = dto::SolutionRequest,
+    request_body = dto::QuoteRequest,
     responses(
-        (status = 200, description = "Solve completed", body = dto::Solution),
+        (status = 200, description = "Quote completed", body = dto::Quote),
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
-        (status = 504, description = "Solve timeout", body = ErrorResponse),
+        (status = 504, description = "Quote timeout", body = ErrorResponse),
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
-pub async fn solve(
+pub async fn quote(
     state: web::Data<AppState>,
-    request: web::Json<dto::SolutionRequest>,
+    request: web::Json<dto::QuoteRequest>,
 ) -> Result<HttpResponse, ApiError> {
     let dto_request = request.into_inner();
 
@@ -52,30 +52,30 @@ pub async fn solve(
     }
 
     // Convert DTO to core types
-    let core_request = dto::solution_request_to_core(dto_request);
+    let core_request: fynd_core::QuoteRequest = dto_request.into();
 
     // Validate orders
-    for order in &core_request.orders {
+    for order in core_request.orders() {
         if let Err(e) = order.validate() {
-            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id, e)));
+            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
         }
     }
 
-    let core_solution = state
+    let core_quote = state
         .order_manager
-        .solve(core_request)
+        .quote(core_request)
         .await?;
 
     info!(
-        solve_time_ms = core_solution.solve_time_ms,
-        num_orders = core_solution.orders.len(),
+        solve_time_ms = core_quote.solve_time_ms(),
+        num_orders = core_quote.orders().len(),
         num_pools = state.order_manager.num_pools(),
-        "solve completed"
+        "quote completed"
     );
 
-    let dto_solution = dto::solution_from_core(core_solution);
+    let dto_quote: dto::Quote = core_quote.into();
 
-    Ok(HttpResponse::Ok().json(dto_solution))
+    Ok(HttpResponse::Ok().json(dto_quote))
 }
 
 /// GET /v1/health - Health check endpoint.

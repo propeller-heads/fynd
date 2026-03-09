@@ -56,7 +56,7 @@ pub use error::{ErrorCode, FyndError};
 pub use signing::{ExecutionReceipt, FyndPayload, SettledOrder, SignablePayload, SignedOrder};
 pub use types::{
     BackendKind, BlockInfo, HealthStatus, Order, OrderSide, Quote, QuoteOptions, QuoteParams,
-    Route, SolutionStatus, Swap,
+    QuoteStatus, Route, Swap,
 };
 
 mod client;

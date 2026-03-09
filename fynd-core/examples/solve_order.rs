@@ -25,7 +25,7 @@ use fynd_core::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     types::{constants::native_token, Order, OrderSide},
-    OrderManager, OrderManagerConfig, SolutionRequest, SolverPoolHandle, WorkerPoolBuilder,
+    OrderManager, OrderManagerConfig, QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                now.saturating_sub(block_info.timestamp)
+                now.saturating_sub(block_info.timestamp())
                     .saturating_mul(1000)
             }
             None => u64::MAX,
@@ -165,36 +165,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let usdc_addr = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?;
     let wbtc_addr = Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599")?;
 
-    let order = Order {
-        id: "example-order".to_string(),
-        token_in: usdc_addr.clone(),
-        token_out: wbtc_addr.clone(),
-        amount: BigUint::from(1_000_000_000u128), // 1000 USDC (6 decimals)
-        side: OrderSide::Sell,
-        sender: "0x0000000000000000000000000000000000000000".parse()?,
-        receiver: None,
-    };
+    let order = Order::new(
+        usdc_addr.clone(),
+        wbtc_addr.clone(),
+        BigUint::from(1_000_000_000u128), // 1000 USDC (6 decimals)
+        OrderSide::Sell,
+        "0x0000000000000000000000000000000000000000".parse()?,
+    )
+    .with_id("example-order".to_string());
 
     print!("Solving: 1000 USDC → WBTC...");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let request = SolutionRequest { orders: vec![order], options: Default::default() };
-    let solution = order_manager.solve(request).await?;
+    let request = QuoteRequest::new(vec![order], Default::default());
+    let solution = order_manager.quote(request).await?;
 
-    println!(" done ({}ms)\n", solution.solve_time_ms);
+    println!(" done ({}ms)\n", solution.solve_time_ms());
 
     // 11. Display results
-    let order_solution = &solution.orders[0];
+    let order_quote = &solution.orders()[0];
 
-    if let Some(route) = &order_solution.route {
+    if let Some(route) = order_quote.route() {
         let market = market_data.read().await;
 
-        let final_swap = route.swaps.last().unwrap();
+        let final_swap = route.swaps().last().unwrap();
         let final_token_out = market
-            .get_token(&final_swap.token_out)
+            .get_token(final_swap.token_out())
             .unwrap();
         let final_amount_out = final_swap
-            .amount_out
+            .amount_out()
             .to_string()
             .parse::<f64>()
             .unwrap_or(0.0) /
@@ -203,23 +202,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Result: {:.2} {}", final_amount_out, final_token_out.symbol);
         println!("Gas:    {}\n", route.total_gas());
 
-        println!("Route ({} hops):", route.swaps.len());
-        for (i, swap) in route.swaps.iter().enumerate() {
+        println!("Route ({} hops):", route.swaps().len());
+        for (i, swap) in route.swaps().iter().enumerate() {
             let token_in = market
-                .get_token(&swap.token_in)
+                .get_token(swap.token_in())
                 .unwrap();
             let token_out = market
-                .get_token(&swap.token_out)
+                .get_token(swap.token_out())
                 .unwrap();
 
             let amount_in_f64 = swap
-                .amount_in
+                .amount_in()
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0) /
                 10f64.powi(token_in.decimals as i32);
             let amount_out_f64 = swap
-                .amount_out
+                .amount_out()
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0) /
@@ -232,11 +231,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 token_in.symbol,
                 amount_out_f64,
                 token_out.symbol,
-                swap.protocol
+                swap.protocol()
             );
         }
     } else {
-        println!("No route found (status: {:?})", order_solution.status);
+        println!("No route found (status: {:?})", order_quote.status());
     }
 
     // Clean shutdown

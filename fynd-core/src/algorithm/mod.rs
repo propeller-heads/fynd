@@ -26,18 +26,18 @@ use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::SharedMarketDataRef,
     graph::GraphManager,
-    types::{solution::Order, RouteResult},
+    types::{quote::Order, RouteResult},
 };
 
 /// Configuration for an Algorithm instance.
 #[derive(Debug, Clone)]
 pub struct AlgorithmConfig {
     /// Minimum hops to search (must be >= 1).
-    pub min_hops: usize,
+    min_hops: usize,
     /// Maximum hops to search.
-    pub max_hops: usize,
+    max_hops: usize,
     /// Timeout for solving.
-    pub timeout: Duration,
+    timeout: Duration,
     /// Maximum number of paths to simulate. `None` means no cap.
     pub max_routes: Option<usize>,
 }
@@ -72,6 +72,21 @@ impl AlgorithmConfig {
             });
         }
         Ok(Self { min_hops, max_hops, timeout, max_routes })
+    }
+
+    /// Returns the minimum number of hops to search.
+    pub fn min_hops(&self) -> usize {
+        self.min_hops
+    }
+
+    /// Returns the maximum number of hops to search.
+    pub fn max_hops(&self) -> usize {
+        self.max_hops
+    }
+
+    /// Returns the timeout for solving.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 

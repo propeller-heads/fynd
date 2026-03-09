@@ -4,14 +4,14 @@
 //! compatibility guarantees with the server.
 
 use fynd_rpc_types as dto;
-use fynd_rpc_types::{OrderSolution, Solution};
+use fynd_rpc_types::OrderQuote;
 use tycho_simulation::tycho_common::models::Address as TychoAddress;
 
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
         BackendKind, BatchQuote, BlockInfo, HealthStatus, Order, OrderSide, Quote, QuoteOptions,
-        QuoteParams, Route, SolutionStatus, Swap,
+        QuoteParams, QuoteStatus, Route, Swap,
     },
 };
 // ============================================================================
@@ -47,9 +47,9 @@ fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
 // CLIENT TYPES → DTO FORMAT
 // ============================================================================
 
-pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::SolutionRequest, FyndError> {
+pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::QuoteRequest, FyndError> {
     let order = dto::Order::try_from(params.order)?;
-    Ok(dto::SolutionRequest { orders: vec![order], options: params.options.into() })
+    Ok(dto::QuoteRequest { orders: vec![order], options: params.options.into() })
 }
 
 impl TryFrom<Order> for dto::Order {
@@ -83,12 +83,13 @@ impl From<OrderSide> for dto::OrderSide {
     }
 }
 
-impl From<QuoteOptions> for dto::SolutionOptions {
+impl From<QuoteOptions> for dto::QuoteOptions {
     fn from(opts: QuoteOptions) -> Self {
-        dto::SolutionOptions {
+        dto::QuoteOptions {
             timeout_ms: opts.timeout_ms,
             min_responses: opts.min_responses,
             max_gas: opts.max_gas,
+            encoding_options: None,
         }
     }
 }
@@ -98,11 +99,11 @@ impl From<QuoteOptions> for dto::SolutionOptions {
 // ============================================================================
 
 pub(crate) fn dto_to_quote(
-    ds: OrderSolution,
+    ds: OrderQuote,
     token_out: bytes::Bytes,
     receiver: bytes::Bytes,
 ) -> Result<Quote, FyndError> {
-    let status = SolutionStatus::from(ds.status);
+    let status = QuoteStatus::from(ds.status);
     let route = ds
         .route
         .map(Route::try_from)
@@ -124,7 +125,7 @@ pub(crate) fn dto_to_quote(
 }
 
 pub(crate) fn dto_to_batch_quote(
-    ds: Solution,
+    ds: dto::Quote,
     token_out: bytes::Bytes,
     receiver: bytes::Bytes,
 ) -> Result<BatchQuote, FyndError> {
@@ -136,14 +137,14 @@ pub(crate) fn dto_to_batch_quote(
     Ok(BatchQuote::new(quotes))
 }
 
-impl From<dto::SolutionStatus> for SolutionStatus {
-    fn from(ds: dto::SolutionStatus) -> Self {
+impl From<dto::QuoteStatus> for QuoteStatus {
+    fn from(ds: dto::QuoteStatus) -> Self {
         match ds {
-            dto::SolutionStatus::Success => Self::Success,
-            dto::SolutionStatus::NoRouteFound => Self::NoRouteFound,
-            dto::SolutionStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
-            dto::SolutionStatus::Timeout => Self::Timeout,
-            dto::SolutionStatus::NotReady => Self::NotReady,
+            dto::QuoteStatus::Success => Self::Success,
+            dto::QuoteStatus::NoRouteFound => Self::NoRouteFound,
+            dto::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
+            dto::QuoteStatus::Timeout => Self::Timeout,
+            dto::QuoteStatus::NotReady => Self::NotReady,
         }
     }
 }
@@ -232,10 +233,10 @@ mod tests {
         }
     }
 
-    fn sample_dto_order_solution() -> dto::OrderSolution {
-        dto::OrderSolution {
+    fn sample_dto_order_quote() -> dto::OrderQuote {
+        dto::OrderQuote {
             order_id: "test-order-id".to_string(),
-            status: dto::SolutionStatus::Success,
+            status: dto::QuoteStatus::Success,
             route: None,
             amount_in: BigUint::from(1_000u32),
             amount_out: BigUint::from(999u32),
@@ -243,6 +244,8 @@ mod tests {
             price_impact_bps: Some(5),
             amount_out_net_gas: BigUint::from(998u32),
             block: sample_dto_block(),
+            gas_price: None,
+            transaction: None,
         }
     }
 
@@ -280,20 +283,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SolutionStatus conversion
+    // QuoteStatus conversion
     // -----------------------------------------------------------------------
 
     #[test]
-    fn solution_status_all_variants() {
-        use dto::SolutionStatus as Dto;
-        assert!(matches!(SolutionStatus::from(Dto::Success), SolutionStatus::Success));
-        assert!(matches!(SolutionStatus::from(Dto::NoRouteFound), SolutionStatus::NoRouteFound));
+    fn quote_status_all_variants() {
+        use dto::QuoteStatus as Dto;
+        assert!(matches!(QuoteStatus::from(Dto::Success), QuoteStatus::Success));
+        assert!(matches!(QuoteStatus::from(Dto::NoRouteFound), QuoteStatus::NoRouteFound));
         assert!(matches!(
-            SolutionStatus::from(Dto::InsufficientLiquidity),
-            SolutionStatus::InsufficientLiquidity
+            QuoteStatus::from(Dto::InsufficientLiquidity),
+            QuoteStatus::InsufficientLiquidity
         ));
-        assert!(matches!(SolutionStatus::from(Dto::Timeout), SolutionStatus::Timeout));
-        assert!(matches!(SolutionStatus::from(Dto::NotReady), SolutionStatus::NotReady));
+        assert!(matches!(QuoteStatus::from(Dto::Timeout), QuoteStatus::Timeout));
+        assert!(matches!(QuoteStatus::from(Dto::NotReady), QuoteStatus::NotReady));
     }
 
     // -----------------------------------------------------------------------
@@ -310,23 +313,23 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // OrderSolution conversion
+    // OrderQuote conversion
     // -----------------------------------------------------------------------
 
     #[test]
     fn quote_try_from_dto_drops_amount_out_net_gas_and_defaults_to_fynd() {
-        let ds = sample_dto_order_solution();
-        let solution = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
-        assert_eq!(solution.order_id(), "test-order-id");
-        assert!(matches!(solution.status(), SolutionStatus::Success));
-        assert!(matches!(solution.backend(), BackendKind::Fynd));
-        assert_eq!(solution.amount_in(), &BigUint::from(1_000u32));
-        assert_eq!(solution.amount_out(), &BigUint::from(999u32));
-        assert_eq!(solution.gas_estimate(), &BigUint::from(100_000u32));
-        assert_eq!(solution.price_impact_bps(), Some(5));
+        let ds = sample_dto_order_quote();
+        let quote = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
+        assert_eq!(quote.order_id(), "test-order-id");
+        assert!(matches!(quote.status(), QuoteStatus::Success));
+        assert!(matches!(quote.backend(), BackendKind::Fynd));
+        assert_eq!(quote.amount_in(), &BigUint::from(1_000u32));
+        assert_eq!(quote.amount_out(), &BigUint::from(999u32));
+        assert_eq!(quote.gas_estimate(), &BigUint::from(100_000u32));
+        assert_eq!(quote.price_impact_bps(), Some(5));
         // token_out and receiver are left empty until populated by quote()
-        assert!(solution.token_out().is_empty());
-        assert!(solution.receiver().is_empty());
+        assert!(quote.token_out().is_empty());
+        assert!(quote.receiver().is_empty());
     }
 
     // -----------------------------------------------------------------------

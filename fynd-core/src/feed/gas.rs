@@ -44,15 +44,15 @@ impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
                 lock.update_gas_price(fee_price);
                 if let Some(last_block_info) = lock.last_updated() {
                     let update_lag_ms =
-                        Utc::now().timestamp_millis() - (last_block_info.timestamp as i64 * 1000);
+                        Utc::now().timestamp_millis() - (last_block_info.timestamp() as i64 * 1000);
                     gauge!("gas_price_update_lag_ms").set(update_lag_ms as f64);
 
                     if last_block_info
-                        .number
+                        .number()
                         .abs_diff(update_block_number) >
                         3
                     {
-                        warn!("Gas price update is out of sync with the last block info. Gas price: {}, Last block info: {}", update_block_number, last_block_info.number);
+                        warn!("Gas price update is out of sync with the last block info. Gas price: {}, Last block info: {}", update_block_number, last_block_info.number());
                     }
                 }
             }

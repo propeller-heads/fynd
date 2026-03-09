@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use alloy::hex;
 use bytes::Bytes;
 use fynd_client::{Order, OrderSide, QuoteOptions, QuoteParams};
 use num_bigint::BigUint;

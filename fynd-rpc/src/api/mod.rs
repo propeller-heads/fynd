@@ -1,7 +1,7 @@
 //! HTTP API layer using Actix Web.
 //!
 //! This module provides the HTTP endpoints for the solver:
-//! - POST /solve - Submit solve requests
+//! - POST /quote - Submit solve requests
 //! - GET /health - Health check endpoint
 
 pub mod dto;
@@ -25,15 +25,15 @@ use crate::api::error::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::solve, handlers::health),
+    paths(handlers::quote, handlers::health),
     components(schemas(
-        dto::SolutionRequest,
+        dto::QuoteRequest,
         dto::Order,
         dto::OrderSide,
-        dto::SolutionOptions,
-        dto::Solution,
-        dto::OrderSolution,
-        dto::SolutionStatus,
+        dto::QuoteOptions,
+        dto::Quote,
+        dto::OrderQuote,
+        dto::QuoteStatus,
         dto::Route,
         dto::Swap,
         dto::BlockInfo,
@@ -68,7 +68,7 @@ impl HealthTracker {
                     .unwrap()
                     .as_secs();
                 // Convert block timestamp (seconds) to ms and calculate age
-                now.saturating_sub(block_info.timestamp)
+                now.saturating_sub(block_info.timestamp())
                     .saturating_mul(1000)
             }
             None => u64::MAX, // Never updated

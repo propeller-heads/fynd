@@ -96,12 +96,12 @@ curl http://localhost:3000/v1/health
 
 Returns `"healthy":true` when ready to receive requests.
 
-### 4. Submit a solve request
+### 4. Request a quote
 
 Get the quote for **1 WETH -> USDC** (or any pair/amount you want):
 
 ```bash
-curl -X POST http://localhost:3000/v1/solve \
+curl -X POST http://localhost:3000/v1/quote \
   -H "Content-Type: application/json" \
   -d '{
     "orders": [

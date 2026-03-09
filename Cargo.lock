@@ -3260,7 +3260,6 @@ dependencies = [
  "fynd-client",
  "fynd-core",
  "fynd-rpc",
- "hex",
  "metrics-exporter-prometheus",
  "num-bigint",
  "num-traits",
@@ -3361,6 +3360,8 @@ dependencies = [
 name = "fynd-rpc-types"
 version = "0.1.0"
 dependencies = [
+ "fynd-core",
+ "hex",
  "num-bigint",
  "serde",
  "serde_json",
