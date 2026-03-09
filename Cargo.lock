@@ -1418,6 +1418,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert-json-diff"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e4f2b81832e72834d7518d8487a0396a28cc408186a2e8854c0f98011faf12"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2580,6 +2590,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "deadpool"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
+dependencies = [
+ "deadpool-runtime",
+ "lazy_static",
+ "num_cpus",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool-runtime"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
 name = "deepsize"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3224,10 +3252,12 @@ dependencies = [
  "alloy",
  "alloy-chains",
  "anyhow",
+ "bytes",
  "clap",
  "dialoguer 0.11.0",
  "dotenv",
  "fastrand",
+ "fynd-client",
  "fynd-core",
  "fynd-rpc",
  "hex",
@@ -3248,6 +3278,24 @@ dependencies = [
  "tracing-subscriber 0.3.22",
  "tycho-execution",
  "tycho-simulation",
+]
+
+[[package]]
+name = "fynd-client"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "bytes",
+ "fynd-rpc-types",
+ "num-bigint",
+ "num-traits",
+ "reqwest",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tycho-simulation",
+ "wiremock",
 ]
 
 [[package]]
@@ -3287,6 +3335,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "fynd-core",
+ "fynd-rpc-types",
  "hex",
  "metrics",
  "num-bigint",
@@ -3305,6 +3354,19 @@ dependencies = [
  "tycho-simulation",
  "utoipa 5.4.0",
  "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "fynd-rpc-types"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tycho-simulation",
+ "utoipa 5.4.0",
  "uuid",
 ]
 
@@ -7374,9 +7436,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.164.0"
+version = "0.165.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "705d52bcdd86c43d5a1027be5537b26541ee43a252bd6a21e242050e8916794b"
+checksum = "89406dc3ce6e8b851ad8ca9794070e236cee4378d110a89470eda067a6056ded"
 dependencies = [
  "alloy",
  "chrono",
@@ -8162,6 +8224,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wiremock"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08db1edfb05d9b3c1542e521aea074442088292f00b5f28e435c714a98f85031"
+dependencies = [
+ "assert-json-diff",
+ "base64",
+ "deadpool",
+ "futures 0.3.32",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "log",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]

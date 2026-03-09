@@ -210,7 +210,7 @@ mod tests {
         let params = SpawnWorkersParams {
             algorithm: "most_liquid".to_string(),
             num_workers: 3,
-            algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50)).unwrap(),
+            algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None).unwrap(),
             task_rx,
             market_data,
             derived_data,

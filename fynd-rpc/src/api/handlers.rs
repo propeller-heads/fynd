@@ -4,7 +4,7 @@ use actix_web::{web, HttpResponse};
 use tracing::{info, instrument};
 
 use super::{dto, ApiError, AppState};
-use crate::api::{dto::HealthStatus, error::ErrorResponse};
+use crate::api::error::ErrorResponse;
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -86,15 +86,15 @@ pub async fn quote(
     path = "/v1/health",
     tag = "health",
     responses(
-        (status = 200, description = "Service healthy", body = HealthStatus),
-        (status = 503, description = "Data stale", body = HealthStatus),
+        (status = 200, description = "Service healthy", body = dto::HealthStatus),
+        (status = 503, description = "Data stale", body = dto::HealthStatus),
     )
 )]
 pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker.age_ms().await;
     let is_healthy = age_ms < 60_000; // Healthy if data less than 60s old
 
-    let status = HealthStatus {
+    let status = dto::HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
         num_solver_pools: state.order_manager.num_pools(),
