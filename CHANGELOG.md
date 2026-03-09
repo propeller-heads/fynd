@@ -1,3 +1,15 @@
+## [0.2.0](https://github.com/propeller-heads/fynd/compare/0.1.0...0.2.0) (2026-03-09)
+
+
+### Features
+
+* allow external algorithms in WorkerPoolBuilder ([3a5defb](https://github.com/propeller-heads/fynd/commit/3a5defbf8c3a2e6be7c894fcc20b3fe9110ef134))
+
+
+### Bug Fixes
+
+* Make spawner in WorkerPoolConfig private ([b488c3e](https://github.com/propeller-heads/fynd/commit/b488c3e5e7cc61e0181598c2185ea2243f20c9e2))
+
 ## [0.1.0](https://github.com/propeller-heads/fynd/compare/0.0.0...0.1.0) (2026-03-09)
 
 
