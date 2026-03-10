@@ -1,17 +1,17 @@
-use alloy::{primitives::Keccak256, sol_types::SolValue};
+use alloy::{
+    primitives::{aliases::U48, Keccak256, U160},
+    sol_types::SolValue,
+};
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
-        approvals::permit2::PermitSingle,
+        approvals::permit2::{PermitDetails as SolPermitDetails, PermitSingle},
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{biguint_to_u256, bytes_to_address},
     },
-    models::{
-        EncodedSolution, NativeAction, PermitDetails as ModelsPermitDetails,
-        PermitSingle as ModelsPermitSingle, Solution, Swap, UserTransferType,
-    },
+    models::{EncodedSolution, Solution, Swap, UserTransferType},
     tycho_encoder::TychoEncoder,
 };
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
@@ -42,6 +42,7 @@ impl From<&OrderQuote> for Solution {
                             Bytes::from(s.token_in().as_ref()),
                             Bytes::from(s.token_out().as_ref()),
                         )
+                        .split(*s.split())
                     })
                     .collect()
             })
@@ -98,6 +99,13 @@ impl Encoder {
         mut quotes: Vec<OrderQuote>,
         encoding_options: EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
+        let slippage = encoding_options.slippage();
+        if slippage == 0.0 {
+            tracing::warn!("slippage is 0, transaction will likely revert");
+        } else if slippage > 0.5 {
+            tracing::warn!(slippage, "slippage exceeds 50%, possible misconfiguration");
+        }
+
         let mut to_encode: Vec<(usize, Solution)> = Vec::new();
 
         for (i, quote) in quotes.iter().enumerate() {
@@ -144,14 +152,6 @@ impl Encoder {
         user_transfer_type: &UserTransferType,
         encoding_options: EncodingOptions,
     ) -> Result<Transaction, EncodingError> {
-        let (mut unwrap, mut wrap) = (false, false);
-        if let Some(action) = solution.native_action.clone() {
-            match action {
-                NativeAction::Wrap => wrap = true,
-                NativeAction::Unwrap => unwrap = true,
-            }
-        }
-
         let given_amount = biguint_to_u256(&solution.given_amount);
         let precision = BigUint::from(1_000_000u64);
         let slippage_amount = solution.checked_amount.clone() *
@@ -162,20 +162,17 @@ impl Encoder {
         let checked_token = bytes_to_address(&solution.checked_token)?;
         let receiver = bytes_to_address(&solution.receiver)?;
         let (permit, signature) = if let Some(p) = encoding_options.permit() {
-            let models_permit = ModelsPermitSingle {
-                details: ModelsPermitDetails {
-                    token: p.details().token().clone(),
-                    amount: p.details().amount().clone(),
-                    expiration: p.details().expiration().clone(),
-                    nonce: p.details().nonce().clone(),
+            let d = p.details();
+            let permit = Some(PermitSingle {
+                details: SolPermitDetails {
+                    token: bytes_to_address(d.token())?,
+                    amount: U160::from(biguint_to_u256(d.amount())),
+                    expiration: U48::from(biguint_to_u256(d.expiration())),
+                    nonce: U48::from(biguint_to_u256(d.nonce())),
                 },
-                spender: p.spender().clone(),
-                sig_deadline: p.sig_deadline().clone(),
-            };
-            let permit = Some(
-                PermitSingle::try_from(&models_permit)
-                    .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
-            );
+                spender: bytes_to_address(p.spender())?,
+                sigDeadline: biguint_to_u256(p.sig_deadline()),
+            });
             let signature = if let Some(sig) = encoding_options.permit2_signature() {
                 sig.to_vec()
             } else {
@@ -197,8 +194,8 @@ impl Encoder {
                 given_token,
                 checked_token,
                 min_amount_out,
-                wrap,
-                unwrap,
+                false,
+                false,
                 receiver,
                 permit.ok_or(EncodingError::FatalError(
                     "permit2 object must be set to use permit2".to_string(),
@@ -216,8 +213,8 @@ impl Encoder {
                 given_token,
                 checked_token,
                 min_amount_out,
-                wrap,
-                unwrap,
+                false,
+                false,
                 receiver,
                 user_transfer_type == &UserTransferType::TransferFrom,
                 encoded_solution.swaps,
@@ -232,8 +229,8 @@ impl Encoder {
                 given_token,
                 checked_token,
                 min_amount_out,
-                wrap,
-                unwrap,
+                false,
+                false,
                 receiver,
                 permit.ok_or(EncodingError::FatalError(
                     "permit2 object must be set to use permit2".to_string(),
@@ -251,8 +248,8 @@ impl Encoder {
                 given_token,
                 checked_token,
                 min_amount_out,
-                wrap,
-                unwrap,
+                false,
+                false,
                 receiver,
                 user_transfer_type == &UserTransferType::TransferFrom,
                 encoded_solution.swaps,
@@ -393,14 +390,7 @@ mod tests {
         }
     }
 
-    fn test_encoder(chain: Chain) -> Encoder {
-        test_encoder_with_encoded_solutions(chain, vec![])
-    }
-
-    fn test_encoder_with_encoded_solutions(
-        chain: Chain,
-        encoded_solutions: Vec<EncodedSolution>,
-    ) -> Encoder {
+    fn mock_encoder(chain: Chain, encoded_solutions: Vec<EncodedSolution>) -> Encoder {
         Encoder { tycho_encoder: Box::new(MockTychoEncoder { encoded_solutions }), chain }
     }
 
@@ -431,7 +421,6 @@ mod tests {
         assert_eq!(solution.given_amount, *quote.amount_in());
         assert_eq!(solution.checked_amount, *quote.amount_out());
         assert!(!solution.exact_out);
-        assert_eq!(solution.native_action, None);
         assert_eq!(solution.swaps.len(), 1);
     }
 
@@ -453,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_encode_skips_non_successful_solutions() {
-        let encoder = test_encoder(Chain::Ethereum);
+        let encoder = mock_encoder(Chain::Ethereum, vec![]);
         let quote = OrderQuote::new(
             "test-order".to_string(),
             make_address(0x01),
@@ -490,7 +479,7 @@ mod tests {
             n_tokens: 2,
             permit: None,
         };
-        let encoder = test_encoder_with_encoded_solutions(Chain::Ethereum, vec![encoded]);
+        let encoder = mock_encoder(Chain::Ethereum, vec![encoded]);
 
         let quote = make_order_quote(make_address(0x01), make_address(0x02)).with_route(
             crate::types::Route::new(vec![make_route_swap_addrs(
