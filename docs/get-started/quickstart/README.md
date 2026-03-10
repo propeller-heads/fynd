@@ -184,7 +184,7 @@ Both pools solve every incoming order in parallel. Fynd picks the best result ac
 
 | Field                 | Default         | Description                                                            |
 |-----------------------|-----------------|------------------------------------------------------------------------|
-| `algorithm`           | `"most_liquid"` | Algorithm used for the pool                                            |
+| `algorithm`           | `"most_liquid"` | [Algorithm](../../ALGORITHMS.md) used for the pool                     |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |

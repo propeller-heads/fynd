@@ -203,7 +203,7 @@ Pluggable interface for route-finding algorithms:
 - Declares derived data requirements (fresh vs stale)
 
 **Built-in:** `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation,
-gas-adjusted ranking.
+gas-adjusted ranking. See [Algorithms](ALGORITHMS.md) for detailed documentation on how each algorithm works.
 
 ---
 
