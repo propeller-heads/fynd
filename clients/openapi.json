@@ -42,77 +42,6 @@
         }
       }
     },
-    "/v1/prices": {
-      "get": {
-        "tags": [
-          "prices"
-        ],
-        "summary": "GET /v1/prices - Return derived token prices and optional market data.",
-        "description": "By default returns token gas prices only. Use `include` query parameter\nto add spot prices and/or pool depths.\n\n# Query Parameters\n\n- `include` - Comma-separated list: `depths`, `spot_prices`\n- `limit` - Max entries for spot_prices / pool_depths (default: 1000)",
-        "operationId": "get_prices",
-        "parameters": [
-          {
-            "name": "include",
-            "in": "query",
-            "description": "Comma-separated list of additional data to include.\nValid values: `depths`, `spot_prices`.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "example": "depths,spot_prices"
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Maximum number of spot_prices and pool_depths entries (default: 1000).",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0
-            },
-            "example": 1000
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Prices returned",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PricesResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid query parameter",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Data not yet available",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/quote": {
       "post": {
         "tags": [
@@ -498,85 +427,6 @@
           }
         }
       },
-      "PoolDepthEntry": {
-        "type": "object",
-        "description": "A single directional pool depth.",
-        "required": [
-          "component_id",
-          "token_in",
-          "token_out",
-          "depth"
-        ],
-        "properties": {
-          "component_id": {
-            "$ref": "#/components/schemas/String",
-            "description": "Pool / component identifier."
-          },
-          "depth": {
-            "type": "string",
-            "description": "Maximum input amount before hitting the slippage threshold (decimal string)."
-          },
-          "token_in": {
-            "type": "string",
-            "description": "Input token address.",
-            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-          },
-          "token_out": {
-            "type": "string",
-            "description": "Output token address.",
-            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-          }
-        }
-      },
-      "PricesResponse": {
-        "type": "object",
-        "description": "Top-level response for GET /v1/prices.",
-        "required": [
-          "prices",
-          "gas_token",
-          "last_block"
-        ],
-        "properties": {
-          "gas_token": {
-            "type": "string",
-            "description": "The gas token address (e.g. WETH).",
-            "example": "0x0000000000000000000000000000000000000000"
-          },
-          "last_block": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Block number at which prices were last computed.",
-            "minimum": 0
-          },
-          "pool_depths": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/PoolDepthEntry"
-            },
-            "description": "Pool depths per pool direction (only if requested via `include=depths`)."
-          },
-          "prices": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TokenPriceEntry"
-            },
-            "description": "Token gas prices relative to the native gas token."
-          },
-          "spot_prices": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/SpotPriceEntry"
-            },
-            "description": "Spot prices per pool direction (only if requested via `include=spot_prices`)."
-          }
-        }
-      },
       "Quote": {
         "type": "object",
         "description": "Complete solution for a [`QuoteRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
@@ -696,40 +546,6 @@
           }
         }
       },
-      "SpotPriceEntry": {
-        "type": "object",
-        "description": "A single directional spot price within a pool.",
-        "required": [
-          "component_id",
-          "token_in",
-          "token_out",
-          "price"
-        ],
-        "properties": {
-          "component_id": {
-            "$ref": "#/components/schemas/String",
-            "description": "Pool / component identifier."
-          },
-          "price": {
-            "type": "number",
-            "format": "double",
-            "description": "Spot price (1 token_in = price token_out)."
-          },
-          "token_in": {
-            "type": "string",
-            "description": "Input token address.",
-            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-          },
-          "token_out": {
-            "type": "string",
-            "description": "Output token address.",
-            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-          }
-        }
-      },
-      "String": {
-        "type": "string"
-      },
       "Swap": {
         "type": "object",
         "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific liquidity pool (component).",
@@ -783,26 +599,6 @@
           "token_out": {
             "type": "string",
             "description": "Output token address.",
-            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-          }
-        }
-      },
-      "TokenPriceEntry": {
-        "type": "object",
-        "description": "A single token's gas price.",
-        "required": [
-          "token",
-          "price"
-        ],
-        "properties": {
-          "price": {
-            "type": "number",
-            "format": "double",
-            "description": "Price relative to gas token as a float."
-          },
-          "token": {
-            "type": "string",
-            "description": "Token address.",
             "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
           }
         }
