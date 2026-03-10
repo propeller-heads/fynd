@@ -40,16 +40,14 @@ use crate::types::{EvaluatedCycle, ExecutionMode, ExecutionResult};
 /// Handles encoding and execution of profitable cycles.
 ///
 /// Future improvements (from review):
-/// - Use eth_estimateGas instead of hardcoded gas limits (100k/800k)
 /// - Return error for unsupported chains instead of silent mainnet fallback
-/// - Implement bribe_pct for priority fee computation (or remove from CLI)
 /// - Add timeout on approval tx confirmation in execute_public
-/// - Cache SwapEncoderRegistry on CycleExecutor instead of rebuilding per call
 /// - Add state overrides for simulation with Address::ZERO
 pub struct CycleExecutor {
     chain: Chain,
     slippage_bps: u32,
-    #[allow(dead_code)]
+    /// Priority fee multiplier as a percentage of the network-suggested fee.
+    /// 100 = use suggested fee, 200 = 2x (aggressive), 50 = 0.5x (passive).
     bribe_pct: u32,
     rpc_url: Option<String>,
     signer: Option<PrivateKeySigner>,
@@ -183,6 +181,10 @@ impl CycleExecutor {
     }
 
     /// Build approval + swap `TransactionRequest`s for eth_simulate.
+    ///
+    /// Gas limits are estimated via `eth_estimateGas` with a 20% buffer.
+    /// Priority fee is scaled by `bribe_pct` relative to the network
+    /// suggested fee (from `eth_maxPriorityFeePerGas`).
     async fn build_tx_requests(
         &self,
         provider: &RootProvider<Ethereum>,
@@ -193,24 +195,13 @@ impl CycleExecutor {
         tx: &Transaction,
         chain_id: u64,
     ) -> Result<(TransactionRequest, TransactionRequest), String> {
-        let block = provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-            .await
-            .map_err(|e| format!("get block: {}", e))?
-            .ok_or("block not found")?;
-
-        let base_fee = block.header.base_fee_per_gas.ok_or("no base fee")?;
-        let max_priority_fee_per_gas = 1_000_000_000u64;
-        let max_fee_per_gas = base_fee + max_priority_fee_per_gas;
-
-        let nonce = provider
-            .get_transaction_count(user_address)
-            .await
-            .map_err(|e| format!("get nonce: {}", e))?;
+        let (base_fee, priority_fee, nonce) =
+            self.fetch_tx_params(provider, user_address).await?;
+        let max_fee_per_gas = base_fee + priority_fee;
 
         let approve_data = build_approval_calldata(&amount_in, router_address);
 
-        let approval_request = TransactionRequest {
+        let mut approval_request = TransactionRequest {
             to: Some(TxKind::Call(sell_token_address)),
             from: Some(user_address),
             value: None,
@@ -218,15 +209,18 @@ impl CycleExecutor {
                 input: Some(AlloyBytes::from(approve_data)),
                 data: None,
             },
-            gas: Some(100_000u64),
             chain_id: Some(chain_id),
             max_fee_per_gas: Some(max_fee_per_gas.into()),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas.into()),
+            max_priority_fee_per_gas: Some(priority_fee.into()),
             nonce: Some(nonce),
             ..Default::default()
         };
 
-        let swap_request = TransactionRequest {
+        let approval_gas = estimate_gas_with_buffer(provider, &approval_request, 100_000)
+            .await;
+        approval_request.gas = Some(approval_gas);
+
+        let mut swap_request = TransactionRequest {
             to: Some(TxKind::Call(Address::from_slice(&tx.to))),
             from: Some(user_address),
             value: Some(biguint_to_u256(&tx.value)),
@@ -234,15 +228,48 @@ impl CycleExecutor {
                 input: Some(AlloyBytes::from(tx.data.clone())),
                 data: None,
             },
-            gas: Some(800_000u64),
             chain_id: Some(chain_id),
             max_fee_per_gas: Some(max_fee_per_gas.into()),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas.into()),
+            max_priority_fee_per_gas: Some(priority_fee.into()),
             nonce: Some(nonce + 1),
             ..Default::default()
         };
 
+        let swap_gas = estimate_gas_with_buffer(provider, &swap_request, 800_000)
+            .await;
+        swap_request.gas = Some(swap_gas);
+
         Ok((approval_request, swap_request))
+    }
+
+    /// Fetch base fee, bribe-scaled priority fee, and current nonce.
+    async fn fetch_tx_params(
+        &self,
+        provider: &RootProvider<Ethereum>,
+        user_address: Address,
+    ) -> Result<(u64, u64, u64), String> {
+        let block = provider
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+            .await
+            .map_err(|e| format!("get block: {}", e))?
+            .ok_or("block not found")?;
+
+        let base_fee = block.header.base_fee_per_gas.ok_or("no base fee")?;
+
+        // Fetch network-suggested priority fee, scale by bribe_pct
+        let suggested_priority = provider
+            .get_max_priority_fee_per_gas()
+            .await
+            .unwrap_or(1_000_000_000); // 1 gwei fallback
+        let priority_fee = suggested_priority * self.bribe_pct as u128 / 100;
+        let priority_fee = priority_fee.min(u64::MAX as u128) as u64;
+
+        let nonce = provider
+            .get_transaction_count(user_address)
+            .await
+            .map_err(|e| format!("get nonce: {}", e))?;
+
+        Ok((base_fee, priority_fee, nonce))
     }
 
     /// Simulate the cycle via eth_simulate (no real tx sent).
@@ -779,22 +806,11 @@ impl CycleExecutor {
         tx: &Transaction,
         chain_id: u64,
     ) -> Result<TransactionRequest, String> {
-        let block = provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-            .await
-            .map_err(|e| format!("get block: {}", e))?
-            .ok_or("block not found")?;
+        let (base_fee, priority_fee, nonce) =
+            self.fetch_tx_params(provider, user_address).await?;
+        let max_fee_per_gas = base_fee + priority_fee;
 
-        let base_fee = block.header.base_fee_per_gas.ok_or("no base fee")?;
-        let max_priority_fee_per_gas = 1_000_000_000u64;
-        let max_fee_per_gas = base_fee + max_priority_fee_per_gas;
-
-        let nonce = provider
-            .get_transaction_count(user_address)
-            .await
-            .map_err(|e| format!("get nonce: {}", e))?;
-
-        Ok(TransactionRequest {
+        let mut swap_request = TransactionRequest {
             to: Some(TxKind::Call(Address::from_slice(&tx.to))),
             from: Some(user_address),
             value: Some(biguint_to_u256(&tx.value)),
@@ -802,17 +818,43 @@ impl CycleExecutor {
                 input: Some(AlloyBytes::from(tx.data.clone())),
                 data: None,
             },
-            gas: Some(800_000u64),
             chain_id: Some(chain_id),
             max_fee_per_gas: Some(max_fee_per_gas.into()),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas.into()),
+            max_priority_fee_per_gas: Some(priority_fee.into()),
             nonce: Some(nonce), // current nonce, no approval tx before this
             ..Default::default()
-        })
+        };
+
+        let gas = estimate_gas_with_buffer(provider, &swap_request, 800_000).await;
+        swap_request.gas = Some(gas);
+
+        Ok(swap_request)
     }
 }
 
 // ==================== Helpers ====================
+
+/// Estimate gas for a transaction with a 20% buffer.
+///
+/// Falls back to `fallback_gas` if the estimate fails (e.g. the sender
+/// has no balance, which is common in simulation mode).
+async fn estimate_gas_with_buffer(
+    provider: &RootProvider<Ethereum>,
+    tx: &TransactionRequest,
+    fallback_gas: u64,
+) -> u64 {
+    match provider.estimate_gas(tx.clone()).await {
+        Ok(estimated) => {
+            let buffered = estimated * 120 / 100; // 20% buffer
+            debug!(estimated, buffered, "gas estimate");
+            buffered
+        }
+        Err(e) => {
+            debug!(fallback = fallback_gas, error = %e, "gas estimate failed, using fallback");
+            fallback_gas
+        }
+    }
+}
 
 /// Convert tycho Chain to numeric chain ID.
 fn chain_to_id(chain: Chain) -> u64 {
