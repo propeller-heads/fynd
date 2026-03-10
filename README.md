@@ -45,7 +45,7 @@ export TYCHO_API_KEY=your-api-key
 export RUST_LOG=info
 
 # Run
-cargo run --release -- \
+cargo run --release serve -- \
   --tycho-url tycho-beta.propellerheads.xyz \
   --protocols uniswap_v2,uniswap_v3
 ```
@@ -65,7 +65,7 @@ The solver starts on `http://localhost:3000` by default.
 You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
 
 ```bash
-cargo run --release -- \
+cargo run --release serve -- \
   --tycho-url tycho-beta.propellerheads.xyz \
   --protocols uniswap_v2,uniswap_v3,rfq:bebop
 ```

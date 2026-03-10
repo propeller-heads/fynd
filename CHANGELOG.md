@@ -1,3 +1,22 @@
+## [0.4.0](https://github.com/propeller-heads/fynd/compare/0.3.1...0.4.0) (2026-03-10)
+
+
+### Features
+
+* add openapi subcommand and export spec ([ac2186c](https://github.com/propeller-heads/fynd/commit/ac2186cb6bed3869d26cd0e3d80e798a7213a02c))
+
+
+### Bug Fixes
+
+* add serve subcommand to Dockerfile entrypoint and README examples ([b13ff0f](https://github.com/propeller-heads/fynd/commit/b13ff0fb3ad02297b931c497900031f18656dcad))
+
+## [0.3.1](https://github.com/propeller-heads/fynd/compare/0.3.0...0.3.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* **deps:** update quinn-proto 0.11.13 -> 0.11.14 (RUSTSEC-2026-0037) ([868adee](https://github.com/propeller-heads/fynd/commit/868adee53efa77b65e179eaa1ae75168510c2a42))
+
 ## [0.3.0](https://github.com/propeller-heads/fynd/compare/0.2.0...0.3.0) (2026-03-09)
 
 

@@ -1,0 +1,643 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "fynd-rpc",
+    "description": "HTTP RPC server for Fynd DEX router",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.3.1"
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "GET /v1/health - Health check endpoint.",
+        "description": "Returns the current health status of the service.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Data stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quote": {
+      "post": {
+        "tags": [
+          "solver"
+        ],
+        "summary": "POST /v1/quote - Request a quote.",
+        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 504 Gateway Timeout: Quote timeout",
+        "operationId": "quote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Quote completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No route found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Quote timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BlockInfo": {
+        "type": "object",
+        "description": "Block information at which a quote was computed.\n\nQuotes are only valid for the block at which they were computed. Market\nconditions may change in subsequent blocks.",
+        "required": [
+          "number",
+          "hash",
+          "timestamp"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string",
+            "description": "Block hash as a hex string.",
+            "example": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block number.",
+            "example": 21000000,
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block timestamp in Unix seconds.",
+            "example": 1730000000,
+            "minimum": 0
+          }
+        }
+      },
+      "EncodingOptions": {
+        "type": "object",
+        "description": "Options to customize the encoding behavior.",
+        "required": [
+          "slippage"
+        ],
+        "properties": {
+          "permit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermitSingle",
+                "description": "Permit2 single-token authorization. Required when using `transfer_from_permit2`."
+              }
+            ]
+          },
+          "permit2_signature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.",
+            "example": "0xabcd..."
+          },
+          "slippage": {
+            "type": "number",
+            "format": "double",
+            "example": "0.001"
+          },
+          "transfer_type": {
+            "$ref": "#/components/schemas/UserTransferType",
+            "description": "Token transfer method. Defaults to `transfer_from`."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Error response body.",
+        "required": [
+          "error",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "BAD_REQUEST"
+          },
+          "details": {},
+          "error": {
+            "type": "string",
+            "example": "bad request: no orders provided"
+          }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "description": "Health check response.",
+        "required": [
+          "healthy",
+          "last_update_ms",
+          "num_solver_pools"
+        ],
+        "properties": {
+          "healthy": {
+            "type": "boolean",
+            "description": "Whether the service is healthy.",
+            "example": true
+          },
+          "last_update_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time since last market update in milliseconds.",
+            "example": 1250,
+            "minimum": 0
+          },
+          "num_solver_pools": {
+            "type": "integer",
+            "description": "Number of active solver pools.",
+            "example": 2,
+            "minimum": 0
+          }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "description": "A single swap order to be solved.\n\nAn order specifies an intent to swap one token for another.",
+        "required": [
+          "token_in",
+          "token_out",
+          "amount",
+          "side",
+          "sender"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Amount to swap, interpreted according to `side` (in token units, as decimal string).",
+            "example": "1000000000000000000"
+          },
+          "receiver": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Address that will receive the output tokens.\n\nDefaults to `sender` if not specified.",
+            "example": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+          },
+          "sender": {
+            "type": "string",
+            "description": "Address that will send the input tokens.",
+            "example": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+          },
+          "side": {
+            "$ref": "#/components/schemas/OrderSide",
+            "description": "Whether this is a sell (exact input) or buy (exact output) order."
+          },
+          "token_in": {
+            "type": "string",
+            "description": "Input token address (the token being sold).",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "token_out": {
+            "type": "string",
+            "description": "Output token address (the token being bought).",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "OrderQuote": {
+        "type": "object",
+        "description": "Quote for a single [`Order`].\n\nContains the route to execute (if found), along with expected amounts,\ngas estimates, and status information.",
+        "required": [
+          "order_id",
+          "status",
+          "amount_in",
+          "amount_out",
+          "gas_estimate",
+          "amount_out_net_gas",
+          "block"
+        ],
+        "properties": {
+          "amount_in": {
+            "type": "string",
+            "description": "Amount of input token (in token units, as decimal string).",
+            "example": "1000000000000000000"
+          },
+          "amount_out": {
+            "type": "string",
+            "description": "Amount of output token (in token units, as decimal string).",
+            "example": "3500000000"
+          },
+          "amount_out_net_gas": {
+            "type": "string",
+            "description": "Amount out minus gas cost in output token terms.\nUsed by OrderManager to compare solutions from different solvers.",
+            "example": "3498000000"
+          },
+          "block": {
+            "$ref": "#/components/schemas/BlockInfo",
+            "description": "Block at which this quote was computed."
+          },
+          "gas_estimate": {
+            "type": "string",
+            "description": "Estimated gas cost for executing this route (as decimal string).",
+            "example": "150000"
+          },
+          "gas_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Effective gas price (in wei) at the time the route was computed.",
+            "example": "20000000000"
+          },
+          "order_id": {
+            "type": "string",
+            "description": "ID of the order this solution corresponds to.",
+            "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+          },
+          "price_impact_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Price impact in basis points (1 bip = 0.01%)."
+          },
+          "route": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Route",
+                "description": "The route to execute, if a valid route was found."
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/QuoteStatus",
+            "description": "Status indicating whether a route was found."
+          },
+          "transaction": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Transaction",
+                "description": "An encoded EVM transaction ready to be submitted on-chain."
+              }
+            ]
+          }
+        }
+      },
+      "OrderSide": {
+        "type": "string",
+        "description": "Specifies the side of an order: sell (exact input) or buy (exact output).\n\nCurrently only `Sell` is supported. `Buy` will be added in a future version.",
+        "enum": [
+          "sell"
+        ]
+      },
+      "PermitDetails": {
+        "type": "object",
+        "description": "Details for a permit2 single-token permit.",
+        "required": [
+          "token",
+          "amount",
+          "expiration",
+          "nonce"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Amount of tokens approved.",
+            "example": "1000000000000000000"
+          },
+          "expiration": {
+            "type": "string",
+            "description": "Expiration timestamp for the permit.",
+            "example": "1893456000"
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Nonce to prevent replay attacks.",
+            "example": "0"
+          },
+          "token": {
+            "type": "string",
+            "description": "Token address for which the permit is granted.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          }
+        }
+      },
+      "PermitSingle": {
+        "type": "object",
+        "description": "A single permit for permit2 token transfer authorization.",
+        "required": [
+          "details",
+          "spender",
+          "sig_deadline"
+        ],
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/PermitDetails",
+            "description": "The permit details (token, amount, expiration, nonce)."
+          },
+          "sig_deadline": {
+            "type": "string",
+            "description": "Deadline timestamp for the permit signature.",
+            "example": "1893456000"
+          },
+          "spender": {
+            "type": "string",
+            "description": "Address authorized to spend the tokens (typically the router).",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          }
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "description": "Complete solution for a [`QuoteRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
+        "required": [
+          "orders",
+          "total_gas_estimate",
+          "solve_time_ms"
+        ],
+        "properties": {
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderQuote"
+            },
+            "description": "Quotes for each order, in the same order as the request."
+          },
+          "solve_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time taken to compute this solution, in milliseconds.",
+            "example": 12,
+            "minimum": 0
+          },
+          "total_gas_estimate": {
+            "type": "string",
+            "description": "Total estimated gas for executing all swaps (as decimal string).",
+            "example": "150000"
+          }
+        }
+      },
+      "QuoteOptions": {
+        "type": "object",
+        "description": "Options to customize the solving behavior.",
+        "properties": {
+          "encoding_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EncodingOptions"
+              }
+            ]
+          },
+          "max_gas": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.",
+            "example": "500000"
+          },
+          "min_responses": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Minimum number of solver responses to wait for before returning.\nIf `None` or `0`, waits for all solvers to respond (or timeout).\n\nUse the `/health` endpoint to check `num_solver_pools` before setting this value.\nValues exceeding the number of active solver pools are clamped internally.",
+            "minimum": 0
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Timeout in milliseconds. If `None`, uses server default.",
+            "example": 2000,
+            "minimum": 0
+          }
+        }
+      },
+      "QuoteRequest": {
+        "type": "object",
+        "description": "Request to solve one or more swap orders.",
+        "required": [
+          "orders"
+        ],
+        "properties": {
+          "options": {
+            "$ref": "#/components/schemas/QuoteOptions",
+            "description": "Optional solving parameters that apply to all orders."
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Order"
+            },
+            "description": "Orders to solve."
+          }
+        }
+      },
+      "QuoteStatus": {
+        "type": "string",
+        "description": "Status of an order quote.",
+        "enum": [
+          "success",
+          "no_route_found",
+          "insufficient_liquidity",
+          "timeout",
+          "not_ready"
+        ]
+      },
+      "Route": {
+        "type": "object",
+        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through liquidity pools to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
+        "required": [
+          "swaps"
+        ],
+        "properties": {
+          "swaps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Swap"
+            },
+            "description": "Ordered sequence of swaps to execute."
+          }
+        }
+      },
+      "Swap": {
+        "type": "object",
+        "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific liquidity pool (component).",
+        "required": [
+          "component_id",
+          "protocol",
+          "token_in",
+          "token_out",
+          "amount_in",
+          "amount_out",
+          "gas_estimate",
+          "split"
+        ],
+        "properties": {
+          "amount_in": {
+            "type": "string",
+            "description": "Amount of input token (in token units, as decimal string).",
+            "example": "1000000000000000000"
+          },
+          "amount_out": {
+            "type": "string",
+            "description": "Amount of output token (in token units, as decimal string).",
+            "example": "3500000000"
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Identifier of the liquidity pool component.",
+            "example": "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"
+          },
+          "gas_estimate": {
+            "type": "string",
+            "description": "Estimated gas cost for this swap (as decimal string).",
+            "example": "150000"
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Protocol system identifier (e.g., \"uniswap_v2\", \"uniswap_v3\", \"vm:balancer\").",
+            "example": "uniswap_v2"
+          },
+          "split": {
+            "type": "number",
+            "format": "double",
+            "description": "Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)",
+            "example": "0.0"
+          },
+          "token_in": {
+            "type": "string",
+            "description": "Input token address.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "token_out": {
+            "type": "string",
+            "description": "Output token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "Transaction": {
+        "type": "object",
+        "description": "An encoded EVM transaction ready to be submitted on-chain.",
+        "required": [
+          "to",
+          "value",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "ABI-encoded calldata as hex string.",
+            "example": "0x1234567890abcdef"
+          },
+          "to": {
+            "type": "string",
+            "description": "Contract address to call.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "value": {
+            "type": "string",
+            "description": "Native token value to send with the transaction (as decimal string).",
+            "example": "0"
+          }
+        }
+      },
+      "UserTransferType": {
+        "type": "string",
+        "description": "Token transfer method for moving funds into Tycho execution.",
+        "enum": [
+          "transfer_from_permit2",
+          "transfer_from",
+          "none"
+        ]
+      }
+    }
+  }
+}
