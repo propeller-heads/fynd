@@ -938,6 +938,7 @@ pub struct Swap {
     /// Protocol state used to perform the swap.
     protocol_state: Box<dyn ProtocolSim>,
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+    #[serde_as(as = "DisplayFromStr")]
     split: f64,
 }
 
@@ -1307,7 +1308,7 @@ mod tests {
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
             "gas_estimate": "150000",
-            "split": 0,
+            "split": "0",
             "protocol_component": {
                 "id": "test-pool",
                 "protocol_system": "uniswap_v2",

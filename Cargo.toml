@@ -8,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 fynd-rpc = { workspace = true }
+fynd-rpc-types = { workspace = true }
 fynd-core = { workspace = true }
 
 # CLI
