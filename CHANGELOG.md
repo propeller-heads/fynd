@@ -1,3 +1,10 @@
+## [0.3.1](https://github.com/propeller-heads/fynd/compare/0.3.0...0.3.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* **deps:** update quinn-proto 0.11.13 -> 0.11.14 (RUSTSEC-2026-0037) ([868adee](https://github.com/propeller-heads/fynd/commit/868adee53efa77b65e179eaa1ae75168510c2a42))
+
 ## [0.3.0](https://github.com/propeller-heads/fynd/compare/0.2.0...0.3.0) (2026-03-09)
 
 
