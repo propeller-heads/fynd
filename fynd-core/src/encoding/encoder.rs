@@ -29,37 +29,53 @@ pub struct Encoder {
     chain: Chain,
 }
 
-impl From<&OrderQuote> for Solution {
-    fn from(quote: &OrderQuote) -> Self {
-        let swaps = quote
-            .route()
-            .map(|r| {
-                r.swaps()
-                    .iter()
-                    .map(|s| {
-                        Swap::new(
-                            s.protocol_component().clone(),
-                            Bytes::from(s.token_in().as_ref()),
-                            Bytes::from(s.token_out().as_ref()),
-                        )
-                        .split(*s.split())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+impl TryFrom<&OrderQuote> for Solution {
+    type Error = SolveError;
 
-        Solution {
+    fn try_from(quote: &OrderQuote) -> Result<Self, Self::Error> {
+        if quote.status() != QuoteStatus::Success {
+            return Err(SolveError::FailedEncoding(format!(
+                "cannot convert quote with status {:?} to Solution",
+                quote.status()
+            )));
+        }
+
+        let route = quote.route().ok_or_else(|| {
+            SolveError::FailedEncoding("successful quote must have a route".to_string())
+        })?;
+
+        let given_token = route
+            .input_token()
+            .ok_or_else(|| SolveError::FailedEncoding("route has no input token".to_string()))?;
+        let checked_token = route
+            .output_token()
+            .ok_or_else(|| SolveError::FailedEncoding("route has no output token".to_string()))?;
+
+        let swaps = route
+            .swaps()
+            .iter()
+            .map(|s| {
+                Swap::new(
+                    s.protocol_component().clone(),
+                    Bytes::from(s.token_in().as_ref()),
+                    Bytes::from(s.token_out().as_ref()),
+                )
+                .split(*s.split())
+            })
+            .collect();
+
+        Ok(Solution {
             sender: quote.sender.clone(),
             receiver: quote.receiver.clone(),
-            given_token: Bytes::from(quote.token_in.as_ref()),
+            given_token: Bytes::from(given_token.as_ref()),
             given_amount: quote.amount_in().clone(),
-            checked_token: Bytes::from(quote.token_out.as_ref()),
+            checked_token: Bytes::from(checked_token.as_ref()),
             exact_out: false,
             checked_amount: quote.amount_out().clone(),
             swaps,
             // TODO: remove once router v3 is released
             native_action: None,
-        }
+        })
     }
 }
 
@@ -113,7 +129,7 @@ impl Encoder {
                 continue;
             }
 
-            to_encode.push((i, Solution::from(quote)));
+            to_encode.push((i, Solution::try_from(quote)?));
         }
 
         let encoded_solutions = self.tycho_encoder.encode_solutions(
@@ -349,11 +365,9 @@ mod tests {
         Address::from([byte; 20])
     }
 
-    fn make_order_quote(token_in: Address, token_out: Address) -> OrderQuote {
+    fn make_order_quote() -> OrderQuote {
         OrderQuote::new(
             "test-order".to_string(),
-            token_in,
-            token_out,
             QuoteStatus::Success,
             BigUint::from(1000u64),
             BigUint::from(990u64),
@@ -395,26 +409,43 @@ mod tests {
     }
 
     #[test]
-    fn test_from_without_route_has_empty_swaps() {
-        let quote = make_order_quote(make_address(0x01), make_address(0x02));
+    fn test_try_from_without_route_errors() {
+        let quote = make_order_quote();
 
-        let solution = Solution::from(&quote);
+        let result = Solution::try_from(&quote);
 
-        assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
-        assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
-        assert!(solution.swaps.is_empty());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_from_maps_tokens_and_amounts() {
-        let quote = make_order_quote(make_address(0x01), make_address(0x02)).with_route(
-            crate::types::Route::new(vec![make_route_swap_addrs(
-                make_address(0x01),
-                make_address(0x02),
-            )]),
+    fn test_try_from_non_success_errors() {
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::NoRouteFound,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            BigUint::from(990u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
         );
 
-        let solution = Solution::from(&quote);
+        let result = Solution::try_from(&quote);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_from_maps_tokens_and_amounts() {
+        let quote =
+            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
+                make_address(0x01),
+                make_address(0x02),
+            )]));
+
+        let solution = Solution::try_from(&quote).unwrap();
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
@@ -425,15 +456,13 @@ mod tests {
     }
 
     #[test]
-    fn test_from_multi_hop_uses_boundary_swap_tokens() {
-        let quote = make_order_quote(make_address(0x01), make_address(0x03)).with_route(
-            crate::types::Route::new(vec![
-                make_route_swap_addrs(make_address(0x01), make_address(0x02)),
-                make_route_swap_addrs(make_address(0x02), make_address(0x03)),
-            ]),
-        );
+    fn test_try_from_multi_hop_uses_boundary_swap_tokens() {
+        let quote = make_order_quote().with_route(crate::types::Route::new(vec![
+            make_route_swap_addrs(make_address(0x01), make_address(0x02)),
+            make_route_swap_addrs(make_address(0x02), make_address(0x03)),
+        ]));
 
-        let solution = Solution::from(&quote);
+        let solution = Solution::try_from(&quote).unwrap();
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x03).as_ref()));
@@ -445,8 +474,6 @@ mod tests {
         let encoder = mock_encoder(Chain::Ethereum, vec![]);
         let quote = OrderQuote::new(
             "test-order".to_string(),
-            make_address(0x01),
-            make_address(0x02),
             QuoteStatus::NoRouteFound,
             BigUint::from(1000u64),
             BigUint::from(990u64),
@@ -481,12 +508,11 @@ mod tests {
         };
         let encoder = mock_encoder(Chain::Ethereum, vec![encoded]);
 
-        let quote = make_order_quote(make_address(0x01), make_address(0x02)).with_route(
-            crate::types::Route::new(vec![make_route_swap_addrs(
+        let quote =
+            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
                 make_address(0x01),
                 make_address(0x02),
-            )]),
-        );
+            )]));
 
         let encoding_options = EncodingOptions::new(0.01);
 

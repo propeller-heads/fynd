@@ -227,8 +227,6 @@ where
 
                 OrderQuote::new(
                     order.id().to_string(),
-                    order.token_in().clone(),
-                    order.token_out().clone(),
                     QuoteStatus::Success,
                     amount_in,
                     amount_out,

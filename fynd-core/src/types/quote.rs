@@ -507,10 +507,6 @@ impl SingleOrderQuote {
 pub struct OrderQuote {
     /// ID of the order this solution corresponds to.
     order_id: String,
-    /// Input token address (the token being sold).
-    pub token_in: Address,
-    /// Output token address (the token being bought).
-    pub token_out: Address,
     /// Status indicating whether a route was found.
     status: QuoteStatus,
     /// The route to execute, if a valid route was found.
@@ -552,8 +548,6 @@ impl OrderQuote {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         order_id: String,
-        token_in: Address,
-        token_out: Address,
         status: QuoteStatus,
         amount_in: BigUint,
         amount_out: BigUint,
@@ -566,8 +560,6 @@ impl OrderQuote {
     ) -> Self {
         Self {
             order_id,
-            token_in,
-            token_out,
             status,
             route: None,
             amount_in,

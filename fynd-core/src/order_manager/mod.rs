@@ -24,7 +24,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
-use tycho_simulation::tycho_common::{models::Address, Bytes};
+use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
@@ -309,8 +309,6 @@ impl OrderManager {
             counter!("order_manager_orders_total", "status" => "no_route").increment(1);
             OrderQuote::new(
                 responses.order_id.clone(),
-                any_q.token_in.clone(),
-                any_q.token_out.clone(),
                 QuoteStatus::NoRouteFound,
                 any_q.amount_in().clone(),
                 BigUint::ZERO,
@@ -355,8 +353,6 @@ impl OrderManager {
 
             OrderQuote::new(
                 responses.order_id.clone(),
-                Address::default(),
-                Address::default(),
                 status,
                 BigUint::ZERO,
                 BigUint::ZERO,
@@ -406,8 +402,6 @@ mod tests {
         SingleOrderQuote::new(
             OrderQuote::new(
                 "test-order".to_string(),
-                make_address(0x01),
-                make_address(0x02),
                 QuoteStatus::Success,
                 BigUint::from(1000u64),
                 BigUint::from(990u64),
@@ -584,8 +578,6 @@ mod tests {
                 "pool".to_string(),
                 OrderQuote::new(
                     "test".to_string(),
-                    make_address(0x01),
-                    make_address(0x02),
                     QuoteStatus::Success,
                     BigUint::from(1000u64),
                     BigUint::from(990u64),

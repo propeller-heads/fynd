@@ -147,8 +147,6 @@ mod tests {
         SingleOrderQuote::new(
             OrderQuote::new(
                 "test-order".to_string(),
-                make_address(0x01),
-                make_address(0x02),
                 QuoteStatus::Success,
                 BigUint::from(1000u64),
                 BigUint::from(990u64),
