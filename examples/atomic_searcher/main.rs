@@ -418,15 +418,6 @@ async fn search_block(
 // ==================== Output ====================
 
 fn log_results(result: &BlockSearchResult) {
-    if result.candidates_found == 0 {
-        debug!(
-            block = result.block_number,
-            time_ms = result.search_time_ms,
-            "no cycles found"
-        );
-        return;
-    }
-
     info!(
         block = result.block_number,
         candidates = result.candidates_found,
@@ -462,24 +453,36 @@ fn log_results(result: &BlockSearchResult) {
             .to_f64()
             .map(|v| v / 1e18)
             .unwrap_or(0.0);
-        let profit_eth = cycle.net_profit as f64 / 1e18;
+        let gross_eth = cycle
+            .gross_profit
+            .to_f64()
+            .map(|v| v / 1e18)
+            .unwrap_or(0.0);
+        let net_eth = cycle.net_profit as f64 / 1e18;
         let gas_eth = cycle
             .gas_cost
             .to_f64()
             .map(|v| v / 1e18)
             .unwrap_or(0.0);
 
-        let status = if cycle.is_profitable { "PROFITABLE" } else { "unprofitable" };
+        let status = if cycle.is_profitable {
+            "PROFITABLE"
+        } else if gross_eth > 0.0 {
+            "GROSS+"
+        } else {
+            "no-arb"
+        };
 
         info!(
             "[{status}] #{i}: {path} | in: {optimal:.4} ETH | \
-             profit: {profit:.6} ETH | gas: {gas:.6} ETH | hops: {hops}",
+             gross: {gross:.6} ETH | gas: {gas:.6} ETH | net: {net:.6} ETH | hops: {hops}",
             status = status,
             i = i,
             path = path_display,
             optimal = optimal_eth,
-            profit = profit_eth,
+            gross = gross_eth,
             gas = gas_eth,
+            net = net_eth,
             hops = cycle.edges.len(),
         );
         info!("  pools: {:?}", pools);
