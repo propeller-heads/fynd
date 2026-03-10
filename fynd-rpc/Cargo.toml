@@ -1,12 +1,13 @@
 [package]
 name = "fynd-rpc"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "HTTP RPC server for Fynd DEX router"
 license = "MIT"
 
 [dependencies]
 fynd-core.workspace = true
+fynd-rpc-types = { workspace = true, features = ["openapi", "core"] }
 actix-web.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true

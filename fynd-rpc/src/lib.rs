@@ -13,7 +13,7 @@
 //! # Main Components
 //!
 //! - **builder**: `FyndRpcBuilder` for assembling and configuring the HTTP server
-//! - **api**: HTTP endpoint handlers (`/v1/solve`, `/v1/health`) and OpenAPI documentation
+//! - **api**: HTTP endpoint handlers (`/v1/quote`, `/v1/health`) and OpenAPI documentation
 //! - **config**: Configuration types for pools, algorithms, and blacklists
 
 // Public modules

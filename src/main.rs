@@ -7,8 +7,15 @@
 //! # Usage
 //!
 //! ```bash
-//! fynd --rpc-url $RPC_URL \
-//!      --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd --tycho-url tycho-beta.propellerheads.xyz \
+//!      --protocols uniswap_v2,uniswap_v3
+//! ```
+//!
+//! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
+//!
+//! ```bash
+//! fynd --tycho-url tycho-beta.propellerheads.xyz \
+//!      --rpc-url https://your-rpc-provider.com/v1/your_key \
 //!      --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
@@ -21,7 +28,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
-    config::{BlacklistConfig, WorkerPoolsConfig},
+    config::{defaults, BlacklistConfig, WorkerPoolsConfig},
 };
 
 mod cli;
@@ -35,7 +42,7 @@ use tokio::{
     select,
     signal::unix::{signal, SignalKind},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> Result<(), anyhow::Error> {
@@ -162,12 +169,25 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
     let chain = parse_chain(&cli.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
+    // Resolve RPC URL, falling back to public endpoint with a warning
+    let rpc_url = match &cli.rpc_url {
+        Some(url) => url.clone(),
+        None => {
+            warn!(
+                "No --rpc-url provided. Using public endpoint: {}. \
+                For production use, provide a dedicated RPC endpoint.",
+                defaults::DEFAULT_RPC_URL
+            );
+            defaults::DEFAULT_RPC_URL.to_string()
+        }
+    };
+
     // Build solver with all fields from CLI
     let mut builder = FyndBuilder::new(
         chain,
         pools_config.pools,
         cli.tycho_url.clone(),
-        cli.rpc_url.clone(),
+        rpc_url,
         cli.protocols.clone(),
     )
     .http_host(cli.http_host.clone())

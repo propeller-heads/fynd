@@ -16,10 +16,7 @@ use tycho_execution::encoding::{
 };
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
-use crate::{
-    types::{EncodingOptions, OrderSolution},
-    SolutionStatus, SolveError, Transaction,
-};
+use crate::{EncodingOptions, OrderQuote, QuoteStatus, SolveError, Transaction};
 
 /// Encodes solution into tycho compatible transactions.
 ///
@@ -32,19 +29,18 @@ pub struct Encoder {
     chain: Chain,
 }
 
-impl From<&OrderSolution> for Solution {
-    fn from(order_solution: &OrderSolution) -> Self {
-        let swaps = order_solution
-            .route
-            .as_ref()
+impl From<&OrderQuote> for Solution {
+    fn from(quote: &OrderQuote) -> Self {
+        let swaps = quote
+            .route()
             .map(|r| {
-                r.swaps
+                r.swaps()
                     .iter()
                     .map(|s| {
                         Swap::new(
-                            s.protocol_component.clone(),
-                            Bytes::from(s.token_in.as_ref()),
-                            Bytes::from(s.token_out.as_ref()),
+                            s.protocol_component().clone(),
+                            Bytes::from(s.token_in().as_ref()),
+                            Bytes::from(s.token_out().as_ref()),
                         )
                     })
                     .collect()
@@ -52,13 +48,13 @@ impl From<&OrderSolution> for Solution {
             .unwrap_or_default();
 
         Solution {
-            sender: order_solution.sender.clone(),
-            receiver: order_solution.receiver.clone(),
-            given_token: Bytes::from(order_solution.token_in.as_ref()),
-            given_amount: order_solution.amount_in.clone(),
-            checked_token: Bytes::from(order_solution.token_out.as_ref()),
+            sender: quote.sender.clone(),
+            receiver: quote.receiver.clone(),
+            given_token: Bytes::from(quote.token_in.as_ref()),
+            given_amount: quote.amount_in().clone(),
+            checked_token: Bytes::from(quote.token_out.as_ref()),
             exact_out: false,
-            checked_amount: order_solution.amount_out.clone(),
+            checked_amount: quote.amount_out().clone(),
             swaps,
             // TODO: remove once router v3 is released
             native_action: None,
@@ -99,21 +95,21 @@ impl Encoder {
     /// Input order solutions with the encoded transaction added to each successful solution.
     pub async fn encode(
         &self,
-        mut solutions: Vec<OrderSolution>,
+        mut quotes: Vec<OrderQuote>,
         encoding_options: EncodingOptions,
-    ) -> Result<Vec<OrderSolution>, SolveError> {
-        let mut solutions_to_encode: Vec<(usize, Solution)> = Vec::new();
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        let mut to_encode: Vec<(usize, Solution)> = Vec::new();
 
-        for (i, order_solution) in solutions.iter().enumerate() {
-            if order_solution.status != SolutionStatus::Success {
+        for (i, quote) in quotes.iter().enumerate() {
+            if quote.status() != QuoteStatus::Success {
                 continue;
             }
 
-            solutions_to_encode.push((i, Solution::from(order_solution)));
+            to_encode.push((i, Solution::from(quote)));
         }
 
         let encoded_solutions = self.tycho_encoder.encode_solutions(
-            solutions_to_encode
+            to_encode
                 .iter()
                 .map(|(_, s)| s.clone())
                 .collect(),
@@ -121,18 +117,18 @@ impl Encoder {
 
         for (encoded_solution, (idx, solution)) in encoded_solutions
             .into_iter()
-            .zip(solutions_to_encode)
+            .zip(to_encode)
         {
             let transaction = self.encode_tycho_router_call(
                 encoded_solution,
                 &solution,
-                &encoding_options.transfer_type,
+                encoding_options.transfer_type(),
                 encoding_options.clone(),
             )?;
-            solutions[idx].transaction = Some(transaction);
+            quotes[idx].transaction = Some(transaction);
         }
 
-        Ok(solutions)
+        Ok(quotes)
     }
 
     /// Encodes a call using one of its supported swap methods.
@@ -159,35 +155,35 @@ impl Encoder {
         let given_amount = biguint_to_u256(&solution.given_amount);
         let precision = BigUint::from(1_000_000u64);
         let slippage_amount = solution.checked_amount.clone() *
-            BigUint::from((encoding_options.slippage * 1_000_000.0) as u64) /
+            BigUint::from((encoding_options.slippage() * 1_000_000.0) as u64) /
             &precision;
         let min_amount_out = biguint_to_u256(&(solution.checked_amount.clone() - slippage_amount));
         let given_token = bytes_to_address(&solution.given_token)?;
         let checked_token = bytes_to_address(&solution.checked_token)?;
         let receiver = bytes_to_address(&solution.receiver)?;
-        let (permit, signature) = if let Some(p) = encoding_options.permit {
+        let (permit, signature) = if let Some(p) = encoding_options.permit() {
             let models_permit = ModelsPermitSingle {
                 details: ModelsPermitDetails {
-                    token: p.details.token,
-                    amount: p.details.amount,
-                    expiration: p.details.expiration,
-                    nonce: p.details.nonce,
+                    token: p.details().token().clone(),
+                    amount: p.details().amount().clone(),
+                    expiration: p.details().expiration().clone(),
+                    nonce: p.details().nonce().clone(),
                 },
-                spender: p.spender,
-                sig_deadline: p.sig_deadline,
+                spender: p.spender().clone(),
+                sig_deadline: p.sig_deadline().clone(),
             };
             let permit = Some(
                 PermitSingle::try_from(&models_permit)
                     .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
             );
-            let signature = if let Some(sig) = encoding_options.permit2_signature {
-                sig
+            let signature = if let Some(sig) = encoding_options.permit2_signature() {
+                sig.to_vec()
             } else {
                 return Err(EncodingError::FatalError(
                     "Signature must be provided for permit2".to_string(),
                 ));
             };
-            (permit, signature.to_vec())
+            (permit, signature)
         } else {
             (None, vec![])
         };
@@ -276,7 +272,7 @@ impl Encoder {
         } else {
             BigUint::ZERO
         };
-        Ok(Transaction { to: encoded_solution.interacting_with, value, data: contract_interaction })
+        Ok(Transaction::new(encoded_solution.interacting_with, value, contract_interaction))
     }
 
     /// Encodes the input data for a function call to the given function selector.
@@ -324,7 +320,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
-        BlockInfo, OrderSolution, SolutionStatus,
+        BlockInfo, OrderQuote, QuoteStatus,
     };
 
     fn make_route_swap_addrs(token_in: Address, token_out: Address) -> crate::types::Swap {
@@ -339,42 +335,38 @@ mod tests {
         };
         let tin = make_token(token_in.clone());
         let tout = make_token(token_out.clone());
-        crate::types::Swap {
-            component_id: "pool-1".to_string(),
-            protocol: "uniswap_v2".to_string(),
+        crate::types::Swap::new(
+            "pool-1".to_string(),
+            "uniswap_v2".to_string(),
             token_in,
             token_out,
-            amount_in: BigUint::from(1000u64),
-            amount_out: BigUint::from(990u64),
-            gas_estimate: BigUint::from(50_000u64),
-            protocol_component: component("test-pool", &[tin, tout]),
-            protocol_state: Box::new(MockProtocolSim::default()),
-        }
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(50_000u64),
+            component("test-pool", &[tin, tout]),
+            Box::new(MockProtocolSim::default()),
+        )
     }
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
     }
 
-    fn make_order_solution(token_in: Address, token_out: Address) -> OrderSolution {
-        OrderSolution {
-            order_id: "test-order".to_string(),
+    fn make_order_quote(token_in: Address, token_out: Address) -> OrderQuote {
+        OrderQuote::new(
+            "test-order".to_string(),
             token_in,
             token_out,
-            status: SolutionStatus::Success,
-            route: None,
-            amount_in: BigUint::from(1000u64),
-            amount_out: BigUint::from(990u64),
-            gas_estimate: BigUint::from(100_000u64),
-            price_impact_bps: None,
-            amount_out_net_gas: BigUint::from(990u64),
-            block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
-            algorithm: "test".to_string(),
-            gas_price: None,
-            transaction: None,
-            sender: Bytes::from(make_address(0xAA).as_ref()),
-            receiver: Bytes::from(make_address(0xAA).as_ref()),
-        }
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            BigUint::from(990u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+        )
     }
 
     struct MockTychoEncoder {
@@ -414,9 +406,9 @@ mod tests {
 
     #[test]
     fn test_from_without_route_has_empty_swaps() {
-        let order_solution = make_order_solution(make_address(0x01), make_address(0x02));
+        let quote = make_order_quote(make_address(0x01), make_address(0x02));
 
-        let solution = Solution::from(&order_solution);
+        let solution = Solution::from(&quote);
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
@@ -425,18 +417,19 @@ mod tests {
 
     #[test]
     fn test_from_maps_tokens_and_amounts() {
-        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
-        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
-            make_address(0x01),
-            make_address(0x02),
-        )]));
+        let quote = make_order_quote(make_address(0x01), make_address(0x02)).with_route(
+            crate::types::Route::new(vec![make_route_swap_addrs(
+                make_address(0x01),
+                make_address(0x02),
+            )]),
+        );
 
-        let solution = Solution::from(&order_solution);
+        let solution = Solution::from(&quote);
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x02).as_ref()));
-        assert_eq!(solution.given_amount, order_solution.amount_in);
-        assert_eq!(solution.checked_amount, order_solution.amount_out);
+        assert_eq!(solution.given_amount, *quote.amount_in());
+        assert_eq!(solution.checked_amount, *quote.amount_out());
         assert!(!solution.exact_out);
         assert_eq!(solution.native_action, None);
         assert_eq!(solution.swaps.len(), 1);
@@ -444,13 +437,14 @@ mod tests {
 
     #[test]
     fn test_from_multi_hop_uses_boundary_swap_tokens() {
-        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x03));
-        order_solution.route = Some(crate::types::Route::new(vec![
-            make_route_swap_addrs(make_address(0x01), make_address(0x02)),
-            make_route_swap_addrs(make_address(0x02), make_address(0x03)),
-        ]));
+        let quote = make_order_quote(make_address(0x01), make_address(0x03)).with_route(
+            crate::types::Route::new(vec![
+                make_route_swap_addrs(make_address(0x01), make_address(0x02)),
+                make_route_swap_addrs(make_address(0x02), make_address(0x03)),
+            ]),
+        );
 
-        let solution = Solution::from(&order_solution);
+        let solution = Solution::from(&quote);
 
         assert_eq!(solution.given_token, Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(solution.checked_token, Bytes::from(make_address(0x03).as_ref()));
@@ -460,22 +454,29 @@ mod tests {
     #[tokio::test]
     async fn test_encode_skips_non_successful_solutions() {
         let encoder = test_encoder(Chain::Ethereum);
-        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
-        order_solution.status = SolutionStatus::NoRouteFound;
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            make_address(0x01),
+            make_address(0x02),
+            QuoteStatus::NoRouteFound,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            BigUint::from(990u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+        );
 
-        let encoding_options = EncodingOptions {
-            slippage: 0.01,
-            transfer_type: UserTransferType::TransferFrom,
-            permit: None,
-            permit2_signature: None,
-        };
+        let encoding_options = EncodingOptions::new(0.01);
 
         let result = encoder
-            .encode(vec![order_solution], encoding_options)
+            .encode(vec![quote], encoding_options)
             .await
             .unwrap();
 
-        assert!(result[0].transaction.is_none());
+        assert!(result[0].transaction().is_none());
     }
 
     #[tokio::test]
@@ -491,27 +492,23 @@ mod tests {
         };
         let encoder = test_encoder_with_encoded_solutions(Chain::Ethereum, vec![encoded]);
 
-        let mut order_solution = make_order_solution(make_address(0x01), make_address(0x02));
-        order_solution.route = Some(crate::types::Route::new(vec![make_route_swap_addrs(
-            make_address(0x01),
-            make_address(0x02),
-        )]));
+        let quote = make_order_quote(make_address(0x01), make_address(0x02)).with_route(
+            crate::types::Route::new(vec![make_route_swap_addrs(
+                make_address(0x01),
+                make_address(0x02),
+            )]),
+        );
 
-        let encoding_options = EncodingOptions {
-            slippage: 0.01,
-            transfer_type: UserTransferType::TransferFrom,
-            permit: None,
-            permit2_signature: None,
-        };
+        let encoding_options = EncodingOptions::new(0.01);
 
         let result = encoder
-            .encode(vec![order_solution], encoding_options)
+            .encode(vec![quote], encoding_options)
             .await
             .unwrap();
 
-        assert!(result[0].transaction.is_some());
-        let tx = result[0].transaction.as_ref().unwrap();
-        assert_eq!(tx.to, Bytes::from(make_address(0xFF).as_ref()));
-        assert!(!tx.data.is_empty());
+        assert!(result[0].transaction().is_some());
+        let tx = result[0].transaction().unwrap();
+        assert_eq!(*tx.to(), Bytes::from(make_address(0xFF).as_ref()));
+        assert!(!tx.data().is_empty());
     }
 }

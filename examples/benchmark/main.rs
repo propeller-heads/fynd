@@ -2,12 +2,12 @@ mod config;
 mod exporter;
 mod runner;
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
 use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
-use fynd_rpc::HealthStatus;
+use fynd_client::{FyndClient, FyndClientBuilder};
 use runner::{run_benchmark, RunnerResults};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -56,15 +56,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Number of requests: {}", cli.num_requests);
     info!("Parallelization mode: {:?}", parallelization_mode);
 
+    // Build the fynd client (quote-only: no Ethereum RPC required)
+    let client = Arc::new(FyndClientBuilder::new(&cli.solver_url, "").build_quote_only()?);
+
     // Check if solver is ready
-    check_solver_health(&cli.solver_url).await?;
+    check_solver_health(&client).await?;
     info!("Solver is ready");
 
     // Load requests
     let (requests, requests_file) = load_requests(cli.requests_file.as_deref())?;
 
     // Run benchmark
-    let client = reqwest::Client::new();
     let benchmark_start = Instant::now();
     let RunnerResults {
         round_trip_times,
@@ -72,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         successful_requests,
         orders_found: orders_solved,
         orders_not_found: orders_not_solved,
-    } = run_benchmark(client, &cli.solver_url, &requests, cli.num_requests, &parallelization_mode)
+    } = run_benchmark(Arc::clone(&client), &requests, cli.num_requests, &parallelization_mode)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
@@ -147,25 +149,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn check_solver_health(solver_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let health_url = format!("{}/v1/health", solver_url);
-
+async fn check_solver_health(client: &FyndClient) -> Result<(), Box<dyn std::error::Error>> {
     info!("Checking solver health...");
 
-    let resp = client.get(&health_url).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!("Solver health check failed with status: {}", resp.status()).into());
-    }
-
-    let health = resp.json::<HealthStatus>().await?;
-    if !health.healthy {
+    let health = client.health().await?;
+    if !health.healthy() {
         return Err("Solver is not healthy".into());
     }
 
     info!(
         "Market data age: {}ms, Solver pools: {}",
-        health.last_update_ms, health.num_solver_pools
+        health.last_update_ms(),
+        health.num_solver_pools()
     );
 
     Ok(())

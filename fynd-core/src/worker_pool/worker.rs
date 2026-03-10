@@ -15,6 +15,7 @@ use std::{
 use num_bigint::BigUint;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
+use tycho_simulation::tycho_core::Bytes;
 
 use crate::{
     algorithm::Algorithm,
@@ -28,7 +29,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
-    BlockInfo, Order, OrderSolution, SingleOrderSolution, SolutionStatus, SolveError,
+    BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError,
 };
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -123,17 +124,17 @@ where
         }
     }
 
-    /// Solves an order and returns the solution.
-    pub async fn solve(&mut self, order: &Order) -> Result<SingleOrderSolution, SolveError> {
+    /// Returns a quote for an order.
+    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderQuote, SolveError> {
         let start_time = Instant::now();
 
         // Log order details once at entry
         debug!(
-            order_id = %order.id,
-            token_in = ?order.token_in,
-            token_out = ?order.token_out,
-            amount = %order.amount,
-            side = ?order.side,
+            order_id = %order.id(),
+            token_in = ?order.token_in(),
+            token_out = ?order.token_out(),
+            amount = %order.amount(),
+            side = ?order.side(),
             "processing order"
         );
 
@@ -165,11 +166,11 @@ where
             let last_block = market
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
-            BlockInfo {
-                number: last_block.number,
-                hash: format!("{:?}", last_block.hash),
-                timestamp: last_block.timestamp,
-            }
+            BlockInfo::new(
+                last_block.number(),
+                format!("{:?}", last_block.hash()),
+                last_block.timestamp(),
+            )
         };
 
         let result = self
@@ -182,80 +183,78 @@ where
             )
             .await;
 
-        let order_solution = match result {
+        let order_quote = match result {
             Ok(result) => {
-                let route = result.route;
+                // Extract scalar values before consuming result with into_route()
+                let amount_out_net_gas = result
+                    .net_amount_out()
+                    .to_biguint()
+                    .unwrap_or(BigUint::ZERO);
+                let gas_price = result.gas_price().clone();
+                let route = result.into_route();
+
                 let gas_estimate = route.total_gas();
                 let amount_in = if order.is_sell() {
-                    order.amount.clone()
+                    order.amount().clone()
                 } else {
                     route
-                        .swaps
+                        .swaps()
                         .first()
-                        .map(|s| s.amount_in.clone())
+                        .map(|s| s.amount_in().clone())
                         .ok_or_else(|| {
                             error!(
-                                order_id = %order.id,
+                                order_id = %order.id(),
                                 "route missing first swap for buy order"
                             );
-                            SolveError::NoRouteFound { order_id: order.id.clone() }
+                            SolveError::NoRouteFound { order_id: order.id().to_string() }
                         })?
                 };
                 let amount_out = if order.is_sell() {
                     route
-                        .swaps
+                        .swaps()
                         .last()
-                        .map(|s| s.amount_out.clone())
+                        .map(|s| s.amount_out().clone())
                         .ok_or_else(|| {
                             error!(
-                                order_id = %order.id,
+                                order_id = %order.id(),
                                 "route missing last swap for sell order"
                             );
-                            SolveError::NoRouteFound { order_id: order.id.clone() }
+                            SolveError::NoRouteFound { order_id: order.id().to_string() }
                         })?
                 } else {
-                    order.amount.clone()
+                    order.amount().clone()
                 };
 
-                // Convert net_amount_out (BigInt) to BigUint for amount_out_net_gas.
-                // If net_amount_out is negative (gas > output), clamp to zero.
-                let amount_out_net_gas = result
-                    .net_amount_out
-                    .to_biguint()
-                    .unwrap_or(BigUint::ZERO);
-
-                OrderSolution {
-                    order_id: order.id.clone(),
-                    token_in: order.token_in.clone(),
-                    token_out: order.token_out.clone(),
-                    status: SolutionStatus::Success,
-                    route: Some(route),
+                OrderQuote::new(
+                    order.id().to_string(),
+                    order.token_in().clone(),
+                    order.token_out().clone(),
+                    QuoteStatus::Success,
                     amount_in,
                     amount_out,
                     gas_estimate,
-                    price_impact_bps: None, // TODO: Calculate price impact
                     amount_out_net_gas,
-                    block: block_info.clone(),
-                    algorithm: self.algorithm.name().to_string(),
-                    gas_price: Some(result.gas_price),
-                    transaction: None,
-                    sender: order.sender.clone(),
-                    receiver: order.effective_receiver().clone(),
-                }
+                    block_info.clone(),
+                    self.algorithm.name().to_string(),
+                    Bytes::from(order.sender().as_ref()),
+                    Bytes::from(order.effective_receiver().as_ref()),
+                )
+                .with_route(route)
+                .with_gas_price(gas_price)
             }
             Err(err) => {
                 let solve_error = match err {
                     crate::AlgorithmError::NoPath { .. } => {
                         error!(
-                            order_id = %order.id,
+                            order_id = %order.id(),
                             error = %err,
                             "no route found"
                         );
-                        SolveError::NoRouteFound { order_id: order.id.clone() }
+                        SolveError::NoRouteFound { order_id: order.id().to_string() }
                     }
                     crate::AlgorithmError::Timeout { elapsed_ms } => {
                         error!(
-                            order_id = %order.id,
+                            order_id = %order.id(),
                             elapsed_ms,
                             "solve timeout"
                         );
@@ -263,7 +262,7 @@ where
                     }
                     _ => {
                         error!(
-                            order_id = %order.id,
+                            order_id = %order.id(),
                             error = %err,
                             "algorithm error"
                         );
@@ -276,7 +275,7 @@ where
 
         let solve_time_ms = start_time.elapsed().as_millis() as u64;
 
-        Ok(SingleOrderSolution { order: order_solution, solve_time_ms })
+        Ok(SingleOrderQuote::new(order_quote, solve_time_ms))
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -442,9 +441,8 @@ where
                 task = task_rx.recv() => {
                     match task.ok() {
                         Some(task) => {
-                            let task_id = task.id;
+                            let task_id = task.id();
                             let _wait_time = task.wait_time();
-                            let task_response_tx = task.response_tx;
 
                             // Wait for derived data readiness before solving
                             // Use algorithm timeout as the max wait time
@@ -455,12 +453,15 @@ where
                                     error = %e,
                                     "not ready to solve"
                                 );
-                                let _ = task_response_tx.send(Err(e));
+                                task.respond(Err(e));
                                 continue;
                             }
 
                             // Process the task
-                            let result = self.solve(&task.order).await;
+                            let result = {
+                                let order = task.order();
+                                self.quote(order).await
+                            };
 
                             if let Err(ref e) = result {
                                 warn!(
@@ -472,7 +473,7 @@ where
                             }
 
                             // Send response
-                            let _ = task_response_tx.send(result);
+                            task.respond(result);
                         }
                         None => {
                             // Channel closed, exit

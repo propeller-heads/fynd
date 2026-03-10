@@ -252,11 +252,7 @@ mod tests {
             block_timestamp: 0,
             pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
         });
-        market.update_last_updated(BlockInfo {
-            number: 12345,
-            hash: "0xabc".to_string(),
-            timestamp: 0,
-        });
+        market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
 
         // Extract only pool_ab
         let ids: HashSet<_> = ["pool_ab".to_string()]

@@ -7,7 +7,7 @@
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::{types::internal::SolveTask, Order, SingleOrderSolution, SolveError};
+use crate::{types::internal::SolveTask, Order, SingleOrderQuote, SolveError};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -34,7 +34,7 @@ impl TaskQueueHandle {
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.
-    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderSolution, SolveError> {
+    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderQuote, SolveError> {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -122,7 +122,7 @@ mod tests {
     use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
-    use crate::{BlockInfo, Order, OrderSide, OrderSolution, SingleOrderSolution, SolutionStatus};
+    use crate::{BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote};
 
     // -------------------------------------------------------------------------
     // Test Helpers
@@ -133,39 +133,34 @@ mod tests {
     }
 
     fn make_order() -> Order {
-        Order {
-            id: "test-order".to_string(),
-            token_in: make_address(0x01),
-            token_out: make_address(0x02),
-            amount: BigUint::from(1000u64),
-            side: OrderSide::Sell,
-            sender: make_address(0xAA),
-            receiver: None,
-        }
+        Order::new(
+            make_address(0x01),
+            make_address(0x02),
+            BigUint::from(1000u64),
+            OrderSide::Sell,
+            make_address(0xAA),
+        )
+        .with_id("test-order".to_string())
     }
 
-    fn make_single_solution() -> SingleOrderSolution {
-        SingleOrderSolution {
-            order: OrderSolution {
-                order_id: "test-order".to_string(),
-                token_in: make_address(0x01),
-                token_out: make_address(0x02),
-                status: SolutionStatus::Success,
-                route: None,
-                amount_in: BigUint::from(1000u64),
-                amount_out: BigUint::from(990u64),
-                gas_estimate: BigUint::from(100_000u64),
-                price_impact_bps: None,
-                amount_out_net_gas: BigUint::from(990u64),
-                block: BlockInfo { number: 1, hash: "0x123".to_string(), timestamp: 1000 },
-                algorithm: "test".to_string(),
-                gas_price: None,
-                transaction: None,
-                sender: Bytes::from(make_address(0xAA).as_ref()),
-                receiver: Bytes::from(make_address(0xAA).as_ref()),
-            },
-            solve_time_ms: 5,
-        }
+    fn make_single_quote() -> SingleOrderQuote {
+        SingleOrderQuote::new(
+            OrderQuote::new(
+                "test-order".to_string(),
+                make_address(0x01),
+                make_address(0x02),
+                QuoteStatus::Success,
+                BigUint::from(1000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                BigUint::from(990u64),
+                BlockInfo::new(1, "0x123".to_string(), 1000),
+                "test".to_string(),
+                Bytes::from(make_address(0xAA).as_ref()),
+                Bytes::from(make_address(0xAA).as_ref()),
+            ),
+            5,
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -248,8 +243,8 @@ mod tests {
                 .recv()
                 .await
                 .expect("should receive task");
-            assert_eq!(task.order.id, "test-order");
-            task.respond(Ok(make_single_solution()));
+            assert_eq!(task.order().id(), "test-order");
+            task.respond(Ok(make_single_quote()));
         });
 
         // Enqueue an order
@@ -258,8 +253,8 @@ mod tests {
         worker
             .await
             .expect("worker should complete");
-        let solution = result.expect("should get solution");
-        assert_eq!(solution.solve_time_ms, 5);
+        let quote = result.expect("should get quote");
+        assert_eq!(quote.solve_time_ms(), 5);
     }
 
     #[tokio::test]
@@ -427,7 +422,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("should receive task");
-                task.respond(Ok(make_single_solution()));
+                task.respond(Ok(make_single_quote()));
             }
         });
 
@@ -452,12 +447,12 @@ mod tests {
         // Spawn workers to collect task IDs
         let collector = tokio::spawn(async move {
             let task1 = receiver.recv().await.unwrap();
-            let id1 = task1.id;
-            task1.respond(Ok(make_single_solution()));
+            let id1 = task1.id();
+            task1.respond(Ok(make_single_quote()));
 
             let task2 = receiver.recv().await.unwrap();
-            let id2 = task2.id;
-            task2.respond(Ok(make_single_solution()));
+            let id2 = task2.id();
+            task2.respond(Ok(make_single_quote()));
 
             (id1, id2)
         });
@@ -466,7 +461,7 @@ mod tests {
         let _ = handle.enqueue(make_order()).await;
         let _ = handle.enqueue(make_order()).await;
 
-        let (id1, id2) = collector
+        let (id1, id2): (Uuid, Uuid) = collector
             .await
             .expect("collector should complete");
         assert_ne!(id1, id2, "Task IDs should be unique");
@@ -493,7 +488,7 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
 
-        task.respond(Ok(make_single_solution()));
+        task.respond(Ok(make_single_quote()));
 
         let result = response_rx
             .await

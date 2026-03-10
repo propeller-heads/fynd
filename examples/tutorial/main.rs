@@ -11,6 +11,7 @@ mod types;
 use std::{collections::HashMap, env, str::FromStr};
 
 use alloy::{
+    hex,
     network::{Ethereum, EthereumWallet},
     primitives::{Address, Bytes as AlloyBytes, Keccak256, Signature, TxKind, B256, U256},
     providers::{
@@ -27,7 +28,7 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::{Order, OrderSide, Route, Solution, SolutionOptions, SolutionRequest, Transaction};
+use fynd_core::{Order, OrderSide, Quote, QuoteOptions, QuoteRequest, Route, Transaction};
 use fynd_rpc::{builder::parse_chain, HealthStatus};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -38,7 +39,7 @@ use tycho_execution::encoding::{
         approvals::permit2::PermitSingle, encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
-    models::{EncodedSolution, Solution as ExecutionSolution, UserTransferType},
+    models::{EncodedSolution, Solution as ExecutionQuote, UserTransferType},
 };
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256,
@@ -241,14 +242,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rpc_url.ok_or("RPC_URL environment variable required for simulation/execution")?;
 
     // Get the route from the quote
-    let order_solution = quote
-        .orders
+    let order_quote = quote
+        .orders()
         .first()
-        .ok_or("No order solution")?;
-    let route = order_solution
-        .route
-        .as_ref()
-        .ok_or("No route in solution")?;
+        .ok_or("No order quote")?;
+    let route = order_quote
+        .route()
+        .ok_or("No route in quote")?;
 
     // Determine user address and transfer type based on available credentials
     let (simulation_address, transfer_type, signer) = if let Some(ref pk_str) = private_key {
@@ -263,8 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (sender_addr, UserTransferType::TransferFrom, None)
     };
 
-    // Map solver route to execution solution
-    let execution_solution = map_route_to_execution_solution(
+    // Map solver route to execution quote
+    let execution_quote = map_route_to_execution_quote(
         route,
         &components,
         &sell_token,
@@ -285,18 +285,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .swap_encoder_registry(swap_encoder_registry)
         .build()?;
 
-    let encoded_solutions = encoder.encode_solutions(vec![execution_solution.clone()])?;
-    let encoded_solution = encoded_solutions
+    let encoded_quotes = encoder.encode_solutions(vec![execution_quote.clone()])?;
+    let encoded_quote = encoded_quotes
         .into_iter()
         .next()
-        .ok_or("No encoded solution")?;
+        .ok_or("No encoded quote")?;
 
     // Handle simulation-only mode without private key
     if signer.is_none() {
         // Simulation without signing - use TransferFrom (approval simulated as tx)
         let tx = encode_tycho_router_call_no_permit(
-            encoded_solution.clone(),
-            &execution_solution,
+            encoded_quote.clone(),
+            &execution_quote,
             chain.native_token().address,
         )?;
 
@@ -307,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                &order_solution.amount_out,
+                order_quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -323,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                &order_solution.amount_out,
+                order_quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -337,8 +337,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Encode the router call with permit signing
     let tx = encode_tycho_router_call(
         chain.id(),
-        encoded_solution.clone(),
-        &execution_solution,
+        encoded_quote.clone(),
+        &execution_quote,
         chain.native_token().address,
         signer.clone(),
     )?;
@@ -362,7 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signer.address(),
             chain.id(),
             cli.use_tenderly,
-            &order_solution.amount_out,
+            order_quote.amount_out(),
             &buy_token,
         )
         .await?;
@@ -386,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signer.address(),
                     chain.id(),
                     cli.use_tenderly,
-                    &order_solution.amount_out,
+                    order_quote.amount_out(),
                     &buy_token,
                 )
                 .await?;
@@ -526,21 +526,19 @@ async fn get_solver_quote(
     token_out: &Bytes,
     amount: &BigUint,
     sender: &str,
-) -> Result<Solution, Box<dyn std::error::Error>> {
-    let url = format!("{}/v1/solve", solver_url);
+) -> Result<Quote, Box<dyn std::error::Error>> {
+    let url = format!("{}/v1/quote", solver_url);
 
-    let request = SolutionRequest {
-        orders: vec![Order {
-            id: String::new(), // Will be auto-generated by the server
-            token_in: token_in.clone(),
-            token_out: token_out.clone(),
-            amount: amount.clone(),
-            side: OrderSide::Sell,
-            sender: Bytes::from_str(sender)?,
-            receiver: None,
-        }],
-        options: SolutionOptions { timeout_ms: Some(5000), ..Default::default() },
-    };
+    let request = QuoteRequest::new(
+        vec![Order::new(
+            token_in.clone(),
+            token_out.clone(),
+            amount.clone(),
+            OrderSide::Sell,
+            Bytes::from_str(sender)?,
+        )],
+        QuoteOptions::default().with_timeout_ms(5000),
+    );
 
     let resp = client
         .post(&url)
@@ -558,7 +556,7 @@ async fn get_solver_quote(
 }
 
 fn display_quote(
-    quote: &Solution,
+    quote: &Quote,
     sell_token: &Token,
     buy_token: &Token,
     amount_in: &BigUint,
@@ -566,16 +564,16 @@ fn display_quote(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========== Quote ==========");
 
-    for order in &quote.orders {
-        println!("Status: {:?}", order.status);
+    for order in quote.orders() {
+        println!("Status: {:?}", order.status());
 
-        if !matches!(order.status, fynd_core::SolutionStatus::Success) {
+        if !matches!(order.status(), fynd_core::QuoteStatus::Success) {
             println!("No route found for this order.");
             continue;
         }
 
         let formatted_in = format_token_amount(amount_in, sell_token);
-        let formatted_out = format_token_amount(&order.amount_out, buy_token);
+        let formatted_out = format_token_amount(order.amount_out(), buy_token);
 
         println!(
             "Swap: {} {} -> {} {}",
@@ -583,42 +581,42 @@ fn display_quote(
         );
 
         // Price
-        let price = calculate_price(amount_in, &order.amount_out, sell_token, buy_token);
+        let price = calculate_price(amount_in, order.amount_out(), sell_token, buy_token);
         println!("Price: {:.6} {} per {}", price, buy_token.symbol, sell_token.symbol);
 
         // Gas estimate
-        println!("Gas estimate: {}", order.gas_estimate);
+        println!("Gas estimate: {}", order.gas_estimate());
 
         // Price impact
-        if let Some(impact) = order.price_impact_bps {
+        if let Some(impact) = order.price_impact_bps() {
             let impact_percent = impact as f64 / 100.0;
             println!("Price impact: {:.2}%", impact_percent);
         }
 
         // Route details with token symbols
-        if let Some(route) = &order.route {
-            println!("\nRoute ({} hops):", route.swaps.len());
-            for (i, swap) in route.swaps.iter().enumerate() {
+        if let Some(route) = order.route() {
+            println!("\nRoute ({} hops):", route.swaps().len());
+            for (i, swap) in route.swaps().iter().enumerate() {
                 let token_in = all_tokens
-                    .get(&swap.token_in)
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_in))?;
+                    .get(swap.token_in())
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_in()))?;
                 let token_out = all_tokens
-                    .get(&swap.token_out)
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_out))?;
+                    .get(swap.token_out())
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_out()))?;
                 println!(
                     "  {}. {} -> {} via {} (pool: {})",
                     i + 1,
                     token_in.symbol,
                     token_out.symbol,
-                    swap.protocol,
-                    swap.component_id.clone()
+                    swap.protocol(),
+                    swap.component_id()
                 );
             }
         }
     }
 
-    println!("\nSolve time: {}ms", quote.solve_time_ms);
-    println!("Total gas: {}", quote.total_gas_estimate);
+    println!("\nSolve time: {}ms", quote.solve_time_ms());
+    println!("Total gas: {}", quote.total_gas_estimate());
     println!("============================\n");
 
     Ok(())
@@ -703,7 +701,7 @@ fn calculate_price(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn map_route_to_execution_solution(
+fn map_route_to_execution_quote(
     route: &Route,
     components: &HashMap<String, ProtocolComponent>,
     sell_token: &Token,
@@ -711,18 +709,18 @@ fn map_route_to_execution_solution(
     amount_in: &BigUint,
     user_address: Bytes,
     slippage_bps: u32,
-) -> Result<ExecutionSolution, Box<dyn std::error::Error>> {
+) -> Result<ExecutionQuote, Box<dyn std::error::Error>> {
     let mut swaps = Vec::new();
 
-    for solver_swap in &route.swaps {
+    for solver_swap in route.swaps() {
         // Look up the component from our fetched data
         let component = components
-            .get(&solver_swap.component_id)
+            .get(solver_swap.component_id())
             .ok_or_else(|| {
                 format!(
                 "Component not found: {}. This component may not have been fetched from the API. \
                 Try adjusting --tvl-threshold or ensuring the protocol is included in --protocols.",
-                solver_swap.component_id
+                solver_swap.component_id()
             )
             })?;
 
@@ -733,12 +731,12 @@ fn map_route_to_execution_solution(
 
     // Calculate minimum amount out with slippage
     let last_swap = route
-        .swaps
+        .swaps()
         .last()
         .ok_or("Empty route")?;
-    let checked_amount = calculate_min_amount_out(&last_swap.amount_out, slippage_bps);
+    let checked_amount = calculate_min_amount_out(last_swap.amount_out(), slippage_bps);
 
-    Ok(ExecutionSolution {
+    Ok(ExecutionQuote {
         sender: user_address.clone(),
         receiver: user_address,
         given_token: sell_token.address.clone(),
@@ -760,12 +758,12 @@ fn calculate_min_amount_out(expected_amount: &BigUint, slippage_bps: u32) -> Big
 
 fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
-    solution: &ExecutionSolution,
+    encoded_quote: EncodedSolution,
+    quote: &ExecutionQuote,
     native_address: Bytes,
     signer: PrivateKeySigner,
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
-    let permit_data = encoded_solution
+    let permit_data = encoded_quote
         .permit
         .as_ref()
         .ok_or("Permit object must be set")?;
@@ -773,11 +771,11 @@ fn encode_tycho_router_call(
     let permit = PermitSingle::try_from(permit_data)?;
     let signature = sign_permit(chain_id, permit_data, signer)?;
 
-    let given_amount = biguint_to_u256(&solution.given_amount);
-    let min_amount_out = biguint_to_u256(&solution.checked_amount);
-    let given_token = Address::from_slice(&solution.given_token);
-    let checked_token = Address::from_slice(&solution.checked_token);
-    let receiver = Address::from_slice(&solution.receiver);
+    let given_amount = biguint_to_u256(&quote.given_amount);
+    let min_amount_out = biguint_to_u256(&quote.checked_amount);
+    let given_token = Address::from_slice(&quote.given_token);
+    let checked_token = Address::from_slice(&quote.checked_token);
+    let receiver = Address::from_slice(&quote.receiver);
 
     let method_calldata = (
         given_amount,
@@ -789,37 +787,37 @@ fn encode_tycho_router_call(
         receiver,
         permit,
         signature.as_bytes().to_vec(),
-        encoded_solution.swaps.clone(),
+        encoded_quote.swaps.clone(),
     )
         .abi_encode();
 
-    let contract_interaction = encode_input(&encoded_solution.function_signature, method_calldata);
+    let contract_interaction = encode_input(&encoded_quote.function_signature, method_calldata);
 
-    let value = if solution.given_token == native_address {
-        solution.given_amount.clone()
+    let value = if quote.given_token == native_address {
+        quote.given_amount.clone()
     } else {
         BigUint::ZERO
     };
 
-    Ok(Transaction { to: encoded_solution.interacting_with, value, data: contract_interaction })
+    Ok(Transaction::new(encoded_quote.interacting_with, value, contract_interaction))
 }
 
 /// Encode router call without permit signing (for TransferFrom mode simulation).
 fn encode_tycho_router_call_no_permit(
-    encoded_solution: EncodedSolution,
-    solution: &ExecutionSolution,
+    encoded_quote: EncodedSolution,
+    quote: &ExecutionQuote,
     native_address: Bytes,
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
     println!("\nEncoding for TransferFrom mode:");
-    println!("  Function signature: {}", encoded_solution.function_signature);
-    println!("  Interacting with: 0x{}", hex::encode(&encoded_solution.interacting_with));
-    println!("  Swaps bytes length: {} bytes", encoded_solution.swaps.len());
+    println!("  Function signature: {}", encoded_quote.function_signature);
+    println!("  Interacting with: 0x{}", hex::encode(&encoded_quote.interacting_with));
+    println!("  Swaps bytes length: {} bytes", encoded_quote.swaps.len());
 
-    let given_amount = biguint_to_u256(&solution.given_amount);
-    let min_amount_out = biguint_to_u256(&solution.checked_amount);
-    let given_token = Address::from_slice(&solution.given_token);
-    let checked_token = Address::from_slice(&solution.checked_token);
-    let receiver = Address::from_slice(&solution.receiver);
+    let given_amount = biguint_to_u256(&quote.given_amount);
+    let min_amount_out = biguint_to_u256(&quote.checked_amount);
+    let given_token = Address::from_slice(&quote.given_token);
+    let checked_token = Address::from_slice(&quote.checked_token);
+    let receiver = Address::from_slice(&quote.receiver);
 
     println!("  Given amount: {}", given_amount);
     println!("  Min amount out: {}", min_amount_out);
@@ -841,19 +839,19 @@ fn encode_tycho_router_call_no_permit(
         false, // unwrap (native output)
         receiver,
         true, // transfer_from - IMPORTANT: must be true for TransferFrom mode
-        encoded_solution.swaps.clone(),
+        encoded_quote.swaps.clone(),
     )
         .abi_encode();
 
-    let contract_interaction = encode_input(&encoded_solution.function_signature, method_calldata);
+    let contract_interaction = encode_input(&encoded_quote.function_signature, method_calldata);
 
-    let value = if solution.given_token == native_address {
-        solution.given_amount.clone()
+    let value = if quote.given_token == native_address {
+        quote.given_amount.clone()
     } else {
         BigUint::ZERO
     };
 
-    Ok(Transaction { to: encoded_solution.interacting_with, value, data: contract_interaction })
+    Ok(Transaction::new(encoded_quote.interacting_with, value, contract_interaction))
 }
 
 fn sign_permit(
@@ -1036,15 +1034,15 @@ async fn run_eth_simulation_no_wallet(
     buy_token: &Token,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSimulating via eth_simulate (no wallet)...");
-    println!("  Router address: 0x{}", hex::encode(&tx.to));
-    println!("  Calldata length: {} bytes", tx.data.len());
+    println!("  Router address: 0x{}", hex::encode(tx.to()));
+    println!("  Calldata length: {} bytes", tx.data().len());
     println!(
         "  Calldata (first 100 bytes): 0x{}",
-        hex::encode(&tx.data[..std::cmp::min(100, tx.data.len())])
+        hex::encode(&tx.data()[..std::cmp::min(100, tx.data().len())])
     );
 
     // For TransferFrom mode, approve the router (tx.to) instead of Permit2
-    let router_address = Address::from_slice(&tx.to);
+    let router_address = Address::from_slice(tx.to());
     let (approval_request, swap_request) = build_tx_requests_simple(
         provider,
         biguint_to_u256(amount_in),
@@ -1154,9 +1152,9 @@ async fn run_tenderly_simulation(
     let swap_sim = TenderlySimulation {
         network_id: chain_id.to_string(),
         from: format!("{:?}", user_address),
-        to: format!("0x{}", hex::encode(&tx.to)),
-        input: format!("0x{}", hex::encode(&tx.data)),
-        value: tx.value.to_string(),
+        to: format!("0x{}", hex::encode(tx.to())),
+        input: format!("0x{}", hex::encode(tx.data())),
+        value: tx.value().to_string(),
         save: false,
         save_if_fails: true,
     };
@@ -1263,10 +1261,10 @@ async fn build_tx_requests(
     };
 
     let swap_request = TransactionRequest {
-        to: Some(TxKind::Call(Address::from_slice(&tx.to))),
+        to: Some(TxKind::Call(Address::from_slice(tx.to()))),
         from: Some(user_address),
-        value: Some(biguint_to_u256(&tx.value)),
-        input: TransactionInput { input: Some(AlloyBytes::from(tx.data)), data: None },
+        value: Some(biguint_to_u256(tx.value())),
+        input: TransactionInput { input: Some(AlloyBytes::from(tx.data().to_vec())), data: None },
         gas: Some(800_000u64),
         chain_id: Some(chain_id),
         max_fee_per_gas: Some(max_fee_per_gas.into()),
@@ -1324,10 +1322,10 @@ async fn build_tx_requests_simple(
     };
 
     let swap_request = TransactionRequest {
-        to: Some(TxKind::Call(Address::from_slice(&tx.to))),
+        to: Some(TxKind::Call(Address::from_slice(tx.to()))),
         from: Some(user_address),
-        value: Some(biguint_to_u256(&tx.value)),
-        input: TransactionInput { input: Some(AlloyBytes::from(tx.data)), data: None },
+        value: Some(biguint_to_u256(tx.value())),
+        input: TransactionInput { input: Some(AlloyBytes::from(tx.data().to_vec())), data: None },
         gas: Some(800_000u64),
         chain_id: Some(chain_id),
         max_fee_per_gas: Some(max_fee_per_gas.into()),

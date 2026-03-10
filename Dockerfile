@@ -14,15 +14,21 @@ WORKDIR /app
 
 # Dependency caching layer: copy manifests and build deps first
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && \
+COPY fynd-core/Cargo.toml fynd-core/
+COPY fynd-rpc/Cargo.toml fynd-rpc/
+RUN mkdir -p src fynd-core/src fynd-rpc/src && \
     echo "fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
+    echo "" > fynd-core/src/lib.rs && \
+    echo "" > fynd-rpc/src/lib.rs && \
     cargo build --release && \
-    rm -rf src
+    rm -rf src fynd-core/src fynd-rpc/src
 
 # Copy real source and rebuild
 COPY src/ src/
-RUN touch src/main.rs src/lib.rs && cargo build --release
+COPY fynd-core/src/ fynd-core/src/
+COPY fynd-rpc/src/ fynd-rpc/src/
+RUN touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs && cargo build --release
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
