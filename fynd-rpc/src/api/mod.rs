@@ -18,9 +18,10 @@ use std::{
 use actix_web::web;
 pub use dto::HealthStatus;
 pub use error::ApiError;
-#[cfg(feature = "experimental")]
-use fynd_core::derived::SharedDerivedDataRef;
-use fynd_core::{feed::market_data::SharedMarketDataRef, order_manager::OrderManager};
+use fynd_core::{
+    derived::SharedDerivedDataRef, feed::market_data::SharedMarketDataRef,
+    order_manager::OrderManager,
+};
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
@@ -64,17 +65,18 @@ pub struct ExperimentalApiDoc;
 
 /// Simple tracker for service health metrics.
 ///
-/// Reads the last update timestamp from SharedMarketData to determine
-/// how fresh the market data is.
+/// Reads the last update timestamp from SharedMarketData to determine how fresh the market data is,
+/// and checks derived data overall readiness.
 #[derive(Clone)]
 pub struct HealthTracker {
     market_data: SharedMarketDataRef,
+    derived_data: SharedDerivedDataRef,
 }
 
 impl HealthTracker {
     /// Creates a new health tracker.
-    pub fn new(market_data: SharedMarketDataRef) -> Self {
-        Self { market_data }
+    pub fn new(market_data: SharedMarketDataRef, derived_data: SharedDerivedDataRef) -> Self {
+        Self { market_data, derived_data }
     }
 
     /// Returns milliseconds since the last market data update.
@@ -92,6 +94,19 @@ impl HealthTracker {
             }
             None => u64::MAX, // Never updated
         }
+    }
+
+    /// Returns whether derived data has been computed at least once.
+    ///
+    /// This checks overall readiness (has any computation cycle completed), not per-block
+    /// freshness. Algorithms that require fresh derived data are ready to receive orders but
+    /// will wait for per-block recomputation before solving.
+    pub async fn derived_data_ready(&self) -> bool {
+        self.derived_data
+            .read()
+            .await
+            .last_block()
+            .is_some()
     }
 }
 
