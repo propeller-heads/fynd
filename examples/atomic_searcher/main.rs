@@ -88,6 +88,19 @@ struct Args {
     /// GSS maximum iterations.
     #[arg(long, default_value_t = 30)]
     gss_max_iter: usize,
+
+    /// Path to blacklist.toml (pools to exclude from search).
+    #[arg(long, default_value = "blacklist.toml")]
+    blacklist: String,
+
+    /// Token addresses to exclude (comma-separated). Cycles through these tokens
+    /// are filtered out. Use for rebase tokens (AMPL) or other tokens with broken
+    /// simulations.
+    #[arg(
+        long,
+        default_value = "0xd46ba6d942050d489dbd938a2c909a5d5039a161"
+    )]
+    blacklist_tokens: String,
 }
 
 // ==================== Main ====================
@@ -113,6 +126,34 @@ async fn main() -> anyhow::Result<()> {
     // Seed amount in wei (1 ETH = 1e18 wei)
     let seed_amount = BigUint::from((args.seed_eth * 1e18) as u128);
 
+    // Load pool blacklist
+    let blacklist = match fynd::BlacklistConfig::load_from_file(&args.blacklist) {
+        Ok(config) => {
+            info!(blacklisted_pools = config.components.len(), "loaded blacklist");
+            config.components
+        }
+        Err(e) => {
+            warn!(path = %args.blacklist, error = %e, "blacklist not loaded, continuing without");
+            HashSet::new()
+        }
+    };
+
+    // Parse token blacklist (rebase tokens, broken simulations, etc.)
+    let blacklisted_tokens: HashSet<Vec<u8>> = args
+        .blacklist_tokens
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim().strip_prefix("0x").unwrap_or(s.trim());
+            hex::decode(s).ok()
+        })
+        .collect();
+    if !blacklisted_tokens.is_empty() {
+        info!(
+            blacklisted_tokens = blacklisted_tokens.len(),
+            "token blacklist active (AMPL, etc.)"
+        );
+    }
+
     info!(
         chain = ?chain,
         source_token = %hex::encode(&source_token_addr),
@@ -125,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     // Set up shared market data
     let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
 
-    // Set up Tycho feed
+    // Set up Tycho feed with blacklist
     let feed_config = TychoFeedConfig::new(
         args.tycho_url.clone(),
         chain,
@@ -133,7 +174,8 @@ async fn main() -> anyhow::Result<()> {
         true,
         protocols,
         args.min_tvl,
-    );
+    )
+    .blacklisted_components(blacklist);
 
     let health_tracker = fynd::api::HealthTracker::new();
     let feed = TychoFeed::new(feed_config, market_data.clone(), health_tracker);
@@ -192,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
                     &market_data,
                     args.gss_tolerance,
                     args.gss_max_iter,
+                    &blacklisted_tokens,
                 )
                 .await;
 
@@ -221,6 +264,7 @@ async fn search_block(
     market_data: &SharedMarketDataRef,
     gss_tolerance: f64,
     gss_max_iter: usize,
+    blacklisted_tokens: &HashSet<Vec<u8>>,
 ) -> BlockSearchResult {
     let start = Instant::now();
 
@@ -299,8 +343,23 @@ async fn search_block(
         &subgraph_edges,
     );
 
+    // Filter out cycles that pass through blacklisted tokens
+    let candidates: Vec<_> = if blacklisted_tokens.is_empty() {
+        candidates
+    } else {
+        candidates
+            .into_iter()
+            .filter(|c| {
+                !c.edges.iter().any(|(from, to, _)| {
+                    blacklisted_tokens.contains(from.as_ref())
+                        || blacklisted_tokens.contains(to.as_ref())
+                })
+            })
+            .collect()
+    };
+
     let candidates_found = candidates.len();
-    debug!(block = block_number, candidates = candidates_found, "BF scan complete");
+    debug!(block = block_number, candidates = candidates_found, "BF scan complete (after token filter)");
 
     if candidates.is_empty() {
         return BlockSearchResult {
@@ -377,11 +436,26 @@ fn log_results(result: &BlockSearchResult) {
     );
 
     for (i, cycle) in result.cycles.iter().take(5).enumerate() {
-        let path_str: Vec<String> = cycle
+        // Show tokens and pools in the cycle
+        let path_parts: Vec<String> = cycle
             .edges
             .iter()
-            .map(|(from, _, cid)| format!("{}..{}", &hex::encode(from)[..6], &cid[..8.min(cid.len())]))
+            .map(|(from, _to, cid)| {
+                let token_hex = hex::encode(from);
+                let pool_short = &cid[..10.min(cid.len())];
+                format!("0x{}.. -[{}..]->", &token_hex[..8], pool_short)
+            })
             .collect();
+        // Close the cycle back to source
+        let source_hex = cycle
+            .edges
+            .first()
+            .map(|(from, _, _)| format!("0x{}..", &hex::encode(from)[..8]))
+            .unwrap_or_default();
+        let path_display = format!("{} {}", path_parts.join(" "), source_hex);
+
+        // Full pool list for investigation
+        let pools: Vec<&str> = cycle.edges.iter().map(|(_, _, cid)| cid.as_str()).collect();
 
         let optimal_eth = cycle
             .optimal_amount_in
@@ -398,16 +472,17 @@ fn log_results(result: &BlockSearchResult) {
         let status = if cycle.is_profitable { "PROFITABLE" } else { "unprofitable" };
 
         info!(
-            "[{status}] #{i}: {path} | optimal_in: {optimal:.4} ETH | \
-             net_profit: {profit:.6} ETH | gas: {gas:.6} ETH | hops: {hops}",
+            "[{status}] #{i}: {path} | in: {optimal:.4} ETH | \
+             profit: {profit:.6} ETH | gas: {gas:.6} ETH | hops: {hops}",
             status = status,
             i = i,
-            path = path_str.join(" -> "),
+            path = path_display,
             optimal = optimal_eth,
             profit = profit_eth,
             gas = gas_eth,
             hops = cycle.edges.len(),
         );
+        info!("  pools: {:?}", pools);
     }
 
     if result.cycles.len() > 5 {
