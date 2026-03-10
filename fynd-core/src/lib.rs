@@ -15,7 +15,7 @@
 //! - **algorithm**: Route-finding algorithms (e.g., `MostLiquidAlgorithm`)
 //! - **graph**: Graph management and pathfinding utilities
 //! - **derived**: Derived data computations (spot prices, pool depths, gas prices)
-//! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderSolution`)
+//! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderQuote`)
 //! - **feed**: Market data structures and event handling
 //! - **worker_pool**: Multi-threaded solver pool management with algorithm registry
 //! - **order_manager**: Request orchestration across multiple solver pools
@@ -31,12 +31,14 @@ pub mod worker_pool;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
+// Required for implementing the Algorithm trait externally
+pub use derived::computation::ComputationRequirements;
 pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
-    BlockInfo, ComponentId, EncodingOptions, Order, OrderSide, OrderSolution, OrderValidationError,
-    PermitDetails, PermitSingle, Route, RouteValidationError, SingleOrderSolution, Solution,
-    SolutionOptions, SolutionRequest, SolutionStatus, SolveError, SolveResult, Swap, TaskId,
-    Transaction, UserTransferType,
+    BlockInfo, ComponentId, EncodingOptions, Order, OrderQuote, OrderSide, OrderValidationError,
+    PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
+    RouteValidationError, SingleOrderQuote, SolveError, SolveResult, Swap, TaskId, Transaction,
+    UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

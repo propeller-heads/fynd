@@ -25,7 +25,7 @@ This modular architecture allows users to:
   uses `petgraph::StableDiGraph`
 - **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager
   selects the best result
-- **Output Format**: Structured `Solution` objects (routes, amounts, gas estimates)
+- **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates)
 - **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a
   separate computation framework
 - **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
@@ -40,11 +40,11 @@ This modular architecture allows users to:
 │                         Async I/O - Non-blocking                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                           RouterApi                                  │   │
-│  │    POST /v1/solve            GET /v1/health          GET /metrics    │   │
+│  │    POST /v1/quote            GET /v1/health          GET /metrics    │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
-                                   │ SolutionRequest
+                                   │ QuoteRequest
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            OrderManager                                     │
@@ -141,7 +141,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 
 **Endpoints:**
 
-- `POST /v1/solve` -- Submit solve requests
+- `POST /v1/quote` -- Submit quote requests
 - `GET /v1/health` -- Health check (data freshness + pool count)
 - `GET /metrics` -- Prometheus metrics (separate server, port 9898)
 
@@ -152,7 +152,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/order_manager/`
 
-Orchestrates solve requests across multiple worker pools:
+Orchestrates quote requests across multiple worker pools:
 
 1. Fans out each order to all pools in parallel
 2. Manages per-request timeouts with optional early return
@@ -289,10 +289,10 @@ to run the complete routing service.
 
 ## Data Flow
 
-### Solve Request Flow
+### Quote Request Flow
 
 ```
-Client POST /v1/solve
+Client POST /v1/quote
     │
     ▼
 RouterApi (validate)
@@ -300,8 +300,8 @@ RouterApi (validate)
     ▼
 OrderManager (fan-out to all pools)
     │
-    ├──► Pool A Queue ──► Worker ──► Algorithm ──► Solution
-    ├──► Pool B Queue ──► Worker ──► Algorithm ──► Solution
+    ├──► Pool A Queue ──► Worker ──► Algorithm ──► Quote
+    ├──► Pool B Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
     │
     ▼

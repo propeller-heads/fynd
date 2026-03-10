@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.1.0"
+    "version": "0.3.1"
   },
   "paths": {
     "/v1/health": {
@@ -42,19 +42,19 @@
         }
       }
     },
-    "/v1/solve": {
+    "/v1/quote": {
       "post": {
         "tags": [
           "solver"
         ],
-        "summary": "POST /v1/solve - Submit a solve request.",
-        "description": "Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 504 Gateway Timeout: Solve timeout",
-        "operationId": "solve",
+        "summary": "POST /v1/quote - Request a quote.",
+        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 504 Gateway Timeout: Quote timeout",
+        "operationId": "quote",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SolutionRequest"
+                "$ref": "#/components/schemas/QuoteRequest"
               }
             }
           },
@@ -62,11 +62,11 @@
         },
         "responses": {
           "200": {
-            "description": "Solve completed",
+            "description": "Quote completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Solution"
+                  "$ref": "#/components/schemas/Quote"
                 }
               }
             }
@@ -102,7 +102,7 @@
             }
           },
           "504": {
-            "description": "Solve timeout",
+            "description": "Quote timeout",
             "content": {
               "application/json": {
                 "schema": {
@@ -144,6 +144,43 @@
             "description": "Block timestamp in Unix seconds.",
             "example": 1730000000,
             "minimum": 0
+          }
+        }
+      },
+      "EncodingOptions": {
+        "type": "object",
+        "description": "Options to customize the encoding behavior.",
+        "required": [
+          "slippage"
+        ],
+        "properties": {
+          "permit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermitSingle",
+                "description": "Permit2 single-token authorization. Required when using `transfer_from_permit2`."
+              }
+            ]
+          },
+          "permit2_signature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.",
+            "example": "0xabcd..."
+          },
+          "slippage": {
+            "type": "number",
+            "format": "double",
+            "example": "0.001"
+          },
+          "transfer_type": {
+            "$ref": "#/components/schemas/UserTransferType",
+            "description": "Token transfer method. Defaults to `transfer_from`."
           }
         }
       },
@@ -240,16 +277,9 @@
           }
         }
       },
-      "OrderSide": {
-        "type": "string",
-        "description": "Specifies the side of an order: sell (exact input) or buy (exact output).\n\nCurrently only `Sell` is supported. `Buy` will be added in a future version.",
-        "enum": [
-          "sell"
-        ]
-      },
-      "OrderSolution": {
+      "OrderQuote": {
         "type": "object",
-        "description": "Solution for a single [`Order`].\n\nContains the route to execute (if found), along with expected amounts,\ngas estimates, and status information.",
+        "description": "Quote for a single [`Order`].\n\nContains the route to execute (if found), along with expected amounts,\ngas estimates, and status information.",
         "required": [
           "order_id",
           "status",
@@ -284,6 +314,14 @@
             "description": "Estimated gas cost for executing this route (as decimal string).",
             "example": "150000"
           },
+          "gas_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Effective gas price (in wei) at the time the route was computed.",
+            "example": "20000000000"
+          },
           "order_id": {
             "type": "string",
             "description": "ID of the order this solution corresponds to.",
@@ -309,30 +347,89 @@
             ]
           },
           "status": {
-            "$ref": "#/components/schemas/SolutionStatus",
+            "$ref": "#/components/schemas/QuoteStatus",
             "description": "Status indicating whether a route was found."
+          },
+          "transaction": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Transaction",
+                "description": "An encoded EVM transaction ready to be submitted on-chain."
+              }
+            ]
           }
         }
       },
-      "Route": {
+      "OrderSide": {
+        "type": "string",
+        "description": "Specifies the side of an order: sell (exact input) or buy (exact output).\n\nCurrently only `Sell` is supported. `Buy` will be added in a future version.",
+        "enum": [
+          "sell"
+        ]
+      },
+      "PermitDetails": {
         "type": "object",
-        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through liquidity pools to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
+        "description": "Details for a permit2 single-token permit.",
         "required": [
-          "swaps"
+          "token",
+          "amount",
+          "expiration",
+          "nonce"
         ],
         "properties": {
-          "swaps": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Swap"
-            },
-            "description": "Ordered sequence of swaps to execute."
+          "amount": {
+            "type": "string",
+            "description": "Amount of tokens approved.",
+            "example": "1000000000000000000"
+          },
+          "expiration": {
+            "type": "string",
+            "description": "Expiration timestamp for the permit.",
+            "example": "1893456000"
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Nonce to prevent replay attacks.",
+            "example": "0"
+          },
+          "token": {
+            "type": "string",
+            "description": "Token address for which the permit is granted.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
           }
         }
       },
-      "Solution": {
+      "PermitSingle": {
         "type": "object",
-        "description": "Complete solution for a [`SolutionRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
+        "description": "A single permit for permit2 token transfer authorization.",
+        "required": [
+          "details",
+          "spender",
+          "sig_deadline"
+        ],
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/PermitDetails",
+            "description": "The permit details (token, amount, expiration, nonce)."
+          },
+          "sig_deadline": {
+            "type": "string",
+            "description": "Deadline timestamp for the permit signature.",
+            "example": "1893456000"
+          },
+          "spender": {
+            "type": "string",
+            "description": "Address authorized to spend the tokens (typically the router).",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          }
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "description": "Complete solution for a [`QuoteRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
         "required": [
           "orders",
           "total_gas_estimate",
@@ -342,9 +439,9 @@
           "orders": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/OrderSolution"
+              "$ref": "#/components/schemas/OrderQuote"
             },
-            "description": "Solutions for each order, in the same order as the request."
+            "description": "Quotes for each order, in the same order as the request."
           },
           "solve_time_ms": {
             "type": "integer",
@@ -360,16 +457,26 @@
           }
         }
       },
-      "SolutionOptions": {
+      "QuoteOptions": {
         "type": "object",
         "description": "Options to customize the solving behavior.",
         "properties": {
+          "encoding_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EncodingOptions"
+              }
+            ]
+          },
           "max_gas": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.",
+            "description": "Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.",
             "example": "500000"
           },
           "min_responses": {
@@ -392,7 +499,7 @@
           }
         }
       },
-      "SolutionRequest": {
+      "QuoteRequest": {
         "type": "object",
         "description": "Request to solve one or more swap orders.",
         "required": [
@@ -400,7 +507,7 @@
         ],
         "properties": {
           "options": {
-            "$ref": "#/components/schemas/SolutionOptions",
+            "$ref": "#/components/schemas/QuoteOptions",
             "description": "Optional solving parameters that apply to all orders."
           },
           "orders": {
@@ -412,9 +519,9 @@
           }
         }
       },
-      "SolutionStatus": {
+      "QuoteStatus": {
         "type": "string",
-        "description": "Status of an order solution.",
+        "description": "Status of an order quote.",
         "enum": [
           "success",
           "no_route_found",
@@ -422,6 +529,22 @@
           "timeout",
           "not_ready"
         ]
+      },
+      "Route": {
+        "type": "object",
+        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through liquidity pools to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
+        "required": [
+          "swaps"
+        ],
+        "properties": {
+          "swaps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Swap"
+            },
+            "description": "Ordered sequence of swaps to execute."
+          }
+        }
       },
       "Swap": {
         "type": "object",
@@ -433,7 +556,8 @@
           "token_out",
           "amount_in",
           "amount_out",
-          "gas_estimate"
+          "gas_estimate",
+          "split"
         ],
         "properties": {
           "amount_in": {
@@ -461,6 +585,12 @@
             "description": "Protocol system identifier (e.g., \"uniswap_v2\", \"uniswap_v3\", \"vm:balancer\").",
             "example": "uniswap_v2"
           },
+          "split": {
+            "type": "number",
+            "format": "double",
+            "description": "Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)",
+            "example": "0.0"
+          },
           "token_in": {
             "type": "string",
             "description": "Input token address.",
@@ -472,6 +602,41 @@
             "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
           }
         }
+      },
+      "Transaction": {
+        "type": "object",
+        "description": "An encoded EVM transaction ready to be submitted on-chain.",
+        "required": [
+          "to",
+          "value",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "ABI-encoded calldata as hex string.",
+            "example": "0x1234567890abcdef"
+          },
+          "to": {
+            "type": "string",
+            "description": "Contract address to call.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "value": {
+            "type": "string",
+            "description": "Native token value to send with the transaction (as decimal string).",
+            "example": "0"
+          }
+        }
+      },
+      "UserTransferType": {
+        "type": "string",
+        "description": "Token transfer method for moving funds into Tycho execution.",
+        "enum": [
+          "transfer_from_permit2",
+          "transfer_from",
+          "none"
+        ]
       }
     }
   }

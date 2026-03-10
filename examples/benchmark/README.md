@@ -2,7 +2,7 @@
 
 Benchmark tool for measuring Fynd's performance with various parallelization strategies.
 
-**Prerequisites:** This benchmark requires a running solver. See [examples/README.md](../README.md) for instructions on starting the solver.
+**Prerequisites:** This benchmark requires a running solver. See the [Run the Solver](../../README.md#run-the-solver) section in the root README, or the [Quickstart](../../docs/get-started/quickstart/README.md) for detailed instructions.
 
 ## Usage
 
@@ -11,6 +11,8 @@ cargo run --example benchmark --release -- [OPTIONS]
 ```
 
 **Important:** Always use `--release` for accurate performance measurements!
+
+Run from the repository root so that file paths (e.g. `--requests-file`) resolve correctly. The tool checks solver health before starting; if the solver is not ready, you will get an error.
 
 ## Options
 
@@ -33,7 +35,7 @@ CLI flags take precedence over environment variables.
 
 ## Request Templates
 
-By default, uses a WETH→USDC swap. To use custom requests, create a JSON file with an array of `SolutionRequest` objects and use `--requests-file` to specify it. The benchmark will randomly select from your templates for each request. See `requests_set.json` for the format.
+By default, uses a WETH→USDC swap. To use custom requests, create a JSON file with an array of request templates and use `--requests-file` to specify it. The benchmark will randomly select from your templates for each request. See `requests_set.json` in this directory for the format.
 
 ## Examples
 
@@ -61,7 +63,7 @@ cargo run --example benchmark --release -- \
   --solver-url http://localhost:3000 \
   -m rate:50 \
   -n 100 \
-  --requests-file examples/benchmark/example_requests.json
+  --requests-file examples/benchmark/requests_set.json
 ```
 
 ### Export results to file

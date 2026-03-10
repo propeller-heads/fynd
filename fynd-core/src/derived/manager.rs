@@ -243,7 +243,7 @@ impl ComputationManager {
             .read()
             .await
             .last_updated()
-            .map(|b| b.number)
+            .map(|b| b.number())
         else {
             warn!("market data has no last updated block, skipping computations");
             return;

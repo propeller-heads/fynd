@@ -32,12 +32,13 @@ In one terminal:
 ```bash
 export TYCHO_URL=tycho-beta.propellerheads.xyz
 export TYCHO_API_KEY=your_api_key
-export RPC_URL=https://your-rpc-provider.com/v1/your_key
 cargo run --release -- \
   --tycho-url tycho-beta.propellerheads.xyz \
-  --rpc-url $RPC_URL \
   --protocols uniswap_v2,uniswap_v3
 ```
+
+`--rpc-url` defaults to `https://eth.llamarpc.com`. For production,
+add `--rpc-url https://your-rpc-provider.com/v1/your_key`.
 
 Wait for "Solver is ready and accepting requests".
 

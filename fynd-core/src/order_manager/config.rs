@@ -6,7 +6,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct OrderManagerConfig {
     /// Default timeout per order (can be overridden per-request).
-    pub default_timeout: Duration,
+    default_timeout: Duration,
     /// Minimum number of solver responses to wait for before returning early.
     ///
     /// **Behavior:**
@@ -15,7 +15,7 @@ pub struct OrderManagerConfig {
     ///   been reached. This enables fast-path responses when some solvers are slower than others.
     ///
     /// The best solution among received responses is still selected.
-    pub min_responses: usize,
+    min_responses: usize,
 }
 
 impl Default for OrderManagerConfig {
@@ -28,6 +28,16 @@ impl Default for OrderManagerConfig {
 }
 
 impl OrderManagerConfig {
+    /// Returns the default timeout per order.
+    pub fn default_timeout(&self) -> Duration {
+        self.default_timeout
+    }
+
+    /// Returns the minimum number of solver responses to wait for.
+    pub fn min_responses(&self) -> usize {
+        self.min_responses
+    }
+
     /// Creates a new config with the specified timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;

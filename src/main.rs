@@ -7,8 +7,15 @@
 //! # Usage
 //!
 //! ```bash
-//! fynd serve --rpc-url $RPC_URL \
-//!            --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//!            --protocols uniswap_v2,uniswap_v3
+//! ```
+//!
+//! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
+//!
+//! ```bash
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//!            --rpc-url https://your-rpc-provider.com/v1/your_key \
 //!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
@@ -21,7 +28,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
-    config::{BlacklistConfig, WorkerPoolsConfig},
+    config::{defaults, BlacklistConfig, WorkerPoolsConfig},
 };
 
 mod cli;
@@ -35,7 +42,7 @@ use tokio::{
     select,
     signal::unix::{signal, SignalKind},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> Result<(), anyhow::Error> {
@@ -175,12 +182,25 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
+    // Resolve RPC URL, falling back to public endpoint with a warning
+    let rpc_url = match &args.rpc_url {
+        Some(url) => url.clone(),
+        None => {
+            warn!(
+                "No --rpc-url provided. Using public endpoint: {}. \
+                For production use, provide a dedicated RPC endpoint.",
+                defaults::DEFAULT_RPC_URL
+            );
+            defaults::DEFAULT_RPC_URL.to_string()
+        }
+    };
+
     // Build solver with all fields from CLI
     let mut builder = FyndBuilder::new(
         chain,
         pools_config.pools,
         args.tycho_url.clone(),
-        args.rpc_url.clone(),
+        rpc_url,
         args.protocols.clone(),
     )
     .http_host(args.http_host.clone())

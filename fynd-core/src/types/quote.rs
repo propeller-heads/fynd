@@ -3,14 +3,14 @@
 //! This module defines all solution-related request and response types exposed to clients:
 //!
 //! ## Request Types
-//! - [`SolutionRequest`] - Top-level request containing orders to solve
+//! - [`QuoteRequest`] - Top-level request containing orders to solve
 //! - [`Order`] - A single swap order with token pair and amount
-//! - [`SolutionOptions`] - Optional parameters for solving behavior
+//! - [`QuoteOptions`] - Optional parameters for solving behavior
 //!
 //! ## Response Types
-//! - [`Solution`] - Top-level response with solutions for all orders
-//! - [`SingleOrderSolution`] - Solution for a single order with timing information
-//! - [`OrderSolution`] - Solution for a single order including route
+//! - [`Quote`] - Top-level response with solutions for all orders
+//! - [`SingleOrderQuote`] - Quote for a single order with timing information
+//! - [`OrderQuote`] - Quote for a single order including route
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
@@ -40,48 +40,163 @@ use crate::AlgorithmError;
 
 // Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolutionRequest {
+pub struct QuoteRequest {
     /// Orders to solve.
-    pub orders: Vec<Order>,
+    orders: Vec<Order>,
     /// Optional solving parameters that apply to all orders.
     #[serde(default)]
-    pub options: SolutionOptions,
+    options: QuoteOptions,
+}
+
+impl QuoteRequest {
+    /// Creates a new solution request.
+    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
+        Self { orders, options }
+    }
+
+    /// Returns the orders to solve.
+    pub fn orders(&self) -> &[Order] {
+        &self.orders
+    }
+
+    /// Returns the solving options.
+    pub fn options(&self) -> &QuoteOptions {
+        &self.options
+    }
 }
 
 /// Options to customize the solving behavior.
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SolutionOptions {
+pub struct QuoteOptions {
     /// Timeout in milliseconds. If `None`, uses server default.
-    pub timeout_ms: Option<u64>,
+    timeout_ms: Option<u64>,
     /// Minimum number of solver responses to wait for before returning.
     /// If `None` or `0`, waits for all solvers to respond (or timeout).
     ///
     /// Use the `/health` endpoint to check `num_solver_pools` before setting this value.
     /// Values exceeding the number of active solver pools are clamped internally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_responses: Option<usize>,
-    /// Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.
+    min_responses: Option<usize>,
+    /// Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gas: Option<BigUint>,
-    pub encoding_options: Option<EncodingOptions>,
+    max_gas: Option<BigUint>,
+    /// Options for encoding the solution into an on-chain transaction.
+    /// If `None`, the solution is returned without an encoded transaction.
+    encoding_options: Option<EncodingOptions>,
+}
+
+impl QuoteOptions {
+    /// Sets the timeout in milliseconds.
+    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+        self.timeout_ms = Some(ms);
+        self
+    }
+
+    /// Sets the minimum number of solver responses to wait for.
+    pub fn with_min_responses(mut self, n: usize) -> Self {
+        self.min_responses = Some(n);
+        self
+    }
+
+    /// Sets the maximum gas cost allowed for a solution.
+    pub fn with_max_gas(mut self, gas: BigUint) -> Self {
+        self.max_gas = Some(gas);
+        self
+    }
+
+    /// Sets the encoding options.
+    pub fn with_encoding_options(mut self, opts: EncodingOptions) -> Self {
+        self.encoding_options = Some(opts);
+        self
+    }
+
+    /// Returns the timeout in milliseconds.
+    pub fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
+    }
+
+    /// Returns the minimum number of solver responses.
+    pub fn min_responses(&self) -> Option<usize> {
+        self.min_responses
+    }
+
+    /// Returns the maximum gas cost constraint.
+    pub fn max_gas(&self) -> Option<&BigUint> {
+        self.max_gas.as_ref()
+    }
+
+    /// Returns the encoding options.
+    pub fn encoding_options(&self) -> Option<&EncodingOptions> {
+        self.encoding_options.as_ref()
+    }
 }
 
 /// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingOptions {
-    pub slippage: f64,
+    slippage: f64,
     /// Token transfer method. Defaults to `TransferFrom`.
     #[serde(default = "default_transfer_type")]
-    pub transfer_type: UserTransferType,
+    transfer_type: UserTransferType,
     /// Permit2 single-token authorization. Required when using `TransferFromPermit2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permit: Option<PermitSingle>,
+    permit: Option<PermitSingle>,
     /// Permit2 signature (65 bytes). Required when `permit` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permit2_signature: Option<Bytes>,
+    permit2_signature: Option<Bytes>,
+}
+
+impl EncodingOptions {
+    /// Creates encoding options with the given slippage and default transfer type.
+    pub fn new(slippage: f64) -> Self {
+        Self {
+            slippage,
+            transfer_type: default_transfer_type(),
+            permit: None,
+            permit2_signature: None,
+        }
+    }
+
+    /// Sets the token transfer type.
+    pub fn with_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
+        self.transfer_type = transfer_type;
+        self
+    }
+
+    /// Sets the permit2 single-token authorization.
+    pub fn with_permit(mut self, permit: PermitSingle) -> Self {
+        self.permit = Some(permit);
+        self
+    }
+
+    /// Sets the permit2 signature.
+    pub fn with_signature(mut self, sig: Bytes) -> Self {
+        self.permit2_signature = Some(sig);
+        self
+    }
+
+    /// Returns the slippage tolerance.
+    pub fn slippage(&self) -> f64 {
+        self.slippage
+    }
+
+    /// Returns the token transfer type.
+    pub fn transfer_type(&self) -> &UserTransferType {
+        &self.transfer_type
+    }
+
+    /// Returns the permit2 authorization, if set.
+    pub fn permit(&self) -> Option<&PermitSingle> {
+        self.permit.as_ref()
+    }
+
+    /// Returns the permit2 signature, if set.
+    pub fn permit2_signature(&self) -> Option<&Bytes> {
+        self.permit2_signature.as_ref()
+    }
 }
 
 /// A single permit for permit2 token transfer authorization.
@@ -89,12 +204,34 @@ pub struct EncodingOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermitSingle {
     /// The permit details (token, amount, expiration, nonce).
-    pub details: PermitDetails,
+    details: PermitDetails,
     /// Address authorized to spend the tokens (typically the router).
-    pub spender: Bytes,
+    spender: Bytes,
     /// Deadline timestamp for the permit signature.
     #[serde_as(as = "DisplayFromStr")]
-    pub sig_deadline: BigUint,
+    sig_deadline: BigUint,
+}
+
+impl PermitSingle {
+    /// Creates a new permit.
+    pub fn new(details: PermitDetails, spender: Bytes, sig_deadline: BigUint) -> Self {
+        Self { details, spender, sig_deadline }
+    }
+
+    /// Returns the permit details.
+    pub fn details(&self) -> &PermitDetails {
+        &self.details
+    }
+
+    /// Returns the spender address.
+    pub fn spender(&self) -> &Bytes {
+        &self.spender
+    }
+
+    /// Returns the signature deadline.
+    pub fn sig_deadline(&self) -> &BigUint {
+        &self.sig_deadline
+    }
 }
 
 /// Details for a permit2 single-token permit.
@@ -102,36 +239,93 @@ pub struct PermitSingle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermitDetails {
     /// Token address for which the permit is granted.
-    pub token: Bytes,
+    token: Bytes,
     /// Amount of tokens approved.
     #[serde_as(as = "DisplayFromStr")]
-    pub amount: BigUint,
+    amount: BigUint,
     /// Expiration timestamp for the permit.
     #[serde_as(as = "DisplayFromStr")]
-    pub expiration: BigUint,
+    expiration: BigUint,
     /// Nonce to prevent replay attacks.
     #[serde_as(as = "DisplayFromStr")]
-    pub nonce: BigUint,
+    nonce: BigUint,
+}
+
+impl PermitDetails {
+    /// Creates permit details.
+    pub fn new(token: Bytes, amount: BigUint, expiration: BigUint, nonce: BigUint) -> Self {
+        Self { token, amount, expiration, nonce }
+    }
+
+    /// Returns the token address.
+    pub fn token(&self) -> &Bytes {
+        &self.token
+    }
+
+    /// Returns the approved amount.
+    pub fn amount(&self) -> &BigUint {
+        &self.amount
+    }
+
+    /// Returns the expiration timestamp.
+    pub fn expiration(&self) -> &BigUint {
+        &self.expiration
+    }
+
+    /// Returns the nonce.
+    pub fn nonce(&self) -> &BigUint {
+        &self.nonce
+    }
 }
 
 // ============================================================================
 // RESPONSE TYPES
 // ============================================================================
 
-/// Complete solution for a [`SolutionRequest`].
+/// Complete solution for a [`QuoteRequest`].
 ///
 /// Contains a solution for each order in the request, along with aggregate
 /// gas estimates and timing information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Solution {
-    /// Solutions for each order, in the same order as the request.
-    pub orders: Vec<OrderSolution>,
+pub struct Quote {
+    /// Quotes for each order, in the same order as the request.
+    orders: Vec<OrderQuote>,
     /// Total estimated gas for executing all swaps (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub total_gas_estimate: BigUint,
+    total_gas_estimate: BigUint,
     /// Time taken to compute this solution, in milliseconds.
-    pub solve_time_ms: u64,
+    solve_time_ms: u64,
+}
+
+impl Quote {
+    pub(crate) fn new(
+        orders: Vec<OrderQuote>,
+        total_gas_estimate: BigUint,
+        solve_time_ms: u64,
+    ) -> Self {
+        Self { orders, total_gas_estimate, solve_time_ms }
+    }
+
+    /// Returns the solutions for each order.
+    pub fn orders(&self) -> &[OrderQuote] {
+        &self.orders
+    }
+
+    /// Consumes this solution and returns the order solutions.
+    pub fn into_orders(self) -> Vec<OrderQuote> {
+        self.orders
+    }
+
+    /// Returns the total estimated gas for all swaps.
+    pub fn total_gas_estimate(&self) -> &BigUint {
+        &self.total_gas_estimate
+    }
+
+    /// Returns the time taken to compute this solution, in milliseconds.
+    pub fn solve_time_ms(&self) -> u64 {
+        self.solve_time_ms
+    }
 }
 
 /// A single swap order to be solved.
@@ -144,26 +338,84 @@ pub struct Order {
     ///
     /// Auto-generated by the API.
     #[serde(default = "generate_order_id", skip_deserializing)]
-    pub id: String,
+    id: String,
     /// Input token address (the token being sold).
-    pub token_in: Address,
+    token_in: Address,
     /// Output token address (the token being bought).
-    pub token_out: Address,
+    token_out: Address,
     /// Amount to swap, interpreted according to `side` (in token units, as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub amount: BigUint,
+    amount: BigUint,
     /// Whether this is a sell (exact input) or buy (exact output) order.
-    pub side: OrderSide,
+    side: OrderSide,
     /// Address that will send the input tokens.
-    pub sender: Address,
+    sender: Address,
     /// Address that will receive the output tokens.
     ///
     /// Defaults to `sender` if not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receiver: Option<Address>,
+    receiver: Option<Address>,
 }
 
 impl Order {
+    /// Creates a new order with an auto-generated ID.
+    pub fn new(
+        token_in: Address,
+        token_out: Address,
+        amount: BigUint,
+        side: OrderSide,
+        sender: Address,
+    ) -> Self {
+        Self { id: generate_order_id(), token_in, token_out, amount, side, sender, receiver: None }
+    }
+
+    /// Overrides the auto-generated order ID.
+    pub fn with_id(mut self, id: String) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Sets the receiver address.
+    pub fn with_receiver(mut self, receiver: Address) -> Self {
+        self.receiver = Some(receiver);
+        self
+    }
+
+    /// Returns the order ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the input token address.
+    pub fn token_in(&self) -> &Address {
+        &self.token_in
+    }
+
+    /// Returns the output token address.
+    pub fn token_out(&self) -> &Address {
+        &self.token_out
+    }
+
+    /// Returns the swap amount.
+    pub fn amount(&self) -> &BigUint {
+        &self.amount
+    }
+
+    /// Returns the order side.
+    pub fn side(&self) -> OrderSide {
+        self.side
+    }
+
+    /// Returns the sender address.
+    pub fn sender(&self) -> &Address {
+        &self.sender
+    }
+
+    /// Returns the receiver address, if set.
+    pub fn receiver(&self) -> Option<&Address> {
+        self.receiver.as_ref()
+    }
+
     /// Returns `true` if this is a sell order (exact input amount).
     pub fn is_sell(&self) -> bool {
         matches!(self.side, OrderSide::Sell)
@@ -219,63 +471,199 @@ pub enum OrderValidationError {
 
 /// Internal wrapper used by workers when returning a solution.
 ///
-/// This wraps [`OrderSolution`] with per-worker timing information.
+/// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Solution`]).
+/// not the total OrderManager orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SingleOrderSolution {
+pub struct SingleOrderQuote {
     /// The solution for the order.
-    pub order: OrderSolution,
+    order: OrderQuote,
     /// Time taken by this specific worker to compute the solution, in milliseconds.
-    pub solve_time_ms: u64,
+    solve_time_ms: u64,
 }
 
-/// Solution for a single [`Order`].
+impl SingleOrderQuote {
+    pub(crate) fn new(order: OrderQuote, solve_time_ms: u64) -> Self {
+        Self { order, solve_time_ms }
+    }
+
+    /// Returns the order solution.
+    pub fn order(&self) -> &OrderQuote {
+        &self.order
+    }
+
+    /// Returns the time taken by this worker to compute the solution, in milliseconds.
+    pub fn solve_time_ms(&self) -> u64 {
+        self.solve_time_ms
+    }
+}
+
+/// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
 /// gas estimates, and status information.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderSolution {
+pub struct OrderQuote {
     /// ID of the order this solution corresponds to.
-    pub order_id: String,
+    order_id: String,
     /// Status indicating whether a route was found.
-    pub status: SolutionStatus,
+    status: QuoteStatus,
     /// The route to execute, if a valid route was found.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub route: Option<Route>,
+    route: Option<Route>,
     /// Amount of input token (in token units, as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub amount_in: BigUint,
+    amount_in: BigUint,
     /// Amount of output token (in token units, as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub amount_out: BigUint,
+    amount_out: BigUint,
     /// Estimated gas cost for executing this route (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub gas_estimate: BigUint,
+    gas_estimate: BigUint,
     /// Price impact in basis points (1 bip = 0.01%).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub price_impact_bps: Option<i32>,
+    price_impact_bps: Option<i32>,
     /// Amount out minus gas cost in output token terms.
     /// Used by OrderManager to compare solutions from different solvers.
     #[serde_as(as = "DisplayFromStr")]
-    pub amount_out_net_gas: BigUint,
+    amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
-    pub block: BlockInfo,
+    block: BlockInfo,
     /// Algorithm that found this solution (internal use only).
     #[serde(skip)]
-    pub algorithm: String,
+    algorithm: String,
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub gas_price: Option<BigUint>,
+    gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
-    pub transaction: Option<Transaction>,
+    transaction: Option<Transaction>,
+}
+
+impl OrderQuote {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        order_id: String,
+        status: QuoteStatus,
+        amount_in: BigUint,
+        amount_out: BigUint,
+        gas_estimate: BigUint,
+        amount_out_net_gas: BigUint,
+        block: BlockInfo,
+        algorithm: String,
+    ) -> Self {
+        Self {
+            order_id,
+            status,
+            route: None,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            price_impact_bps: None,
+            amount_out_net_gas,
+            block,
+            algorithm,
+            gas_price: None,
+            transaction: None,
+        }
+    }
+
+    /// Sets the route for this solution.
+    pub(crate) fn with_route(mut self, route: Route) -> Self {
+        self.route = Some(route);
+        self
+    }
+
+    /// Sets the effective gas price.
+    pub(crate) fn with_gas_price(mut self, gas_price: BigUint) -> Self {
+        self.gas_price = Some(gas_price);
+        self
+    }
+
+    /// Sets the price impact in basis points.
+    #[allow(dead_code)]
+    pub(crate) fn with_price_impact_bps(mut self, bps: i32) -> Self {
+        self.price_impact_bps = Some(bps);
+        self
+    }
+
+    /// Sets the encoded EVM transaction.
+    #[allow(dead_code)]
+    pub(crate) fn with_transaction(mut self, transaction: Transaction) -> Self {
+        self.transaction = Some(transaction);
+        self
+    }
+
+    /// Returns the order ID.
+    pub fn order_id(&self) -> &str {
+        &self.order_id
+    }
+
+    /// Returns the solution status.
+    pub fn status(&self) -> QuoteStatus {
+        self.status
+    }
+
+    /// Returns the route, if a valid route was found.
+    pub fn route(&self) -> Option<&Route> {
+        self.route.as_ref()
+    }
+
+    /// Consumes this solution and returns the route.
+    pub fn into_route(self) -> Option<Route> {
+        self.route
+    }
+
+    /// Returns the input amount.
+    pub fn amount_in(&self) -> &BigUint {
+        &self.amount_in
+    }
+
+    /// Returns the output amount.
+    pub fn amount_out(&self) -> &BigUint {
+        &self.amount_out
+    }
+
+    /// Returns the estimated gas cost.
+    pub fn gas_estimate(&self) -> &BigUint {
+        &self.gas_estimate
+    }
+
+    /// Returns the price impact in basis points, if available.
+    pub fn price_impact_bps(&self) -> Option<i32> {
+        self.price_impact_bps
+    }
+
+    /// Returns the output amount minus gas cost in output token terms.
+    pub fn amount_out_net_gas(&self) -> &BigUint {
+        &self.amount_out_net_gas
+    }
+
+    /// Returns the block at which this solution was computed.
+    pub fn block(&self) -> &BlockInfo {
+        &self.block
+    }
+
+    /// Returns the algorithm name that found this solution.
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
+    }
+
+    /// Returns the effective gas price at the time the route was computed.
+    pub fn gas_price(&self) -> Option<&BigUint> {
+        self.gas_price.as_ref()
+    }
+
+    /// Returns the encoded EVM transaction, if available.
+    pub fn transaction(&self) -> Option<&Transaction> {
+        self.transaction.as_ref()
+    }
 }
 
 /// Status of an order solution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SolutionStatus {
+pub enum QuoteStatus {
     /// A valid route was found.
     Success,
     /// No route exists between the specified tokens.
@@ -288,17 +676,17 @@ pub enum SolutionStatus {
     NotReady,
 }
 
-impl From<AlgorithmError> for SolutionStatus {
+impl From<AlgorithmError> for QuoteStatus {
     fn from(err: crate::algorithm::AlgorithmError) -> Self {
         match err {
-            AlgorithmError::NoPath { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::InsufficientLiquidity => SolutionStatus::InsufficientLiquidity,
-            AlgorithmError::Timeout { .. } => SolutionStatus::Timeout,
-            AlgorithmError::ExactOutNotSupported => SolutionStatus::NoRouteFound,
-            AlgorithmError::Other(_) => SolutionStatus::NoRouteFound,
-            AlgorithmError::InvalidConfiguration { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::SimulationFailed { .. } => SolutionStatus::NoRouteFound,
-            AlgorithmError::DataNotFound { .. } => SolutionStatus::NoRouteFound,
+            AlgorithmError::NoPath { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::InsufficientLiquidity => QuoteStatus::InsufficientLiquidity,
+            AlgorithmError::Timeout { .. } => QuoteStatus::Timeout,
+            AlgorithmError::ExactOutNotSupported => QuoteStatus::NoRouteFound,
+            AlgorithmError::Other(_) => QuoteStatus::NoRouteFound,
+            AlgorithmError::InvalidConfiguration { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::SimulationFailed { .. } => QuoteStatus::NoRouteFound,
+            AlgorithmError::DataNotFound { .. } => QuoteStatus::NoRouteFound,
         }
     }
 }
@@ -310,11 +698,33 @@ impl From<AlgorithmError> for SolutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockInfo {
     /// Block number.
-    pub number: u64,
+    number: u64,
     /// Block hash as a hex string.
-    pub hash: String,
+    hash: String,
     /// Block timestamp in Unix seconds.
-    pub timestamp: u64,
+    timestamp: u64,
+}
+
+impl BlockInfo {
+    /// Creates new block info.
+    pub fn new(number: u64, hash: String, timestamp: u64) -> Self {
+        Self { number, hash, timestamp }
+    }
+
+    /// Returns the block number.
+    pub fn number(&self) -> u64 {
+        self.number
+    }
+
+    /// Returns the block hash.
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    /// Returns the block timestamp in Unix seconds.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
 }
 
 // ============================================================================
@@ -328,7 +738,7 @@ pub struct BlockInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     /// Ordered sequence of swaps to execute.
-    pub swaps: Vec<Swap>,
+    swaps: Vec<Swap>,
 }
 
 impl Route {
@@ -336,21 +746,54 @@ impl Route {
     pub fn new(swaps: Vec<Swap>) -> Self {
         Self { swaps }
     }
+
+    /// Returns the swaps in this route.
+    pub fn swaps(&self) -> &[Swap] {
+        &self.swaps
+    }
+
+    /// Consumes the route and returns its swaps.
+    pub fn into_swaps(self) -> Vec<Swap> {
+        self.swaps
+    }
 }
 
 /// The result of a route-finding algorithm: a route plus its gas-adjusted net output.
 ///
 /// `net_amount_out` is the output amount after subtracting gas costs converted to output token
 /// units. It can be negative if gas exceeds output (e.g., tiny swaps or inaccurate gas
-/// estimation). Used by the worker to populate `amount_out_net_gas` on `OrderSolution`.
+/// estimation). Used by the worker to populate `amount_out_net_gas` on `OrderQuote`.
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     /// The route (sequence of swaps) to execute.
-    pub route: Route,
+    route: Route,
     /// Net amount out after accounting for gas costs in output token terms.
-    pub net_amount_out: BigInt,
+    net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
-    pub gas_price: BigUint,
+    gas_price: BigUint,
+}
+
+impl RouteResult {
+    /// Creates a new route result.
+    pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
+        Self { route, net_amount_out, gas_price }
+    }
+
+    pub(crate) fn route(&self) -> &Route {
+        &self.route
+    }
+
+    pub(crate) fn into_route(self) -> Route {
+        self.route
+    }
+
+    pub(crate) fn net_amount_out(&self) -> &BigInt {
+        &self.net_amount_out
+    }
+
+    pub(crate) fn gas_price(&self) -> &BigUint {
+        &self.gas_price
+    }
 }
 
 impl Route {
@@ -458,33 +901,33 @@ pub enum RouteValidationError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
     /// Identifier of the liquidity pool component.
-    pub component_id: ComponentId,
+    component_id: ComponentId,
     /// Protocol system identifier (e.g., "uniswap_v2", "uniswap_v3", "vm:balancer").
-    pub protocol: String,
+    protocol: String,
     /// Input token address.
-    pub token_in: Address,
+    token_in: Address,
     /// Output token address.
-    pub token_out: Address,
+    token_out: Address,
     /// Amount of input token (in token units, as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub amount_in: BigUint,
+    amount_in: BigUint,
     /// Amount of output token (in token units, as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub amount_out: BigUint,
+    amount_out: BigUint,
     /// Estimated gas cost for this swap (as decimal string).
     #[serde_as(as = "DisplayFromStr")]
-    pub gas_estimate: BigUint,
+    gas_estimate: BigUint,
     /// Protocol component to perform the swap.
-    pub protocol_component: ProtocolComponent,
+    protocol_component: ProtocolComponent,
     /// Protocol state used to perform the swap.
-    pub protocol_state: Box<dyn ProtocolSim>,
+    protocol_state: Box<dyn ProtocolSim>,
+    /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+    split: f64,
 }
 
 impl Swap {
-    /// Creates a new swap with an auto-calculated gas estimate.
-    // All arguments correspond directly to struct fields; no grouping makes sense here.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         component_id: ComponentId,
         protocol: String,
         token_in: Address,
@@ -505,7 +948,64 @@ impl Swap {
             gas_estimate,
             protocol_component,
             protocol_state,
+            split: 0.0,
         }
+    }
+    /// Sets the split of this Swap
+    #[allow(dead_code)]
+    pub(crate) fn with_split(mut self, split: f64) -> Self {
+        self.split = split;
+        self
+    }
+
+    /// Returns the component ID of the liquidity pool.
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
+    /// Returns the protocol identifier.
+    pub fn protocol(&self) -> &str {
+        &self.protocol
+    }
+
+    /// Returns the input token address.
+    pub fn token_in(&self) -> &Address {
+        &self.token_in
+    }
+
+    /// Returns the output token address.
+    pub fn token_out(&self) -> &Address {
+        &self.token_out
+    }
+
+    /// Returns the input amount.
+    pub fn amount_in(&self) -> &BigUint {
+        &self.amount_in
+    }
+
+    /// Returns the output amount.
+    pub fn amount_out(&self) -> &BigUint {
+        &self.amount_out
+    }
+
+    /// Returns the estimated gas cost for this swap.
+    pub fn gas_estimate(&self) -> &BigUint {
+        &self.gas_estimate
+    }
+
+    /// Returns the protocol component.
+    pub fn protocol_component(&self) -> &ProtocolComponent {
+        &self.protocol_component
+    }
+
+    /// Returns the protocol state.
+    pub fn protocol_state(&self) -> &dyn ProtocolSim {
+        self.protocol_state.as_ref()
+    }
+
+    /// Returns the split of this swap.
+    pub fn split(&self) -> &f64 {
+        &self.split
     }
 }
 
@@ -514,12 +1014,34 @@ impl Swap {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     /// Contract address to call.
-    pub to: Bytes,
+    to: Bytes,
     /// Native token value to send with the transaction.
     #[serde_as(as = "DisplayFromStr")]
-    pub value: num_bigint::BigUint,
+    value: num_bigint::BigUint,
     /// ABI-encoded calldata.
-    pub data: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl Transaction {
+    /// Creates a new transaction.
+    pub fn new(to: Bytes, value: BigUint, data: Vec<u8>) -> Self {
+        Self { to, value, data }
+    }
+
+    /// Returns the contract address to call.
+    pub fn to(&self) -> &Bytes {
+        &self.to
+    }
+
+    /// Returns the native token value to send.
+    pub fn value(&self) -> &num_bigint::BigUint {
+        &self.value
+    }
+
+    /// Returns the ABI-encoded calldata.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 // ============================================================================
@@ -547,31 +1069,29 @@ mod tests {
     }
 
     fn make_order(token_in_byte: u8, token_out_byte: u8, amount: u64) -> Order {
-        Order {
-            id: generate_order_id(),
-            token_in: make_address(token_in_byte),
-            token_out: make_address(token_out_byte),
-            amount: BigUint::from(amount),
-            side: OrderSide::Sell,
-            sender: make_address(0xAA),
-            receiver: None,
-        }
+        Order::new(
+            make_address(token_in_byte),
+            make_address(token_out_byte),
+            BigUint::from(amount),
+            OrderSide::Sell,
+            make_address(0xAA),
+        )
     }
 
     fn make_swap(token_in_byte: u8, token_out_byte: u8, amount_in: u64, amount_out: u64) -> Swap {
         let token_in = token(token_in_byte, "TIN");
         let token_out = token(token_out_byte, "TOUT");
-        Swap {
-            component_id: "pool-1".to_string(),
-            protocol: "uniswap_v2".to_string(),
-            token_in: make_address(token_in_byte),
-            token_out: make_address(token_out_byte),
-            amount_in: BigUint::from(amount_in),
-            amount_out: BigUint::from(amount_out),
-            gas_estimate: BigUint::from(100_000u64),
-            protocol_component: component("test-pool", &[token_in, token_out]),
-            protocol_state: Box::new(MockProtocolSim::default()),
-        }
+        Swap::new(
+            "pool-1".to_string(),
+            "uniswap_v2".to_string(),
+            make_address(token_in_byte),
+            make_address(token_out_byte),
+            BigUint::from(amount_in),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            component("test-pool", &[token_in, token_out]),
+            Box::new(MockProtocolSim::default()),
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -588,8 +1108,11 @@ mod tests {
     #[case::with_receiver(Some(0xBB), 0xBB)]
     #[case::without_receiver(None, 0xAA)]
     fn test_order_effective_receiver(#[case] receiver: Option<u8>, #[case] expected: u8) {
-        let mut order = make_order(0x01, 0x02, 1000);
-        order.receiver = receiver.map(make_address);
+        let order = make_order(0x01, 0x02, 1000);
+        let order = match receiver {
+            Some(b) => order.with_receiver(make_address(b)),
+            None => order,
+        };
         assert_eq!(order.effective_receiver(), make_address(expected));
     }
 
@@ -768,6 +1291,7 @@ mod tests {
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
             "gas_estimate": "150000",
+            "split": 0,
             "protocol_component": {
                 "id": "test-pool",
                 "protocol_system": "uniswap_v2",
@@ -809,15 +1333,13 @@ mod tests {
         )
         .unwrap();
 
-        let order = Order {
-            id: "test".to_string(),
-            token_in: make_address(0x01),
-            token_out: make_address(0x02),
-            amount: large_amount.clone(),
-            side: OrderSide::Sell,
-            sender: make_address(0xAA),
-            receiver: None,
-        };
+        let order = Order::new(
+            make_address(0x01),
+            make_address(0x02),
+            large_amount.clone(),
+            OrderSide::Sell,
+            make_address(0xAA),
+        );
 
         let json = serde_json::to_string(&order).unwrap();
         assert!(json.contains(
@@ -831,11 +1353,7 @@ mod tests {
 
     #[test]
     fn test_solution_serializes_amounts_as_strings() {
-        let solution = Solution {
-            orders: vec![],
-            total_gas_estimate: BigUint::from(500_000u64),
-            solve_time_ms: 10,
-        };
+        let solution = Quote::new(vec![], BigUint::from(500_000u64), 10);
 
         let json = serde_json::to_string(&solution).unwrap();
         assert!(json.contains(r#""total_gas_estimate":"500000""#));

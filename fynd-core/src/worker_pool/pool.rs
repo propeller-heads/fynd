@@ -12,36 +12,49 @@ use tracing::{error, info};
 use crate::{
     algorithm::AlgorithmConfig,
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    feed::{
+        events::{MarketEvent, MarketEventHandler},
+        market_data::SharedMarketDataRef,
+    },
+    graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
     worker_pool::{
-        registry::{spawn_workers, SpawnWorkersParams, UnknownAlgorithmError, DEFAULT_ALGORITHM},
+        registry::{
+            spawn_workers_generic, AlgorithmSpawner, SpawnWorkersParams, UnknownAlgorithmError,
+            DEFAULT_ALGORITHM,
+        },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
     },
 };
 
 /// Configuration for the worker pool.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WorkerPoolConfig {
     /// Human-readable name for this pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
-    pub name: String,
-    /// Algorithm name for this pool (e.g., "most_liquid").
-    /// Use `worker_pool::list_algorithms()` to see available options.
-    pub algorithm: String,
+    name: String,
+    /// How to spawn workers — either a built-in registry lookup or a custom factory.
+    spawner: AlgorithmSpawner,
     /// Number of worker threads.
-    pub num_workers: usize,
+    num_workers: usize,
     /// Configuration for the algorithm used by each worker.
-    pub algorithm_config: AlgorithmConfig,
+    algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
-    pub task_queue_capacity: usize,
+    task_queue_capacity: usize,
+}
+
+impl WorkerPoolConfig {
+    /// Returns the algorithm name for this pool.
+    pub fn algorithm_name(&self) -> &str {
+        self.spawner.algorithm_name()
+    }
 }
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
         Self {
             name: DEFAULT_ALGORITHM.to_string(),
-            algorithm: DEFAULT_ALGORITHM.to_string(),
+            spawner: AlgorithmSpawner::Registry { algorithm: DEFAULT_ALGORITHM.to_string() },
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
@@ -89,11 +102,14 @@ impl WorkerPool {
     ) -> Result<Self, UnknownAlgorithmError> {
         let (shutdown_tx, _) = broadcast::channel(1);
         let name = config.name.clone();
-        let algorithm = config.algorithm.clone();
+        let algorithm = config
+            .spawner
+            .algorithm_name()
+            .to_string();
 
-        // Spawn workers via the algorithm registry
+        // Spawn workers
         let params = SpawnWorkersParams {
-            algorithm: config.algorithm,
+            algorithm: algorithm.clone(),
             num_workers: config.num_workers,
             algorithm_config: config.algorithm_config,
             task_rx,
@@ -103,7 +119,7 @@ impl WorkerPool {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
         };
-        let workers = spawn_workers(params)?;
+        let workers = config.spawner.spawn(params)?;
 
         info!(
             name = %name,
@@ -169,11 +185,34 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the algorithm by name.
+    /// Sets the algorithm by name (built-in registry lookup).
     ///
-    /// Use `worker_pool::list_algorithms()` to see available options.
+    /// Available built-in algorithms: `"most_liquid"`.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
-        self.config.algorithm = algorithm.into();
+        self.config.spawner = AlgorithmSpawner::Registry { algorithm: algorithm.into() };
+        self
+    }
+
+    /// Sets a custom algorithm implementation via a factory closure.
+    ///
+    /// The `factory` is called once per worker thread to create an algorithm instance.
+    /// This bypasses the built-in registry, so any type implementing [`Algorithm`] can be used.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.with_algorithm("my_algo", |config| MyAlgorithm::new(config))
+    /// ```
+    pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
+    where
+        A: crate::algorithm::Algorithm + 'static,
+        A::GraphManager: MarketEventHandler + EdgeWeightUpdaterWithDerived + 'static,
+        F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let spawner =
+            Box::new(move |params: SpawnWorkersParams| spawn_workers_generic(params, &factory));
+        self.config.spawner = AlgorithmSpawner::Custom { algorithm: name, spawner };
         self
     }
 

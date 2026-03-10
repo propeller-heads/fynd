@@ -1,6 +1,6 @@
 # Table of contents
 
-* [Fork it](get-started/quickstart/README.md)
+* [Quickstart](get-started/quickstart/README.md)
 * [Contact us](https://t.me/+B4CNQwv7dgIyYTJl)
 
 ## Get Started

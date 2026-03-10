@@ -49,9 +49,9 @@ pub struct ServeArgs {
     #[arg(long)]
     pub disable_tls: bool,
 
-    /// Node RPC URL for the target chain
+    /// Node RPC URL for the target chain. Defaults to a public endpoint if not set.
     #[arg(long, env)]
-    pub rpc_url: String,
+    pub rpc_url: Option<String>,
 
     /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3)
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
@@ -136,7 +136,7 @@ mod cli_tests {
         assert_eq!(args.http_host, "127.0.0.1");
         assert_eq!(args.http_port, 8080);
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
-        assert_eq!(args.rpc_url, "https://rpc.example.com");
+        assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
         assert_eq!(args.tycho_url, "wss://custom.tycho.url");
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, 20.0);
@@ -145,15 +145,10 @@ mod cli_tests {
 
     #[test]
     fn test_arg_parsing_defaults() {
-        let cli = Cli::try_parse_from(vec![
-            "fynd",
-            "serve",
-            "--rpc-url",
-            "https://rpc.example.com",
-            "--protocols",
-            "uniswap_v2",
-        ])
-        .expect("parse errored");
+        // Clear ambient env var so the test is deterministic
+        std::env::remove_var("RPC_URL");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--protocols", "uniswap_v2"])
+            .expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");
@@ -162,7 +157,7 @@ mod cli_tests {
         assert_eq!(args.http_host, "0.0.0.0");
         assert_eq!(args.http_port, 3000);
         assert_eq!(args.tycho_api_key, None);
-        assert_eq!(args.rpc_url, "https://rpc.example.com");
+        assert_eq!(args.rpc_url, None);
         assert_eq!(args.tycho_url, "localhost:4242");
         assert_eq!(args.protocols, vec!["uniswap_v2"]);
         assert_eq!(args.min_tvl, 10.0);
@@ -180,8 +175,6 @@ mod cli_tests {
             "serve",
             "--tycho-api-key",
             "test-key",
-            "--rpc-url",
-            "https://rpc.example.com",
             "--protocols",
             "uniswap_v2",
         ])
@@ -191,14 +184,6 @@ mod cli_tests {
             panic!("expected Serve command");
         };
         assert_eq!(args.worker_pools_config, PathBuf::from("worker_pools.toml"));
-    }
-
-    #[test]
-    fn test_arg_parsing_missing_required_args() {
-        // rpc_url is required; clear any ambient env var so the test is deterministic
-        std::env::remove_var("RPC_URL");
-        let args = Cli::try_parse_from(vec!["fynd", "serve", "--protocols", "uniswap_v2"]);
-        assert!(args.is_err());
     }
 
     #[test]

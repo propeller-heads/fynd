@@ -7,6 +7,7 @@ num_workers = 5
 task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 100
+max_routes = 50
 
 [pools.most_liquid_3_hops]
 algorithm = "most_liquid"
