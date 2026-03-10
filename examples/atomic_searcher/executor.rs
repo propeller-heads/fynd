@@ -33,11 +33,19 @@ use tycho_simulation::{
     tycho_common::{models::Chain, Bytes},
 };
 
-use fynd::feed::market_data::SharedMarketData;
+use fynd::feed::market_data::{SharedMarketData, SharedMarketDataRef};
 
 use crate::types::{EvaluatedCycle, ExecutionMode, ExecutionResult};
 
 /// Handles encoding and execution of profitable cycles.
+///
+/// Future improvements (from review):
+/// - Use eth_estimateGas instead of hardcoded gas limits (100k/800k)
+/// - Return error for unsupported chains instead of silent mainnet fallback
+/// - Implement bribe_pct for priority fee computation (or remove from CLI)
+/// - Add timeout on approval tx confirmation in execute_public
+/// - Cache SwapEncoderRegistry on CycleExecutor instead of rebuilding per call
+/// - Add state overrides for simulation with Address::ZERO
 pub struct CycleExecutor {
     chain: Chain,
     slippage_bps: u32,
@@ -67,10 +75,13 @@ impl CycleExecutor {
     }
 
     /// Execute (or simulate) a profitable cycle.
+    ///
+    /// Takes `SharedMarketDataRef` (Arc<RwLock>) so the lock is only held
+    /// during `build_solution` and released before any network I/O.
     pub async fn execute_cycle(
         &self,
         cycle: &EvaluatedCycle,
-        market: &SharedMarketData,
+        market_ref: &SharedMarketDataRef,
         source_token_addr: &tycho_simulation::tycho_common::models::Address,
         mode: &ExecutionMode,
     ) -> ExecutionResult {
@@ -82,12 +93,14 @@ impl CycleExecutor {
                 mode: mode.clone(),
                 message: "log-only mode, no execution attempted".into(),
             },
-            ExecutionMode::Simulate => self.simulate(cycle, market, source_token_addr).await,
+            ExecutionMode::Simulate => {
+                self.simulate(cycle, market_ref, source_token_addr).await
+            }
             ExecutionMode::ExecutePublic => {
-                self.execute_public(cycle, market, source_token_addr).await
+                self.execute_public(cycle, market_ref, source_token_addr).await
             }
             ExecutionMode::ExecuteProtected => {
-                self.execute_protected(cycle, market, source_token_addr).await
+                self.execute_protected(cycle, market_ref, source_token_addr).await
             }
         }
     }
@@ -236,7 +249,7 @@ impl CycleExecutor {
     async fn simulate(
         &self,
         cycle: &EvaluatedCycle,
-        market: &SharedMarketData,
+        market_ref: &SharedMarketDataRef,
         source_token_addr: &tycho_simulation::tycho_common::models::Address,
     ) -> ExecutionResult {
         let rpc_url = match &self.rpc_url {
@@ -264,7 +277,9 @@ impl CycleExecutor {
             .map(|s| s.address())
             .unwrap_or(Address::ZERO);
 
-        let solution = match self.build_solution(cycle, market, source_token_addr, bot_address) {
+        // Hold the market lock only for build_solution, then drop before network I/O
+        let market = market_ref.read().await;
+        let solution = match self.build_solution(cycle, &market, source_token_addr, bot_address) {
             Ok(s) => s,
             Err(e) => {
                 return ExecutionResult {
@@ -276,6 +291,7 @@ impl CycleExecutor {
                 }
             }
         };
+        drop(market);
 
         let tx = match self.encode_solution(&solution, source_token_addr) {
             Ok(t) => t,
@@ -394,7 +410,7 @@ impl CycleExecutor {
     async fn execute_public(
         &self,
         cycle: &EvaluatedCycle,
-        market: &SharedMarketData,
+        market_ref: &SharedMarketDataRef,
         source_token_addr: &tycho_simulation::tycho_common::models::Address,
     ) -> ExecutionResult {
         let (rpc_url, signer) = match (&self.rpc_url, &self.signer) {
@@ -413,8 +429,10 @@ impl CycleExecutor {
         let bot_address = Bytes::from(signer.address().as_slice());
         let user_address = signer.address();
 
+        // Hold market lock only for build_solution, then drop before network I/O
+        let market = market_ref.read().await;
         let solution =
-            match self.build_solution(cycle, market, source_token_addr, bot_address) {
+            match self.build_solution(cycle, &market, source_token_addr, bot_address) {
                 Ok(s) => s,
                 Err(e) => {
                     return ExecutionResult {
@@ -426,6 +444,7 @@ impl CycleExecutor {
                     }
                 }
             };
+        drop(market);
 
         let tx = match self.encode_solution(&solution, source_token_addr) {
             Ok(t) => t,
@@ -568,11 +587,14 @@ impl CycleExecutor {
         }
     }
 
-    /// Sign locally and POST raw tx to Flashbots Protect.
+    /// Sign locally and POST raw signed tx to Flashbots Protect.
+    ///
+    /// Does NOT broadcast to the public mempool. Requires the bot to have
+    /// a persistent approval to the TychoRouter (set up once beforehand).
     async fn execute_protected(
         &self,
         cycle: &EvaluatedCycle,
-        market: &SharedMarketData,
+        market_ref: &SharedMarketDataRef,
         source_token_addr: &tycho_simulation::tycho_common::models::Address,
     ) -> ExecutionResult {
         let (rpc_url, signer) = match (&self.rpc_url, &self.signer) {
@@ -590,8 +612,10 @@ impl CycleExecutor {
 
         let bot_address = Bytes::from(signer.address().as_slice());
 
+        // Hold market lock only for build_solution, then drop before network I/O
+        let market = market_ref.read().await;
         let solution =
-            match self.build_solution(cycle, market, source_token_addr, bot_address) {
+            match self.build_solution(cycle, &market, source_token_addr, bot_address) {
                 Ok(s) => s,
                 Err(e) => {
                     return ExecutionResult {
@@ -603,6 +627,7 @@ impl CycleExecutor {
                     }
                 }
             };
+        drop(market);
 
         let tx = match self.encode_solution(&solution, source_token_addr) {
             Ok(t) => t,
@@ -617,7 +642,7 @@ impl CycleExecutor {
             }
         };
 
-        // Build the raw swap tx, sign it, and send to Flashbots
+        // Use a read-only provider for nonce/gas queries (no wallet, no broadcasting)
         let provider = match ProviderBuilder::default().connect(&rpc_url).await {
             Ok(p) => p,
             Err(e) => {
@@ -633,16 +658,13 @@ impl CycleExecutor {
 
         let chain_id = chain_to_id(self.chain);
         let user_address = signer.address();
-        let router_address = Address::from_slice(&tx.to);
-        let sell_token = Address::from_slice(source_token_addr.as_ref());
 
-        let (_approval_request, swap_request) = match self
-            .build_tx_requests(
+        // Build swap-only request at CURRENT nonce (no approval tx in this flow;
+        // bot must have a persistent approval to the TychoRouter).
+        let swap_request = match self
+            .build_swap_only_request(
                 &provider,
-                biguint_to_u256(&cycle.optimal_amount_in),
                 user_address,
-                sell_token,
-                router_address,
                 &tx,
                 chain_id,
             )
@@ -660,32 +682,27 @@ impl CycleExecutor {
             }
         };
 
-        // For Flashbots, we need to sign the raw tx and POST to their RPC
-        // Note: approval must already be set (persistent approval to the router)
+        // Sign locally via NetworkWallet without broadcasting
         let wallet = alloy::network::EthereumWallet::from(signer);
-        let named_chain = alloy_chains::NamedChain::try_from(chain_id)
-            .unwrap_or(alloy_chains::NamedChain::Mainnet);
-        let signed_provider = match ProviderBuilder::<_, _, Ethereum>::default()
-            .with_chain(named_chain)
-            .wallet(wallet)
-            .connect(&rpc_url)
-            .await
-        {
-            Ok(p) => p,
+        use alloy::network::TransactionBuilder;
+        let typed_tx = match swap_request.clone().build_unsigned() {
+            Ok(t) => t,
             Err(e) => {
                 return ExecutionResult {
                     tx_hash: None,
                     success: false,
                     gas_used: None,
                     mode: ExecutionMode::ExecuteProtected,
-                    message: format!("provider with wallet: {}", e),
+                    message: format!("build unsigned tx: {}", e),
                 }
             }
         };
-
-        // Sign the tx
-        let pending = match signed_provider.send_transaction(swap_request).await {
-            Ok(p) => p,
+        let tx_envelope = match <alloy::network::EthereumWallet as alloy::network::NetworkWallet<
+            Ethereum,
+        >>::sign_transaction(&wallet, typed_tx)
+        .await
+        {
+            Ok(t) => t,
             Err(e) => {
                 return ExecutionResult {
                     tx_hash: None,
@@ -697,11 +714,15 @@ impl CycleExecutor {
             }
         };
 
-        let tx_hash = format!("{:?}", pending.tx_hash());
-        info!(tx_hash = %tx_hash, "tx signed, sending to Flashbots Protect");
+        // Encode to raw RLP bytes for Flashbots submission
+        use alloy::eips::Encodable2718;
+        let raw_bytes = tx_envelope.encoded_2718();
+        let raw_tx_hex = format!("0x{}", hex::encode(&raw_bytes));
 
-        // POST raw signed tx to Flashbots Protect
-        let raw_tx = format!("0x{}", hex::encode(pending.tx_hash().as_slice()));
+        let tx_hash = format!("0x{}", hex::encode(tx_envelope.tx_hash().as_slice()));
+        info!(tx_hash = %tx_hash, "tx signed locally, sending to Flashbots Protect");
+
+        // POST raw signed tx to Flashbots Protect (NOT the user's RPC)
         let client = reqwest::Client::new();
         let fb_resp = client
             .post("https://rpc.flashbots.net")
@@ -709,7 +730,7 @@ impl CycleExecutor {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "eth_sendRawTransaction",
-                "params": [raw_tx]
+                "params": [raw_tx_hex]
             }))
             .send()
             .await;
@@ -745,6 +766,49 @@ impl CycleExecutor {
                 message: format!("Flashbots POST failed: {}", e),
             },
         }
+    }
+
+    /// Build a single swap `TransactionRequest` at current nonce (no approval).
+    ///
+    /// Used by `execute_protected` where the bot already has a persistent
+    /// approval to the TychoRouter.
+    async fn build_swap_only_request(
+        &self,
+        provider: &RootProvider<Ethereum>,
+        user_address: Address,
+        tx: &Transaction,
+        chain_id: u64,
+    ) -> Result<TransactionRequest, String> {
+        let block = provider
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+            .await
+            .map_err(|e| format!("get block: {}", e))?
+            .ok_or("block not found")?;
+
+        let base_fee = block.header.base_fee_per_gas.ok_or("no base fee")?;
+        let max_priority_fee_per_gas = 1_000_000_000u64;
+        let max_fee_per_gas = base_fee + max_priority_fee_per_gas;
+
+        let nonce = provider
+            .get_transaction_count(user_address)
+            .await
+            .map_err(|e| format!("get nonce: {}", e))?;
+
+        Ok(TransactionRequest {
+            to: Some(TxKind::Call(Address::from_slice(&tx.to))),
+            from: Some(user_address),
+            value: Some(biguint_to_u256(&tx.value)),
+            input: TransactionInput {
+                input: Some(AlloyBytes::from(tx.data.clone())),
+                data: None,
+            },
+            gas: Some(800_000u64),
+            chain_id: Some(chain_id),
+            max_fee_per_gas: Some(max_fee_per_gas.into()),
+            max_priority_fee_per_gas: Some(max_priority_fee_per_gas.into()),
+            nonce: Some(nonce), // current nonce, no approval tx before this
+            ..Default::default()
+        })
     }
 }
 

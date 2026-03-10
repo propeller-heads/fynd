@@ -289,12 +289,19 @@ async fn main() -> anyhow::Result<()> {
 
                 log_results(&result);
 
-                // Execute best profitable cycle if mode != LogOnly
+                // Execute best profitable cycle if mode != LogOnly.
+                // The executor acquires the market lock only during
+                // build_solution and drops it before any network I/O,
+                // so TychoFeed writes are not blocked.
                 if execution_mode != ExecutionMode::LogOnly {
                     if let Some(best) = result.cycles.iter().find(|c| c.is_profitable) {
-                        let market = market_data.read().await;
                         let exec_result = cycle_executor
-                            .execute_cycle(best, &market, &source_token_addr, &execution_mode)
+                            .execute_cycle(
+                                best,
+                                &market_data,
+                                &source_token_addr,
+                                &execution_mode,
+                            )
                             .await;
                         info!(
                             mode = ?exec_result.mode,
