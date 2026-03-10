@@ -4,6 +4,10 @@ on:
   pull_request:
     branches:
       - main
+      types:
+      - opened
+      - edited
+      - synchronize
 
 permissions:
   contents: read
@@ -23,6 +27,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Check PR title for breaking change intent
+        id: pr-title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Matches: feat!: ..., fix(scope)!: ..., or breaking: ...
+          if echo "$TITLE" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$TITLE" | grep -qE '^breaking(\(.+\))?:'; then
+            echo "declared=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "declared=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -71,33 +87,78 @@ jobs:
             echo "breaking=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Post breaking change comment
-        if: steps.check.outputs.breaking == 'true'
+      - name: Post semver comment
+        if: >
+          steps.check.outputs.breaking == 'true' ||
+          steps.pr-title.outputs.declared == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          BREAKING: ${{ steps.check.outputs.breaking }}
+          DECLARED: ${{ steps.pr-title.outputs.declared }}
         with:
           script: |
             const fs = require('fs');
-            const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
-            const MAX_OUTPUT = 60_000;
-            const output = raw.length > MAX_OUTPUT
-              ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
-              : raw;
+            const breaking = process.env.BREAKING === 'true';
+            const declared = process.env.DECLARED === 'true';
             const marker = '<!-- semver-check -->';
-            const body = [
-              marker,
-              '## Breaking API Changes Detected',
-              '',
-              'This PR introduces breaking changes to the public API.',
-              'If this is intentional, consider bumping the major version.',
-              '',
-              '<details><summary>semver-checks output</summary>',
-              '',
-              '```',
-              output,
-              '```',
-              '',
-              '</details>',
-            ].join('\n');
+
+            let body;
+            if (breaking && !declared) {
+              const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
+              const MAX_OUTPUT = 60_000;
+              const output = raw.length > MAX_OUTPUT
+                ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
+                : raw;
+              body = [
+                marker,
+                '## Breaking API Changes Detected',
+                '',
+                'This PR introduces breaking API changes, but the PR title does not declare them.',
+                'Either fix the breaking changes, or update the PR title to signal intent:',
+                '- Use the `!` convention: `feat!: ...`, `fix!: ...`',
+                '- Or use the `breaking` type: `breaking: ...`',
+                '',
+                '<details><summary>semver-checks output</summary>',
+                '',
+                '```',
+                output,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else if (breaking && declared) {
+              const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
+              const MAX_OUTPUT = 60_000;
+              const output = raw.length > MAX_OUTPUT
+                ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
+                : raw;
+              body = [
+                marker,
+                '## Breaking API Changes (Intentional)',
+                '',
+                'Breaking API changes detected and declared in the PR title.',
+                'Ensure the major version is bumped before merging.',
+                '',
+                '<details><summary>semver-checks output</summary>',
+                '',
+                '```',
+                output,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else {
+              // !breaking && declared
+              body = [
+                marker,
+                '## No API Breaking Changes Detected',
+                '',
+                'The PR title signals breaking changes, but `cargo-semver-checks` found none.',
+                'If the breaking change is behavioral, CLI, or config-level (not public Rust API), this is expected.',
+                'Otherwise, consider removing the `!` or `breaking` type from the PR title.',
+              ].join('\n');
+            }
+
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -120,8 +181,32 @@ jobs:
               });
             }
 
-      - name: Fail on breaking changes
-        if: steps.check.outputs.breaking == 'true'
+      - name: Delete stale semver comment
+        if: >
+          steps.check.outputs.breaking == 'false' &&
+          steps.pr-title.outputs.declared == 'false'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            const marker = '<!-- semver-check -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.deleteComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            }
+
+      - name: Fail on undeclared breaking changes
+        if: >
+          steps.check.outputs.breaking == 'true' &&
+          steps.pr-title.outputs.declared == 'false'
         run: |
           cat semver-output.txt
           exit 1
