@@ -27,8 +27,8 @@ use tracing::{debug, warn};
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, SolveError,
+    encoding::encoder::Encoder, worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order,
+    OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -75,12 +75,18 @@ pub struct OrderManager {
     solver_pools: Vec<SolverPoolHandle>,
     /// Configuration for the order manager.
     config: OrderManagerConfig,
+    /// Encoder for encoding solutions into on-chain transactions.
+    encoder: Encoder,
 }
 
 impl OrderManager {
-    /// Creates a new OrderManager with the given solver pools and config.
-    pub fn new(solver_pools: Vec<SolverPoolHandle>, config: OrderManagerConfig) -> Self {
-        Self { solver_pools, config }
+    /// Creates a new OrderManager with the given solver pools, config, and encoder.
+    pub fn new(
+        solver_pools: Vec<SolverPoolHandle>,
+        config: OrderManagerConfig,
+        encoder: Encoder,
+    ) -> Self {
+        Self { solver_pools, config, encoder }
     }
 
     /// Returns the number of registered solver pools.
@@ -116,10 +122,18 @@ impl OrderManager {
         let order_responses = futures::future::join_all(order_futures).await;
 
         // Select best quote for each order
-        let order_quotes: Vec<OrderQuote> = order_responses
+        let mut order_quotes: Vec<OrderQuote> = order_responses
             .into_iter()
             .map(|responses| self.select_best(&responses, request.options()))
             .collect();
+
+        // Encode solutions if encoding_options is set
+        if let Some(encoding_options) = request.options().encoding_options() {
+            order_quotes = self
+                .encoder
+                .encode(order_quotes, encoding_options.clone())
+                .await?;
+        }
 
         // Calculate totals
         let total_gas_estimate = order_quotes
@@ -378,10 +392,21 @@ impl OrderManager {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use tycho_simulation::tycho_core::{models::Address, Bytes};
+    use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+    use tycho_simulation::{
+        tycho_common::models::Chain,
+        tycho_core::{models::Address, Bytes},
+    };
 
     use super::*;
     use crate::{types::internal::SolveTask, OrderSide, SingleOrderQuote};
+
+    fn default_encoder() -> Encoder {
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .expect("default encoders should always succeed");
+        Encoder::new(Chain::Ethereum, registry).expect("encoder creation should succeed")
+    }
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
@@ -455,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_order_manager_no_pools() {
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
@@ -466,7 +491,8 @@ mod tests {
     async fn test_order_manager_single_pool_success() {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_quote(900)), 0);
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager =
+            OrderManager::new(vec![pool], OrderManagerConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
@@ -490,7 +516,7 @@ mod tests {
 
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
@@ -512,7 +538,7 @@ mod tests {
         let (pool, worker) = create_mock_pool("slow_pool", Ok(make_single_quote(900)), 500);
 
         let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
-        let manager = OrderManager::new(vec![pool], config);
+        let manager = OrderManager::new(vec![pool], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
@@ -540,7 +566,7 @@ mod tests {
         let config = OrderManagerConfig::default()
             .with_timeout(Duration::from_millis(1000))
             .with_min_responses(1);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config);
+        let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
 
         let start = Instant::now();
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
@@ -597,7 +623,7 @@ mod tests {
             None => QuoteOptions::default(),
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
         let result = manager.select_best(&responses, &options);
 
         if should_pass {
@@ -616,7 +642,8 @@ mod tests {
             0,
         );
 
-        let manager = OrderManager::new(vec![pool], OrderManagerConfig::default());
+        let manager =
+            OrderManager::new(vec![pool], OrderManagerConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = manager.quote(request).await;
@@ -642,7 +669,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
         let result = manager.select_best(&responses, &QuoteOptions::default());
 
         assert_eq!(result.status(), QuoteStatus::Timeout);
@@ -659,7 +686,7 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
         let result = manager.select_best(&responses, &QuoteOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
@@ -671,7 +698,7 @@ mod tests {
         let responses =
             OrderResponses { order_id: "test".to_string(), quotes: vec![], failed_solvers: vec![] };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default());
+        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
         let result = manager.select_best(&responses, &QuoteOptions::default());
 
         // No failures but also no quotes means NoRouteFound
