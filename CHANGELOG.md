@@ -1,3 +1,10 @@
+## [0.7.0](https://github.com/propeller-heads/fynd/compare/0.6.0...0.7.0) (2026-03-10)
+
+
+### Features
+
+* generate TypeScript autogen package from OpenAPI spec ([0d0415e](https://github.com/propeller-heads/fynd/commit/0d0415ea548d73acf605ca7fbec3e47a297c81be))
+
 ## [0.6.0](https://github.com/propeller-heads/fynd/compare/0.5.0...0.6.0) (2026-03-10)
 
 
