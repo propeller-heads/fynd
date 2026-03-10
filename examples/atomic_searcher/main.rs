@@ -22,6 +22,7 @@
 
 mod amount_optimizer;
 mod cycle_detector;
+mod executor;
 mod types;
 
 use std::{
@@ -50,7 +51,8 @@ use fynd::{
     native_token, parse_chain,
 };
 
-use crate::types::BlockSearchResult;
+use crate::executor::CycleExecutor;
+use crate::types::{BlockSearchResult, ExecutionMode};
 
 // ==================== CLI ====================
 
@@ -101,6 +103,33 @@ struct Args {
         default_value = "0xd46ba6d942050d489dbd938a2c909a5d5039a161"
     )]
     blacklist_tokens: String,
+
+    /// Minimum net profit in basis points to attempt execution.
+    /// Cycles below this threshold are logged but not executed.
+    #[arg(long, default_value_t = 0)]
+    min_profit_bps: i64,
+
+    /// Slippage tolerance in basis points for execution encoding.
+    #[arg(long, default_value_t = 50)]
+    slippage_bps: u32,
+
+    /// Percentage of profit to use as builder bribe (Flashbots).
+    #[arg(long, default_value_t = 100)]
+    bribe_pct: u32,
+
+    /// Execution mode: log-only, simulate, execute-public, execute-protected.
+    #[arg(long, default_value = "log-only")]
+    execution_mode: String,
+
+    /// Private key for signing transactions (hex, with or without 0x prefix).
+    /// Also reads from PRIVATE_KEY env var.
+    #[arg(long, env = "PRIVATE_KEY")]
+    private_key: Option<String>,
+
+    /// RPC URL for simulation/execution.
+    /// Also reads from RPC_URL env var.
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Option<String>,
 }
 
 // ==================== Main ====================
@@ -123,7 +152,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let execution_mode = ExecutionMode::from_str_arg(&args.execution_mode)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     let chain = parse_chain(&args.chain)?;
+
+    let cycle_executor = CycleExecutor::new(
+        chain,
+        args.slippage_bps,
+        args.bribe_pct,
+        args.rpc_url.clone(),
+        args.private_key.clone(),
+    )?;
     let source_token_addr = native_token(&chain)?;
     let protocols: Vec<String> = args
         .protocols
@@ -243,10 +283,29 @@ async fn main() -> anyhow::Result<()> {
                     args.gss_tolerance,
                     args.gss_max_iter,
                     &blacklisted_tokens,
+                    args.min_profit_bps,
                 )
                 .await;
 
                 log_results(&result);
+
+                // Execute best profitable cycle if mode != LogOnly
+                if execution_mode != ExecutionMode::LogOnly {
+                    if let Some(best) = result.cycles.iter().find(|c| c.is_profitable) {
+                        let market = market_data.read().await;
+                        let exec_result = cycle_executor
+                            .execute_cycle(best, &market, &source_token_addr, &execution_mode)
+                            .await;
+                        info!(
+                            mode = ?exec_result.mode,
+                            success = exec_result.success,
+                            tx_hash = ?exec_result.tx_hash,
+                            gas_used = ?exec_result.gas_used,
+                            msg = %exec_result.message,
+                            "execution result"
+                        );
+                    }
+                }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!("Missed {} events (searcher too slow)", n);
@@ -263,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
 
 // ==================== Search Logic ====================
 
+#[allow(clippy::too_many_arguments)]
 async fn search_block(
     block_number: u64,
     source_token_addr: &tycho_simulation::tycho_core::models::Address,
@@ -273,6 +333,7 @@ async fn search_block(
     gss_tolerance: f64,
     gss_max_iter: usize,
     blacklisted_tokens: &HashSet<Vec<u8>>,
+    min_profit_bps: i64,
 ) -> BlockSearchResult {
     let start = Instant::now();
 
@@ -296,8 +357,19 @@ async fn search_block(
     // Acquire market data snapshot
     let market = market_data.read().await;
 
-    // Extract subgraph around source
-    let subgraph_edges = cycle_detector::extract_subgraph(source_node, max_hops, graph);
+    // Pre-compute blacklisted node indices from token addresses
+    let blacklisted_nodes: HashSet<NodeIndex> = if blacklisted_tokens.is_empty() {
+        HashSet::new()
+    } else {
+        graph
+            .node_indices()
+            .filter(|&n| blacklisted_tokens.contains(graph[n].as_ref()))
+            .collect()
+    };
+
+    // Extract subgraph around source (blacklisted tokens excluded at graph level)
+    let subgraph_edges =
+        cycle_detector::extract_subgraph(source_node, max_hops, graph, &blacklisted_nodes);
 
     if subgraph_edges.is_empty() {
         return BlockSearchResult {
@@ -351,23 +423,8 @@ async fn search_block(
         &subgraph_edges,
     );
 
-    // Filter out cycles that pass through blacklisted tokens
-    let candidates: Vec<_> = if blacklisted_tokens.is_empty() {
-        candidates
-    } else {
-        candidates
-            .into_iter()
-            .filter(|c| {
-                !c.edges.iter().any(|(from, to, _)| {
-                    blacklisted_tokens.contains(from.as_ref())
-                        || blacklisted_tokens.contains(to.as_ref())
-                })
-            })
-            .collect()
-    };
-
     let candidates_found = candidates.len();
-    debug!(block = block_number, candidates = candidates_found, "BF scan complete (after token filter)");
+    debug!(block = block_number, candidates = candidates_found, "BF scan complete");
 
     if candidates.is_empty() {
         return BlockSearchResult {
@@ -411,6 +468,18 @@ async fn search_block(
 
     // Sort by net profit descending
     cycles.sort_by(|a, b| b.net_profit.cmp(&a.net_profit));
+
+    // Filter by minimum profit threshold (in basis points of amount_in)
+    if min_profit_bps > 0 {
+        cycles.retain(|c| {
+            if c.net_profit <= 0 {
+                return false;
+            }
+            let amount_in_f = c.optimal_amount_in.to_f64().unwrap_or(1.0).max(1.0);
+            let profit_bps = (c.net_profit as f64 / amount_in_f * 10_000.0) as i64;
+            profit_bps >= min_profit_bps
+        });
+    }
 
     let profitable_cycles = cycles.iter().filter(|c| c.is_profitable).count();
 

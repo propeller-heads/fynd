@@ -6,7 +6,12 @@ Last updated: 2026-03-10
 Branch: `ms/atomic-searcher-showcase` (based on `ms/bellman-ford-algorithm` / PR #43)
 Repo: `/Users/markusschmitt/Documents/GitHub/fynd`
 
-## What Was Built
+## Condition for Completion
+
+An example that runs and settles trades on all chains we support, and a guide that
+gets team approval. (from Searcher Showcase spec)
+
+## What Was Built (Phase 0)
 
 An `examples/atomic_searcher/` showcase for Fynd that runs Janos Tapolcai's cyclic
 arbitrage algorithm as an autonomous searcher (Token A -> ... -> Token A), complementing
@@ -37,9 +42,10 @@ Made these types `pub` (was `pub(crate)`) so the example can use them:
 - Added `[[example]] name = "atomic_searcher"`
 - Added dev-dependencies: `num-bigint`, `num-traits`, `toml`
 
-## Commits on Branch (5)
+## Commits on Branch (6)
 
 ```
+0c01353 docs: add project plan and review notes for atomic searcher
 425ea7f test: add 11 unit tests for cycle detector and amount optimizer
 9470f93 fix: address review findings from extreme code review
 7545330 improve: show gross profit and cycle status labels in output
@@ -50,15 +56,158 @@ f2a0ee7 feat: add atomic searcher showcase example
 ## Algorithm
 
 1. Subscribe to Tycho market updates via Fynd's TychoFeed
-2. On each block, extract subgraph around source token (BFS to max_hops)
+2. On each block, extract subgraph around source token (BFS to max_hops),
+   excluding blacklisted tokens from the market graph before search begins
 3. Run layered Bellman-Ford relaxation (same as solver) but check edges back
    to source for cycles where amount_out > amount_in
-4. Filter cycles through blacklisted tokens (AMPL rebase token)
-5. For each candidate, run golden section search to find optimal input amount
-6. Log results: PROFITABLE / GROSS+ / no-arb with amounts
+4. For each candidate, run golden section search to find optimal input amount
+5. Log results: PROFITABLE / GROSS+ / no-arb with amounts
 
 Based on: https://github.com/jtapolcai/tycho-searcher
 Paper: https://www.overleaf.com/read/ksqhzzmndmqh
+
+---
+
+## Feature Backlog
+
+### Phase 1: Close the Loop (Execution)
+
+Turn the searcher from "logs opportunities" into "actually trades." Uses
+`tycho-execution` for calldata encoding and `alloy` for signing/broadcasting
+(Option B: direct execution, not through `FyndClient`).
+
+**Why not FyndClient?** The `fynd-client` (PR #58) is designed around A->B solver
+orders. The atomic searcher finds its own cycles (A->...->A) and needs to encode
+those specific swaps directly against the Tycho router contract. The client's
+`signable_payload()` and `execute()` patterns are useful as reference for the
+alloy signing/broadcasting code.
+
+- [ ] **Execution via tycho-execution + alloy**: Encode cycle swaps as calldata
+  for the RouterV3 contract. Build EIP-1559 tx, sign with a local wallet, submit
+  via Flashbots Protect (BuilderNet) for MEV protection. Parse receipt and compute
+  settled amount (reuse pattern from `fynd-client/signing.rs`).
+  New file: `executor.rs`
+  New deps: `tycho-execution`, `alloy`, `reqwest` (for Flashbots RPC)
+
+- [ ] **Gas accounting in out-token**: Convert gas cost (in ETH) to the source
+  token. For WETH source this is 1:1. For non-WETH sources, needs a price quoter.
+  Start with WETH-only gas accounting; generalize when multi-source lands.
+  Dependency: Mini Price Quoter (for non-WETH sources, later)
+
+- [ ] **Profitability threshold (--min-profit-bps)**: CLI flag, default 0.
+  Only execute trades above this threshold. Useful for testing: set slightly
+  negative to force trades through even at a small loss.
+
+- [ ] **Slippage parameter (--slippage-bps)**: Reduce expected amounts by this
+  many basis points when encoding swaps. Only send trades still profitable after
+  slippage.
+
+- [ ] **Execution options (--execution-mode)**: Protected submission via
+  Flashbots Protect / BuilderNet (default), or public mempool for testing.
+
+- [ ] **Dynamic bribe**: Bid a configurable % of expected profit as gas tip
+  (--bribe-pct, default 100). On Ethereum this means bidding the surplus as
+  priority fee.
+
+### Phase 2: Make It a Real Reference Bot
+
+- [ ] **Multi-source token support (--source-tokens)**: Run BF from WETH, USDC,
+  WBTC, etc. Addresses the CRITICAL limitation of WETH-only cycles. Catches
+  stablecoin triangles, WBTC cycles, and any cycle not touching WETH.
+
+- [ ] **Gas safeguard (--max-gas-per-hour)**: Cap total gas spend per hour.
+  Prevents a buggy bot from burning through the wallet.
+
+- [ ] **Gas warning (--gas-warn-threshold)**: Notify when wallet ETH balance
+  drops below threshold.
+
+### Phase 3: Performance and Strategy
+
+- [ ] **Pre-enumerated cycle files**: Johnson's enumeration algorithm as an
+  alternative to real-time BF. Generate offline, order by historical profitability,
+  hot-load without downtime. Second mode: `--mode cycle-file` vs `--mode realtime-bf`.
+  ("pre-enumeration of cycles with soft simulation was the basic
+  way to just be really fast.")
+
+- [ ] **Cycle file management**: Index by affected pools. Prune pools below
+  configurable TVL threshold. Regenerate periodically. Hot-load (double-buffer)
+  without stopping the bot.
+
+- [ ] **Cycle merging**: Phase 3 from Janos's algorithm. Shared edges between
+  cycles save gas by batching them into a single transaction.
+
+- [ ] **State overrides for repeated pools**: When the same pool appears in
+  multiple cycles in the same block, re-simulate with updated state after each
+  execution.
+
+- [ ] **O(1) address lookup**: Build HashMap for Address-to-NodeIndex instead of
+  O(V) linear scan per edge in GSS. (Code review item #4.)
+
+### Phase 4: The Guide
+
+Comprehensive documentation (the "guide" from the Searcher Showcase spec).
+Written as the example's README or as a separate guide in `docs/`.
+
+- [ ] **Chain-specific strategies**: Three classes:
+  - Ethereum mainnet (PBS/auction): gas optimization, longer compute budget
+  - Avalanche (FCFS): pure latency race, sub-1ms target
+  - Polygon (randomized ordering): spam/lottery strategy
+  How to adapt the bot for each. When to use which execution mode.
+
+- [ ] **How to stabilize your own protocol**: For dapp teams wanting a backstop
+  bot. Integrate protocol via Tycho SDK, adjust the template, share with
+  searchers. Reference: Moo's self-built liquidation bot.
+
+- [ ] **Latency reduction guide**: Self-host Tycho, float arithmetic (soft
+  simulation), analytical solutions vs numerical (link to papers), on-chain
+  routing (move calculation to contract, revert if unprofitable), parallel/async,
+  native implementations for slow protocols, co-location with validators.
+
+- [ ] **Cycle file management docs**: How to generate, order by profitability,
+  hot-load, index by affected pools, prune low-TVL pools. Johnson's enumeration
+  reference.
+
+- [ ] **Protected execution options**: BuilderNet, Flashbots Protect, MEVBlocker,
+  public mempool. Dynamic bribing. Builder refunds. Per-chain execution
+  differences. Bundling.
+
+- [ ] **How Tycho fits event-driven architectures**: Module that plugs into
+  Artemis-style setups. Shared protocol implementations via Tycho.
+
+- [ ] **Finding arbitrage on every path**: How to stay current with every Tycho
+  protocol. Day-one arb opportunities when protocols self-integrate before launch.
+  Strategic advantage for new searchers.
+
+### Phase 5: Polish and Expand
+
+- [ ] More protocol coverage (Curve, Balancer, UniV4)
+- [ ] Base / Unichain testing
+- [ ] Benchmark: cycles found per block over 1000+ blocks
+- [ ] Biconnected component decomposition (parallelize independent subgraphs)
+- [ ] Selective recalculation: only recheck cycles whose pools were touched in
+  the latest block update. Index cycles by pool; filter to affected cycles per
+  block.
+- [ ] Trade monitoring: record pending trades, block pools in active trades,
+  log outcomes (success/fail, amounts, gas, profit).
+
+### Considerations (Not Planned)
+
+- **Event-driven architecture (Artemis-style)**: This pattern is common
+  across MEV teams. Fynd's and Tycho's existing architecture already provides the
+  event-driven data flow (TychoFeed block updates). A full Artemis-style refactor
+  (events/handlers/strategies) would be a larger architectural change. Worth
+  revisiting if the example grows into a standalone framework, but not needed for
+  the showcase.
+
+---
+
+## Before Merging (Current PR)
+
+- [ ] PR #43 (BellmanFord solver) must merge first, or rebase this on top
+- [ ] Fix 2 dead-code warnings (`CycleCandidate.layer`, `EvaluatedCycle.amount_out`)
+- [ ] Push branch and open PR
+
+---
 
 ## What Was Tested
 
@@ -109,61 +258,24 @@ Review report at: `notes/team-review-ms-atomic-searcher-showcase-20260309-2121.m
 
 ### Issues Acknowledged (not fixed, documented)
 
-4. O(V) Address-to-NodeIndex lookup per edge in GSS (should build HashMap)
-5. No state overrides for repeated pools (solver has this, example doesn't)
-6. net_profit uses i128 with saturation (should use BigInt)
-7. Distance arrays sized by full graph, not subgraph (memory optimization)
-
-## Known Limitations
-
-### CRITICAL: Only searches WETH-denominated cycles
-
-The searcher ONLY finds cycles starting and ending at WETH. It misses:
-- Stablecoin triangles: USDC -> DAI -> USDT -> USDC
-- Wrapped BTC cycles: WBTC -> cbBTC -> WBTC
-- Any cycle that doesn't touch WETH
-
-This is the same as Janos's original implementation but should be expanded.
-To fix: run BF from multiple source tokens (top N by connectivity).
-
-### Other Limitations
-
-- No cycle merging (shared edges save gas). Janos's code has this (Phase 3).
-- No biconnected component decomposition (parallelize independent subgraphs).
-- No state overrides for re-simulation (pools visited twice get stale state).
-- No on-chain execution / calldata encoding.
-- Only tested with UniV2 + UniV3 + SushiV2. Not tested with Curve, Balancer,
-  PancakeSwap, Ekubo, or UniV4.
-- Only tested on Ethereum. Not tested on Base or Unichain.
-- Gas price assumes 1:1 for WETH source token. Non-WETH sources would need
-  token gas price conversion (like the solver's TokenGasPrices).
-
-## TODO (Next Steps)
-
-### Before Merging
-
-- [ ] PR #43 (BellmanFord solver) must merge first, or rebase this on top
-- [ ] Push branch and open PR
-- [ ] Address remaining "Consider" items from review if desired
-
-### Follow-up Features
-
-- [ ] Multi-source token support (run BF from WETH, USDC, WBTC, etc.)
-- [ ] Cycle merging (Phase 3 from Janos's algorithm)
-- [ ] State override re-simulation for repeated pools
-- [ ] More protocol coverage (Curve, Balancer, UniV4)
-- [ ] Base / Unichain testing
-- [ ] Benchmark: cycles found per block over 1000+ blocks
+4. O(V) Address-to-NodeIndex lookup per edge in GSS (should build HashMap) -> Phase 3
+5. No state overrides for repeated pools (solver has this, example doesn't) -> Phase 3
+6. net_profit uses i128 with saturation (should use BigInt) -> Phase 1 (gas accounting)
+7. Distance arrays sized by full graph, not subgraph (memory optimization) -> Phase 5
 
 ## References
 
+- Searcher Showcase spec: /Users/markusschmitt/Documents/notes/Notes/Searcher Showcase.md
+- Simple Atomic Arbitrage Showcase spec: /Users/markusschmitt/Documents/notes/Notes/Simple Atomic Arbitrage Showcase.md
+- Atomic Searcher spec (older): /Users/markusschmitt/Documents/notes/Notes/Atomic Searcher.md
+- Atomic MEV strategy call (2025-03-03)
 - Janos's tycho-searcher: https://github.com/jtapolcai/tycho-searcher
 - Paper writeup: https://www.overleaf.com/read/ksqhzzmndmqh
 - FC 2026 paper on arbitrage market saturation (accepted)
 - Fynd PR #43 (BellmanFord solver): https://github.com/propeller-heads/fynd/pull/43
+- Fynd PR #58 (fynd-client): https://github.com/propeller-heads/fynd/pull/58
 - Notion design doc: https://www.notion.so/Routing-Algorithm-Design-20a2ed0857018035b34cc66c8d01ce6e
 - Telegram chat: "Janos < > Propeller" (chat ID 4944590475)
-- Plan doc: /Users/markusschmitt/Documents/llm-output/2026-03-09-fynd-atomic-searcher-plan.md
 
 ## How to Resume
 
@@ -199,3 +311,8 @@ cargo check --example atomic_searcher
 4. **Token-level blacklist**: Pool-level blacklisting is insufficient for rebase tokens
    like AMPL that have many pool variants. Token blacklist catches all paths through
    the problematic token.
+
+5. **Direct execution (Option B)**: Use `tycho-execution` + `alloy` directly for
+   encoding and submitting cycle trades, rather than going through `FyndClient`.
+   The client assumes A->B solver orders; the searcher has its own pre-computed
+   cycles and needs full control over which exact swaps get executed.

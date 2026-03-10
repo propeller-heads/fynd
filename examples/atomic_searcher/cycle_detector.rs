@@ -211,7 +211,7 @@ fn find_closing_edges(
                         candidates.push(CycleCandidate {
                             edges: path,
                             relaxation_amount_out: result.amount,
-                            layer: k + 1,
+                            _layer: k + 1,
                         });
                     }
                 }
@@ -272,10 +272,14 @@ fn reconstruct_cycle(
 }
 
 /// Extracts a subgraph via BFS from `start` up to `max_depth` hops.
+///
+/// Nodes in `blacklisted_nodes` are excluded: edges into them are dropped and
+/// they are never enqueued, so the BFS never traverses through them.
 pub fn extract_subgraph(
     start: NodeIndex,
     max_depth: usize,
     graph: &StableDiGraph<()>,
+    blacklisted_nodes: &HashSet<NodeIndex>,
 ) -> Vec<(NodeIndex, NodeIndex, String)> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
@@ -291,8 +295,12 @@ pub fn extract_subgraph(
 
         for edge in graph.edges(node) {
             let target = edge.target();
-            let component_id = &edge.weight().component_id;
 
+            if blacklisted_nodes.contains(&target) {
+                continue;
+            }
+
+            let component_id = &edge.weight().component_id;
             edges.push((node, target, component_id.clone()));
 
             if !visited.contains(&target) {
@@ -548,7 +556,7 @@ mod tests {
             .unwrap();
 
         let seed = BigUint::from(1000u64);
-        let subgraph_edges = extract_subgraph(source_node, 4, graph);
+        let subgraph_edges = extract_subgraph(source_node, 4, graph, &HashSet::new());
 
         let candidates = find_cycles(
             source_node,
@@ -594,7 +602,7 @@ mod tests {
             .unwrap();
 
         let seed = BigUint::from(1000u64);
-        let subgraph_edges = extract_subgraph(source_node, 4, graph);
+        let subgraph_edges = extract_subgraph(source_node, 4, graph, &HashSet::new());
 
         let candidates = find_cycles(
             source_node,
@@ -703,7 +711,7 @@ mod tests {
             .collect();
 
         let seed = BigUint::from(100u64);
-        let subgraph_edges = extract_subgraph(source_node, 5, graph);
+        let subgraph_edges = extract_subgraph(source_node, 5, graph, &HashSet::new());
 
         let candidates = find_cycles(
             source_node,
@@ -758,7 +766,7 @@ mod tests {
             .unwrap();
 
         // Depth 1: should reach only A and B
-        let edges_d1 = extract_subgraph(source_node, 1, graph);
+        let edges_d1 = extract_subgraph(source_node, 1, graph, &HashSet::new());
         let nodes_d1: HashSet<NodeIndex> = edges_d1
             .iter()
             .flat_map(|(f, t, _)| [*f, *t])
@@ -775,7 +783,7 @@ mod tests {
         );
 
         // Depth 3: should reach all nodes including D
-        let edges_d3 = extract_subgraph(source_node, 3, graph);
+        let edges_d3 = extract_subgraph(source_node, 3, graph, &HashSet::new());
         let nodes_d3: HashSet<NodeIndex> = edges_d3
             .iter()
             .flat_map(|(f, t, _)| [*f, *t])
@@ -797,7 +805,7 @@ mod tests {
                 (addr_b.clone(), addr_a.clone(), "pool_2".into()),
             ],
             relaxation_amount_out: BigUint::from(200u64),
-            layer: 2,
+            _layer: 2,
         };
         // Same component path, different relaxation amount
         let c2 = CycleCandidate {
@@ -806,7 +814,7 @@ mod tests {
                 (addr_b.clone(), addr_a.clone(), "pool_2".into()),
             ],
             relaxation_amount_out: BigUint::from(100u64),
-            layer: 3,
+            _layer: 3,
         };
         // Different path
         let c3 = CycleCandidate {
@@ -815,7 +823,7 @@ mod tests {
                 (addr_b.clone(), addr_a.clone(), "pool_4".into()),
             ],
             relaxation_amount_out: BigUint::from(50u64),
-            layer: 2,
+            _layer: 2,
         };
 
         let result = dedup_candidates(vec![c1, c2, c3]);

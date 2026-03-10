@@ -506,7 +506,7 @@ mod tests {
                 (tok_c.address.clone(), tok_a.address.clone(), "pool_ca".into()),
             ],
             relaxation_amount_out: BigUint::from(6000u64),
-            layer: 3,
+            _layer: 3,
         };
 
         (market, gm, token_map, candidate)
@@ -599,7 +599,7 @@ mod tests {
                 (tok_c.address.clone(), tok_a.address.clone(), "pool_ca".into()),
             ],
             relaxation_amount_out: BigUint::from(500u64), // less than seed
-            layer: 3,
+            _layer: 3,
         };
 
         let seed = BigUint::from(1000u64);
@@ -769,7 +769,7 @@ mod tests {
                 (bad_addr.clone(), tok_a.address.clone(), "pool_xx".into()),
             ],
             relaxation_amount_out: BigUint::from(100u64),
-            layer: 2,
+            _layer: 2,
         };
 
         let seed = BigUint::from(1000u64);
