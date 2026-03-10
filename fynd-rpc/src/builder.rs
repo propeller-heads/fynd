@@ -272,8 +272,14 @@ impl FyndBuilder {
             .with_min_responses(self.order_manager_min_responses);
         let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
 
-        let app_state =
-            AppState::new(order_manager, health_tracker, Arc::clone(&derived_data), gas_token);
+        let app_state = AppState::new(
+            order_manager,
+            health_tracker,
+            #[cfg(feature = "experimental")]
+            Arc::clone(&derived_data),
+            #[cfg(feature = "experimental")]
+            gas_token,
+        );
 
         let server = HttpServer::new(move || {
             App::new()

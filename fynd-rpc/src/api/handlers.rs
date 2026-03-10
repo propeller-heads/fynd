@@ -1,25 +1,26 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
+#[cfg(feature = "experimental")]
+use tracing::warn;
 
 use super::{dto, ApiError, AppState};
-use crate::api::{
-    error::ErrorResponse,
-    prices::{
-        price_to_f64, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse, SpotPriceEntry,
-        TokenPriceEntry,
-    },
+use crate::api::error::ErrorResponse;
+#[cfg(feature = "experimental")]
+use crate::api::prices::{
+    price_to_f64, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse, SpotPriceEntry,
+    TokenPriceEntry,
 };
 
 /// Configures API routes under /v1 namespace.
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/v1")
-            .route("/quote", web::post().to(quote))
-            .route("/health", web::get().to(health))
-            .route("/prices", web::get().to(get_prices)),
-    );
+    let scope = web::scope("/v1")
+        .route("/quote", web::post().to(quote))
+        .route("/health", web::get().to(health));
+    #[cfg(feature = "experimental")]
+    let scope = scope.route("/prices", web::get().to(get_prices));
+    cfg.service(scope);
 }
 
 /// POST /v1/quote - Request a quote.
@@ -114,9 +115,11 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     }
 }
 
+#[cfg(feature = "experimental")]
 /// Default limit for spot_prices and pool_depths entries.
 const DEFAULT_PRICES_LIMIT: usize = 1000;
 
+#[cfg(feature = "experimental")]
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
 /// By default returns token gas prices only. Use `include` query parameter

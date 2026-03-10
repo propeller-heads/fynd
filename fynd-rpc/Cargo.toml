@@ -29,5 +29,8 @@ metrics.workspace = true
 hex = "0.4"
 tycho-execution.workspace = true
 
+[features]
+experimental = []
+
 [dev-dependencies]
 rstest.workspace = true
