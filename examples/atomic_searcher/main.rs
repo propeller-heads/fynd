@@ -115,6 +115,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if !args.seed_eth.is_finite() || args.seed_eth <= 0.0 {
+        anyhow::bail!(
+            "seed_eth must be a positive finite number, got: {}",
+            args.seed_eth
+        );
+    }
+
     let chain = parse_chain(&args.chain)?;
     let source_token_addr = native_token(&chain)?;
     let protocols: Vec<String> = args

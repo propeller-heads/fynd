@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use num_bigint::BigUint;
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
-use tracing::{debug, trace};
+use tracing::debug;
 use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_core::models::token::Token;
 
@@ -121,83 +121,16 @@ pub fn find_cycles(
         active_nodes = next_active.into_iter().collect();
     }
 
-    // Now check all edges pointing back to source to find profitable cycles.
+    // Check all edges pointing back to source to find profitable cycles.
     // A cycle exists if: source -> ... -> node -[edge]-> source, and the
     // final amount exceeds the seed amount.
-    let mut candidates: Vec<CycleCandidate> = Vec::new();
     let source_token = match token_map.get(&source_node) {
         Some(t) => t,
-        None => return candidates,
+        None => return Vec::new(),
     };
 
-    for k in 1..num_layers {
-        for &u in active_nodes_at_layer(k, &distance, max_idx).iter() {
-            let u_idx = u.index();
-            if distance[k][u_idx].is_zero() {
-                continue;
-            }
-
-            let Some(token_u) = token_map.get(&u) else {
-                continue;
-            };
-
-            // Check edges from u back to source
-            let Some(edges) = adj.get(&u) else {
-                continue;
-            };
-
-            for &(v, component_id) in edges {
-                if v != source_node {
-                    continue;
-                }
-
-                let Some(sim_state) = market.get_simulation_state(component_id) else {
-                    continue;
-                };
-
-                let result = match sim_state.get_amount_out(
-                    distance[k][u_idx].clone(),
-                    token_u,
-                    source_token,
-                ) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                // Check if we get back more than we started with
-                if result.amount > *seed_amount {
-                    let path = match reconstruct_cycle(
-                        u,
-                        source_node,
-                        k,
-                        &predecessor,
-                        component_id,
-                        graph,
-                    ) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-
-                    trace!(
-                        layer = k + 1,
-                        amount_out = %result.amount,
-                        seed = %seed_amount,
-                        "cycle candidate found"
-                    );
-
-                    candidates.push(CycleCandidate {
-                        edges: path,
-                        relaxation_amount_out: result.amount,
-                        layer: k + 1,
-                    });
-                }
-            }
-        }
-    }
-
-    // Also check nodes from all layers (not just active ones at last layer)
-    // by scanning all layers for non-zero distances
-    let mut all_candidates = find_closing_edges(
+    // Scan all layers for non-zero distances and check closing edges.
+    let candidates = find_closing_edges(
         &distance,
         &predecessor,
         &adj,
@@ -210,9 +143,7 @@ pub fn find_cycles(
         max_hops,
         max_idx,
     );
-    // Merge, dedup by path
-    all_candidates.extend(candidates);
-    dedup_candidates(all_candidates)
+    dedup_candidates(candidates)
 }
 
 /// Finds all edges that close a cycle back to source, scanning all layers.
@@ -289,14 +220,6 @@ fn find_closing_edges(
     }
 
     candidates
-}
-
-/// Helper to collect nodes with non-zero distance at a given layer.
-fn active_nodes_at_layer(layer: usize, distance: &[Vec<BigUint>], max_idx: usize) -> Vec<NodeIndex> {
-    (0..max_idx)
-        .filter(|&idx| !distance[layer][idx].is_zero())
-        .map(NodeIndex::new)
-        .collect()
 }
 
 /// Reconstructs a cycle path from predecessor data.

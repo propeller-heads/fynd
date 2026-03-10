@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use petgraph::graph::NodeIndex;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use tycho_simulation::tycho_core::models::token::Token;
 
 use fynd::feed::market_data::SharedMarketData;
@@ -21,6 +21,10 @@ use crate::types::{CycleCandidate, EvaluatedCycle};
 
 /// Golden ratio constant for the search.
 const PHI: f64 = 1.618_033_988_749_895;
+
+/// Maximum wei value for GSS search (~1000 ETH). Beyond this, f64 loses
+/// integer precision and the `as u128` casts become unreliable.
+const MAX_GSS_WEI: u128 = 1_000_000_000_000_000_000_000; // 1e21
 
 /// Evaluates a cycle at a given input amount.
 ///
@@ -148,15 +152,54 @@ pub fn optimize_amount(
         hi_profit = doubled_profit;
     }
 
+    // Cap hi to avoid f64 precision loss beyond ~9e15 integer precision.
+    let max_gss = BigUint::from(MAX_GSS_WEI);
+    if hi > max_gss {
+        warn!(
+            hi_wei = %hi,
+            cap_wei = MAX_GSS_WEI,
+            "GSS upper bound exceeds f64 precision, capping at ~1000 ETH"
+        );
+        hi = max_gss;
+        hi_profit = profit_fn(&hi);
+    }
+
+    // If upper bound profit is not finite, we cannot search meaningfully.
+    if !hi_profit.is_finite() {
+        debug!("GSS upper bound profit is not finite, skipping optimization");
+        return Some(EvaluatedCycle {
+            edges: candidate.edges.clone(),
+            optimal_amount_in: seed_amount.clone(),
+            amount_out: BigUint::ZERO,
+            gross_profit: BigUint::ZERO,
+            gas_cost: BigUint::ZERO,
+            net_profit: 0,
+            is_profitable: false,
+        });
+    }
+
     // Phase 2: Golden section search
     let resp = 2.0 - PHI; // ~0.382
     let mut a = lo.to_f64().unwrap_or(0.0);
     let mut b = hi.to_f64().unwrap_or(1e18);
 
+    /// Safely converts an f64 to BigUint, returning None if the value is
+    /// not finite, negative, or exceeds u128 range.
+    fn safe_to_biguint(x: f64) -> Option<BigUint> {
+        if !x.is_finite() || x < 0.0 || x > u128::MAX as f64 {
+            return None;
+        }
+        Some(BigUint::from(x as u128))
+    }
+
     let mut x1 = a + resp * (b - a);
     let mut x2 = b - resp * (b - a);
-    let mut f1 = profit_fn(&BigUint::from(x1 as u128));
-    let mut f2 = profit_fn(&BigUint::from(x2 as u128));
+    let mut f1 = safe_to_biguint(x1)
+        .map(|v| profit_fn(&v))
+        .unwrap_or(f64::NEG_INFINITY);
+    let mut f2 = safe_to_biguint(x2)
+        .map(|v| profit_fn(&v))
+        .unwrap_or(f64::NEG_INFINITY);
 
     for i in 0..max_iterations {
         if (b - a).abs() < tolerance * a.max(1.0) {
@@ -169,17 +212,28 @@ pub fn optimize_amount(
             x1 = x2;
             f1 = f2;
             x2 = b - resp * (b - a);
-            f2 = profit_fn(&BigUint::from(x2 as u128));
+            f2 = safe_to_biguint(x2)
+                .map(|v| profit_fn(&v))
+                .unwrap_or(f64::NEG_INFINITY);
         } else {
             b = x2;
             x2 = x1;
             f2 = f1;
             x1 = a + resp * (b - a);
-            f1 = profit_fn(&BigUint::from(x1 as u128));
+            f1 = safe_to_biguint(x1)
+                .map(|v| profit_fn(&v))
+                .unwrap_or(f64::NEG_INFINITY);
         }
     }
 
-    let optimal_amount = BigUint::from(((a + b) / 2.0) as u128);
+    let mid = (a + b) / 2.0;
+    let optimal_amount = match safe_to_biguint(mid) {
+        Some(v) => v,
+        None => {
+            debug!("GSS midpoint not convertible to BigUint");
+            return None;
+        }
+    };
 
     // Final evaluation at optimal amount
     let (amount_out, total_gas) = evaluate_cycle(&edge_nodes, &optimal_amount, market, token_map)?;
