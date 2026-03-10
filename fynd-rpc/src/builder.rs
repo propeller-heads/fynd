@@ -192,7 +192,7 @@ impl FyndBuilder {
         // Computation manager for derived data (token prices, pool depths)
         let gas_token = native_token(&self.chain).context("gas token not configured for chain")?;
         let computation_config = ComputationManagerConfig::new()
-            .with_gas_token(gas_token)
+            .with_gas_token(gas_token.clone())
             .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
         let (computation_manager, _derived_event_rx) =
             ComputationManager::new(computation_config, Arc::clone(&market_data))
@@ -272,7 +272,14 @@ impl FyndBuilder {
             .with_min_responses(self.order_manager_min_responses);
         let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
 
-        let app_state = AppState::new(order_manager, health_tracker);
+        let app_state = AppState::new(
+            order_manager,
+            health_tracker,
+            #[cfg(feature = "experimental")]
+            Arc::clone(&derived_data),
+            #[cfg(feature = "experimental")]
+            gas_token,
+        );
 
         let server = HttpServer::new(move || {
             App::new()
