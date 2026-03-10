@@ -121,6 +121,12 @@ struct Args {
     #[arg(long, default_value = "log-only")]
     execution_mode: String,
 
+    /// Force execution on the best gross-positive cycle even if net-unprofitable.
+    /// Useful for testing the encoding/execution pipeline on mainnet where all
+    /// arb is extracted and no cycle covers gas costs.
+    #[arg(long, default_value_t = false)]
+    force_execute: bool,
+
     /// Private key for signing transactions (hex, with or without 0x prefix).
     /// Also reads from PRIVATE_KEY env var.
     #[arg(long, env = "PRIVATE_KEY")]
@@ -294,7 +300,27 @@ async fn main() -> anyhow::Result<()> {
                 // build_solution and drops it before any network I/O,
                 // so TychoFeed writes are not blocked.
                 if execution_mode != ExecutionMode::LogOnly {
-                    if let Some(best) = result.cycles.iter().find(|c| c.is_profitable) {
+                    // Pick best cycle: profitable first, or best gross+ if force_execute
+                    let best = result
+                        .cycles
+                        .iter()
+                        .find(|c| c.is_profitable)
+                        .or_else(|| {
+                            if args.force_execute {
+                                // Pick best gross-positive cycle (highest gross_profit)
+                                result
+                                    .cycles
+                                    .iter()
+                                    .find(|c| c.gross_profit > BigUint::ZERO)
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(best) = best {
+                        if !best.is_profitable {
+                            info!("force-execute: using best gross+ cycle (net-unprofitable)");
+                        }
                         let exec_result = cycle_executor
                             .execute_cycle(
                                 best,
