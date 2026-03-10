@@ -570,6 +570,18 @@ fn log_results(result: &BlockSearchResult) {
             hops = cycle.edges.len(),
         );
         info!("  pools: {:?}", pools);
+        // For top cycle, show full token addresses for debugging
+        if i == 0 {
+            for (j, (from, to, cid)) in cycle.edges.iter().enumerate() {
+                info!(
+                    "  hop {j}: 0x{from} -> 0x{to} via {cid}",
+                    j = j,
+                    from = hex::encode(from),
+                    to = hex::encode(to),
+                    cid = cid,
+                );
+            }
+        }
     }
 
     if result.cycles.len() > 5 {
