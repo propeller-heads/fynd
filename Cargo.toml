@@ -72,7 +72,13 @@ dialoguer = "0.11"
 dotenv = "0.15"
 futures = "0.3"
 hex = "0.4"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
 
 [[example]]
 name = "tutorial"
 path = "examples/tutorial/main.rs"
+
+[[example]]
+name = "atomic_searcher"
+path = "examples/atomic_searcher/main.rs"

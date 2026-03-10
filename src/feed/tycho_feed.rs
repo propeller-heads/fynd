@@ -45,7 +45,7 @@ use crate::{
 /// - Update SharedMarketData (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
-pub(crate) struct TychoFeed {
+pub struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).

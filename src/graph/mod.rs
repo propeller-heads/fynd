@@ -85,7 +85,7 @@ impl<'a, D> Path<'a, D> {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum GraphError {
+pub enum GraphError {
     #[error("Token not found in graph: {0:?}")]
     TokenNotFound(Address),
     #[error("Components not found in graph: {0:?}")]
@@ -101,7 +101,7 @@ pub(crate) enum GraphError {
 ///
 /// Graph managers are stateful - they maintain the graph internally and update it based on market
 /// events.
-pub(crate) trait GraphManager<G>: Send + Sync
+pub trait GraphManager<G>: Send + Sync
 where
     G: Send + Sync,
 {

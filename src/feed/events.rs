@@ -14,7 +14,7 @@ use crate::{graph::GraphError, types::ComponentId};
 /// Events broadcast by the indexer when market data changes.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum MarketEvent {
+pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {
         added_components: HashMap<ComponentId, Vec<Address>>,
@@ -26,7 +26,7 @@ pub(crate) enum MarketEvent {
 
 /// Errors that can occur when handling market events.
 #[derive(Error, Debug)]
-pub(crate) enum EventError {
+pub enum EventError {
     /// Graph-related errors
     #[error("graph errors: {0:?}")]
     GraphErrors(Vec<GraphError>),
@@ -34,7 +34,7 @@ pub(crate) enum EventError {
 
 /// Trait for components that can receive market events.
 #[async_trait]
-pub(crate) trait MarketEventHandler: Send {
+pub trait MarketEventHandler: Send {
     /// Handle a market event.
     ///
     /// # Errors
