@@ -8,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 fynd-rpc = { workspace = true }
+fynd-rpc-types = { workspace = true }
 fynd-core = { workspace = true }
 
 # CLI
@@ -44,7 +45,7 @@ tycho-simulation = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-alloy = { version = "1.0", features = [
+alloy = { workspace = true, features = [
     "providers",
     "signer-local",
     "rpc-types-eth",

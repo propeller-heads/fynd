@@ -537,7 +537,11 @@ pub struct OrderQuote {
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
-    transaction: Option<Transaction>,
+    pub transaction: Option<Transaction>,
+    /// Address of the sender.
+    pub sender: Bytes,
+    /// Address of the receiver.
+    pub receiver: Bytes,
 }
 
 impl OrderQuote {
@@ -551,6 +555,8 @@ impl OrderQuote {
         amount_out_net_gas: BigUint,
         block: BlockInfo,
         algorithm: String,
+        sender: Bytes,
+        receiver: Bytes,
     ) -> Self {
         Self {
             order_id,
@@ -565,6 +571,8 @@ impl OrderQuote {
             algorithm,
             gas_price: None,
             transaction: None,
+            sender,
+            receiver,
         }
     }
 
@@ -922,6 +930,7 @@ pub struct Swap {
     /// Protocol state used to perform the swap.
     protocol_state: Box<dyn ProtocolSim>,
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+    #[serde_as(as = "DisplayFromStr")]
     split: f64,
 }
 
@@ -1291,7 +1300,7 @@ mod tests {
             "amount_in": "1000000000000000000",
             "amount_out": "999000000000000000",
             "gas_estimate": "150000",
-            "split": 0,
+            "split": "0",
             "protocol_component": {
                 "id": "test-pool",
                 "protocol_system": "uniswap_v2",

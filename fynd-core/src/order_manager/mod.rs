@@ -24,6 +24,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
+use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
@@ -315,6 +316,8 @@ impl OrderManager {
                 BigUint::ZERO,
                 any_q.block().clone(),
                 String::new(),
+                any_q.sender.clone(),
+                any_q.receiver.clone(),
             )
         } else {
             // No responses at all - determine status from failure types
@@ -357,6 +360,8 @@ impl OrderManager {
                 BigUint::ZERO,
                 BlockInfo::new(0, String::new(), 0),
                 String::new(),
+                Bytes::default(),
+                Bytes::default(),
             )
         }
     }
@@ -373,7 +378,7 @@ impl OrderManager {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use tycho_simulation::tycho_core::models::Address;
+    use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
     use crate::{types::internal::SolveTask, OrderSide, SingleOrderQuote};
@@ -404,6 +409,8 @@ mod tests {
                 BigUint::from(amount_out_net_gas),
                 BlockInfo::new(1, "0x123".to_string(), 1000),
                 "test".to_string(),
+                Bytes::from(make_address(0xAA).as_ref()),
+                Bytes::from(make_address(0xAA).as_ref()),
             ),
             5,
         )
@@ -578,6 +585,8 @@ mod tests {
                     BigUint::from(900u64),
                     BlockInfo::new(1, "0x123".to_string(), 1000),
                     "test".to_string(),
+                    Bytes::from(make_address(0xAA).as_ref()),
+                    Bytes::from(make_address(0xAA).as_ref()),
                 ),
             )],
             failed_solvers: vec![],
