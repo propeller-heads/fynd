@@ -1,0 +1,16 @@
+# BF-2 vs ML-2 benchmark configuration
+# Both algorithms at 2 hops for apples-to-apples comparison
+
+[pools.bellman_ford_2_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 200
+
+[pools.most_liquid_2_hops]
+algorithm = "most_liquid"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 5000
