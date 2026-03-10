@@ -7,6 +7,7 @@
 pub mod dto;
 pub mod error;
 pub mod handlers;
+pub mod prices;
 
 use std::{
     sync::Arc,
@@ -16,16 +17,23 @@ use std::{
 use actix_web::web;
 pub use dto::HealthStatus;
 pub use error::ApiError;
-use fynd_core::{feed::market_data::SharedMarketDataRef, order_manager::OrderManager};
+use fynd_core::{
+    derived::SharedDerivedDataRef, feed::market_data::SharedMarketDataRef,
+    order_manager::OrderManager,
+};
 use handlers::configure_routes;
+use tycho_simulation::tycho_common::models::Address;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::api::error::ErrorResponse;
+use crate::api::{
+    error::ErrorResponse,
+    prices::{PoolDepthEntry, PricesResponse, SpotPriceEntry, TokenPriceEntry},
+};
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::quote, handlers::health),
+    paths(handlers::quote, handlers::health, handlers::get_prices),
     components(schemas(
         dto::QuoteRequest,
         dto::Order,
@@ -39,6 +47,10 @@ use crate::api::error::ErrorResponse;
         dto::BlockInfo,
         HealthStatus,
         ErrorResponse,
+        PricesResponse,
+        TokenPriceEntry,
+        SpotPriceEntry,
+        PoolDepthEntry,
     ))
 )]
 pub struct ApiDoc;
@@ -83,12 +95,26 @@ pub struct AppState {
     pub order_manager: Arc<OrderManager>,
     /// Health tracker for monitoring data freshness.
     pub health_tracker: HealthTracker,
+    /// Shared derived data (token prices, spot prices, pool depths).
+    pub derived_data: SharedDerivedDataRef,
+    /// Gas token address for this chain (e.g. WETH).
+    pub gas_token: Address,
 }
 
 impl AppState {
     /// Creates new application state.
-    pub fn new(order_manager: OrderManager, health_tracker: HealthTracker) -> Self {
-        Self { order_manager: Arc::new(order_manager), health_tracker }
+    pub fn new(
+        order_manager: OrderManager,
+        health_tracker: HealthTracker,
+        derived_data: SharedDerivedDataRef,
+        gas_token: Address,
+    ) -> Self {
+        Self {
+            order_manager: Arc::new(order_manager),
+            health_tracker,
+            derived_data,
+            gas_token,
+        }
     }
 }
 
