@@ -126,8 +126,8 @@ alloy signing/broadcasting code.
 - [ ] **Pre-enumerated cycle files**: Johnson's enumeration algorithm as an
   alternative to real-time BF. Generate offline, order by historical profitability,
   hot-load without downtime. Second mode: `--mode cycle-file` vs `--mode realtime-bf`.
-  ("pre-enumeration of cycles with soft simulation was the basic
-  way to just be really fast.")
+  ("pre-enumeration of cycles with soft simulation was the basic way to just be
+  really fast.")
 
 - [ ] **Cycle file management**: Index by affected pools. Prune pools below
   configurable TVL threshold. Regenerate periodically. Hot-load (double-buffer)
@@ -192,8 +192,8 @@ Written as the example's README or as a separate guide in `docs/`.
 
 ### Considerations (Not Planned)
 
-- **Event-driven architecture (Artemis-style)**: This pattern is common
-  across MEV teams. Fynd's and Tycho's existing architecture already provides the
+- **Event-driven architecture (Artemis-style)**: This pattern is common across
+  MEV teams. Fynd's and Tycho's existing architecture already provides the
   event-driven data flow (TychoFeed block updates). A full Artemis-style refactor
   (events/handlers/strategies) would be a larger architectural change. Worth
   revisiting if the example grows into a standalone framework, but not needed for
