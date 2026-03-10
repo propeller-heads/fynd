@@ -10,8 +10,8 @@ use tycho_simulation::tycho_common::models::Address as TychoAddress;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, HealthStatus, Order, OrderSide, Quote, QuoteOptions,
-        QuoteParams, QuoteStatus, Route, Swap,
+        BackendKind, BatchQuote, BlockInfo, EncodedTransaction, EncodingOptions, HealthStatus,
+        Order, OrderSide, Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, Swap,
     },
 };
 // ============================================================================
@@ -89,7 +89,18 @@ impl From<QuoteOptions> for dto::QuoteOptions {
             timeout_ms: opts.timeout_ms,
             min_responses: opts.min_responses,
             max_gas: opts.max_gas,
-            encoding_options: None,
+            encoding_options: opts.encoding_options.map(Into::into),
+        }
+    }
+}
+
+impl From<EncodingOptions> for dto::EncodingOptions {
+    fn from(opts: EncodingOptions) -> Self {
+        dto::EncodingOptions {
+            slippage: opts.slippage,
+            transfer_type: Default::default(),
+            permit: None,
+            permit2_signature: None,
         }
     }
 }
@@ -109,6 +120,9 @@ pub(crate) fn dto_to_quote(
         .map(Route::try_from)
         .transpose()?;
     let block = BlockInfo::from(ds.block);
+    let transaction = ds.transaction.map(|t| {
+        EncodedTransaction::new(tycho_to_bytes(t.to), t.value, t.data)
+    });
     Ok(Quote::new(
         ds.order_id,
         status,
@@ -121,6 +135,7 @@ pub(crate) fn dto_to_quote(
         block,
         token_out,
         receiver,
+        transaction,
     ))
 }
 

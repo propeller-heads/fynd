@@ -1061,6 +1061,7 @@ impl Transaction {
 fn default_transfer_type() -> UserTransferType {
     UserTransferType::TransferFrom
 }
+
 /// Generates a unique order ID using UUID v4.
 fn generate_order_id() -> String {
     Uuid::new_v4().to_string()

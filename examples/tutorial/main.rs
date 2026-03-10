@@ -28,9 +28,11 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::{Order, OrderSide, QuoteOptions, QuoteRequest, Transaction};
-use fynd_rpc::{builder::parse_chain, HealthStatus};
-use fynd_rpc_types::{Quote, QuoteStatus as RpcQuoteStatus, Route};
+use fynd_client::{
+    EncodingOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions, QuoteParams, QuoteStatus,
+    Route,
+};
+use fynd_core::Transaction;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
@@ -121,7 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let chain = parse_chain(&cli.chain)?;
+    let chain: Chain = serde_json::from_str(&format!(
+        "\"{}\"",
+        cli.chain.to_ascii_lowercase()
+    ))
+    .map_err(|_| format!("unsupported chain '{}'. Try 'ethereum'", cli.chain))?;
 
     let solver_url = cli.solver_url.clone();
     let tycho_url =
@@ -153,16 +159,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     info!("Using {} protocol systems", protocol_systems.len());
 
+    // Build Fynd client (quote-only: solver API calls only, no Ethereum RPC)
+    let client = FyndClientBuilder::new(&solver_url, "").build_quote_only()?;
+
     // Check solver health
     info!("Checking solver health at {}...", solver_url);
-    let client = reqwest::Client::new();
-    let health = check_solver_health(&client, &solver_url).await?;
+    let health = client.health().await?;
     info!(
         "Solver healthy: {}, last update: {}ms ago, {} solver pools",
-        health.healthy, health.last_update_ms, health.num_solver_pools
+        health.healthy(),
+        health.last_update_ms(),
+        health.num_solver_pools()
     );
 
-    if !health.healthy {
+    if !health.healthy() {
         return Err("Solver is not healthy. Please wait for market data to load.".into());
     }
 
@@ -205,28 +215,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fetch_amm_components(&tycho_rpc, chain, &protocol_systems, cli.tvl_threshold).await?;
     info!("Fetched {} protocol components", components.len());
 
-    // Determine user address for the quote
+    // Determine sender address for the quote
     // Priority: PRIVATE_KEY > --sender > zero address
-    let user_address = if let Some(ref pk) = private_key {
+    let sender_bytes: bytes::Bytes = if let Some(ref pk) = private_key {
         let pk_bytes = B256::from_str(pk)?;
         let signer = PrivateKeySigner::from_bytes(&pk_bytes)?;
-        format!("{:?}", signer.address())
+        bytes::Bytes::copy_from_slice(signer.address().as_slice())
     } else if let Some(ref sender) = cli.sender {
-        sender.clone()
+        let hex_str = sender.strip_prefix("0x").unwrap_or(sender);
+        bytes::Bytes::from(hex::decode(hex_str)?)
     } else {
-        "0x0000000000000000000000000000000000000000".to_string()
+        bytes::Bytes::from_static(&[0u8; 20])
     };
 
-    // Call solver API
-    let quote = get_solver_quote(
-        &client,
-        &solver_url,
-        &sell_token_address,
-        &buy_token_address,
-        &amount_in,
-        &user_address,
-    )
-    .await?;
+    // Call solver API via fynd-client
+    let order = Order::new(
+        sell_token_address.0.clone(),
+        buy_token_address.0.clone(),
+        amount_in.clone(),
+        OrderSide::Sell,
+        sender_bytes,
+        None,
+    );
+    let slippage = f64::from(cli.slippage_bps) / 10_000.0;
+    let options = QuoteOptions::default()
+        .with_timeout_ms(5000)
+        .with_encoding(EncodingOptions::new(slippage));
+    let quote = client
+        .quote(QuoteParams::new(order, options))
+        .await
+        .map_err(|e| format!("Quote request failed: {e}"))?;
 
     // Display quote
     display_quote(&quote, &sell_token, &buy_token, &amount_in, &all_tokens)?;
@@ -243,14 +261,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rpc_url.ok_or("RPC_URL environment variable required for simulation/execution")?;
 
     // Get the route from the quote
-    let order_quote = quote
-        .orders
-        .first()
-        .ok_or("No order quote")?;
-    let route = order_quote
-        .route
-        .as_ref()
-        .ok_or("No route in quote")?;
+    if quote.status() != QuoteStatus::Success {
+        return Err(format!("Quote failed: {:?}", quote.status()).into());
+    }
+    let route = quote.route().ok_or("No route in quote")?;
 
     // Determine user address and transfer type based on available credentials
     let (simulation_address, transfer_type, signer) = if let Some(ref pk_str) = private_key {
@@ -309,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                &order_quote.amount_out,
+                quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -325,7 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                &order_quote.amount_out,
+                quote.amount_out(),
                 &buy_token,
             )
             .await?;
@@ -364,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signer.address(),
             chain.id(),
             cli.use_tenderly,
-            &order_quote.amount_out,
+            quote.amount_out(),
             &buy_token,
         )
         .await?;
@@ -388,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signer.address(),
                     chain.id(),
                     cli.use_tenderly,
-                    &order_quote.amount_out,
+                    quote.amount_out(),
                     &buy_token,
                 )
                 .await?;
@@ -412,20 +426,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-async fn check_solver_health(
-    client: &reqwest::Client,
-    solver_url: &str,
-) -> Result<HealthStatus, Box<dyn std::error::Error>> {
-    let url = format!("{}/v1/health", solver_url);
-    let resp = client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Health check failed: {}", resp.status()).into());
-    }
-
-    Ok(resp.json().await?)
 }
 
 /// Fetch all available protocol systems from the Tycho API.
@@ -521,104 +521,76 @@ async fn fetch_amm_components(
     Ok(all_components)
 }
 
-async fn get_solver_quote(
-    client: &reqwest::Client,
-    solver_url: &str,
-    token_in: &Bytes,
-    token_out: &Bytes,
-    amount: &BigUint,
-    sender: &str,
-) -> Result<Quote, Box<dyn std::error::Error>> {
-    let url = format!("{}/v1/quote", solver_url);
-
-    let request = QuoteRequest::new(
-        vec![Order::new(
-            token_in.clone(),
-            token_out.clone(),
-            amount.clone(),
-            OrderSide::Sell,
-            Bytes::from_str(sender)?,
-        )],
-        QuoteOptions::default().with_timeout_ms(5000),
-    );
-
-    let resp = client
-        .post(&url)
-        .json(&request)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Solve request failed ({}): {}", status, body).into());
-    }
-
-    Ok(resp.json().await?)
-}
-
 fn display_quote(
-    quote: &Quote,
+    quote: &fynd_client::Quote,
     sell_token: &Token,
     buy_token: &Token,
     amount_in: &BigUint,
     all_tokens: &HashMap<Bytes, Token>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========== Quote ==========");
+    println!("Status: {:?}", quote.status());
 
-    for order in &quote.orders {
-        println!("Status: {:?}", order.status);
+    if quote.status() != QuoteStatus::Success {
+        println!("No route found for this order.");
+        println!("============================\n");
+        return Ok(());
+    }
 
-        if !matches!(order.status, RpcQuoteStatus::Success) {
-            println!("No route found for this order.");
-            continue;
-        }
+    let formatted_in = format_token_amount(amount_in, sell_token);
+    let formatted_out = format_token_amount(quote.amount_out(), buy_token);
 
-        let formatted_in = format_token_amount(amount_in, sell_token);
-        let formatted_out = format_token_amount(&order.amount_out, buy_token);
+    println!(
+        "Swap: {} {} -> {} {}",
+        formatted_in, sell_token.symbol, formatted_out, buy_token.symbol
+    );
 
-        println!(
-            "Swap: {} {} -> {} {}",
-            formatted_in, sell_token.symbol, formatted_out, buy_token.symbol
-        );
+    // Price
+    let price = calculate_price(amount_in, quote.amount_out(), sell_token, buy_token);
+    println!("Price: {:.6} {} per {}", price, buy_token.symbol, sell_token.symbol);
 
-        // Price
-        let price = calculate_price(amount_in, &order.amount_out, sell_token, buy_token);
-        println!("Price: {:.6} {} per {}", price, buy_token.symbol, sell_token.symbol);
+    // Gas estimate
+    println!("Gas estimate: {}", quote.gas_estimate());
 
-        // Gas estimate
-        println!("Gas estimate: {}", order.gas_estimate);
+    // Price impact
+    if let Some(impact) = quote.price_impact_bps() {
+        let impact_percent = impact as f64 / 100.0;
+        println!("Price impact: {:.2}%", impact_percent);
+    }
 
-        // Price impact
-        if let Some(impact) = order.price_impact_bps {
-            let impact_percent = impact as f64 / 100.0;
-            println!("Price impact: {:.2}%", impact_percent);
-        }
-
-        // Route details with token symbols
-        if let Some(route) = &order.route {
-            println!("\nRoute ({} hops):", route.swaps.len());
-            for (i, swap) in route.swaps.iter().enumerate() {
-                let token_in = all_tokens
-                    .get(&swap.token_in)
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_in))?;
-                let token_out = all_tokens
-                    .get(&swap.token_out)
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_out))?;
-                println!(
-                    "  {}. {} -> {} via {} (pool: {})",
-                    i + 1,
-                    token_in.symbol,
-                    token_out.symbol,
-                    swap.protocol,
-                    swap.component_id
-                );
-            }
+    // Route details with token symbols
+    if let Some(route) = quote.route() {
+        println!("\nRoute ({} hops):", route.swaps().len());
+        for (i, swap) in route.swaps().iter().enumerate() {
+            let token_in_key = Bytes::from(swap.token_in().clone());
+            let token_out_key = Bytes::from(swap.token_out().clone());
+            let token_in = all_tokens
+                .get(&token_in_key)
+                .ok_or_else(|| format!("Token not found: {}", token_in_key))?;
+            let token_out = all_tokens
+                .get(&token_out_key)
+                .ok_or_else(|| format!("Token not found: {}", token_out_key))?;
+            println!(
+                "  {}. {} -> {} via {} (pool: {})",
+                i + 1,
+                token_in.symbol,
+                token_out.symbol,
+                swap.protocol(),
+                swap.component_id()
+            );
         }
     }
 
-    println!("\nSolve time: {}ms", quote.solve_time_ms);
-    println!("Total gas: {}", quote.total_gas_estimate);
+    // Server-encoded transaction
+    if let Some(tx) = quote.transaction() {
+        println!("\nEncoded transaction (from server):");
+        println!("  To: 0x{}", hex::encode(tx.to()));
+        println!("  Value: {}", tx.value());
+        println!("  Data: 0x{}...", hex::encode(&tx.data()[..std::cmp::min(20, tx.data().len())]));
+    }
+
+    println!("\nSolve time: {}ms", quote.solve_time_ms());
+    println!("Gas estimate: {}", quote.gas_estimate());
     println!("============================\n");
 
     Ok(())
@@ -714,15 +686,15 @@ fn map_route_to_execution_quote(
 ) -> Result<ExecutionQuote, Box<dyn std::error::Error>> {
     let mut swaps = Vec::new();
 
-    for solver_swap in &route.swaps {
+    for solver_swap in route.swaps() {
         // Look up the component from our fetched data
         let component = components
-            .get(&solver_swap.component_id)
+            .get(solver_swap.component_id())
             .ok_or_else(|| {
                 format!(
                 "Component not found: {}. This component may not have been fetched from the API. \
                 Try adjusting --tvl-threshold or ensuring the protocol is included in --protocols.",
-                solver_swap.component_id
+                solver_swap.component_id()
             )
             })?;
 
@@ -733,10 +705,10 @@ fn map_route_to_execution_quote(
 
     // Calculate minimum amount out with slippage
     let last_swap = route
-        .swaps
+        .swaps()
         .last()
         .ok_or("Empty route")?;
-    let checked_amount = calculate_min_amount_out(&last_swap.amount_out, slippage_bps);
+    let checked_amount = calculate_min_amount_out(last_swap.amount_out(), slippage_bps);
 
     Ok(ExecutionQuote {
         sender: user_address.clone(),

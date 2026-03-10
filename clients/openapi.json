@@ -1,3 +1,6 @@
+   Compiling fynd v0.6.0 (/Users/tamaralipowski/Code/fynd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.53s
+     Running `target/debug/fynd openapi`
 {
   "openapi": "3.1.0",
   "info": {

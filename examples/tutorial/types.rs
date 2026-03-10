@@ -65,7 +65,7 @@ pub struct TenderlyTransactionDetails {
 
 /// Trait for converting solver swaps to execution swaps.
 ///
-/// This trait bridges the gap between `fynd_rpc_types::Swap` (the wire format)
+/// This trait bridges the gap between `fynd_client::Swap` (the client type)
 /// and `tycho_execution::encoding::models::Swap` (which contains execution
 /// details including the full ProtocolComponent).
 pub trait SwapToExecution {
@@ -79,16 +79,16 @@ pub trait SwapToExecution {
     ) -> tycho_execution::encoding::models::Swap;
 }
 
-impl SwapToExecution for fynd_rpc_types::Swap {
+impl SwapToExecution for fynd_client::Swap {
     fn to_execution_swap(
         &self,
         component: &ProtocolComponent,
     ) -> tycho_execution::encoding::models::Swap {
         tycho_execution::encoding::models::Swap::new(
             component.clone(),
-            Bytes::from(self.token_in.0.clone()),
-            Bytes::from(self.token_out.0.clone()),
+            Bytes::from(self.token_in().clone()),
+            Bytes::from(self.token_out().clone()),
         )
-        .split(self.split)
+        .split(self.split())
     }
 }

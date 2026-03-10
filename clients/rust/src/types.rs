@@ -83,6 +83,59 @@ impl Order {
     }
 }
 
+/// Options for server-side transaction encoding.
+///
+/// When passed via [`QuoteOptions::with_encoding`], the server returns an
+/// [`EncodedTransaction`] alongside the quote.
+pub struct EncodingOptions {
+    pub(crate) slippage: f64,
+}
+
+impl EncodingOptions {
+    /// Create encoding options with the given slippage tolerance.
+    ///
+    /// Slippage is expressed as a decimal fraction (e.g. 0.005 for 0.5%).
+    pub fn new(slippage: f64) -> Self {
+        Self { slippage }
+    }
+
+    /// The configured slippage tolerance.
+    pub fn slippage(&self) -> f64 {
+        self.slippage
+    }
+}
+
+/// An encoded EVM transaction returned by the server.
+///
+/// Present on [`Quote::transaction`] when [`EncodingOptions`] were included in the request.
+#[derive(Debug, Clone)]
+pub struct EncodedTransaction {
+    to: Bytes,
+    value: BigUint,
+    data: Vec<u8>,
+}
+
+impl EncodedTransaction {
+    pub(crate) fn new(to: Bytes, value: BigUint, data: Vec<u8>) -> Self {
+        Self { to, value, data }
+    }
+
+    /// Contract address to call (20 raw bytes).
+    pub fn to(&self) -> &Bytes {
+        &self.to
+    }
+
+    /// Native token value to send with the transaction.
+    pub fn value(&self) -> &BigUint {
+        &self.value
+    }
+
+    /// ABI-encoded calldata.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
 /// Build via the builder methods; unset options use server defaults.
@@ -91,6 +144,7 @@ pub struct QuoteOptions {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
+    pub(crate) encoding_options: Option<EncodingOptions>,
 }
 
 impl QuoteOptions {
@@ -125,9 +179,22 @@ impl QuoteOptions {
         self.min_responses
     }
 
+    /// Request server-side transaction encoding with the given options.
+    ///
+    /// When set, the quote response will include an [`EncodedTransaction`].
+    pub fn with_encoding(mut self, encoding: EncodingOptions) -> Self {
+        self.encoding_options = Some(encoding);
+        self
+    }
+
     /// The configured gas cap, or `None` if no cap was set.
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
+    }
+
+    /// The configured encoding options, or `None` if not set.
+    pub fn encoding_options(&self) -> Option<&EncodingOptions> {
+        self.encoding_options.as_ref()
     }
 }
 
@@ -214,7 +281,6 @@ pub struct Swap {
     amount_in: BigUint,
     amount_out: BigUint,
     gas_estimate: BigUint,
-    #[allow(dead_code)]
     split: f64,
 }
 
@@ -252,6 +318,11 @@ impl Swap {
     /// Estimated gas units required to execute this swap.
     pub fn gas_estimate(&self) -> &BigUint {
         &self.gas_estimate
+    }
+
+    /// The proportion of the total swap amount handled by this leg (e.g. 0.5 = 50%).
+    pub fn split(&self) -> f64 {
+        self.split
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -316,6 +387,8 @@ pub struct Quote {
     /// Defaults to `sender` if the order had no explicit receiver.
     /// Populated by `quote()` from the corresponding `Order`.
     receiver: Bytes,
+    /// Server-encoded transaction, present when [`EncodingOptions`] were included in the request.
+    transaction: Option<EncodedTransaction>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -384,6 +457,11 @@ impl Quote {
         &self.receiver
     }
 
+    /// The server-encoded transaction, if [`EncodingOptions`] were included in the request.
+    pub fn transaction(&self) -> Option<&EncodedTransaction> {
+        self.transaction.as_ref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -404,6 +482,7 @@ impl Quote {
         block: BlockInfo,
         token_out: Bytes,
         receiver: Bytes,
+        transaction: Option<EncodedTransaction>,
     ) -> Self {
         Self {
             order_id,
@@ -417,6 +496,7 @@ impl Quote {
             block,
             token_out,
             receiver,
+            transaction,
             solve_time_ms: 0,
         }
     }
