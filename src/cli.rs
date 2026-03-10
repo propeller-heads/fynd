@@ -9,6 +9,22 @@ use fynd_rpc::config::defaults;
 #[derive(Parser, PartialEq, Debug)]
 #[command(name = "fynd", version, about, long_about = None)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Available subcommands.
+#[derive(clap::Subcommand, PartialEq, Debug)]
+pub enum Commands {
+    /// Run the solver HTTP server
+    Serve(Box<ServeArgs>),
+    /// Print the OpenAPI spec as JSON to stdout
+    Openapi,
+}
+
+/// Arguments for the `serve` subcommand.
+#[derive(clap::Args, PartialEq, Debug)]
+pub struct ServeArgs {
     /// Target chain (e.g. Ethereum)
     #[arg(short, long, default_value = "Ethereum")]
     pub chain: String,
@@ -91,6 +107,7 @@ mod cli_tests {
     fn test_arg_parsing() {
         let cli = Cli::try_parse_from(vec![
             "fynd",
+            "serve",
             "--chain",
             "Ethereum",
             "--http-host",
@@ -112,40 +129,50 @@ mod cli_tests {
         ])
         .expect("parse errored");
 
-        assert_eq!(cli.chain, "Ethereum");
-        assert_eq!(cli.http_host, "127.0.0.1");
-        assert_eq!(cli.http_port, 8080);
-        assert_eq!(cli.tycho_api_key, Some("test-key".to_string()));
-        assert_eq!(cli.rpc_url, Some("https://rpc.example.com".to_string()));
-        assert_eq!(cli.tycho_url, "wss://custom.tycho.url");
-        assert_eq!(cli.protocols, vec!["uniswap_v2", "uniswap_v3"]);
-        assert_eq!(cli.min_tvl, 20.0);
-        assert_eq!(cli.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
+        let Commands::Serve(args) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(args.chain, "Ethereum");
+        assert_eq!(args.http_host, "127.0.0.1");
+        assert_eq!(args.http_port, 8080);
+        assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
+        assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
+        assert_eq!(args.tycho_url, "wss://custom.tycho.url");
+        assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
+        assert_eq!(args.min_tvl, 20.0);
+        assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
     }
 
     #[test]
     fn test_arg_parsing_defaults() {
-        let cli =
-            Cli::try_parse_from(vec!["fynd", "--protocols", "uniswap_v2"]).expect("parse errored");
+        // Clear ambient env var so the test is deterministic
+        std::env::remove_var("RPC_URL");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--protocols", "uniswap_v2"])
+            .expect("parse errored");
 
-        assert_eq!(cli.chain, "Ethereum");
-        assert_eq!(cli.http_host, "0.0.0.0");
-        assert_eq!(cli.http_port, 3000);
-        assert_eq!(cli.tycho_api_key, None);
-        assert_eq!(cli.tycho_url, "localhost:4242");
-        assert_eq!(cli.protocols, vec!["uniswap_v2"]);
-        assert_eq!(cli.min_tvl, 10.0);
-        assert_eq!(cli.tvl_buffer_multiplier, 1.1);
-        assert_eq!(cli.gas_refresh_interval_secs, 30);
-        assert_eq!(cli.reconnect_delay_secs, 5);
-        assert_eq!(cli.order_manager_timeout_ms, 100);
-        assert_eq!(cli.order_manager_min_responses, 0);
+        let Commands::Serve(args) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(args.chain, "Ethereum");
+        assert_eq!(args.http_host, "0.0.0.0");
+        assert_eq!(args.http_port, 3000);
+        assert_eq!(args.tycho_api_key, None);
+        assert_eq!(args.rpc_url, None);
+        assert_eq!(args.tycho_url, "localhost:4242");
+        assert_eq!(args.protocols, vec!["uniswap_v2"]);
+        assert_eq!(args.min_tvl, 10.0);
+        assert_eq!(args.tvl_buffer_multiplier, 1.1);
+        assert_eq!(args.gas_refresh_interval_secs, 30);
+        assert_eq!(args.reconnect_delay_secs, 5);
+        assert_eq!(args.order_manager_timeout_ms, 100);
+        assert_eq!(args.order_manager_min_responses, 0);
     }
 
     #[test]
     fn test_arg_parsing_default_worker_pools() {
         let cli = Cli::try_parse_from(vec![
             "fynd",
+            "serve",
             "--tycho-api-key",
             "test-key",
             "--protocols",
@@ -153,6 +180,15 @@ mod cli_tests {
         ])
         .expect("parse errored");
 
-        assert_eq!(cli.worker_pools_config, PathBuf::from("worker_pools.toml"));
+        let Commands::Serve(args) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(args.worker_pools_config, PathBuf::from("worker_pools.toml"));
+    }
+
+    #[test]
+    fn test_openapi_subcommand() {
+        let cli = Cli::try_parse_from(vec!["fynd", "openapi"]).expect("parse errored");
+        assert_eq!(cli.command, Commands::Openapi);
     }
 }

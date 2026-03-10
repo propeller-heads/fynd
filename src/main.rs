@@ -7,16 +7,16 @@
 //! # Usage
 //!
 //! ```bash
-//! fynd --tycho-url tycho-beta.propellerheads.xyz \
-//!      --protocols uniswap_v2,uniswap_v3
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
 //! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 //!
 //! ```bash
-//! fynd --tycho-url tycho-beta.propellerheads.xyz \
-//!      --rpc-url https://your-rpc-provider.com/v1/your_key \
-//!      --protocols uniswap_v2,uniswap_v3
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//!            --rpc-url https://your-rpc-provider.com/v1/your_key \
+//!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
 //! See `fynd --help` for all available options.
@@ -32,7 +32,7 @@ use fynd_rpc::{
 };
 
 mod cli;
-use cli::Cli;
+use cli::{Cli, Commands};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -47,8 +47,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
-    run_solver(cli).map_err(|e| anyhow!("{}", e))?;
-    Ok(())
+    match cli.command {
+        Commands::Openapi => {
+            use utoipa::OpenApi as _;
+            let spec = fynd_rpc::api::ApiDoc::openapi();
+            // Safety: OpenAPI spec serialization only fails on non-string map keys,
+            // which utoipa never produces.
+            let json = serde_json::to_string_pretty(&spec).expect("spec serialization cannot fail");
+            println!("{json}");
+            Ok(())
+        }
+        Commands::Serve(serve_args) => {
+            run_solver(*serve_args).map_err(|e| anyhow!("{}", e))?;
+            Ok(())
+        }
+    }
 }
 
 /// Errors that can occur during solver operation.
@@ -158,19 +171,19 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError> {
+async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, SolverError> {
     // Load worker pools config
     let pools_config =
-        WorkerPoolsConfig::load_from_file(&cli.worker_pools_config).map_err(|e| {
+        WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
             SolverError::SetupError(format!("failed to load worker pools config: {}", e))
         })?;
 
     // Parse chain
-    let chain = parse_chain(&cli.chain)
+    let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
     // Resolve RPC URL, falling back to public endpoint with a warning
-    let rpc_url = match &cli.rpc_url {
+    let rpc_url = match &args.rpc_url {
         Some(url) => url.clone(),
         None => {
             warn!(
@@ -186,26 +199,26 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
     let mut builder = FyndBuilder::new(
         chain,
         pools_config.pools,
-        cli.tycho_url.clone(),
+        args.tycho_url.clone(),
         rpc_url,
-        cli.protocols.clone(),
+        args.protocols.clone(),
     )
-    .http_host(cli.http_host.clone())
-    .http_port(cli.http_port)
-    .min_tvl(cli.min_tvl)
-    .tvl_buffer_multiplier(cli.tvl_buffer_multiplier)
-    .gas_refresh_interval(Duration::from_secs(cli.gas_refresh_interval_secs))
-    .reconnect_delay(Duration::from_secs(cli.reconnect_delay_secs))
-    .order_manager_timeout(Duration::from_millis(cli.order_manager_timeout_ms))
-    .order_manager_min_responses(cli.order_manager_min_responses);
+    .http_host(args.http_host.clone())
+    .http_port(args.http_port)
+    .min_tvl(args.min_tvl)
+    .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
+    .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
+    .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
+    .order_manager_timeout(Duration::from_millis(args.order_manager_timeout_ms))
+    .order_manager_min_responses(args.order_manager_min_responses);
 
-    if cli.disable_tls {
+    if args.disable_tls {
         builder = builder.disable_tls();
     }
-    if let Some(api_key) = &cli.tycho_api_key {
+    if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
-    if let Some(blacklist_path) = &cli.blacklist_config {
+    if let Some(blacklist_path) = &args.blacklist_config {
         let blacklist = BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
             SolverError::SetupError(format!("failed to load blacklist config: {}", e))
         })?;
@@ -221,14 +234,14 @@ async fn setup_solver(cli: &Cli) -> Result<fynd_rpc::builder::Fynd, SolverError>
 }
 
 #[tokio::main]
-async fn run_solver(cli: Cli) -> Result<(), SolverError> {
+async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     let provider = create_tracing_subscriber();
     info!("Starting Fynd");
 
     let _metrics_task = create_metrics_exporter();
 
     // Setup solver (handles setup errors)
-    let solver = setup_solver(&cli).await?;
+    let solver = setup_solver(&args).await?;
 
     // Run with graceful shutdown
     // The shutdown signal stops the server, which causes solver.run() to complete

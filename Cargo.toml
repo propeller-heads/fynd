@@ -32,6 +32,12 @@ opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
+# Serialization (for OpenAPI spec output)
+serde_json = { workspace = true }
+
+# OpenAPI (for ApiDoc::openapi() trait)
+utoipa = { workspace = true }
+
 # Tycho (for Chain type in CLI)
 tycho-simulation = { workspace = true }
 
