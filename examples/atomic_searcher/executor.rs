@@ -63,8 +63,8 @@ impl CycleExecutor {
     ) -> anyhow::Result<Self> {
         let signer = private_key
             .map(|pk| {
-                let pk = pk.strip_prefix("0x").unwrap_or(&pk);
-                PrivateKeySigner::from_str(pk)
+                let pk = if pk.starts_with("0x") { pk } else { format!("0x{}", pk) };
+                PrivateKeySigner::from_str(&pk)
                     .map_err(|e| anyhow::anyhow!("invalid private key: {}", e))
             })
             .transpose()?;
