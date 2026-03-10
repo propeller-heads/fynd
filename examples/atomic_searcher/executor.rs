@@ -269,7 +269,10 @@ impl CycleExecutor {
             .await
             .map_err(|e| format!("get nonce: {}", e))?;
 
-        Ok((base_fee, priority_fee, nonce))
+        // Use 2 * base_fee to handle EIP-1559 base fee volatility.
+        // Base fee can increase up to 12.5% per block; 2x covers ~6 blocks of
+        // consecutive increases, which is plenty for search latency.
+        Ok((base_fee * 2, priority_fee, nonce))
     }
 
     /// Simulate the cycle via eth_simulate (no real tx sent).
@@ -380,14 +383,26 @@ impl CycleExecutor {
             }
         };
 
+        // State overrides: give the sender 1000 ETH so the simulation
+        // doesn't fail with "insufficient funds". The swap calldata is
+        // what we're testing, not the sender's balance.
+        let overrides = alloy::rpc::types::state::StateOverride::from_iter([(
+            user_address,
+            alloy::rpc::types::state::AccountOverride {
+                balance: Some(U256::from(1_000u64) * U256::from(10u64).pow(U256::from(18u64))),
+                ..Default::default()
+            },
+        )]);
+
         let payload = SimulatePayload {
             block_state_calls: vec![SimBlock {
                 block_overrides: None,
-                state_overrides: None,
+                state_overrides: Some(overrides),
                 calls: vec![approval_request, swap_request],
             }],
             trace_transfers: true,
-            validation: true,
+            // Disable validation: sender may not have signed txs (simulation only)
+            validation: false,
             return_full_transactions: true,
         };
 
