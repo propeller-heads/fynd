@@ -31,10 +31,7 @@ use crate::api::error::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(
-        handlers::quote,
-        handlers::health,
-    ),
+    paths(handlers::quote, handlers::health,),
     components(schemas(
         dto::QuoteRequest,
         dto::Order,

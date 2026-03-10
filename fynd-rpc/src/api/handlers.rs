@@ -1,9 +1,9 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
-use tracing::{info, instrument};
 #[cfg(feature = "experimental")]
 use tracing::warn;
+use tracing::{info, instrument};
 
 use super::{dto, ApiError, AppState};
 use crate::api::error::ErrorResponse;
