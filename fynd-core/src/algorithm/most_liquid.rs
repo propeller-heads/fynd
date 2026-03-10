@@ -427,6 +427,17 @@ impl Algorithm for MostLiquidAlgorithm {
             self.max_hops,
         )?;
 
+        // DEBUG: Filter to only paths that include the suspect Curve tricrypto2 pool
+        let tricrypto2_id = "0xd51a44d3fae010294c616388b506acda1bfaae46";
+        let all_paths: Vec<_> = all_paths
+            .into_iter()
+            .filter(|path| {
+                path.edge_iter()
+                    .iter()
+                    .any(|e| e.component_id == tricrypto2_id)
+            })
+            .collect();
+
         let paths_candidates = all_paths.len();
         if paths_candidates == 0 {
             return Err(AlgorithmError::NoPath {

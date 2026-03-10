@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Chain::Ethereum,
         tycho_api_key,
         true,
-        vec!["vm:curve".to_string()],
+        vec!["vm:curve".to_string(), "uniswap_v2".to_string()],
         1.0,
     );
 

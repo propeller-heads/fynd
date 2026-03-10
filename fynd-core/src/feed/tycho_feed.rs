@@ -112,7 +112,7 @@ impl TychoFeed {
             true,
             self.config.chain,
             Some(self.config.min_token_quality),
-            None,
+            Some(1),
         )
         .await
         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;

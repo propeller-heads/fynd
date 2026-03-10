@@ -62,16 +62,16 @@ use types::{
 #[command(name = "tutorial")]
 #[command(about = "Get quotes from tycho-router and optionally simulate/execute swaps")]
 struct Cli {
-    /// Sell token address (defaults to USDC on the mainnet)
-    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
+    /// Sell token address (defaults to USDT on the mainnet)
+    #[arg(long, default_value = "0xdAC17F958D2ee523a2206206994597C13D831ec7")]
     sell_token: String,
 
-    /// Buy token address (defaults to WETH on the mainnet)
-    #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    /// Buy token address (defaults to USDC on the mainnet)
+    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     buy_token: String,
 
-    /// Amount to sell (in decimal units, e.g., 1000.0 for 10 USDC)
-    #[arg(long, default_value_t = 1000.0)]
+    /// Amount to sell (in decimal units, e.g., 2000.0 for 2000 USDT)
+    #[arg(long, default_value_t = 2000.0)]
     sell_amount: f64,
 
     /// Blockchain network
