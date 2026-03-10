@@ -7,8 +7,8 @@ use super::{dto, ApiError, AppState};
 use crate::api::{
     error::ErrorResponse,
     prices::{
-        IncludeField, PoolDepthEntry, PricesQuery, PricesResponse, SpotPriceEntry,
-        TokenPriceEntry, price_to_f64,
+        price_to_f64, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse, SpotPriceEntry,
+        TokenPriceEntry,
     },
 };
 
@@ -144,11 +144,12 @@ pub async fn get_prices(
 ) -> Result<HttpResponse, ApiError> {
     // Parse include fields (reject unknowns with 400)
     let include_fields = match &query.include {
-        Some(raw) => IncludeField::parse_include(raw)
-            .map_err(ApiError::BadRequest)?,
+        Some(raw) => IncludeField::parse_include(raw).map_err(ApiError::BadRequest)?,
         None => vec![],
     };
-    let limit = query.limit.unwrap_or(DEFAULT_PRICES_LIMIT);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_PRICES_LIMIT);
     let want_depths = include_fields.contains(&IncludeField::Depths);
     let want_spot = include_fields.contains(&IncludeField::SpotPrices);
 
@@ -168,10 +169,7 @@ pub async fn get_prices(
         for (address, price) in token_prices {
             match price_to_f64(&price.numerator, &price.denominator) {
                 Some(f) => {
-                    prices.push(TokenPriceEntry {
-                        token: address.clone(),
-                        price: f,
-                    });
+                    prices.push(TokenPriceEntry { token: address.clone(), price: f });
                 }
                 None => {
                     warn!(
@@ -195,8 +193,11 @@ pub async fn get_prices(
             })
             .collect();
         entries.sort_by(|a, b| {
-            (&a.component_id, &a.token_in, &a.token_out)
-                .cmp(&(&b.component_id, &b.token_in, &b.token_out))
+            (&a.component_id, &a.token_in, &a.token_out).cmp(&(
+                &b.component_id,
+                &b.token_in,
+                &b.token_out,
+            ))
         });
         entries.truncate(limit);
         Some(entries)
@@ -217,8 +218,11 @@ pub async fn get_prices(
             })
             .collect();
         entries.sort_by(|a, b| {
-            (&a.component_id, &a.token_in, &a.token_out)
-                .cmp(&(&b.component_id, &b.token_in, &b.token_out))
+            (&a.component_id, &a.token_in, &a.token_out).cmp(&(
+                &b.component_id,
+                &b.token_in,
+                &b.token_out,
+            ))
         });
         entries.truncate(limit);
         Some(entries)

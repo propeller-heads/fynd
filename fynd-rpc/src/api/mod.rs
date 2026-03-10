@@ -109,12 +109,7 @@ impl AppState {
         derived_data: SharedDerivedDataRef,
         gas_token: Address,
     ) -> Self {
-        Self {
-            order_manager: Arc::new(order_manager),
-            health_tracker,
-            derived_data,
-            gas_token,
-        }
+        Self { order_manager: Arc::new(order_manager), health_tracker, derived_data, gas_token }
     }
 }
 
