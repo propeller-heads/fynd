@@ -1,3 +1,18 @@
+## [0.6.0](https://github.com/propeller-heads/fynd/compare/0.5.0...0.6.0) (2026-03-10)
+
+
+### Features
+
+* **rpc:** add GET /v1/prices endpoint for derived market data ([30c0e9b](https://github.com/propeller-heads/fynd/commit/30c0e9bc254a9df077c8468b48610152bfd6960d))
+* **rpc:** gate /v1/prices endpoint behind "experimental" feature ([0850fe6](https://github.com/propeller-heads/fynd/commit/0850fe6ef87f0c1298cb44da89710c93b696909b))
+
+
+### Bug Fixes
+
+* apply nightly fmt and regenerate OpenAPI spec ([95c1a10](https://github.com/propeller-heads/fynd/commit/95c1a10690362f5f45c3e0b79458571660c6a8c2))
+* merge main, apply nightly fmt, regenerate OpenAPI spec ([48a5376](https://github.com/propeller-heads/fynd/commit/48a5376767ae4f33376678d34211b3e898be9d19))
+* regenerate openapi.json without experimental schemas ([7f8b77c](https://github.com/propeller-heads/fynd/commit/7f8b77c3bacfc27b5b87f4b9626fdedf115d000e))
+
 ## [0.5.0](https://github.com/propeller-heads/fynd/compare/0.4.0...0.5.0) (2026-03-10)
 
 
