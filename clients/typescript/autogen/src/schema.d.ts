@@ -24,7 +24,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/solve": {
+    "/v1/quote": {
         parameters: {
             query?: never;
             header?: never;
@@ -34,8 +34,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /v1/solve - Submit a solve request.
-         * @description Accepts a `SolutionRequest` and returns a `Solution` with the best routes found, or an error
+         * POST /v1/quote - Request a quote.
+         * @description Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error
          *     if the request could not be filled.
          *
          *     # Errors
@@ -43,9 +43,9 @@ export interface paths {
          *     - 400 Bad Request: Invalid request format
          *     - 422 Unprocessable Entity: No routes found
          *     - 503 Service Unavailable: Queue full or service overloaded
-         *     - 504 Gateway Timeout: Solve timeout
+         *     - 504 Gateway Timeout: Quote timeout
          */
-        post: operations["solve"];
+        post: operations["quote"];
         delete?: never;
         options?: never;
         head?: never;
@@ -80,6 +80,22 @@ export interface components {
              * @example 1730000000
              */
             timestamp: number;
+        };
+        /** @description Options to customize the encoding behavior. */
+        EncodingOptions: {
+            permit?: null | components["schemas"]["PermitSingle"];
+            /**
+             * @description Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
+             * @example 0xabcd...
+             */
+            permit2_signature?: string | null;
+            /**
+             * Format: double
+             * @example 0.001
+             */
+            slippage: number;
+            /** @description Token transfer method. Defaults to `transfer_from`. */
+            transfer_type?: components["schemas"]["UserTransferType"];
         };
         /** @description Error response body. */
         ErrorResponse: {
@@ -145,19 +161,12 @@ export interface components {
             token_out: string;
         };
         /**
-         * @description Specifies the side of an order: sell (exact input) or buy (exact output).
-         *
-         *     Currently only `Sell` is supported. `Buy` will be added in a future version.
-         * @enum {string}
-         */
-        OrderSide: "sell";
-        /**
-         * @description Solution for a single [`Order`].
+         * @description Quote for a single [`Order`].
          *
          *     Contains the route to execute (if found), along with expected amounts,
          *     gas estimates, and status information.
          */
-        OrderSolution: {
+        OrderQuote: {
             /**
              * @description Amount of input token (in token units, as decimal string).
              * @example 1000000000000000000
@@ -182,6 +191,11 @@ export interface components {
              */
             gas_estimate: string;
             /**
+             * @description Effective gas price (in wei) at the time the route was computed.
+             * @example 20000000000
+             */
+            gas_price?: string | null;
+            /**
              * @description ID of the order this solution corresponds to.
              * @example f47ac10b-58cc-4372-a567-0e02b2c3d479
              */
@@ -193,27 +207,63 @@ export interface components {
             price_impact_bps?: number | null;
             route?: null | components["schemas"]["Route"];
             /** @description Status indicating whether a route was found. */
-            status: components["schemas"]["SolutionStatus"];
+            status: components["schemas"]["QuoteStatus"];
+            transaction?: null | components["schemas"]["Transaction"];
         };
         /**
-         * @description A route consisting of one or more sequential swaps.
+         * @description Specifies the side of an order: sell (exact input) or buy (exact output).
          *
-         *     A route describes the path through liquidity pools to execute a swap.
-         *     For multi-hop swaps, the output of each swap becomes the input of the next.
+         *     Currently only `Sell` is supported. `Buy` will be added in a future version.
+         * @enum {string}
          */
-        Route: {
-            /** @description Ordered sequence of swaps to execute. */
-            swaps: components["schemas"]["Swap"][];
+        OrderSide: "sell";
+        /** @description Details for a permit2 single-token permit. */
+        PermitDetails: {
+            /**
+             * @description Amount of tokens approved.
+             * @example 1000000000000000000
+             */
+            amount: string;
+            /**
+             * @description Expiration timestamp for the permit.
+             * @example 1893456000
+             */
+            expiration: string;
+            /**
+             * @description Nonce to prevent replay attacks.
+             * @example 0
+             */
+            nonce: string;
+            /**
+             * @description Token address for which the permit is granted.
+             * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+             */
+            token: string;
+        };
+        /** @description A single permit for permit2 token transfer authorization. */
+        PermitSingle: {
+            /** @description The permit details (token, amount, expiration, nonce). */
+            details: components["schemas"]["PermitDetails"];
+            /**
+             * @description Deadline timestamp for the permit signature.
+             * @example 1893456000
+             */
+            sig_deadline: string;
+            /**
+             * @description Address authorized to spend the tokens (typically the router).
+             * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+             */
+            spender: string;
         };
         /**
-         * @description Complete solution for a [`SolutionRequest`].
+         * @description Complete solution for a [`QuoteRequest`].
          *
          *     Contains a solution for each order in the request, along with aggregate
          *     gas estimates and timing information.
          */
-        Solution: {
-            /** @description Solutions for each order, in the same order as the request. */
-            orders: components["schemas"]["OrderSolution"][];
+        Quote: {
+            /** @description Quotes for each order, in the same order as the request. */
+            orders: components["schemas"]["OrderQuote"][];
             /**
              * Format: int64
              * @description Time taken to compute this solution, in milliseconds.
@@ -227,9 +277,10 @@ export interface components {
             total_gas_estimate: string;
         };
         /** @description Options to customize the solving behavior. */
-        SolutionOptions: {
+        QuoteOptions: {
+            encoding_options?: null | components["schemas"]["EncodingOptions"];
             /**
-             * @description Maximum gas cost allowed for a solution. Solutions exceeding this are filtered out.
+             * @description Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.
              * @example 500000
              */
             max_gas?: string | null;
@@ -249,17 +300,27 @@ export interface components {
             timeout_ms?: number | null;
         };
         /** @description Request to solve one or more swap orders. */
-        SolutionRequest: {
+        QuoteRequest: {
             /** @description Optional solving parameters that apply to all orders. */
-            options?: components["schemas"]["SolutionOptions"];
+            options?: components["schemas"]["QuoteOptions"];
             /** @description Orders to solve. */
             orders: components["schemas"]["Order"][];
         };
         /**
-         * @description Status of an order solution.
+         * @description Status of an order quote.
          * @enum {string}
          */
-        SolutionStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready";
+        QuoteStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready";
+        /**
+         * @description A route consisting of one or more sequential swaps.
+         *
+         *     A route describes the path through liquidity pools to execute a swap.
+         *     For multi-hop swaps, the output of each swap becomes the input of the next.
+         */
+        Route: {
+            /** @description Ordered sequence of swaps to execute. */
+            swaps: components["schemas"]["Swap"][];
+        };
         /**
          * @description A single swap within a route.
          *
@@ -292,6 +353,12 @@ export interface components {
              */
             protocol: string;
             /**
+             * Format: double
+             * @description Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
+             * @example 0.0
+             */
+            split: number;
+            /**
              * @description Input token address.
              * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
              */
@@ -302,6 +369,29 @@ export interface components {
              */
             token_out: string;
         };
+        /** @description An encoded EVM transaction ready to be submitted on-chain. */
+        Transaction: {
+            /**
+             * @description ABI-encoded calldata as hex string.
+             * @example 0x1234567890abcdef
+             */
+            data: string;
+            /**
+             * @description Contract address to call.
+             * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+             */
+            to: string;
+            /**
+             * @description Native token value to send with the transaction (as decimal string).
+             * @example 0
+             */
+            value: string;
+        };
+        /**
+         * @description Token transfer method for moving funds into Tycho execution.
+         * @enum {string}
+         */
+        UserTransferType: "transfer_from_permit2" | "transfer_from" | "none";
     };
     responses: never;
     parameters: never;
@@ -340,7 +430,7 @@ export interface operations {
             };
         };
     };
-    solve: {
+    quote: {
         parameters: {
             query?: never;
             header?: never;
@@ -349,17 +439,17 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SolutionRequest"];
+                "application/json": components["schemas"]["QuoteRequest"];
             };
         };
         responses: {
-            /** @description Solve completed */
+            /** @description Quote completed */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Solution"];
+                    "application/json": components["schemas"]["Quote"];
                 };
             };
             /** @description Invalid request */
@@ -389,7 +479,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Solve timeout */
+            /** @description Quote timeout */
             504: {
                 headers: {
                     [name: string]: unknown;
