@@ -28,8 +28,9 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use fynd_core::{Order, OrderSide, Quote, QuoteOptions, QuoteRequest, Route, Transaction};
+use fynd_core::{Order, OrderSide, QuoteOptions, QuoteRequest, Transaction};
 use fynd_rpc::{builder::parse_chain, HealthStatus};
+use fynd_rpc_types::{Quote, QuoteStatus as RpcQuoteStatus, Route};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::info;
@@ -243,11 +244,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the route from the quote
     let order_quote = quote
-        .orders()
+        .orders
         .first()
         .ok_or("No order quote")?;
     let route = order_quote
-        .route()
+        .route
+        .as_ref()
         .ok_or("No route in quote")?;
 
     // Determine user address and transfer type based on available credentials
@@ -307,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                order_quote.amount_out(),
+                &order_quote.amount_out,
                 &buy_token,
             )
             .await?;
@@ -323,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &amount_in,
                 simulation_address,
                 chain.id(),
-                order_quote.amount_out(),
+                &order_quote.amount_out,
                 &buy_token,
             )
             .await?;
@@ -362,7 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signer.address(),
             chain.id(),
             cli.use_tenderly,
-            order_quote.amount_out(),
+            &order_quote.amount_out,
             &buy_token,
         )
         .await?;
@@ -386,7 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signer.address(),
                     chain.id(),
                     cli.use_tenderly,
-                    order_quote.amount_out(),
+                    &order_quote.amount_out,
                     &buy_token,
                 )
                 .await?;
@@ -564,16 +566,16 @@ fn display_quote(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========== Quote ==========");
 
-    for order in quote.orders() {
-        println!("Status: {:?}", order.status());
+    for order in &quote.orders {
+        println!("Status: {:?}", order.status);
 
-        if !matches!(order.status(), fynd_core::QuoteStatus::Success) {
+        if !matches!(order.status, RpcQuoteStatus::Success) {
             println!("No route found for this order.");
             continue;
         }
 
         let formatted_in = format_token_amount(amount_in, sell_token);
-        let formatted_out = format_token_amount(order.amount_out(), buy_token);
+        let formatted_out = format_token_amount(&order.amount_out, buy_token);
 
         println!(
             "Swap: {} {} -> {} {}",
@@ -581,42 +583,42 @@ fn display_quote(
         );
 
         // Price
-        let price = calculate_price(amount_in, order.amount_out(), sell_token, buy_token);
+        let price = calculate_price(amount_in, &order.amount_out, sell_token, buy_token);
         println!("Price: {:.6} {} per {}", price, buy_token.symbol, sell_token.symbol);
 
         // Gas estimate
-        println!("Gas estimate: {}", order.gas_estimate());
+        println!("Gas estimate: {}", order.gas_estimate);
 
         // Price impact
-        if let Some(impact) = order.price_impact_bps() {
+        if let Some(impact) = order.price_impact_bps {
             let impact_percent = impact as f64 / 100.0;
             println!("Price impact: {:.2}%", impact_percent);
         }
 
         // Route details with token symbols
-        if let Some(route) = order.route() {
-            println!("\nRoute ({} hops):", route.swaps().len());
-            for (i, swap) in route.swaps().iter().enumerate() {
+        if let Some(route) = &order.route {
+            println!("\nRoute ({} hops):", route.swaps.len());
+            for (i, swap) in route.swaps.iter().enumerate() {
                 let token_in = all_tokens
-                    .get(swap.token_in())
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_in()))?;
+                    .get(&swap.token_in)
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_in))?;
                 let token_out = all_tokens
-                    .get(swap.token_out())
-                    .ok_or_else(|| format!("Token not found: {}", swap.token_out()))?;
+                    .get(&swap.token_out)
+                    .ok_or_else(|| format!("Token not found: {}", swap.token_out))?;
                 println!(
                     "  {}. {} -> {} via {} (pool: {})",
                     i + 1,
                     token_in.symbol,
                     token_out.symbol,
-                    swap.protocol(),
-                    swap.component_id()
+                    swap.protocol,
+                    swap.component_id
                 );
             }
         }
     }
 
-    println!("\nSolve time: {}ms", quote.solve_time_ms());
-    println!("Total gas: {}", quote.total_gas_estimate());
+    println!("\nSolve time: {}ms", quote.solve_time_ms);
+    println!("Total gas: {}", quote.total_gas_estimate);
     println!("============================\n");
 
     Ok(())
@@ -712,15 +714,15 @@ fn map_route_to_execution_quote(
 ) -> Result<ExecutionQuote, Box<dyn std::error::Error>> {
     let mut swaps = Vec::new();
 
-    for solver_swap in route.swaps() {
+    for solver_swap in &route.swaps {
         // Look up the component from our fetched data
         let component = components
-            .get(solver_swap.component_id())
+            .get(&solver_swap.component_id)
             .ok_or_else(|| {
                 format!(
                 "Component not found: {}. This component may not have been fetched from the API. \
                 Try adjusting --tvl-threshold or ensuring the protocol is included in --protocols.",
-                solver_swap.component_id()
+                solver_swap.component_id
             )
             })?;
 
@@ -731,10 +733,10 @@ fn map_route_to_execution_quote(
 
     // Calculate minimum amount out with slippage
     let last_swap = route
-        .swaps()
+        .swaps
         .last()
         .ok_or("Empty route")?;
-    let checked_amount = calculate_min_amount_out(last_swap.amount_out(), slippage_bps);
+    let checked_amount = calculate_min_amount_out(&last_swap.amount_out, slippage_bps);
 
     Ok(ExecutionQuote {
         sender: user_address.clone(),

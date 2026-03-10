@@ -119,7 +119,7 @@ impl TaskQueue {
 mod tests {
     use num_bigint::BigUint;
     use rstest::rstest;
-    use tycho_simulation::tycho_core::models::Address;
+    use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
     use crate::{BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote};
@@ -154,6 +154,8 @@ mod tests {
                 BigUint::from(990u64),
                 BlockInfo::new(1, "0x123".to_string(), 1000),
                 "test".to_string(),
+                Bytes::from(make_address(0xAA).as_ref()),
+                Bytes::from(make_address(0xAA).as_ref()),
             ),
             5,
         )

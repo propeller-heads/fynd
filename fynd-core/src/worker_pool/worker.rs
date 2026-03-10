@@ -15,6 +15,7 @@ use std::{
 use num_bigint::BigUint;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
+use tycho_simulation::tycho_core::Bytes;
 
 use crate::{
     algorithm::Algorithm,
@@ -233,6 +234,8 @@ where
                     amount_out_net_gas,
                     block_info.clone(),
                     self.algorithm.name().to_string(),
+                    Bytes::from(order.sender().as_ref()),
+                    Bytes::from(order.effective_receiver().as_ref()),
                 )
                 .with_route(route)
                 .with_gas_price(gas_price)

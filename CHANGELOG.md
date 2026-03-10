@@ -1,3 +1,10 @@
+## [0.5.0](https://github.com/propeller-heads/fynd/compare/0.4.0...0.5.0) (2026-03-10)
+
+
+### Features
+
+* add encoder ([d65b2fa](https://github.com/propeller-heads/fynd/commit/d65b2faf5fe35929ed52199054d4e58a5ad086d0))
+
 ## [0.4.0](https://github.com/propeller-heads/fynd/compare/0.3.1...0.4.0) (2026-03-10)
 
 
