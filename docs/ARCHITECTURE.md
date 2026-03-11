@@ -142,7 +142,7 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 **Endpoints:**
 
 - `POST /v1/quote` -- Submit quote requests
-- `GET /v1/health` -- Health check (data freshness + pool count)
+- `GET /v1/health` -- Health check (data freshness, derived data readiness, pool count)
 - `GET /metrics` -- Prometheus metrics (separate server, port 9898)
 
 ---

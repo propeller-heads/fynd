@@ -1,3 +1,30 @@
+## [0.8.1](https://github.com/propeller-heads/fynd/compare/0.8.0...0.8.1) (2026-03-11)
+
+
+### Bug Fixes
+
+* **ci:** strip info.version from openapi drift check ([f291a1e](https://github.com/propeller-heads/fynd/commit/f291a1ed383433f7ba8954818c26a71b34df0421))
+
+## [0.8.0](https://github.com/propeller-heads/fynd/compare/0.7.0...0.8.0) (2026-03-11)
+
+
+### Features
+
+* include derived data readiness in health check ([ba06b00](https://github.com/propeller-heads/fynd/commit/ba06b000a34af248cb08af25cf72a7313534f98e))
+
+
+### Bug Fixes
+
+* **ci:** checkout PR head for openapi drift check ([9386af9](https://github.com/propeller-heads/fynd/commit/9386af9b77592b4d9bac157a6d21ff34a98efdf5))
+* update openapi spec after health endpoint changes ([80d08f0](https://github.com/propeller-heads/fynd/commit/80d08f072dbe2c40b2dc95813047b2edcb6663cd))
+
+## [0.7.0](https://github.com/propeller-heads/fynd/compare/0.6.0...0.7.0) (2026-03-10)
+
+
+### Features
+
+* generate TypeScript autogen package from OpenAPI spec ([0d0415e](https://github.com/propeller-heads/fynd/commit/0d0415ea548d73acf605ca7fbec3e47a297c81be))
+
 ## [0.6.0](https://github.com/propeller-heads/fynd/compare/0.5.0...0.6.0) (2026-03-10)
 
 

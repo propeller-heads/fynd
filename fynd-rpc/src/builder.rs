@@ -173,7 +173,6 @@ impl FyndBuilder {
 
         // Shared state
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
-        let health_tracker = HealthTracker::new(Arc::clone(&market_data));
 
         // Tycho feed
         let tycho_feed_config = TychoFeedConfig::new(
@@ -209,6 +208,8 @@ impl FyndBuilder {
             ComputationManager::new(computation_config, Arc::clone(&market_data))
                 .map_err(|e| anyhow::anyhow!("failed to create computation manager: {}", e))?;
         let derived_data: SharedDerivedDataRef = computation_manager.store();
+        let health_tracker =
+            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
 

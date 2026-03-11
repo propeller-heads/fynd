@@ -69,6 +69,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Use PR head so we build and compare the branch’s code and openapi.json, not base
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Setup toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -79,12 +82,43 @@ jobs:
           cache-on-failure: true
       - name: Check OpenAPI spec is up to date
         run: |
-          cargo run --locked -- openapi > /tmp/openapi.json
-          if ! diff -q clients/openapi.json /tmp/openapi.json > /dev/null 2>&1; then
+          # Strip info.version before diffing: the release bot bumps Cargo.toml and commits it
+          # to main, which changes the generated spec's version field. Regenerating and committing
+          # openapi.json as part of the release would require a second post-release commit, so we
+          # accept version drift here and only check that the API surface itself hasn't changed.
+          cargo run --locked -- openapi | jq 'del(.info.version)' > /tmp/openapi.json
+          jq 'del(.info.version)' clients/openapi.json > /tmp/openapi_committed.json
+          if ! diff -q /tmp/openapi_committed.json /tmp/openapi.json > /dev/null 2>&1; then
             echo "clients/openapi.json is out of date. Run 'cargo run -- openapi > clients/openapi.json' and commit."
-            diff clients/openapi.json /tmp/openapi.json
+            diff /tmp/openapi_committed.json /tmp/openapi.json
             exit 1
           fi
+
+  typescript_autogen_drift:
+    name: TypeScript Autogen Drift Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate fresh schema
+        run: npx --yes openapi-typescript@7.13.0 clients/openapi.json -o /tmp/schema.d.ts
+      - name: Check autogen schema is up to date
+        run: |
+          if ! diff -q clients/typescript/autogen/src/schema.d.ts /tmp/schema.d.ts > /dev/null 2>&1; then
+            echo "clients/typescript/autogen/src/schema.d.ts is out of date."
+            echo "Regenerate by running: openapi-typescript clients/openapi.json -o clients/typescript/autogen/src/schema.d.ts"
+            diff clients/typescript/autogen/src/schema.d.ts /tmp/schema.d.ts
+            exit 1
+          fi
+      - name: Typecheck autogen package
+        run: |
+          cd clients/typescript/autogen
+          npm ci
+          npx tsc --noEmit
 
   security_audit:
     name: Security Audit

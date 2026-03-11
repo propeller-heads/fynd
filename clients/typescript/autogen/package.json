@@ -1,0 +1,29 @@
+{
+  "name": "@fynd/autogen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Auto-generated TypeScript client for the fynd-rpc API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "typescript": "5.8.2"
+  }
+}

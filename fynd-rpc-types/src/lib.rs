@@ -388,6 +388,14 @@ pub struct HealthStatus {
     /// Number of active solver pools.
     #[cfg_attr(feature = "openapi", schema(example = 2))]
     pub num_solver_pools: usize,
+    /// Whether derived data has been computed at least once.
+    ///
+    /// This indicates overall readiness, not per-block freshness. Some algorithms
+    /// require fresh derived data for each block — they are ready to receive orders
+    /// but will wait for recomputation before solving.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(example = true))]
+    pub derived_data_ready: bool,
 }
 
 /// Error response body.
