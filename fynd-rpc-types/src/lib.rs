@@ -297,10 +297,14 @@ pub struct BlockInfo {
     #[cfg_attr(feature = "openapi", schema(example = 21000000))]
     pub number: u64,
     /// Block hash as a hex string.
+    ///
+    /// Uses a custom deserializer to strip any spurious surrounding quotes that
+    /// the server may emit (e.g. `"\"0x...\""`  →  `"0x..."`).
     #[cfg_attr(
         feature = "openapi",
         schema(example = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
     )]
+    #[serde(deserialize_with = "deserialize_unquoted_string")]
     pub hash: String,
     /// Block timestamp in Unix seconds.
     #[cfg_attr(feature = "openapi", schema(example = 1730000000))]
@@ -453,6 +457,23 @@ where
 // ============================================================================
 // PRIVATE HELPERS
 // ============================================================================
+
+/// Deserializes a string, stripping one layer of surrounding `"` quotes when present.
+///
+/// The Fynd server currently double-encodes `BlockInfo.hash`, emitting
+/// `"hash":"\"0x...\"` instead of `"hash":"0x..."`. This deserializer accepts
+/// both forms so the client is robust to either encoding.
+fn deserialize_unquoted_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        Ok(s[1..s.len() - 1].to_string())
+    } else {
+        Ok(s)
+    }
+}
 
 /// Generates a unique order ID using UUID v4.
 fn generate_order_id() -> String {
@@ -747,5 +768,24 @@ mod conversions {
                 assert_eq!(QuoteStatus::from(core), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_info_hash_strips_surrounding_quotes() {
+        let json = r#"{"number":1,"hash":"\"0xdeadbeef\"","timestamp":0}"#;
+        let block: BlockInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(block.hash, "0xdeadbeef");
+    }
+
+    #[test]
+    fn block_info_hash_plain_string_unchanged() {
+        let json = r#"{"number":1,"hash":"0xdeadbeef","timestamp":0}"#;
+        let block: BlockInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(block.hash, "0xdeadbeef");
     }
 }
