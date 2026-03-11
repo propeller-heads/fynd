@@ -166,7 +166,12 @@ Submit one or more swap orders and receive optimal routes.
 
 ### GET /v1/health
 
-Returns service health status. HTTP 200 if healthy, 503 if stale.
+Returns service health status. HTTP 200 if healthy, 503 if unhealthy.
+
+The service is healthy when market data is fresh (< 60s old) **and** derived data has 
+been computed at least once. The `derived_data_ready` field indicates overall readiness, 
+not per-block freshness — algorithms that require fresh derived data will wait for 
+recomputation before solving.
 
 ## Configuration
 

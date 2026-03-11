@@ -445,6 +445,7 @@ pub struct HealthStatus {
     healthy: bool,
     last_update_ms: u64,
     num_solver_pools: usize,
+    derived_data_ready: bool,
 }
 
 impl HealthStatus {
@@ -463,8 +464,22 @@ impl HealthStatus {
         self.num_solver_pools
     }
 
-    pub(crate) fn new(healthy: bool, last_update_ms: u64, num_solver_pools: usize) -> Self {
-        Self { healthy, last_update_ms, num_solver_pools }
+    /// Whether derived data has been computed at least once.
+    ///
+    /// This indicates overall readiness, not per-block freshness. Some algorithms
+    /// require fresh derived data for each block — they are ready to receive orders
+    /// but will wait for recomputation before solving.
+    pub fn derived_data_ready(&self) -> bool {
+        self.derived_data_ready
+    }
+
+    pub(crate) fn new(
+        healthy: bool,
+        last_update_ms: u64,
+        num_solver_pools: usize,
+        derived_data_ready: bool,
+    ) -> Self {
+        Self { healthy, last_update_ms, num_solver_pools, derived_data_ready }
     }
 }
 

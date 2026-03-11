@@ -100,12 +100,18 @@ pub async fn quote(
 )]
 pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker.age_ms().await;
-    let is_healthy = age_ms < 60_000; // Healthy if data less than 60s old
+    let data_fresh = age_ms < 60_000; // Healthy if data less than 60s old
+    let derived_data_ready = state
+        .health_tracker
+        .derived_data_ready()
+        .await;
+    let is_healthy = data_fresh && derived_data_ready;
 
     let status = dto::HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
         num_solver_pools: state.order_manager.num_pools(),
+        derived_data_ready,
     };
 
     if is_healthy {
