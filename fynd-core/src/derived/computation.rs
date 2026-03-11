@@ -92,6 +92,11 @@ impl ComputationRequirements {
     pub fn has_requirements(&self) -> bool {
         !self.require_fresh.is_empty() || !self.allow_stale.is_empty()
     }
+
+    /// Returns true if the given computation is required (fresh or stale).
+    pub fn is_required(&self, id: ComputationId) -> bool {
+        self.require_fresh.contains(&id) || self.allow_stale.contains(&id)
+    }
 }
 
 /// Trait for derived data computations.

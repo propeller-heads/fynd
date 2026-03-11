@@ -20,8 +20,8 @@ use tycho_simulation::tycho_core::Bytes;
 use crate::{
     algorithm::Algorithm,
     derived::{
-        computation::DerivedComputation, computations::PoolDepthComputation,
-        events::DerivedDataEvent, tracker::ReadinessTracker, SharedDerivedDataRef,
+        computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
+        SharedDerivedDataRef,
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
@@ -46,6 +46,8 @@ where
     market_data: SharedMarketDataRef,
     /// Reference to shared derived data (pool depths, token prices).
     derived_data: SharedDerivedDataRef,
+    /// Algorithm's computation requirements (which derived data to react to).
+    requirements: ComputationRequirements,
     /// Tracks readiness of required derived data computations.
     readiness_tracker: ReadinessTracker,
     /// Notified when readiness state may have changed.
@@ -84,6 +86,7 @@ where
             graph_manager: A::GraphManager::default(),
             market_data,
             derived_data,
+            requirements: requirements.clone(),
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
@@ -141,8 +144,8 @@ where
         // Check readiness before solving
         if self
             .readiness_tracker
-            .has_requirements() &&
-            !self.readiness_tracker.is_ready()
+            .has_requirements()
+            && !self.readiness_tracker.is_ready()
         {
             return Err(SolveError::NotReady(format!(
                 "derived data not ready: missing {:?}",
@@ -285,8 +288,8 @@ where
         // Fast path: no requirements or already ready
         if !self
             .readiness_tracker
-            .has_requirements() ||
-            self.readiness_tracker.is_ready()
+            .has_requirements()
+            || self.readiness_tracker.is_ready()
         {
             return Ok(());
         }
@@ -392,16 +395,15 @@ where
                             // Signal waiters that readiness may have changed
                             self.ready_notify.notify_waiters();
 
-                            // TODO: This handling breaks the worker abstraction, assuming that weights
-                            // will always be used, and they will always come from PoolDepth. A refactor
-                            // is needed to move this handling to the algorithm.
+                            // Update edge weights when a relevant computation completes.
                             if let DerivedDataEvent::ComputationComplete { computation_id, block } = &event {
-                                if *computation_id == PoolDepthComputation::ID {
+                                if self.requirements.is_required(computation_id) {
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
                                     let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
                                     debug!(
                                         self.worker_id,
+                                        computation_id,
                                         block,
                                         updated,
                                         "updated edge weights with derived data"
@@ -420,17 +422,15 @@ where
                                 "derived event receiver lagged, skipped {} events",
                                 skipped
                             );
-                            // Try to update with current derived data
+                            // Recover by updating with whatever derived data is available.
                             let market = self.market_data.read().await;
                             let derived = self.derived_data.read().await;
-                            if derived.pool_depths().is_some() {
-                                let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
-                                debug!(
-                                    self.worker_id,
-                                    updated,
-                                    "recovered edge weights after lag"
-                                );
-                            }
+                            let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                            debug!(
+                                self.worker_id,
+                                updated,
+                                "recovered edge weights after lag"
+                            );
                         }
                     }
                 }
@@ -493,7 +493,7 @@ mod tests {
     use crate::{
         algorithm::{most_liquid::DepthAndPrice, test_utils::setup_market},
         derived::{
-            computation::ComputationRequirements,
+            computation::DerivedComputation,
             computations::{SpotPriceComputation, TokenGasPriceComputation},
             DerivedData,
         },
