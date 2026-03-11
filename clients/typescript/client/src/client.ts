@@ -105,12 +105,12 @@ export class FyndClient {
   }
 
   private async doQuote(
-    body: components["schemas"]["SolutionRequest"],
+    body: components["schemas"]["QuoteRequest"],
     tokenOut: Address,
     receiver: Address,
   ): Promise<Quote> {
     const timeoutMs = this.options.timeoutMs ?? 30_000;
-    const { data, error } = await this.http.POST("/v1/solve", {
+    const { data, error } = await this.http.POST("/v1/quote", {
       body,
       signal: AbortSignal.timeout(timeoutMs),
     });

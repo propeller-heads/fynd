@@ -11,9 +11,9 @@ import type {
 } from "./types.js";
 
 type WireOrder           = components["schemas"]["Order"];
-type WireSolution        = components["schemas"]["Solution"];
-type WireSolutionRequest = components["schemas"]["SolutionRequest"];
-type WireSolutionOptions = components["schemas"]["SolutionOptions"];
+type WireSolution        = components["schemas"]["Quote"];
+type WireSolutionRequest = components["schemas"]["QuoteRequest"];
+type WireSolutionOptions = components["schemas"]["QuoteOptions"];
 type WireHealthStatus    = components["schemas"]["HealthStatus"];
 type WireRoute           = components["schemas"]["Route"];
 type WireSwap            = components["schemas"]["Swap"];
@@ -65,7 +65,7 @@ export function fromWireQuote(
   return {
     orderId:         orderSolution.order_id,
     status:          orderSolution.status,
-    backend:         'fynd',  // WireOrderSolution has no backend field; hardcoded per design
+    backend:         'fynd',  // WireOrderQuote has no backend field; hardcoded per design
     amountIn:        BigInt(orderSolution.amount_in),
     amountOut:       BigInt(orderSolution.amount_out),
     gasEstimate:     BigInt(orderSolution.gas_estimate),

@@ -1,4 +1,4 @@
-// Must stay in sync with components["schemas"]["SolutionStatus"] from @fynd/autogen.
+// Must stay in sync with components["schemas"]["QuoteStatus"] from @fynd/autogen.
 export type SolutionStatus =
   | 'success'
   | 'no_route_found'
