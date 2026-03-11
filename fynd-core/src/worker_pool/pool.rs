@@ -2,8 +2,12 @@
 //!
 //! The worker pool manages multiple dedicated OS threads for CPU-bound route finding.
 //! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
-//! A pool is configured with a specific algorithm (by name), allowing multiple pools
-//! with different algorithms to compete via the OrderManager.
+//! A pool is configured with a specific algorithm, allowing multiple pools with different
+//! algorithms to compete via the OrderManager.
+//!
+//! Pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
+//! or a custom [`Algorithm`](crate::algorithm::Algorithm) implementation (via
+//! [`WorkerPoolBuilder::with_algorithm`]).
 use std::thread::JoinHandle;
 
 use tokio::sync::broadcast;
@@ -170,6 +174,17 @@ impl WorkerPool {
 }
 
 /// Builder for WorkerPool with a fluent API.
+///
+/// # Built-in algorithms
+///
+/// Use [`algorithm`](Self::algorithm) to select a built-in algorithm by name (e.g.,
+/// `"most_liquid"`).
+///
+/// # Custom algorithms
+///
+/// Use [`with_algorithm`](Self::with_algorithm) to plug in any type implementing
+/// [`Algorithm`](crate::algorithm::Algorithm) via a factory closure, bypassing the built-in
+/// registry entirely. See the `custom_algorithm` example for a full walkthrough.
 pub struct WorkerPoolBuilder {
     config: WorkerPoolConfig,
 }
@@ -196,7 +211,8 @@ impl WorkerPoolBuilder {
     /// Sets a custom algorithm implementation via a factory closure.
     ///
     /// The `factory` is called once per worker thread to create an algorithm instance.
-    /// This bypasses the built-in registry, so any type implementing [`Algorithm`] can be used.
+    /// This bypasses the built-in registry, so any type implementing
+    /// [`Algorithm`](crate::algorithm::Algorithm) can be used.
     ///
     /// # Example
     ///

@@ -62,7 +62,7 @@ Fynd works with any protocol Tycho supports. See the [list of supported protocol
 2. **SharedMarketData** stores all component states, tokens, and gas prices in a single shared structure.
 3. When a **quote request** arrives via HTTP, the **OrderManager** fans it out to all worker pools in parallel.
 4. Each **Worker Pool** runs a specific algorithm. Workers compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
-5. The **OrderManager** collects results, picks the best solution by `amount_out_net_gas`, and returns it.
+5. The **OrderManager** collects results, picks the best solution by `amount_out_net_gas`, optionally encodes it into an on-chain transaction, and returns it.
 
 ## Try it out
 

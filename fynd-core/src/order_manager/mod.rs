@@ -2,7 +2,8 @@
 //!
 //! The OrderManager sits between the API layer and multiple solver pools.
 //! It fans out each order to all configured solvers, manages timeouts,
-//! and selects the best quote based on `amount_out_net_gas`.
+//! selects the best quote based on `amount_out_net_gas`, and optionally
+//! encodes the winning solution into an on-chain transaction.
 
 //! # Responsibilities
 //!
@@ -11,6 +12,8 @@
 //! 2. **Timeout**: Cancel if solver response takes too long
 //! 3. **Collection**: Wait for N responses OR timeout per order
 //! 4. **Selection**: Choose best quote (max `amount_out_net_gas`)
+//! 5. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
+//!    encode winning solutions into executable on-chain transactions via the [`Encoder`]
 
 pub mod config;
 
@@ -100,6 +103,8 @@ impl OrderManager {
     /// 1. Sends the order to all solver pools in parallel
     /// 2. Waits for responses with timeout
     /// 3. Selects the best quote based on `amount_out_net_gas`
+    /// 4. If `encoding_options` are set on the request, encodes winning solutions into on-chain
+    ///    transactions
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
