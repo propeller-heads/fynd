@@ -395,11 +395,18 @@ mod tests {
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::{
         tycho_common::models::Chain,
-        tycho_core::{models::Address, Bytes},
+        tycho_core::{
+            models::{token::Token, Address, Chain as SimChain},
+            Bytes,
+        },
     };
 
     use super::*;
-    use crate::{types::internal::SolveTask, OrderSide, SingleOrderQuote};
+    use crate::{
+        algorithm::test_utils::{component, MockProtocolSim},
+        types::internal::SolveTask,
+        EncodingOptions, OrderSide, Route, SingleOrderQuote, Swap,
+    };
 
     fn default_encoder() -> Encoder {
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
@@ -424,21 +431,45 @@ mod tests {
     }
 
     fn make_single_quote(amount_out_net_gas: u64) -> SingleOrderQuote {
-        SingleOrderQuote::new(
-            OrderQuote::new(
-                "test-order".to_string(),
-                QuoteStatus::Success,
-                BigUint::from(1000u64),
-                BigUint::from(990u64),
-                BigUint::from(100_000u64),
-                BigUint::from(amount_out_net_gas),
-                BlockInfo::new(1, "0x123".to_string(), 1000),
-                "test".to_string(),
-                Bytes::from(make_address(0xAA).as_ref()),
-                Bytes::from(make_address(0xAA).as_ref()),
+        let make_token = |addr: Address| Token {
+            address: addr,
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let tin = make_address(0x01);
+        let tout = make_address(0x02);
+        let swap = Swap::new(
+            "pool-1".to_string(),
+            "uniswap_v2".to_string(),
+            tin.clone(),
+            tout.clone(),
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(50_000u64),
+            component(
+                "0x0000000000000000000000000000000000000001",
+                &[make_token(tin), make_token(tout)],
             ),
-            5,
+            Box::new(MockProtocolSim::default()),
+        );
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out_net_gas),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
         )
+        .with_route(Route::new(vec![swap]));
+        SingleOrderQuote::new(quote, 5)
     }
 
     // Helper to create a mock solver pool that responds with a given solution
@@ -493,7 +524,8 @@ mod tests {
 
         let manager =
             OrderManager::new(vec![pool], OrderManagerConfig::default(), default_encoder());
-        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+        let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+        let request = QuoteRequest::new(vec![make_order()], options);
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
@@ -502,6 +534,11 @@ mod tests {
         assert_eq!(quote.orders().len(), 1);
         assert_eq!(quote.orders()[0].status(), QuoteStatus::Success);
         assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(900u64));
+        assert!(!quote.orders()[0]
+            .transaction()
+            .unwrap()
+            .data()
+            .is_empty());
 
         drop(manager);
         worker.abort();
@@ -517,7 +554,8 @@ mod tests {
         // Wait for both responses to test best selection logic
         let config = OrderManagerConfig::default().with_min_responses(2);
         let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
-        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+        let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+        let request = QuoteRequest::new(vec![make_order()], options);
 
         let result = manager.quote(request).await;
         assert!(result.is_ok());
@@ -526,6 +564,11 @@ mod tests {
         assert_eq!(quote.orders().len(), 1);
         // Should select pool_b's quote (higher amount_out_net_gas)
         assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(950u64));
+        assert!(!quote.orders()[0]
+            .transaction()
+            .unwrap()
+            .data()
+            .is_empty());
 
         drop(manager);
         worker_a.abort();
@@ -569,7 +612,8 @@ mod tests {
         let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
 
         let start = Instant::now();
-        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+        let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+        let request = QuoteRequest::new(vec![make_order()], options);
 
         let result = manager.quote(request).await;
         let elapsed = start.elapsed();
@@ -582,6 +626,12 @@ mod tests {
         let quote = result.unwrap();
         assert_eq!(quote.orders().len(), 1);
         assert_eq!(quote.orders()[0].status(), QuoteStatus::Success);
+        // Should have encoding
+        assert!(!quote.orders()[0]
+            .transaction()
+            .unwrap()
+            .data()
+            .is_empty());
 
         drop(manager);
         worker_a.abort();
