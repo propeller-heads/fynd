@@ -21,6 +21,7 @@ use std::{
 use fynd_core::{
     algorithm::AlgorithmConfig,
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
+    encoding::encoder::Encoder,
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
@@ -29,6 +30,7 @@ use fynd_core::{
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
+use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 use tycho_simulation::{
     evm::tycho_models::Chain, tycho_core::Bytes, tycho_ethereum::rpc::EthereumRpcClient,
 };
@@ -101,9 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
     // 7. OrderManager to coordinate solving
+    let swap_encoder_registry = SwapEncoderRegistry::new(chain)
+        .add_default_encoders(None)
+        .expect("Failed to create default swap encoder registry");
+    let encoder = Encoder::new(chain, swap_encoder_registry).expect("Failed to create encoder");
     let order_manager = OrderManager::new(
         vec![SolverPoolHandle::new("solver", task_handle)],
         OrderManagerConfig::default().with_timeout(Duration::from_secs(10)),
+        encoder,
     );
 
     // 8. Spawn background tasks

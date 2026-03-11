@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use fynd_core::{
     algorithm::AlgorithmConfig,
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
+    encoding::encoder::Encoder,
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
@@ -14,6 +15,7 @@ use fynd_core::{
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
+use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
 
 use crate::{
@@ -48,6 +50,8 @@ pub struct FyndBuilder {
     order_manager_min_responses: usize,
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
+    /// Custom encoder override. If `None`, a default encoder is created during build.
+    encoder: Option<Encoder>,
 }
 
 impl FyndBuilder {
@@ -77,6 +81,7 @@ impl FyndBuilder {
             order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
             order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
+            encoder: None,
         }
     }
 
@@ -149,6 +154,12 @@ impl FyndBuilder {
     /// Sets the blacklist configuration for filtering components.
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.blacklist = blacklist;
+        self
+    }
+
+    /// Overrides the default encoder with a custom one.
+    pub fn encoder(mut self, encoder: Encoder) -> Self {
+        self.encoder = Some(encoder);
         self
     }
 
@@ -268,10 +279,20 @@ impl FyndBuilder {
                 .await;
         });
 
+        let encoder = match self.encoder {
+            Some(encoder) => encoder,
+            None => {
+                let swap_encoder_registry =
+                    SwapEncoderRegistry::new(self.chain).add_default_encoders(None)?;
+                Encoder::new(self.chain, swap_encoder_registry)
+                    .map_err(|e| anyhow::anyhow!("failed to create encoder: {}", e))?
+            }
+        };
+
         let order_manager_config = OrderManagerConfig::default()
             .with_timeout(self.order_manager_timeout)
             .with_min_responses(self.order_manager_min_responses);
-        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config);
+        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config, encoder);
 
         let app_state = AppState::new(
             order_manager,
