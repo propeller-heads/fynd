@@ -97,8 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(quote.status(), QuoteStatus::Success, "expected a successful WETH→USDC quote");
     assert!(quote.amount_out() > &BigUint::from(0u32), "amount_out must be non-zero");
     assert!(
-        !quote.block().hash().contains('"'),
-        "block hash must not contain literal quote characters"
+        quote.block().hash().starts_with("0x"),
+        "block hash must be a 0x-prefixed hex string, got: {}",
+        quote.block().hash()
     );
 
     // -----------------------------------------------------------------------
