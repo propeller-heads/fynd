@@ -1,3 +1,10 @@
+## [0.8.1](https://github.com/propeller-heads/fynd/compare/0.8.0...0.8.1) (2026-03-11)
+
+
+### Bug Fixes
+
+* **ci:** strip info.version from openapi drift check ([f291a1e](https://github.com/propeller-heads/fynd/commit/f291a1ed383433f7ba8954818c26a71b34df0421))
+
 ## [0.8.0](https://github.com/propeller-heads/fynd/compare/0.7.0...0.8.0) (2026-03-11)
 
 
