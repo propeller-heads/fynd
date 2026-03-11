@@ -182,9 +182,20 @@ impl MostLiquidAlgorithm {
 
             for edge in graph.edges(current_node) {
                 let next_node = edge.target();
+                let next_addr = &graph[next_node];
+
+                // Skip paths that revisit a token already in the path.
+                // Exception: when source == destination, the destination may
+                // appear at the end (forming a first == last cycle, e.g.
+                // USDC → WETH → USDC). All other intermediate cycles (e.g.
+                // USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
+                let is_valid_cycle = next_node == to_idx && from_idx == to_idx;
+                if !is_valid_cycle && current_path.tokens.contains(&next_addr) {
+                    continue;
+                }
 
                 let mut new_path = current_path.clone();
-                new_path.add_hop(&graph[current_node], edge.weight(), &graph[next_node]);
+                new_path.add_hop(&graph[current_node], edge.weight(), next_addr);
 
                 if next_node == to_idx && new_path.len() >= min_hops {
                     paths.push(new_path.clone());
@@ -850,23 +861,17 @@ mod tests {
     }
 
     #[test]
-    fn test_find_paths_revisit_destination() {
+    fn test_find_paths_no_intermediate_cycles() {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
 
-        // A->B with max_hops=3: finds 1-hop path plus 3-hop revisit paths
+        // A->B with max_hops=3: only the direct 1-hop path is valid.
+        // Revisit paths like A->B->C->B or A->B->B->B are pruned because
+        // they create intermediate cycles unsupported by Tycho execution
+        // (only first == last cycles are allowed, i.e. from == to).
         let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3).unwrap();
-
-        // Check all expected paths are found (order-independent)
-        assert_eq!(
-            all_ids(p),
-            HashSet::from([
-                vec!["ab"],             // 1-hop direct
-                vec!["ab", "ab", "ab"], // 3-hop: revisit via self
-                vec!["ab", "bc", "bc"], // 3-hop: A->B->C->B
-            ])
-        );
+        assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
     }
 
     #[test]
@@ -931,17 +936,29 @@ mod tests {
 
     #[test]
     fn test_find_paths_bfs_ordering() {
-        let (a, b, _, _) = addrs();
-        let m = linear_graph();
+        // Build a graph with 1-hop, 2-hop, and 3-hop paths to E:
+        //   A --[ae]--> E                          (1-hop)
+        //   A --[ab]--> B --[be]--> E              (2-hop)
+        //   A --[ac]--> C --[cd]--> D --[de]--> E  (3-hop)
+        let (a, b, c, d) = addrs();
+        let e = addr(0x0E);
+        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
+        let mut t = HashMap::new();
+        t.insert("ae".into(), vec![a.clone(), e.clone()]);
+        t.insert("ab".into(), vec![a.clone(), b.clone()]);
+        t.insert("be".into(), vec![b, e.clone()]);
+        t.insert("ac".into(), vec![a.clone(), c.clone()]);
+        t.insert("cd".into(), vec![c, d.clone()]);
+        t.insert("de".into(), vec![d, e.clone()]);
+        m.initialize_graph(&t);
         let g = m.graph();
 
-        // BFS ensures shorter paths come first: 1-hop before 3-hop
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3).unwrap();
+        let p = MostLiquidAlgorithm::find_paths(g, &a, &e, 1, 3).unwrap();
 
-        // Verify BFS property: paths are ordered by hop count
+        // BFS guarantees paths are ordered by hop count
         assert_eq!(p.len(), 3, "Expected 3 paths total");
         assert_eq!(p[0].len(), 1, "First path should be 1-hop");
-        assert_eq!(p[1].len(), 3, "Second path should be 3-hop");
+        assert_eq!(p[1].len(), 2, "Second path should be 2-hop");
         assert_eq!(p[2].len(), 3, "Third path should be 3-hop");
     }
 
