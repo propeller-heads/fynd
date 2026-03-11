@@ -206,7 +206,13 @@ export class FyndClient {
     // signature is '0x' + 130 hex chars (65 bytes)
     const r = `0x${signature.slice(2, 66)}` as Hex;
     const s = `0x${signature.slice(66, 130)}` as Hex;
-    const yParity = parseInt(signature.slice(130, 132), 16) as 0 | 1;
+    const vByte = parseInt(signature.slice(130, 132), 16);
+    // Normalize: legacy v=27/28 → yParity 0/1; EIP-1559 v=0/1 pass through
+    const vNormalized = vByte === 27 ? 0 : vByte === 28 ? 1 : vByte;
+    if (vNormalized !== 0 && vNormalized !== 1) {
+      throw FyndError.config(`invalid signature v byte: ${vByte}`);
+    }
+    const yParity: 0 | 1 = vNormalized;
 
     const rawTx = serializeTransaction(
       {
