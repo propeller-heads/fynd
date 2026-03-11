@@ -108,6 +108,15 @@ export interface components {
         /** @description Health check response. */
         HealthStatus: {
             /**
+             * @description Whether derived data has been computed at least once.
+             *
+             *     This indicates overall readiness, not per-block freshness. Some algorithms
+             *     require fresh derived data for each block — they are ready to receive orders
+             *     but will wait for recomputation before solving.
+             * @example true
+             */
+            derived_data_ready?: boolean;
+            /**
              * @description Whether the service is healthy.
              * @example true
              */
