@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "paths": {
     "/v1/health": {
@@ -212,6 +212,11 @@
           "num_solver_pools"
         ],
         "properties": {
+          "derived_data_ready": {
+            "type": "boolean",
+            "description": "Whether derived data has been computed at least once.\n\nThis indicates overall readiness, not per-block freshness. Some algorithms\nrequire fresh derived data for each block — they are ready to receive orders\nbut will wait for recomputation before solving.",
+            "example": true
+          },
           "healthy": {
             "type": "boolean",
             "description": "Whether the service is healthy.",
