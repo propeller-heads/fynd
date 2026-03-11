@@ -1,3 +1,15 @@
+## [0.9.0](https://github.com/propeller-heads/fynd/compare/0.8.1...0.9.0) (2026-03-11)
+
+
+### Features
+
+* Use encoder in order manager ([b2dd105](https://github.com/propeller-heads/fynd/commit/b2dd1055ea0a88a3ba887ba4dba27a945fb1bf0c))
+
+
+### Bug Fixes
+
+* Examples that directly init the order manager. ([cd4f588](https://github.com/propeller-heads/fynd/commit/cd4f588c23d4c78ecb51d7550dcd42c72b08ea23))
+
 ## [0.8.1](https://github.com/propeller-heads/fynd/compare/0.8.0...0.8.1) (2026-03-11)
 
 
