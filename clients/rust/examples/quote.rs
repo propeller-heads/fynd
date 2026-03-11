@@ -57,14 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     let quote = client
         .quote(QuoteParams::new(
-            Order::new(
-                addr(WETH),
-                addr(USDC),
-                one_ether(),
-                OrderSide::Sell,
-                addr(VITALIK),
-                None,
-            ),
+            Order::new(addr(WETH), addr(USDC), one_ether(), OrderSide::Sell, addr(VITALIK), None),
             QuoteOptions::default(),
         ))
         .await?;
@@ -76,11 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  amount_out:    {}", quote.amount_out());
     println!("  gas_estimate:  {}", quote.gas_estimate());
     println!("  solve_time_ms: {}", quote.solve_time_ms());
-    println!(
-        "  block:         #{} ({})",
-        quote.block().number(),
-        quote.block().hash()
-    );
+    println!("  block:         #{} ({})", quote.block().number(), quote.block().hash());
     if let Some(route) = quote.route() {
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
@@ -107,14 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     let quote2 = client
         .quote(QuoteParams::new(
-            Order::new(
-                addr(USDC),
-                addr(USDT),
-                one_usdc(),
-                OrderSide::Sell,
-                addr(VITALIK),
-                None,
-            ),
+            Order::new(addr(USDC), addr(USDT), one_usdc(), OrderSide::Sell, addr(VITALIK), None),
             QuoteOptions::default(),
         ))
         .await?;
@@ -125,11 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  amount_in:     {}", quote2.amount_in());
     println!("  amount_out:    {}", quote2.amount_out());
     println!("  gas_estimate:  {}", quote2.gas_estimate());
-    println!(
-        "  block:         #{} ({})",
-        quote2.block().number(),
-        quote2.block().hash()
-    );
+    println!("  block:         #{} ({})", quote2.block().number(), quote2.block().hash());
     println!();
 
     assert_eq!(quote2.status(), QuoteStatus::Success, "expected a successful USDC→USDT quote");

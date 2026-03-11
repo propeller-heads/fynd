@@ -3288,6 +3288,7 @@ dependencies = [
  "alloy",
  "bytes",
  "fynd-rpc-types",
+ "hex",
  "num-bigint",
  "num-traits",
  "reqwest",
