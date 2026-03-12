@@ -230,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Order::new(sell_token_bytes, buy_token_bytes, amount, OrderSide::Sell, sender_bytes, None);
     let options = QuoteOptions::default()
         .with_timeout_ms(5_000)
-        .with_encoding_options(EncodingOptions::new(slippage).with_permit2(fynd_permit, signature));
+        .with_encoding_options(EncodingOptions::new(slippage).with_permit2(fynd_permit, signature)?);
     let quote = client.quote(QuoteParams::new(order, options)).await?;
 
     // Display quote

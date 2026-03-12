@@ -18,6 +18,7 @@ pub enum UserTransferType {
 }
 
 /// Per-token details for a Permit2 single-token authorization.
+#[derive(Debug, Clone)]
 pub struct PermitDetails {
     pub(crate) token: bytes::Bytes,
     pub(crate) amount: num_bigint::BigUint,
@@ -37,6 +38,7 @@ impl PermitDetails {
 }
 
 /// A single Permit2 authorization, covering one token for one spender.
+#[derive(Debug, Clone)]
 pub struct PermitSingle {
     pub(crate) details: PermitDetails,
     pub(crate) spender: bytes::Bytes,
@@ -78,7 +80,13 @@ impl PermitSingle {
         let amount = p2_biguint_to_uint160(&self.details.amount)?;
         let expiration = p2_biguint_to_uint48(&self.details.expiration)?;
         let nonce = p2_biguint_to_uint48(&self.details.nonce)?;
-        let sig_deadline = p2_biguint_to_u256(&self.sig_deadline);
+        let sig_deadline = {
+            let bytes = self.sig_deadline.to_bytes_be();
+            let mut arr = [0u8; 32];
+            let len = bytes.len().min(32);
+            arr[32 - len..].copy_from_slice(&bytes[..len]);
+            alloy::primitives::U256::from_be_bytes(arr)
+        };
 
         let domain = eip712_domain! {
             name: "Permit2",
@@ -160,18 +168,11 @@ fn p2_biguint_to_uint48(
     Ok(alloy::primitives::Uint::<48, 1>::from_be_bytes(arr))
 }
 
-fn p2_biguint_to_u256(n: &num_bigint::BigUint) -> alloy::primitives::U256 {
-    let bytes = n.to_bytes_be();
-    let mut arr = [0u8; 32];
-    let len = bytes.len().min(32);
-    arr[32 - len..].copy_from_slice(&bytes[..len]);
-    alloy::primitives::U256::from_be_bytes(arr)
-}
-
 /// Options that instruct the server to return ABI-encoded calldata in the quote response.
 ///
 /// Pass via [`QuoteOptions::with_encoding_options`] to opt into calldata generation. Without this,
 /// the server returns routing information only and [`Quote::transaction`] will be `None`.
+#[derive(Debug, Clone)]
 pub struct EncodingOptions {
     pub(crate) slippage: f64,
     pub(crate) transfer_type: UserTransferType,
@@ -195,12 +196,27 @@ impl EncodingOptions {
 
     /// Enable Permit2 token transfer with a pre-computed EIP-712 signature.
     ///
-    /// `signature` is the 65-byte result of signing the Permit2 typed-data hash externally.
-    pub fn with_permit2(mut self, permit: PermitSingle, signature: bytes::Bytes) -> Self {
+    /// `signature` must be the 65-byte result of signing the Permit2 typed-data hash
+    /// externally (ECDSA: 32-byte r, 32-byte s, 1-byte v).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::FyndError::Protocol`] if `signature` is not exactly 65 bytes.
+    pub fn with_permit2(
+        mut self,
+        permit: PermitSingle,
+        signature: bytes::Bytes,
+    ) -> Result<Self, crate::error::FyndError> {
+        if signature.len() != 65 {
+            return Err(crate::error::FyndError::Protocol(format!(
+                "Permit2 signature must be exactly 65 bytes, got {}",
+                signature.len()
+            )));
+        }
         self.transfer_type = UserTransferType::TransferFromPermit2;
         self.permit = Some(permit);
         self.permit2_signature = Some(signature);
-        self
+        Ok(self)
     }
 
     /// Use funds already present in the Tycho Router (no token transfer performed).
@@ -825,11 +841,31 @@ mod tests {
         );
         let permit = PermitSingle::new(details, spender, BigUint::from(9_999_999u32));
 
-        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone());
+        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone()).unwrap();
 
         assert_eq!(opts.transfer_type, UserTransferType::TransferFromPermit2);
         assert!(opts.permit.is_some());
         assert_eq!(opts.permit2_signature.as_ref().unwrap(), &sig);
+    }
+
+    #[test]
+    fn encoding_options_with_permit2_rejects_wrong_signature_length() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        let permit = PermitSingle::new(
+            details,
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(9_999_999u32),
+        );
+        let bad_sig = Bytes::copy_from_slice(&[0xcc; 64]); // 64 bytes, not 65
+        assert!(matches!(
+            EncodingOptions::new(0.005).with_permit2(permit, bad_sig),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
     }
 
     #[test]

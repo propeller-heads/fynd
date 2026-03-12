@@ -587,7 +587,7 @@ mod tests {
             BigUint::from(9_999_999u32),
         );
         let sig = Bytes::copy_from_slice(&[0xcc; 65]);
-        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone());
+        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone()).unwrap();
 
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
         assert!(matches!(dto_opts.transfer_type, dto::UserTransferType::TransferFromPermit2));
