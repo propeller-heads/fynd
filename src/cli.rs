@@ -65,13 +65,12 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::MIN_TVL)]
     pub min_tvl: f64,
 
-    /// TVL buffer multiplier.
+    /// TVL buffer ratio.
     /// Used to avoid fluctuations caused by components hovering around a single threshold.
-    /// Default is 1.1 (10% buffer). For example, if the minimum TVL is 10 ETH, then components
-    /// that drop below 10 ETH will be removed from the market data and components that exceed 11
-    /// ETH will be added.
-    #[arg(long, default_value_t = defaults::TVL_BUFFER_MULTIPLIER)]
-    pub tvl_buffer_multiplier: f64,
+    /// Default is 1.1 (10% buffer). For example, if the minimum TVL is 10 ETH, components are
+    /// added when TVL >= 10 ETH and removed when TVL drops below 10 / 1.1 ≈ 9.09 ETH.
+    #[arg(long, default_value_t = defaults::TVL_BUFFER_RATIO)]
+    pub tvl_buffer_ratio: f64,
 
     /// Minimum token quality filter.
     #[arg(long, default_value_t = defaults::MIN_TOKEN_QUALITY)]
@@ -167,7 +166,7 @@ mod cli_tests {
         assert_eq!(args.tycho_url, "localhost:4242");
         assert!(args.protocols.is_empty());
         assert_eq!(args.min_tvl, 10.0);
-        assert_eq!(args.tvl_buffer_multiplier, 1.1);
+        assert_eq!(args.tvl_buffer_ratio, 1.1);
         assert_eq!(args.gas_refresh_interval_secs, 30);
         assert_eq!(args.reconnect_delay_secs, 5);
         assert_eq!(args.order_manager_timeout_ms, 100);
