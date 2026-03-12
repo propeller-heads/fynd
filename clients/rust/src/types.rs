@@ -841,7 +841,9 @@ mod tests {
         );
         let permit = PermitSingle::new(details, spender, BigUint::from(9_999_999u32));
 
-        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone()).unwrap();
+        let opts = EncodingOptions::new(0.005)
+            .with_permit2(permit, sig.clone())
+            .unwrap();
 
         assert_eq!(opts.transfer_type, UserTransferType::TransferFromPermit2);
         assert!(opts.permit.is_some());
@@ -890,7 +892,9 @@ mod tests {
     fn eip712_signing_hash_returns_32_bytes() {
         let permit = sample_permit_single();
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
-        let hash = permit.eip712_signing_hash(1, &permit2_addr).unwrap();
+        let hash = permit
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
         assert_eq!(hash.len(), 32);
         // Non-zero: alloy should never hash to all-zeros for a real input
         assert_ne!(hash, [0u8; 32]);
@@ -899,16 +903,24 @@ mod tests {
     #[test]
     fn eip712_signing_hash_is_deterministic() {
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
-        let h1 = sample_permit_single().eip712_signing_hash(1, &permit2_addr).unwrap();
-        let h2 = sample_permit_single().eip712_signing_hash(1, &permit2_addr).unwrap();
+        let h1 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        let h2 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn eip712_signing_hash_differs_by_chain_id() {
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
-        let h1 = sample_permit_single().eip712_signing_hash(1, &permit2_addr).unwrap();
-        let h137 = sample_permit_single().eip712_signing_hash(137, &permit2_addr).unwrap();
+        let h1 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        let h137 = sample_permit_single()
+            .eip712_signing_hash(137, &permit2_addr)
+            .unwrap();
         assert_ne!(h1, h137);
     }
 
@@ -930,11 +942,8 @@ mod tests {
             BigUint::from(1u32),
             BigUint::from(0u32),
         );
-        let permit = PermitSingle::new(
-            details,
-            Bytes::copy_from_slice(&[0xbb; 20]),
-            BigUint::from(1u32),
-        );
+        let permit =
+            PermitSingle::new(details, Bytes::copy_from_slice(&[0xbb; 20]), BigUint::from(1u32));
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
         assert!(matches!(
             permit.eip712_signing_hash(1, &permit2_addr),
@@ -952,11 +961,8 @@ mod tests {
             BigUint::from(1u32),
             BigUint::from(0u32),
         );
-        let permit = PermitSingle::new(
-            details,
-            Bytes::copy_from_slice(&[0xbb; 20]),
-            BigUint::from(1u32),
-        );
+        let permit =
+            PermitSingle::new(details, Bytes::copy_from_slice(&[0xbb; 20]), BigUint::from(1u32));
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
         assert!(matches!(
             permit.eip712_signing_hash(1, &permit2_addr),

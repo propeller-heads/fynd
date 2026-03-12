@@ -694,8 +694,8 @@ where
                     Some(receipt) => {
                         let settled_amount =
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
-                        let gas_cost = BigUint::from(receipt.gas_used) *
-                            BigUint::from(receipt.effective_gas_price);
+                        let gas_cost = BigUint::from(receipt.gas_used)
+                            * BigUint::from(receipt.effective_gas_price);
                         return Ok(SettledOrder::new(settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,

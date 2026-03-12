@@ -32,7 +32,10 @@ pub(crate) fn bytes_to_alloy_address(
 /// Convert a client `bytes::Bytes` address to a tycho DTO-format address.
 fn bytes_to_tycho(b: &bytes::Bytes) -> Result<TychoAddress, FyndError> {
     if b.len() != 20 {
-        return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
+        return Err(FyndError::Protocol(format!(
+            "expected 20-byte address, got {} bytes",
+            b.len()
+        )));
     }
     // hex_bytes::Bytes has From<bytes::Bytes>
     Ok(TychoAddress::from(b.clone()))
@@ -109,7 +112,10 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
             timeout_ms: opts.timeout_ms,
             min_responses: opts.min_responses,
             max_gas: opts.max_gas,
-            encoding_options: opts.encoding_options.map(dto::EncodingOptions::try_from).transpose()?,
+            encoding_options: opts
+                .encoding_options
+                .map(dto::EncodingOptions::try_from)
+                .transpose()?,
         })
     }
 }
@@ -119,8 +125,13 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
 
     fn try_from(opts: EncodingOptions) -> Result<Self, Self::Error> {
         use tycho_simulation::tycho_core::Bytes as TychoBytes;
-        let permit = opts.permit.map(dto::PermitSingle::try_from).transpose()?;
-        let permit2_signature = opts.permit2_signature.map(TychoBytes::from);
+        let permit = opts
+            .permit
+            .map(dto::PermitSingle::try_from)
+            .transpose()?;
+        let permit2_signature = opts
+            .permit2_signature
+            .map(TychoBytes::from);
         Ok(dto::EncodingOptions {
             slippage: opts.slippage,
             transfer_type: opts.transfer_type.into(),
@@ -587,11 +598,20 @@ mod tests {
             BigUint::from(9_999_999u32),
         );
         let sig = Bytes::copy_from_slice(&[0xcc; 65]);
-        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone()).unwrap();
+        let opts = EncodingOptions::new(0.005)
+            .with_permit2(permit, sig.clone())
+            .unwrap();
 
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
         assert!(matches!(dto_opts.transfer_type, dto::UserTransferType::TransferFromPermit2));
         assert!(dto_opts.permit.is_some());
-        assert_eq!(dto_opts.permit2_signature.as_ref().unwrap().as_ref(), sig.as_ref());
+        assert_eq!(
+            dto_opts
+                .permit2_signature
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            sig.as_ref()
+        );
     }
 }

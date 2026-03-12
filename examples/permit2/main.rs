@@ -147,8 +147,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse addresses
     let sell_token_addr = Address::from_str(&cli.sell_token)
         .map_err(|e| format!("invalid sell token address: {e}"))?;
-    let buy_token_addr = Address::from_str(&cli.buy_token)
-        .map_err(|e| format!("invalid buy token address: {e}"))?;
+    let buy_token_addr =
+        Address::from_str(&cli.buy_token).map_err(|e| format!("invalid buy token address: {e}"))?;
     let router_addr =
         Address::from_str(&cli.router).map_err(|e| format!("invalid router address: {e}"))?;
     let permit2_addr =
@@ -218,7 +218,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Signing Permit2 EIP-712 hash (chain_id={}, nonce={})...", chain_id, nonce);
     let permit2_addr_bytes = Bytes::copy_from_slice(permit2_addr.as_slice());
     let signing_hash = fynd_permit.eip712_signing_hash(chain_id, &permit2_addr_bytes)?;
-    let sig = signer.sign_hash(&alloy::primitives::B256::from(signing_hash)).await?;
+    let sig = signer
+        .sign_hash(&alloy::primitives::B256::from(signing_hash))
+        .await?;
     let signature = Bytes::copy_from_slice(&sig.as_bytes());
 
     info!(
@@ -230,8 +232,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Order::new(sell_token_bytes, buy_token_bytes, amount, OrderSide::Sell, sender_bytes, None);
     let options = QuoteOptions::default()
         .with_timeout_ms(5_000)
-        .with_encoding_options(EncodingOptions::new(slippage).with_permit2(fynd_permit, signature)?);
-    let quote = client.quote(QuoteParams::new(order, options)).await?;
+        .with_encoding_options(
+            EncodingOptions::new(slippage).with_permit2(fynd_permit, signature)?,
+        );
+    let quote = client
+        .quote(QuoteParams::new(order, options))
+        .await?;
 
     // Display quote
     println!("\n========== Quote ==========");
@@ -259,8 +265,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================\n");
 
     // Build and sign the Fynd order payload
-    let payload = client.signable_payload(quote, &SigningHints::default()).await?;
-    let order_sig = signer.sign_hash(&payload.signing_hash()).await?;
+    let payload = client
+        .signable_payload(quote, &SigningHints::default())
+        .await?;
+    let order_sig = signer
+        .sign_hash(&payload.signing_hash())
+        .await?;
     let signed = SignedOrder::assemble(payload, order_sig);
 
     let exec_options = if cli.execute {
@@ -277,10 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let balance_pos = balance_slot_result?;
         let allowance_pos = allowance_slot_result?;
-        info!(
-            "Found balance slot {} and allowance-to-Permit2 slot {}",
-            balance_pos, allowance_pos
-        );
+        info!("Found balance slot {} and allowance-to-Permit2 slot {}", balance_pos, allowance_pos);
 
         let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
         let token_key = Bytes::copy_from_slice(sell_token_addr.as_slice());
@@ -301,7 +308,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) }
     };
 
-    let receipt = client.execute(signed, &exec_options).await?;
+    let receipt = client
+        .execute(signed, &exec_options)
+        .await?;
 
     let settled = if cli.execute {
         tokio::time::timeout(Duration::from_secs(120), receipt)
