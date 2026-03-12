@@ -77,6 +77,10 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::MIN_TOKEN_QUALITY)]
     pub min_token_quality: i32,
 
+    /// Only include tokens traded within this many days.
+    #[arg(long, default_value_t = defaults::TRADED_N_DAYS_AGO)]
+    pub traded_n_days_ago: u64,
+
     /// Gas price refresh interval in seconds
     #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL_SECS)]
     pub gas_refresh_interval_secs: u64,
