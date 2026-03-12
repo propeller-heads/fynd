@@ -1,162 +1,116 @@
-# Tutorial: Quote, Simulate & Execute Swaps
+# Tutorial: Quote and Execute Swaps via FyndClient
 
-This example demonstrates how to interact with an already-running tycho-router solver to get swap quotes, and optionally
-simulate or execute those swaps on-chain using tycho-execution.
+This example demonstrates how to interact with a running Fynd solver to get swap quotes and
+execute them — either as a dry-run simulation (default) or as a real on-chain transaction.
 
 ## Prerequisites
 
-1. **Tycho API key**: Required for loading token data from the Tycho indexer
+1. **Running Fynd solver**: The example talks to a solver over HTTP (`--fynd-url`)
 
 2. **RPC URL**: Required for simulation and execution (Ethereum mainnet or other supported chain)
 
-3. **Private key**: Required only for execution or Permit2 simulation. For basic simulation, use `--sender` instead.
+3. **Private key**: Required only for on-chain execution (`--execute`)
 
 ## Environment Variables
 
-| Variable              | Required     | Description                                                   |
-|-----------------------|--------------|---------------------------------------------------------------|
-| `TYCHO_URL`           | No           | Tycho indexer URL (defaults to tycho-beta.propellerheads.xyz) |
-| `TYCHO_API_KEY`       | Yes          | API key for Tycho indexer                                     |
-| `RPC_URL`             | For sim/exec | Ethereum RPC endpoint                                         |
-| `PRIVATE_KEY`         | For exec     | Wallet private key (hex, no 0x prefix)                        |
-| `TENDERLY_ACCESS_KEY` | For Tenderly | Tenderly API access key                                       |
-| `TENDERLY_ACCOUNT`    | For Tenderly | Tenderly account slug                                         |
-| `TENDERLY_PROJECT`    | For Tenderly | Tenderly project slug                                         |
+| Variable      | Required          | Description                       |
+|---------------|-------------------|-----------------------------------|
+| `RPC_URL`     | Yes               | Ethereum JSON-RPC endpoint        |
+| `PRIVATE_KEY` | With `--execute`  | Wallet private key (0x-prefixed)  |
 
 ## Tutorial
 
 ### 1. Start the solver
 
-In one terminal:
-
 ```bash
-export TYCHO_URL=tycho-beta.propellerheads.xyz
-export TYCHO_API_KEY=your_api_key
 cargo run --release -- \
   --tycho-url tycho-beta.propellerheads.xyz \
   --protocols uniswap_v2,uniswap_v3
 ```
 
-`--rpc-url` defaults to `https://eth.llamarpc.com`. For production,
-add `--rpc-url https://your-rpc-provider.com/v1/your_key`.
-
 Wait for "Solver is ready and accepting requests".
 
-### 2. Get a quote (no private key needed)
-
-In another terminal:
-
-```bash
-export TYCHO_URL=tycho-beta.propellerheads.xyz
-export TYCHO_API_KEY=your_api_key
-cargo run --example tutorial -- --sell-amount 100
-```
-
-This will display a quote for swapping 100 USDC to WETH (default tokens). You can customize the in/out tokens with
-`--sell-token` and `--buy-token` parameters
-
-### 3. Simulate without private key
-
-Use `--sender` to simulate as any address without exposing a private key:
+### 2. Get a quote and dry-run simulate (no private key needed)
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
-cargo run --example tutorial -- \
-  --sell-amount 100 \
-  --simulate-only \
-  --sender 0xYourAddressHere
+cargo run --example tutorial -- --sell-amount 1000000000
 ```
 
-This simulates using standard ERC-20 `transferFrom` (not Permit2). The simulation will fail if the sender lacks token
-balance.
+This quotes 1000 USDC → WETH (default tokens) and simulates the swap using ERC-20 storage
+overrides, so no real funds are required. You'll see the settled amount and gas cost.
 
-### 4. Simulate with private key (Permit2)
-
-For full Permit2 simulation with signature:
+### 3. Execute on-chain
 
 ```bash
-export PRIVATE_KEY=your_private_key_hex
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
-cargo run --example tutorial -- \
-  --sell-amount 100 \
-  --simulate-only
+export PRIVATE_KEY=0x...
+cargo run --example tutorial -- --sell-amount 1000000000 --execute
 ```
 
-### 5. Simulate with Tenderly
+If the router hasn't been approved yet, the example prints the exact `cast send` command needed:
 
-```bash
-export TENDERLY_ACCESS_KEY=your_tenderly_key
-export TENDERLY_ACCOUNT=your_account
-export TENDERLY_PROJECT=your_project
-cargo run --example tutorial -- \
-  --sell-amount 100 \
-  --simulate-only \
-  --use-tenderly
+```
+Error: insufficient sell-token allowance for the Fynd router.
+  Token:     0xa0b86991...
+  Router:    0xabc...
+  Allowance: 0
+  Required:  1000000000
+
+Approve the router with:
+  cast send 0xa0b8... "approve(address,uint256)" 0xabc... 1000000000 \
+    --rpc-url $RPC_URL --private-key $PRIVATE_KEY
 ```
 
-### 6. Execute a swap (mainnet!)
+### 4. Custom tokens
 
 ```bash
-export PRIVATE_KEY=your_private_key_hex
-cargo run --example tutorial -- --sell-amount 10
-```
-
-You'll be prompted to choose: Simulate, Execute, or Cancel.
-
-### 7. Custom tokens and protocols
-
-```bash
+export RPC_URL=https://your-rpc-provider.com/v1/your_key
 cargo run --example tutorial -- \
   --sell-token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount 1000 \
-  --protocols "uniswap_v2,uniswap_v3"
+  --buy-token  0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
+  --sell-amount 1000000000 \
+  --slippage-bps 50
 ```
 
 ## CLI Reference
 
-| Flag              | Default               | Description                                                          |
-|-------------------|-----------------------|----------------------------------------------------------------------|
-| `--sell-token`    | USDC address          | Token address to sell                                                |
-| `--buy-token`     | WETH address          | Token address to buy                                                 |
-| `--sell-amount`   | 10.0                  | Amount to sell (human readable)                                      |
-| `--chain`         | ethereum              | Blockchain (currently only ethereum is available)                    |
-| `--solver-url`    | http://localhost:3000 | Solver API URL                                                       |
-| `--tvl-threshold` | 10.0                  | Min pool TVL in ETH                                                  |
-| `--simulate-only` | false                 | Only simulate, don't prompt for execution                            |
-| `--use-tenderly`  | false                 | Use Tenderly instead of eth_simulate                                 |
-| `--slippage-bps`  | 50                    | Slippage tolerance (50 = 0.5%)                                       |
-| `--protocols`     | (all available)       | Comma-separated protocol systems (fetched from API if not specified) |
-| `--sender`        | -                     | Sender address for simulation (use with --simulate-only)             |
+| Flag            | Default               | Description                                        |
+|-----------------|-----------------------|----------------------------------------------------|
+| `--sell-token`  | USDC address          | ERC-20 address of the token to sell                |
+| `--buy-token`   | WETH address          | ERC-20 address of the token to buy                 |
+| `--sell-amount` | 1000000000            | Amount to sell in raw atomic units (no decimals)   |
+| `--fynd-url`    | http://localhost:3000 | Fynd solver API URL                                |
+| `--slippage-bps`| 50                    | Slippage tolerance in basis points (50 = 0.5%)     |
+| `--execute`     | false                 | Submit on-chain instead of dry-running             |
 
 ## Security Notes
 
 1. **Never expose your private key**: Always use environment variables, never CLI arguments
 
-2. **Use simulate-only first**: Always test with `--simulate-only` before executing real transactions
+2. **Dry-run first**: The default mode simulates the swap without spending funds — verify the
+   output before adding `--execute`
 
-3. **Slippage protection**: The default 0.5% slippage may not be suitable for large trades or volatile markets.
-   Adjust `--slippage-bps` as needed
+3. **Exact approvals**: When prompted to approve, the suggested command approves only the exact
+   amount needed for the swap, not an unlimited allowance
 
-4. **Mainnet warning**: Executing swaps sends real transactions. Start with small amounts
+4. **Slippage protection**: The default 0.5% slippage may not be suitable for large trades or
+   volatile markets. Adjust `--slippage-bps` as needed
 
-5. **Verify routes**: Always review the displayed route before execution. Multi-hop routes through low-liquidity pools
-   may result in worse execution
+5. **Mainnet warning**: `--execute` sends a real transaction. Start with small amounts
 
 ## Troubleshooting
 
-**"Solver is not healthy"**: Wait for the solver to finish loading market data. Check the solver terminal for progress.
+**"Solver is not healthy"**: Wait for the solver to finish loading market data.
 
-**"Sell/buy token not found"**: Ensure the token address is correct and the token exists on Tycho's indexer.
+**"Quote has no calldata"**: The solver did not return encoded calldata. Ensure the solver
+supports encoding and that `--fynd-url` points to the correct endpoint.
 
-**"Simulation failed"**: Your RPC provider may not support `eth_simulate`. Try `--use-tenderly` or a different RPC.
+**"insufficient sell-token allowance"**: Run the printed `cast send approve(...)` command, then
+retry with `--execute`.
 
-**"No route found"**: The solver couldn't find a path between your tokens. Try adjusting `--tvl-threshold` or check that
-both tokens have liquidity.
+**"No route found"**: The solver couldn't find a path between your tokens. Check that both tokens
+have liquidity on the connected protocols.
 
-**"Cyclical swaps are only allowed..."**: This is a limitation in tycho-execution. The encoder doesn't support certain
-multi-hop routes where tokens repeat. Try limiting protocols with `--protocols uniswap_v3` or using a smaller amount
-that routes through fewer hops.
-
-**"Swap encoder not found for protocol"**: The route uses a protocol not included in `--protocols`. Either add the
-protocol or the component wasn't fetched from the API.
+**"timed out waiting for transaction to be mined"**: The transaction was submitted but not mined
+within 120 seconds. Check the mempool for the pending tx.
