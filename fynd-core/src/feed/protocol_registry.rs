@@ -1,6 +1,6 @@
 use std::{collections::HashSet, env, time::Duration};
 
-use tracing::info;
+use tracing::{info, warn};
 use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
@@ -130,7 +130,7 @@ pub(crate) fn register_exchanges(
                 continue;
             }
             _ => {
-                return Err(DataFeedError::Config(format!("Unknown protocol: {}", protocol)));
+                warn!("Skipping unknown protocol: {}", protocol);
             }
         }
     }
@@ -172,7 +172,7 @@ pub(crate) fn register_rfq(
                     .add_client::<HashflowState>("hashflow", Box::new(hashflow_client));
             }
             p if p.starts_with("rfq:") => {
-                return Err(DataFeedError::Config(format!("Unknown RFQ protocol: {}", p)));
+                warn!("Skipping unknown RFQ protocol: {}", p);
             }
             _ => {}
         }
