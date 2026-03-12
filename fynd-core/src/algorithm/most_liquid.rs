@@ -185,12 +185,12 @@ impl MostLiquidAlgorithm {
                 let next_addr = &graph[next_node];
 
                 // Skip paths that revisit a token already in the path.
-                // Exception: when source == destination, the destination may
-                // appear at the end (forming a first == last cycle, e.g.
-                // USDC → WETH → USDC). All other intermediate cycles (e.g.
-                // USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
-                let is_valid_cycle = next_node == to_idx && from_idx == to_idx;
-                if !is_valid_cycle && current_path.tokens.contains(&next_addr) {
+                // Exception: when source == destination, the destination may appear at the end
+                // (forming a first == last cycle, e.g. USDC → WETH → USDC). All other intermediate
+                // cycles (e.g. USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
+                let already_visited = current_path.tokens.contains(&next_addr);
+                let is_closing_circular_route = from_idx == to_idx && next_node == to_idx;
+                if already_visited && !is_closing_circular_route {
                     continue;
                 }
 
