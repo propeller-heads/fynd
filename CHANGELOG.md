@@ -1,3 +1,21 @@
+## [0.10.0](https://github.com/propeller-heads/fynd/compare/0.9.0...0.10.0) (2026-03-12)
+
+
+### Features
+
+* add @fynd/client package scaffold ([5ae612e](https://github.com/propeller-heads/fynd/commit/5ae612e03fdcf42a19c2e40d872b7d1393f0899e))
+* add client types and FyndError ([ffcf3a7](https://github.com/propeller-heads/fynd/commit/ffcf3a71df885bad1a90c4e000f1730fb6846ded))
+* add FyndClient with quote, health, sign, and execute ([ae453b3](https://github.com/propeller-heads/fynd/commit/ae453b32625eed32513672d425a76d204386d05a))
+* add pnpm workspace and lockfile for TypeScript packages ([f60ef30](https://github.com/propeller-heads/fynd/commit/f60ef30d05e0ce43a91fbbd3cceefc0c70cf8f9c))
+* add signing primitives and wire mapping ([6c57b82](https://github.com/propeller-heads/fynd/commit/6c57b82d89a19aa5aa41298ae4b139cdd5d640bb))
+
+
+### Bug Fixes
+
+* remove dead eslint-disable comments and add missing edge-case tests ([58d861f](https://github.com/propeller-heads/fynd/commit/58d861f3919282dff0e93d29adda6892d08c6030))
+* update client to use /v1/quote endpoint (v0.7.0 API) ([c73f681](https://github.com/propeller-heads/fynd/commit/c73f68175054093fb6893a465ab877137aa62810))
+* validate yParity before casting in signature parsing ([837644d](https://github.com/propeller-heads/fynd/commit/837644dfe4a0a5ba840c52c27c07fac100537e95))
+
 ## [0.9.0](https://github.com/propeller-heads/fynd/compare/0.8.1...0.9.0) (2026-03-11)
 
 
