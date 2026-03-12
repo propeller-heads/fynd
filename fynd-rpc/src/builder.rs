@@ -43,6 +43,7 @@ pub struct FyndBuilder {
     protocols: Vec<String>,
     min_tvl: f64,
     min_token_quality: i32,
+    traded_n_days_ago: u64,
     tvl_buffer_multiplier: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
@@ -75,6 +76,7 @@ impl FyndBuilder {
             protocols,
             min_tvl: defaults::MIN_TVL,
             min_token_quality: defaults::MIN_TOKEN_QUALITY,
+            traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
             tvl_buffer_multiplier: defaults::TVL_BUFFER_MULTIPLIER,
             gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
@@ -106,6 +108,12 @@ impl FyndBuilder {
     /// Sets the minimum token quality filter.
     pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
+        self
+    }
+
+    /// Sets the traded_n_days_ago filter (default: 3).
+    pub fn traded_n_days_ago(mut self, days: u64) -> Self {
+        self.traded_n_days_ago = days;
         self
     }
 
@@ -187,6 +195,7 @@ impl FyndBuilder {
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality)
+        .traded_n_days_ago(self.traded_n_days_ago)
         .blacklisted_components(self.blacklist.components);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())

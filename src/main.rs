@@ -247,6 +247,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
             .http_port(args.http_port)
             .min_tvl(args.min_tvl)
             .min_token_quality(args.min_token_quality)
+            .traded_n_days_ago(args.traded_n_days_ago)
             .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
             .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
             .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))

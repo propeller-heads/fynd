@@ -42,6 +42,8 @@ pub struct TychoFeedConfig {
     /// Reconnect delay on connection failure.
     /// Default is 5 seconds.
     pub(crate) reconnect_delay: Duration,
+    /// Only include tokens traded within this many days.
+    pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from routing.
     pub(crate) blacklisted_components: HashSet<String>,
 }
@@ -63,6 +65,7 @@ impl TychoFeedConfig {
             protocols,
             min_tvl,
             min_token_quality: 100,
+            traded_n_days_ago: None,
             tvl_buffer_multiplier: 1.1,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
@@ -87,6 +90,11 @@ impl TychoFeedConfig {
 
     pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
+        self
+    }
+
+    pub fn traded_n_days_ago(mut self, days: u64) -> Self {
+        self.traded_n_days_ago = Some(days);
         self
     }
 
