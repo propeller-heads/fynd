@@ -13,16 +13,15 @@ use std::{env, str::FromStr, time::Duration};
 
 use alloy::hex;
 use alloy::network::Ethereum;
-use alloy::primitives::{keccak256, map::B256HashMap, Address, Bytes as AlloyBytes, TxKind, B256, U256};
+use alloy::primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::{
-    state::{AccountOverride, StateOverride},
-    TransactionRequest,
-};
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::{local::PrivateKeySigner, Signer};
-use alloy::sol;
 use alloy::sol_types::SolCall;
 use bytes::Bytes;
+
+mod erc20;
+use erc20::IERC20;
 use clap::Parser;
 use fynd_client::{
     EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
@@ -31,16 +30,6 @@ use fynd_client::{
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-
-sol! {
-    interface IERC20 {
-        function balanceOf(address account) external view returns (uint256);
-        function allowance(address owner, address spender) external view returns (uint256);
-    }
-}
-
-/// Maximum storage slot position to probe when detecting balance/allowance slots.
-const MAX_PROBE_SLOT: u64 = 20;
 
 /// Tutorial CLI: Quote and execute a swap via the Fynd solver
 #[derive(Parser)]
@@ -217,8 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // U256::MAX into those slots so the simulation succeeds without real funds.
         info!("Detecting storage slots for {}...", cli.sell_token);
         let (balance_slot_result, allowance_slot_result) = tokio::join!(
-            find_balance_slot(&provider, sell_token_addr, sender),
-            find_allowance_slot(&provider, sell_token_addr, sender, router),
+            erc20::find_balance_slot(&provider, sell_token_addr, sender),
+            erc20::find_allowance_slot(&provider, sell_token_addr, sender, router),
         );
         let balance_pos = balance_slot_result?;
         let allowance_pos = allowance_slot_result?;
@@ -229,12 +218,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut overrides = StorageOverrides::default();
         overrides.insert(
             token_key.clone(),
-            Bytes::copy_from_slice(&erc20_balance_slot_at(sender, balance_pos).0),
+            Bytes::copy_from_slice(&erc20::balance_slot_at(sender, balance_pos).0),
             max_val.clone(),
         );
         overrides.insert(
             token_key,
-            Bytes::copy_from_slice(&erc20_allowance_slot_at(sender, router, allowance_pos).0),
+            Bytes::copy_from_slice(&erc20::allowance_slot_at(sender, router, allowance_pos).0),
             max_val,
         );
         info!("Submitting dry-run execution...");
@@ -286,103 +275,3 @@ async fn read_erc20_allowance(
     Ok(BigUint::from_bytes_be(&result[..32]))
 }
 
-/// Find the storage slot position used by an ERC-20 token's `balances` mapping.
-///
-/// Probes slot positions 0..=[`MAX_PROBE_SLOT`] by applying a state override and calling
-/// `balanceOf`. Returns the first position whose override is reflected in the return value.
-async fn find_balance_slot(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    holder: Address,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let calldata = IERC20::balanceOfCall { account: holder }.abi_encode();
-    let target = B256::from(U256::MAX);
-
-    for position in 0..=MAX_PROBE_SLOT {
-        let slot = erc20_balance_slot_at(holder, position);
-        let result = provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(token)),
-                input: AlloyBytes::from(calldata.clone()).into(),
-                ..Default::default()
-            })
-            .overrides(state_override_single(token, slot, target))
-            .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
-            return Ok(position);
-        }
-    }
-    Err(format!(
-        "could not detect balance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
-         the token may use a non-standard storage layout"
-    )
-    .into())
-}
-
-/// Find the storage slot position used by an ERC-20 token's `allowances` mapping.
-///
-/// Probes slot positions 0..=[`MAX_PROBE_SLOT`] by applying a state override and calling
-/// `allowance`. Returns the first position whose override is reflected in the return value.
-async fn find_allowance_slot(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let target = B256::from(U256::MAX);
-
-    for position in 0..=MAX_PROBE_SLOT {
-        let slot = erc20_allowance_slot_at(owner, spender, position);
-        let result = provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(token)),
-                input: AlloyBytes::from(calldata.clone()).into(),
-                ..Default::default()
-            })
-            .overrides(state_override_single(token, slot, target))
-            .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
-            return Ok(position);
-        }
-    }
-    Err(format!(
-        "could not detect allowance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
-         the token may use a non-standard storage layout"
-    )
-    .into())
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Build a `StateOverride` that sets a single storage slot on one contract.
-fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOverride {
-    let mut state_diff = B256HashMap::default();
-    state_diff.insert(slot, value);
-    let mut overrides = StateOverride::default();
-    overrides.insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
-    overrides
-}
-
-/// Compute `keccak256(address_padded32 || uint256(position))` — the Solidity mapping slot
-/// for a single-key `mapping(address => ...)` at storage base `position`.
-fn erc20_balance_slot_at(holder: Address, position: u64) -> B256 {
-    let mut buf = [0u8; 64];
-    buf[12..32].copy_from_slice(holder.as_slice());
-    buf[56..64].copy_from_slice(&position.to_be_bytes());
-    keccak256(buf)
-}
-
-/// Compute the Solidity slot for `allowances[owner][spender]` at storage base `position`.
-///
-/// Inner = `keccak256(owner_padded32 || uint256(position))`
-/// Outer = `keccak256(spender_padded32 || inner)`
-fn erc20_allowance_slot_at(owner: Address, spender: Address, position: u64) -> B256 {
-    let inner = erc20_balance_slot_at(owner, position);
-    let mut buf = [0u8; 64];
-    buf[12..32].copy_from_slice(spender.as_slice());
-    buf[32..64].copy_from_slice(inner.as_slice());
-    keccak256(buf)
-}
