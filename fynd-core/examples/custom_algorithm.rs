@@ -33,9 +33,9 @@ use fynd_core::{
         TychoFeedConfig,
     },
     types::{constants::native_token, RouteResult},
-    Algorithm, AlgorithmConfig, AlgorithmError, ComputationRequirements, MostLiquidAlgorithm,
-    Order, OrderManager, OrderManagerConfig, OrderSide, QuoteRequest, SolverPoolHandle,
-    WorkerPoolBuilder,
+    Algorithm, AlgorithmConfig, AlgorithmError, ComputationRequirements, EncodingOptions,
+    MostLiquidAlgorithm, Order, OrderManager, OrderManagerConfig, OrderSide, QuoteOptions,
+    QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
@@ -246,7 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("Solving: 1000 USDC → WBTC with MyAlgorithm...");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let request = QuoteRequest::new(vec![order], Default::default());
+    let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+    let request = QuoteRequest::new(vec![order], options);
     let solution = order_manager.quote(request).await?;
     println!(" done ({}ms)\n", solution.solve_time_ms());
 
@@ -296,6 +297,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 token_out.symbol,
                 swap.protocol()
             );
+        }
+        if let Some(tx) = order_quote.transaction() {
+            let calldata: String = tx
+                .data()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            println!("\nEncoded tx: to={}, calldata=0x{}", tx.to(), calldata);
         }
     } else {
         println!("No route found (status: {:?})", order_quote.status());
