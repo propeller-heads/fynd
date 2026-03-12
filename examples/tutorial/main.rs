@@ -177,9 +177,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  Required:  {}", required);
             eprintln!("\nApprove the router with:");
             eprintln!(
-                "  cast send {:#x} \"approve(address,uint256)\" {:#x} \\\n    \
-                 $(cast max-uint256) --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                sell_token_addr, router,
+                "  cast send {:#x} \"approve(address,uint256)\" {:#x} {} \\\n    \
+                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
+                sell_token_addr, router, cli.sell_amount,
             );
             return Err("insufficient sell-token allowance".into());
         }
