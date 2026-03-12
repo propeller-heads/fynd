@@ -2,16 +2,21 @@ export type {
   Address,
   BackendKind,
   BlockInfo,
+  EncodingOptions,
   Hex,
   HealthStatus,
   Order,
   OrderSide,
+  PermitDetails,
+  PermitSingle,
   Quote,
   QuoteOptions,
   QuoteParams,
   Route,
   SolutionStatus,
   Swap,
+  Transaction,
+  UserTransferType,
 } from "./types.js";
 export { FyndError } from "./error.js";
 export type { ClientErrorCode, ErrorCode, ServerErrorCode } from "./error.js";
@@ -25,6 +30,12 @@ export type {
   SignedOrder,
 } from "./signing.js";
 export { assembleSignedOrder, signingHash } from "./signing.js";
+export {
+  permit2SigningHash,
+  encodingOptions,
+  withPermit2,
+  withNoTransfer,
+} from "./permit2.js";
 export { FyndClient } from "./client.js";
 export type {
   EthProvider,
