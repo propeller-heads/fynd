@@ -7,6 +7,10 @@
 //! # Usage
 //!
 //! ```bash
+//! # All supported protocols are fetched from Tycho RPC by default:
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz
+//!
+//! # Or specify protocols explicitly:
 //! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
 //! ```
@@ -15,8 +19,7 @@
 //!
 //! ```bash
 //! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
-//!            --rpc-url https://your-rpc-provider.com/v1/your_key \
-//!            --protocols uniswap_v2,uniswap_v3
+//!            --rpc-url https://your-rpc-provider.com/v1/your_key
 //! ```
 //!
 //! See `fynd --help` for all available options.
@@ -30,6 +33,10 @@ use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
 };
+use tycho_simulation::{
+    tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
+    tycho_common::models::Chain,
+};
 
 mod cli;
 use cli::{Cli, Commands};
@@ -42,7 +49,7 @@ use tokio::{
     select,
     signal::unix::{signal, SignalKind},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> Result<(), anyhow::Error> {
@@ -195,22 +202,40 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
         }
     };
 
+    // Resolve protocols: use CLI args, or fetch all supported from Tycho RPC
+    let protocols = if args.protocols.is_empty() {
+        fetch_protocol_systems(
+            &args.tycho_url,
+            args.tycho_api_key.as_deref(),
+            !args.disable_tls,
+            chain,
+        )
+        .await
+        .map_err(|e| SolverError::SetupError(format!("failed to fetch protocol systems: {}", e)))?
+    } else {
+        args.protocols.clone()
+    };
+
+    if protocols.is_empty() {
+        return Err(SolverError::SetupError(
+            "no supported protocols found. Provide --protocols or check Tycho connectivity."
+                .to_string(),
+        ));
+    }
+
+    info!(?protocols, "starting with {} protocol(s)", protocols.len());
+
     // Build solver with all fields from CLI
-    let mut builder = FyndBuilder::new(
-        chain,
-        pools_config.pools,
-        args.tycho_url.clone(),
-        rpc_url,
-        args.protocols.clone(),
-    )
-    .http_host(args.http_host.clone())
-    .http_port(args.http_port)
-    .min_tvl(args.min_tvl)
-    .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
-    .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
-    .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
-    .order_manager_timeout(Duration::from_millis(args.order_manager_timeout_ms))
-    .order_manager_min_responses(args.order_manager_min_responses);
+    let mut builder =
+        FyndBuilder::new(chain, pools_config.pools, args.tycho_url.clone(), rpc_url, protocols)
+            .http_host(args.http_host.clone())
+            .http_port(args.http_port)
+            .min_tvl(args.min_tvl)
+            .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
+            .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
+            .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
+            .order_manager_timeout(Duration::from_millis(args.order_manager_timeout_ms))
+            .order_manager_min_responses(args.order_manager_min_responses);
 
     if args.disable_tls {
         builder = builder.disable_tls();
@@ -291,4 +316,44 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
         let _ = provider.shutdown();
     }
     Ok(())
+}
+
+/// Fetches all available protocol systems from Tycho RPC.
+async fn fetch_protocol_systems(
+    tycho_url: &str,
+    auth_key: Option<&str>,
+    use_tls: bool,
+    chain: Chain,
+) -> Result<Vec<String>, anyhow::Error> {
+    use tycho_simulation::tycho_common::dto::{PaginationParams, ProtocolSystemsRequestBody};
+
+    info!("Fetching available protocol systems from Tycho RPC...");
+
+    let rpc_url =
+        if use_tls { format!("https://{tycho_url}") } else { format!("http://{tycho_url}") };
+    let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
+    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
+
+    const PAGE_SIZE: i64 = 100;
+    let mut all_protocols = Vec::new();
+    let mut page = 0;
+
+    loop {
+        let request = ProtocolSystemsRequestBody {
+            chain: chain.into(),
+            pagination: PaginationParams { page, page_size: PAGE_SIZE },
+        };
+        let response = rpc_client
+            .get_protocol_systems(&request)
+            .await?;
+        let count = response.protocol_systems.len();
+        all_protocols.extend(response.protocol_systems);
+        if (count as i64) < PAGE_SIZE {
+            break;
+        }
+        page += 1;
+    }
+
+    debug!("Fetched {} protocol system(s) from Tycho RPC", all_protocols.len());
+    Ok(all_protocols)
 }
