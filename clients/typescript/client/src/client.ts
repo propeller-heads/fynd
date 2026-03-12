@@ -58,7 +58,6 @@ export interface ExecutionOptions {
 export interface FyndClientOptions {
   baseUrl: string;
   chainId: number;
-  routerAddress: Address;
   sender?: Address;
   timeoutMs?: number;    // default: 30_000
   retry?: RetryConfig;
@@ -167,15 +166,22 @@ export class FyndClient {
 
     const gas = hints.gasLimit ?? quote.gasEstimate;
 
+    const txData = quote.transaction;
+    if (txData === undefined) {
+      throw FyndError.config(
+        "quote has no calldata; set encodingOptions in QuoteOptions"
+      );
+    }
+
     const tx: Eip1559Transaction = {
       chainId:              this.options.chainId,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,
       gas,
-      to:    this.options.routerAddress,
-      value: 0n,
-      data:  '0x',
+      to:    txData.to,
+      value: txData.value,
+      data:  txData.data,
     };
 
     if (hints.simulate === true) {
