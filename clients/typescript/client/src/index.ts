@@ -2,16 +2,21 @@ export type {
   Address,
   BackendKind,
   BlockInfo,
+  EncodingOptions,
   Hex,
   HealthStatus,
   Order,
   OrderSide,
+  PermitDetails,
+  PermitSingle,
   Quote,
   QuoteOptions,
   QuoteParams,
   Route,
   SolutionStatus,
   Swap,
+  Transaction,
+  UserTransferType,
 } from "./types.js";
 export { FyndError } from "./error.js";
 export type { ClientErrorCode, ErrorCode, ServerErrorCode } from "./error.js";

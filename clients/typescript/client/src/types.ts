@@ -22,10 +22,39 @@ export interface Order {
   receiver?: Address;
 }
 
+export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'none';
+
+export interface PermitDetails {
+  token: Address;
+  amount: bigint;
+  expiration: bigint;
+  nonce: bigint;
+}
+
+export interface PermitSingle {
+  details: PermitDetails;
+  spender: Address;
+  sigDeadline: bigint;
+}
+
+export interface EncodingOptions {
+  slippage: number;
+  transferType?: UserTransferType;
+  permit?: PermitSingle;
+  permit2Signature?: Hex;
+}
+
+export interface Transaction {
+  to: Address;
+  value: bigint;
+  data: Hex;
+}
+
 export interface QuoteOptions {
   timeoutMs?: number;
   minResponses?: number;
   maxGas?: bigint;
+  encodingOptions?: EncodingOptions;
 }
 
 export interface QuoteParams {
@@ -65,6 +94,7 @@ export interface Quote {
   block: BlockInfo;
   tokenOut: Address;    // from original Order; used by execute() for Transfer log parsing
   receiver: Address;    // from original Order; defaults to sender if Order.receiver was absent
+  transaction?: Transaction;  // present when EncodingOptions was set in the quote request
 }
 
 export interface HealthStatus {

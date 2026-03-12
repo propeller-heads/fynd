@@ -68,7 +68,8 @@ const wireSolution = {
       gas_estimate:       '150000',
       route:              null,
       price_impact_bps:   null,
-      block: { hash: '0xabc', number: 100, timestamp: 1000000 },
+      block:              { hash: '0xabc', number: 100, timestamp: 1000000 },
+      transaction:        { to: ROUTER, value: '0', data: '0x' },
     },
   ],
   total_gas_estimate: '150000',
@@ -146,7 +147,6 @@ describe('FyndClient.quote — retry path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       retry:         { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 10 },
     });
@@ -179,7 +179,6 @@ describe('FyndClient.quote — retry path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       retry:         { maxAttempts: 3, initialBackoffMs: 1 },
     });
@@ -210,7 +209,6 @@ describe('FyndClient.quote — retry path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       retry:         { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 5 },
     });
@@ -266,7 +264,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -280,7 +277,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
     });
     const quote = { ...makeDummyQuote() };
@@ -297,7 +293,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       provider,
       // no sender
     });
@@ -310,21 +305,37 @@ describe('FyndClient.signablePayload', () => {
     }
   });
 
-  it('builds transaction with correct to and value', async () => {
+  it('builds transaction with correct to and value from quote.transaction', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
     const quote = makeDummyQuote();
     const payload = await client.signablePayload(quote);
     expect(payload.kind).toBe('fynd');
-    expect(payload.payload.tx.to).toBe(ROUTER);
-    expect(payload.payload.tx.value).toBe(0n);
-    expect(payload.payload.tx.data).toBe('0x');
+    expect(payload.payload.tx.to).toBe(quote.transaction?.to);
+    expect(payload.payload.tx.value).toBe(quote.transaction?.value);
+    expect(payload.payload.tx.data).toBe(quote.transaction?.data);
+  });
+
+  it('throws CONFIG error when quote.transaction is undefined', async () => {
+    const provider = makeMockProvider();
+    const client = new FyndClient({
+      baseUrl:       'http://localhost:8080',
+      chainId:       1,
+      sender:        SENDER,
+      provider,
+    });
+    const quote = { ...makeDummyQuote(), transaction: undefined };
+    await expect(client.signablePayload(quote)).rejects.toThrow(FyndError);
+    try {
+      await client.signablePayload(quote);
+    } catch (e) {
+      expect(e instanceof FyndError && e.code).toBe('CONFIG');
+    }
   });
 
   it('uses hints.sender over options.sender', async () => {
@@ -333,7 +344,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -347,7 +357,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -362,7 +371,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -381,7 +389,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -395,7 +402,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -410,7 +416,6 @@ describe('FyndClient.signablePayload', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -439,7 +444,6 @@ describe('FyndClient.execute — standard path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -457,7 +461,6 @@ describe('FyndClient.execute — standard path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
     });
     const signedOrder = makeSignedOrder(makeDummyQuote());
@@ -477,7 +480,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -501,7 +503,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -525,7 +526,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -544,7 +544,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -562,7 +561,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -584,7 +582,6 @@ describe('FyndClient.execute — dry-run path', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -627,7 +624,6 @@ describe('Transfer log decoding via settle()', () => {
     const client = new FyndClient({
       baseUrl:       'http://localhost:8080',
       chainId:       1,
-      routerAddress: ROUTER,
       sender:        SENDER,
       provider,
     });
@@ -720,9 +716,10 @@ function makeDummyQuote(overrides?: Partial<{ gasEstimate: bigint }>) {
     amountIn:    1000n,
     amountOut:   3500n,
     gasEstimate: overrides?.gasEstimate ?? 150000n,
-    block: { hash: '0xabc', number: 100, timestamp: 1000 },
-    tokenOut: TOKEN_OUT,
-    receiver: SENDER,
+    block:       { hash: '0xabc', number: 100, timestamp: 1000 },
+    tokenOut:    TOKEN_OUT,
+    receiver:    SENDER,
+    transaction: { to: ROUTER, value: 0n, data: '0x' as Hex },
   };
 }
 

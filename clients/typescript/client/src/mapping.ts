@@ -3,11 +3,13 @@ import { FyndError } from "./error.js";
 import type {
   Address,
   BlockInfo,
+  EncodingOptions,
   HealthStatus,
   Quote,
   QuoteParams,
   Route,
   Swap,
+  Transaction,
 } from "./types.js";
 
 type WireOrder           = components["schemas"]["Order"];
@@ -18,6 +20,10 @@ type WireHealthStatus    = components["schemas"]["HealthStatus"];
 type WireRoute           = components["schemas"]["Route"];
 type WireSwap            = components["schemas"]["Swap"];
 type WireBlockInfo       = components["schemas"]["BlockInfo"];
+type WireTransaction     = components["schemas"]["Transaction"];
+type WireEncodingOptions = components["schemas"]["EncodingOptions"];
+type WirePermitSingle    = components["schemas"]["PermitSingle"];
+type WirePermitDetails   = components["schemas"]["PermitDetails"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -41,6 +47,9 @@ export function toWireRequest(params: QuoteParams): WireSolutionRequest {
         ...(params.options.maxGas !== undefined
           ? { max_gas: params.options.maxGas.toString() }
           : {}),
+        ...(params.options.encodingOptions !== undefined
+          ? { encoding_options: toWireEncodingOptions(params.options.encodingOptions) }
+          : {}),
       }
     : undefined;
   return {
@@ -62,6 +71,9 @@ export function fromWireQuote(
     ? fromWireRoute(orderSolution.route)
     : undefined;
   const priceImpactBps = orderSolution.price_impact_bps ?? undefined;
+  const transaction = orderSolution.transaction != null
+    ? fromWireTransaction(orderSolution.transaction)
+    : undefined;
   return {
     orderId:         orderSolution.order_id,
     status:          orderSolution.status,
@@ -75,6 +87,7 @@ export function fromWireQuote(
     // exactOptionalPropertyTypes: spread optional fields only when defined
     ...(route !== undefined ? { route } : {}),
     ...(priceImpactBps !== undefined ? { priceImpactBps } : {}),
+    ...(transaction !== undefined ? { transaction } : {}),
   };
 }
 
@@ -99,6 +112,40 @@ function fromWireBlockInfo(wire: WireBlockInfo): BlockInfo {
     number:    wire.number,
     hash:      wire.hash,
     timestamp: wire.timestamp,
+  };
+}
+
+function fromWireTransaction(wire: WireTransaction): Transaction {
+  return {
+    to:    wire.to as Address,
+    value: BigInt(wire.value),
+    data:  wire.data as `0x${string}`,
+  };
+}
+
+function toWireEncodingOptions(opts: EncodingOptions): WireEncodingOptions {
+  const permit: WirePermitSingle | undefined = opts.permit !== undefined
+    ? toWirePermitSingle(opts.permit)
+    : undefined;
+  return {
+    slippage: opts.slippage,
+    ...(opts.transferType !== undefined ? { transfer_type: opts.transferType } : {}),
+    ...(permit !== undefined ? { permit } : {}),
+    ...(opts.permit2Signature !== undefined ? { permit2_signature: opts.permit2Signature } : {}),
+  };
+}
+
+function toWirePermitSingle(permit: import("./types.js").PermitSingle): WirePermitSingle {
+  const details: WirePermitDetails = {
+    token:      permit.details.token,
+    amount:     permit.details.amount.toString(),
+    expiration: permit.details.expiration.toString(),
+    nonce:      permit.details.nonce.toString(),
+  };
+  return {
+    details,
+    spender:      permit.spender,
+    sig_deadline: permit.sigDeadline.toString(),
   };
 }
 
