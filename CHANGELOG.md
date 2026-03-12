@@ -1,3 +1,10 @@
+## [0.11.0](https://github.com/propeller-heads/fynd/compare/0.10.0...0.11.0) (2026-03-12)
+
+
+### Features
+
+* Add encoding to fynd-core examples ([aea8a11](https://github.com/propeller-heads/fynd/commit/aea8a110412731f98d3718121b275238b9917057))
+
 ## [0.10.0](https://github.com/propeller-heads/fynd/compare/0.9.0...0.10.0) (2026-03-12)
 
 
