@@ -28,10 +28,9 @@ function makeClientWithHttpMock(
   opts?: Partial<FyndClientOptions>,
 ): FyndClient {
   const client = new FyndClient({
-    baseUrl:       'http://localhost:8080',
-    chainId:       1,
-    routerAddress: ROUTER,
-    sender:        SENDER,
+    baseUrl: 'http://localhost:8080',
+    chainId: 1,
+    sender:  SENDER,
     ...opts,
   });
 
@@ -144,11 +143,10 @@ describe('FyndClient.quote — error path', () => {
 describe('FyndClient.quote — retry path', () => {
   it('retries on QUEUE_FULL and succeeds on second attempt', async () => {
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
-      retry:         { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 10 },
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      retry:   { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 10 },
     });
 
     let callCount = 0;
@@ -177,11 +175,10 @@ describe('FyndClient.quote — retry path', () => {
 
   it('does not retry on non-retryable errors', async () => {
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
-      retry:         { maxAttempts: 3, initialBackoffMs: 1 },
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      retry:   { maxAttempts: 3, initialBackoffMs: 1 },
     });
 
     let callCount = 0;
@@ -208,11 +205,10 @@ describe('FyndClient.quote — retry path', () => {
 
   it('exhausts all retries and throws on all-retryable failure', async () => {
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
-      retry:         { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 5 },
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      retry:   { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 5 },
     });
 
     let callCount = 0;
@@ -264,10 +260,9 @@ describe('FyndClient.signablePayload', () => {
   it('throws for turbine backend (not yet implemented)', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const turbineQuote = { ...makeDummyQuote(), backend: 'turbine' as const };
@@ -278,10 +273,9 @@ describe('FyndClient.signablePayload', () => {
 
   it('throws CONFIG error when provider is not set', async () => {
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
     });
     const quote = { ...makeDummyQuote() };
     await expect(client.signablePayload(quote)).rejects.toThrow(FyndError);
@@ -295,9 +289,8 @@ describe('FyndClient.signablePayload', () => {
   it('throws CONFIG error when no sender configured', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
       provider,
       // no sender
     });
@@ -310,13 +303,12 @@ describe('FyndClient.signablePayload', () => {
     }
   });
 
-  it('builds transaction with correct to and value', async () => {
+  it('builds transaction with correct to, value, and data from quote.transaction', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -327,14 +319,52 @@ describe('FyndClient.signablePayload', () => {
     expect(payload.payload.tx.data).toBe('0x');
   });
 
+  it('builds transaction with calldata from quote.transaction', async () => {
+    const provider = makeMockProvider();
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      provider,
+    });
+    const quote = {
+      ...makeDummyQuote(),
+      transaction: {
+        to: '0x2222222222222222222222222222222222222222' as Address,
+        value: 42n,
+        data: '0xdeadbeef' as Hex,
+      },
+    };
+    const payload = await client.signablePayload(quote);
+    expect(payload.payload.tx.to).toBe('0x2222222222222222222222222222222222222222');
+    expect(payload.payload.tx.value).toBe(42n);
+    expect(payload.payload.tx.data).toBe('0xdeadbeef');
+  });
+
+  it('throws CONFIG error when quote has no transaction', async () => {
+    const provider = makeMockProvider();
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      provider,
+    });
+    const { transaction: _, ...quoteWithoutTx } = makeDummyQuote();
+    await expect(client.signablePayload(quoteWithoutTx)).rejects.toThrow(FyndError);
+    try {
+      await client.signablePayload(quoteWithoutTx);
+    } catch (e) {
+      expect(e instanceof FyndError && e.code).toBe('CONFIG');
+    }
+  });
+
   it('uses hints.sender over options.sender', async () => {
     const provider = makeMockProvider();
     const altSender = '0x9999999999999999999999999999999999999999' as Address;
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -345,10 +375,9 @@ describe('FyndClient.signablePayload', () => {
   it('uses hints.nonce without calling getTransactionCount', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -360,10 +389,9 @@ describe('FyndClient.signablePayload', () => {
   it('uses hints.maxFeePerGas without calling estimateFeesPerGas', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -379,10 +407,9 @@ describe('FyndClient.signablePayload', () => {
   it('uses hints.gasLimit over quote.gasEstimate', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote(); // gasEstimate = 150000n
@@ -393,10 +420,9 @@ describe('FyndClient.signablePayload', () => {
   it('calls provider.call when hints.simulate is true', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -408,10 +434,9 @@ describe('FyndClient.signablePayload', () => {
     const provider = makeMockProvider();
     provider.call.mockRejectedValueOnce(new Error('execution reverted'));
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
     const quote = makeDummyQuote();
@@ -437,10 +462,9 @@ describe('FyndClient.execute — standard path', () => {
     provider.getTransactionReceipt.mockResolvedValueOnce(receipt);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -455,10 +479,9 @@ describe('FyndClient.execute — standard path', () => {
 
   it('throws CONFIG when provider not set', async () => {
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
     });
     const signedOrder = makeSignedOrder(makeDummyQuote());
     await expect(client.execute(signedOrder)).rejects.toThrow(FyndError);
@@ -475,10 +498,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.estimateGas.mockResolvedValueOnce(100000n);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -499,10 +521,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.estimateGas.mockResolvedValueOnce(50000n);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -523,10 +544,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.estimateGas.mockResolvedValueOnce(50000n);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -542,10 +562,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.estimateGas.mockResolvedValueOnce(50000n);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -560,10 +579,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.call.mockRejectedValueOnce(new Error('execution reverted'));
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -582,10 +600,9 @@ describe('FyndClient.execute — dry-run path', () => {
     provider.estimateGas.mockResolvedValueOnce(200000n);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -625,10 +642,9 @@ describe('Transfer log decoding via settle()', () => {
     provider.getTransactionReceipt.mockResolvedValueOnce(receipt);
 
     const client = new FyndClient({
-      baseUrl:       'http://localhost:8080',
-      chainId:       1,
-      routerAddress: ROUTER,
-      sender:        SENDER,
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
       provider,
     });
 
@@ -723,6 +739,11 @@ function makeDummyQuote(overrides?: Partial<{ gasEstimate: bigint }>) {
     block: { hash: '0xabc', number: 100, timestamp: 1000 },
     tokenOut: TOKEN_OUT,
     receiver: SENDER,
+    transaction: {
+      to: ROUTER,
+      value: 0n,
+      data: '0x' as Hex,
+    },
   };
 }
 
