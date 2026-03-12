@@ -2,6 +2,68 @@ use bytes::Bytes;
 use num_bigint::BigUint;
 
 // ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// Token transfer method used when building an on-chain swap transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserTransferType {
+    /// Use standard ERC-20 `approve` + `transferFrom`. Default.
+    #[default]
+    TransferFrom,
+}
+
+/// Options that instruct the server to return ABI-encoded calldata in the quote response.
+///
+/// Pass via [`QuoteOptions::with_encoding_options`] to opt into calldata generation. Without this,
+/// the server returns routing information only and [`Quote::transaction`] will be `None`.
+pub struct EncodingOptions {
+    pub(crate) slippage: f64,
+    pub(crate) transfer_type: UserTransferType,
+}
+
+impl EncodingOptions {
+    /// Create encoding options with the given slippage tolerance.
+    ///
+    /// `slippage` is a fraction (e.g. `0.005` for 0.5%). The transfer type defaults to
+    /// [`UserTransferType::TransferFrom`].
+    pub fn new(slippage: f64) -> Self {
+        Self { slippage, transfer_type: UserTransferType::TransferFrom }
+    }
+}
+
+/// An encoded EVM transaction returned by the server when [`EncodingOptions`] was set.
+///
+/// Contains everything needed to submit the swap on-chain.
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    to: Bytes,
+    value: BigUint,
+    data: Vec<u8>,
+}
+
+impl Transaction {
+    pub(crate) fn new(to: Bytes, value: BigUint, data: Vec<u8>) -> Self {
+        Self { to, value, data }
+    }
+
+    /// Router contract address (20 raw bytes).
+    pub fn to(&self) -> &Bytes {
+        &self.to
+    }
+
+    /// Native value to send with the transaction (token units; usually `0` for ERC-20 swaps).
+    pub fn value(&self) -> &BigUint {
+        &self.value
+    }
+
+    /// ABI-encoded calldata.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+// ============================================================================
 // ORDER SIDE
 // ============================================================================
 
@@ -91,6 +153,7 @@ pub struct QuoteOptions {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
+    pub(crate) encoding_options: Option<EncodingOptions>,
 }
 
 impl QuoteOptions {
@@ -112,6 +175,13 @@ impl QuoteOptions {
     /// Discard quotes whose estimated gas cost exceeds `gas`.
     pub fn with_max_gas(mut self, gas: BigUint) -> Self {
         self.max_gas = Some(gas);
+        self
+    }
+
+    /// Request server-side calldata generation. The resulting [`Quote::transaction`] will be
+    /// populated when this option is set.
+    pub fn with_encoding_options(mut self, opts: EncodingOptions) -> Self {
+        self.encoding_options = Some(opts);
         self
     }
 
@@ -316,6 +386,9 @@ pub struct Quote {
     /// Defaults to `sender` if the order had no explicit receiver.
     /// Populated by `quote()` from the corresponding `Order`.
     receiver: Bytes,
+    /// ABI-encoded on-chain transaction. Present only when [`EncodingOptions`] was set in the
+    /// request via [`QuoteOptions::with_encoding_options`].
+    transaction: Option<Transaction>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -384,6 +457,14 @@ impl Quote {
         &self.receiver
     }
 
+    /// The server-encoded on-chain transaction, present when [`EncodingOptions`] was set.
+    ///
+    /// Contains the router contract address, native value, and ABI-encoded calldata ready to
+    /// submit. Returns `None` when no [`EncodingOptions`] were passed in the request.
+    pub fn transaction(&self) -> Option<&Transaction> {
+        self.transaction.as_ref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -404,6 +485,7 @@ impl Quote {
         block: BlockInfo,
         token_out: Bytes,
         receiver: Bytes,
+        transaction: Option<Transaction>,
     ) -> Self {
         Self {
             order_id,
@@ -417,6 +499,7 @@ impl Quote {
             block,
             token_out,
             receiver,
+            transaction,
             solve_time_ms: 0,
         }
     }

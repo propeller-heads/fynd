@@ -4,7 +4,7 @@ use alloy::{
     consensus::{TxEip1559, TypedTransaction},
     eips::{eip2718::Encodable2718, eip2930::AccessList},
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256},
+    primitives::{Address, Bytes as AlloyBytes, TxKind, B256},
     providers::{Provider, ProviderBuilder, RootProvider},
     rpc::types::{
         state::{AccountOverride, StateOverride},
@@ -266,10 +266,6 @@ pub struct FyndClientBuilder {
     base_url: String,
     timeout: Duration,
     retry: RetryConfig,
-    /// Optional router contract address. Defaults to `Address::ZERO` if not set.
-    ///
-    /// TODO: Replace with the actual RouterV3 contract address once deployed.
-    router_address: Option<Address>,
     rpc_url: String,
     submit_url: Option<String>,
     sender: Option<Address>,
@@ -286,7 +282,6 @@ impl FyndClientBuilder {
             base_url: base_url.into(),
             timeout: Duration::from_secs(30),
             retry: RetryConfig::default(),
-            router_address: None,
             rpc_url: rpc_url.into(),
             submit_url: None,
             sender: None,
@@ -319,14 +314,6 @@ impl FyndClientBuilder {
         self
     }
 
-    /// Override the RouterV3 contract address (default: `Address::ZERO`).
-    ///
-    /// This address is used as the `to` field of every EIP-1559 transaction.
-    pub fn with_router_address(mut self, addr: Address) -> Self {
-        self.router_address = Some(addr);
-        self
-    }
-
     /// Build a [`FyndClient`] without connecting to an Ethereum RPC node.
     ///
     /// Suitable for [`FyndClient::quote`] and [`FyndClient::health`] calls only.
@@ -351,10 +338,6 @@ impl FyndClientBuilder {
         let provider = ProviderBuilder::default().connect_http(parsed_base.clone());
         let submit_provider = ProviderBuilder::default().connect_http(parsed_base);
 
-        let router_address = self
-            .router_address
-            .unwrap_or(Address::ZERO);
-
         let http = HttpClient::builder()
             .timeout(self.timeout)
             .build()
@@ -364,7 +347,6 @@ impl FyndClientBuilder {
             http,
             base_url: self.base_url,
             retry: self.retry,
-            router_address,
             chain_id: 1,
             default_sender: self.sender,
             provider,
@@ -411,11 +393,6 @@ impl FyndClientBuilder {
             .await
             .map_err(|e| FyndError::Config(format!("failed to fetch chain_id from RPC: {e}")))?;
 
-        // TODO: Replace with the actual RouterV3 contract address once deployed.
-        let router_address = self
-            .router_address
-            .unwrap_or(Address::ZERO);
-
         // Build HTTP client.
         let http = HttpClient::builder()
             .timeout(self.timeout)
@@ -426,7 +403,6 @@ impl FyndClientBuilder {
             http,
             base_url: self.base_url,
             retry: self.retry,
-            router_address,
             chain_id,
             default_sender: self.sender,
             provider,
@@ -452,7 +428,6 @@ where
     http: HttpClient,
     base_url: String,
     retry: RetryConfig,
-    router_address: Address,
     chain_id: u64,
     default_sender: Option<Address>,
     provider: P,
@@ -475,22 +450,12 @@ where
         http: HttpClient,
         base_url: String,
         retry: RetryConfig,
-        router_address: Address,
         chain_id: u64,
         default_sender: Option<Address>,
         provider: P,
         submit_provider: P,
     ) -> Self {
-        Self {
-            http,
-            base_url,
-            retry,
-            router_address,
-            chain_id,
-            default_sender,
-            provider,
-            submit_provider,
-        }
+        Self { http, base_url, retry, chain_id, default_sender, provider, submit_provider }
     }
 
     /// Request a quote for one or more swap orders.
@@ -639,16 +604,24 @@ where
                 .ok_or_else(|| FyndError::Protocol("gas estimate exceeds u64".into()))?,
         };
 
+        let tx_data = quote.transaction().ok_or_else(|| {
+            FyndError::Protocol(
+                "quote has no calldata; set encoding_options in QuoteOptions".into(),
+            )
+        })?;
+        let to_addr = mapping::bytes_to_alloy_address(tx_data.to())?;
+        let value = mapping::biguint_to_u256(tx_data.value());
+        let input = AlloyBytes::from(tx_data.data().to_vec());
+
         let tx_eip1559 = TxEip1559 {
             chain_id: self.chain_id,
             nonce,
             max_fee_per_gas,
             max_priority_fee_per_gas,
             gas_limit,
-            to: TxKind::Call(self.router_address),
-            value: U256::ZERO,
-            // TODO: populate with ABI-encoded calldata once RouterV3 interface is finalised.
-            input: AlloyBytes::new(),
+            to: TxKind::Call(to_addr),
+            value,
+            input,
             access_list: AccessList::default(),
         };
 
@@ -825,7 +798,6 @@ mod tests {
             http,
             base_url,
             retry,
-            Address::ZERO,
             1,
             default_sender,
             provider,
@@ -839,7 +811,13 @@ mod tests {
     fn make_order_quote() -> crate::types::Quote {
         use num_bigint::BigUint;
 
-        use crate::types::{BackendKind, BlockInfo, QuoteStatus};
+        use crate::types::{BackendKind, BlockInfo, QuoteStatus, Transaction};
+
+        let tx = Transaction::new(
+            bytes::Bytes::copy_from_slice(&[0x01; 20]),
+            BigUint::ZERO,
+            vec![0x12, 0x34],
+        );
 
         crate::types::Quote::new(
             "test-order-id".to_string(),
@@ -853,6 +831,7 @@ mod tests {
             BlockInfo::new(1_234_567, "0xabcdef".to_string(), 1_700_000_000),
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
             bytes::Bytes::copy_from_slice(&[0xcc; 20]),
+            Some(tx),
         )
     }
 
@@ -1395,6 +1374,49 @@ mod tests {
         assert!(
             settled.settled_amount().is_none(),
             "empty return data should yield None settled_amount"
+        );
+    }
+
+    #[tokio::test]
+    async fn signable_payload_returns_protocol_error_when_no_transaction() {
+        use crate::types::{BackendKind, BlockInfo, QuoteStatus};
+
+        let sender = Address::with_last_byte(0xab);
+        let (client, _asserter) =
+            make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
+
+        // Build a quote with no transaction (encoding_options not set in request)
+        let quote = crate::types::Quote::new(
+            "no-tx".to_string(),
+            QuoteStatus::Success,
+            BackendKind::Fynd,
+            None,
+            num_bigint::BigUint::from(1_000u64),
+            num_bigint::BigUint::from(990u64),
+            num_bigint::BigUint::from(50_000u64),
+            None,
+            BlockInfo::new(1, "0xabc".to_string(), 0),
+            bytes::Bytes::copy_from_slice(&[0xbb; 20]),
+            bytes::Bytes::copy_from_slice(&[0xcc; 20]),
+            None,
+        );
+        let hints = SigningHints {
+            sender: Some(sender),
+            nonce: Some(1),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas_limit: Some(100_000),
+            simulate: false,
+        };
+
+        let err = client
+            .signable_payload(quote, &hints)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, FyndError::Protocol(_)),
+            "expected Protocol error when quote has no transaction, got {err:?}"
         );
     }
 

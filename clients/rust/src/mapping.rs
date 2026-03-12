@@ -10,8 +10,8 @@ use tycho_simulation::tycho_common::models::Address as TychoAddress;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, HealthStatus, Order, OrderSide, Quote, QuoteOptions,
-        QuoteParams, QuoteStatus, Route, Swap,
+        BackendKind, BatchQuote, BlockInfo, EncodingOptions, HealthStatus, Order, OrderSide, Quote,
+        QuoteOptions, QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -41,6 +41,22 @@ fn bytes_to_tycho(b: &bytes::Bytes) -> Result<TychoAddress, FyndError> {
 fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
     // hex_bytes::Bytes has From<Bytes> -> bytes::Bytes, and inner field .0 is pub
     addr.0
+}
+
+// ============================================================================
+// PRIMITIVE CONVERSIONS
+// ============================================================================
+
+/// Convert a [`num_bigint::BigUint`] to an [`alloy::primitives::U256`].
+///
+/// Serialises `n` as a big-endian byte string, right-pads into 32 bytes, and
+/// constructs a `U256` from the resulting fixed-width representation.
+pub(crate) fn biguint_to_u256(n: &num_bigint::BigUint) -> alloy::primitives::U256 {
+    let bytes = n.to_bytes_be();
+    let mut arr = [0u8; 32];
+    let len = bytes.len().min(32);
+    arr[32 - len..].copy_from_slice(&bytes[..len]);
+    alloy::primitives::U256::from_be_bytes(arr)
 }
 
 // ============================================================================
@@ -89,7 +105,26 @@ impl From<QuoteOptions> for dto::QuoteOptions {
             timeout_ms: opts.timeout_ms,
             min_responses: opts.min_responses,
             max_gas: opts.max_gas,
-            encoding_options: None,
+            encoding_options: opts.encoding_options.map(Into::into),
+        }
+    }
+}
+
+impl From<EncodingOptions> for dto::EncodingOptions {
+    fn from(opts: EncodingOptions) -> Self {
+        dto::EncodingOptions {
+            slippage: opts.slippage,
+            transfer_type: opts.transfer_type.into(),
+            permit: None,
+            permit2_signature: None,
+        }
+    }
+}
+
+impl From<UserTransferType> for dto::UserTransferType {
+    fn from(t: UserTransferType) -> Self {
+        match t {
+            UserTransferType::TransferFrom => dto::UserTransferType::TransferFrom,
         }
     }
 }
@@ -109,6 +144,7 @@ pub(crate) fn dto_to_quote(
         .map(Route::try_from)
         .transpose()?;
     let block = BlockInfo::from(ds.block);
+    let transaction = ds.transaction.map(Transaction::from);
     Ok(Quote::new(
         ds.order_id,
         status,
@@ -121,7 +157,14 @@ pub(crate) fn dto_to_quote(
         block,
         token_out,
         receiver,
+        transaction,
     ))
+}
+
+impl From<dto::Transaction> for Transaction {
+    fn from(dt: dto::Transaction) -> Self {
+        Transaction::new(bytes::Bytes::copy_from_slice(dt.to.as_ref()), dt.value, dt.data)
+    }
 }
 
 pub(crate) fn dto_to_batch_quote(
@@ -249,6 +292,42 @@ mod tests {
             gas_price: None,
             transaction: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // biguint_to_u256
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn biguint_to_u256_zero() {
+        let result = biguint_to_u256(&BigUint::ZERO);
+        assert_eq!(result, alloy::primitives::U256::ZERO);
+    }
+
+    #[test]
+    fn biguint_to_u256_known_value() {
+        let n = BigUint::from(0x1234_5678u64);
+        let result = biguint_to_u256(&n);
+        assert_eq!(result, alloy::primitives::U256::from(0x1234_5678u64));
+    }
+
+    // -----------------------------------------------------------------------
+    // Transaction conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transaction_from_dto() {
+        use tycho_simulation::tycho_core::Bytes as TychoBytes;
+        let router_bytes = vec![0x01u8; 20];
+        let dto_tx = dto::Transaction {
+            to: TychoBytes::from(Bytes::copy_from_slice(&router_bytes)),
+            value: BigUint::ZERO,
+            data: vec![0x12, 0x34],
+        };
+        let tx = Transaction::from(dto_tx);
+        assert_eq!(tx.to().as_ref(), router_bytes.as_slice());
+        assert_eq!(tx.value(), &BigUint::ZERO);
+        assert_eq!(tx.data(), &[0x12, 0x34]);
     }
 
     // -----------------------------------------------------------------------
