@@ -12,7 +12,10 @@
 use std::{env, str::FromStr, time::Duration};
 
 use alloy::hex;
-use alloy::primitives::{Address, Keccak256, B256, U256};
+use alloy::primitives::{Address, Bytes as AlloyBytes, Keccak256, TxKind, B256, U256};
+use alloy::network::Ethereum;
+use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::{local::PrivateKeySigner, Signer};
 use bytes::Bytes;
 use clap::Parser;
@@ -161,6 +164,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Quote has no calldata. Ensure encoding_options were set in the request.")?;
     let router = Address::from_slice(tx.to().as_ref());
 
+    // On-chain execution only: verify the router is approved before signing, so
+    // the user gets a clear error and a fix command rather than a cryptic revert.
+    if cli.execute {
+        let allowance = read_erc20_allowance(&rpc_url, sell_token_addr, sender, router).await?;
+        let required = BigUint::from(cli.sell_amount);
+        if allowance < required {
+            eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
+            eprintln!("  Token:     {:#x}", sell_token_addr);
+            eprintln!("  Router:    {:#x}", router);
+            eprintln!("  Allowance: {}", allowance);
+            eprintln!("  Required:  {}", required);
+            eprintln!("\nApprove the router with:");
+            eprintln!(
+                "  cast send {:#x} \"approve(address,uint256)\" {:#x} \\\n    \
+                 $(cast max-uint256) --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
+                sell_token_addr, router,
+            );
+            return Err("insufficient sell-token allowance".into());
+        }
+    }
+
     // Build and sign the payload
     let payload = client.signable_payload(quote, &SigningHints::default()).await?;
     let signature = signer.sign_hash(&payload.signing_hash()).await?;
@@ -211,6 +235,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Gas cost (wei): {}", settled.gas_cost());
 
     Ok(())
+}
+
+/// Read the current `allowance(owner, spender)` from an ERC-20 token via `eth_call`.
+async fn read_erc20_allowance(
+    rpc_url: &str,
+    token: Address,
+    owner: Address,
+    spender: Address,
+) -> Result<BigUint, Box<dyn std::error::Error>> {
+    // Encode allowance(address,address) calldata manually — 4-byte selector + two padded addresses
+    let mut hasher = Keccak256::new();
+    hasher.update(b"allowance(address,address)");
+    let full_hash = hasher.finalize();
+    let mut calldata = full_hash[..4].to_vec();
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(owner.as_slice());
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(spender.as_slice());
+
+    let provider: RootProvider<Ethereum> = ProviderBuilder::default()
+        .connect_http(rpc_url.parse::<reqwest::Url>()?);
+    let req = TransactionRequest {
+        to: Some(TxKind::Call(token)),
+        input: AlloyBytes::from(calldata).into(),
+        ..Default::default()
+    };
+    let result = provider.call(req).await?;
+    if result.len() < 32 {
+        return Err(format!("allowance() returned {} bytes, expected 32", result.len()).into());
+    }
+    Ok(BigUint::from_bytes_be(&result[..32]))
 }
 
 /// Compute the ERC-20 `balances` mapping slot for `holder` (mapping at storage position 1).
