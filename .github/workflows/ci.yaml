@@ -120,6 +120,26 @@ jobs:
           npm ci
           npx tsc --noEmit
 
+  check_ts_client:
+    name: TypeScript client typecheck + lint + test
+    needs: typescript_autogen_drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1  # v4.2.0
+        with:
+          version: "10.30.3"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: clients/typescript/pnpm-lock.yaml
+      - run: pnpm --dir clients/typescript install --frozen-lockfile
+      - run: pnpm --dir clients/typescript --filter @fynd/autogen run build
+      - run: pnpm --dir clients/typescript --filter @fynd/client run typecheck
+      - run: pnpm --dir clients/typescript --filter @fynd/client run lint
+      - run: pnpm --dir clients/typescript --filter @fynd/client run test
+
   security_audit:
     name: Security Audit
     runs-on: ubuntu-latest

@@ -1,3 +1,5 @@
 /target/
 /.idea/
 /.vscode/
+clients/typescript/client/dist/
+clients/typescript/node_modules/
