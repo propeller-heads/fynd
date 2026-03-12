@@ -13,13 +13,15 @@ use std::{env, str::FromStr, time::Duration};
 
 use alloy::hex;
 use alloy::network::Ethereum;
-use alloy::primitives::{map::B256HashMap, Address, Bytes as AlloyBytes, Keccak256, TxKind, B256, U256};
+use alloy::primitives::{keccak256, map::B256HashMap, Address, Bytes as AlloyBytes, TxKind, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::{
     state::{AccountOverride, StateOverride},
     TransactionRequest,
 };
 use alloy::signers::{local::PrivateKeySigner, Signer};
+use alloy::sol;
+use alloy::sol_types::SolCall;
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
@@ -29,6 +31,13 @@ use fynd_client::{
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+sol! {
+    interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
+        function allowance(address owner, address spender) external view returns (uint256);
+    }
+}
 
 /// Maximum storage slot position to probe when detecting balance/allowance slots.
 const MAX_PROBE_SLOT: u64 = 20;
@@ -263,7 +272,7 @@ async fn read_erc20_allowance(
     owner: Address,
     spender: Address,
 ) -> Result<BigUint, Box<dyn std::error::Error>> {
-    let calldata = encode_call_2addr(b"allowance(address,address)", owner, spender);
+    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
     let result = provider
         .call(TransactionRequest {
             to: Some(TxKind::Call(token)),
@@ -286,7 +295,7 @@ async fn find_balance_slot(
     token: Address,
     holder: Address,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let calldata = encode_call_1addr(b"balanceOf(address)", holder);
+    let calldata = IERC20::balanceOfCall { account: holder }.abi_encode();
     let target = B256::from(U256::MAX);
 
     for position in 0..=MAX_PROBE_SLOT {
@@ -320,7 +329,7 @@ async fn find_allowance_slot(
     owner: Address,
     spender: Address,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let calldata = encode_call_2addr(b"allowance(address,address)", owner, spender);
+    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
     let target = B256::from(U256::MAX);
 
     for position in 0..=MAX_PROBE_SLOT {
@@ -363,9 +372,7 @@ fn erc20_balance_slot_at(holder: Address, position: u64) -> B256 {
     let mut buf = [0u8; 64];
     buf[12..32].copy_from_slice(holder.as_slice());
     buf[56..64].copy_from_slice(&position.to_be_bytes());
-    let mut hasher = Keccak256::new();
-    hasher.update(buf);
-    hasher.finalize()
+    keccak256(buf)
 }
 
 /// Compute the Solidity slot for `allowances[owner][spender]` at storage base `position`.
@@ -377,31 +384,5 @@ fn erc20_allowance_slot_at(owner: Address, spender: Address, position: u64) -> B
     let mut buf = [0u8; 64];
     buf[12..32].copy_from_slice(spender.as_slice());
     buf[32..64].copy_from_slice(inner.as_slice());
-    let mut hasher = Keccak256::new();
-    hasher.update(buf);
-    hasher.finalize()
-}
-
-/// Encode a 4-byte selector + single padded address argument.
-fn encode_call_1addr(sig: &[u8], arg: Address) -> Vec<u8> {
-    let mut hasher = Keccak256::new();
-    hasher.update(sig);
-    let hash = hasher.finalize();
-    let mut data = hash[..4].to_vec();
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(arg.as_slice());
-    data
-}
-
-/// Encode a 4-byte selector + two padded address arguments.
-fn encode_call_2addr(sig: &[u8], arg1: Address, arg2: Address) -> Vec<u8> {
-    let mut hasher = Keccak256::new();
-    hasher.update(sig);
-    let hash = hasher.finalize();
-    let mut data = hash[..4].to_vec();
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(arg1.as_slice());
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(arg2.as_slice());
-    data
+    keccak256(buf)
 }
