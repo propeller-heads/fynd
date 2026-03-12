@@ -151,3 +151,7 @@ path = "examples/tutorial/main.rs"
 [[example]]
 name = "benchmark"
 path = "examples/benchmark/main.rs"
+
+[[example]]
+name = "compare"
+path = "examples/compare/main.rs"
