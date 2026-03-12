@@ -12,10 +12,13 @@
 use std::{env, str::FromStr, time::Duration};
 
 use alloy::hex;
-use alloy::primitives::{Address, Bytes as AlloyBytes, Keccak256, TxKind, B256, U256};
 use alloy::network::Ethereum;
+use alloy::primitives::{map::B256HashMap, Address, Bytes as AlloyBytes, Keccak256, TxKind, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::TransactionRequest;
+use alloy::rpc::types::{
+    state::{AccountOverride, StateOverride},
+    TransactionRequest,
+};
 use alloy::signers::{local::PrivateKeySigner, Signer};
 use bytes::Bytes;
 use clap::Parser;
@@ -26,6 +29,9 @@ use fynd_client::{
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+/// Maximum storage slot position to probe when detecting balance/allowance slots.
+const MAX_PROBE_SLOT: u64 = 20;
 
 /// Tutorial CLI: Quote and execute a swap via the Fynd solver
 #[derive(Parser)]
@@ -83,6 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let sender = signer.address();
     info!("Sender: {:?}", sender);
+
+    let provider: RootProvider<Ethereum> =
+        ProviderBuilder::default().connect_http(rpc_url.parse::<reqwest::Url>()?);
 
     let client = FyndClientBuilder::new(&cli.fynd_url, &rpc_url)
         .with_sender(sender)
@@ -167,7 +176,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On-chain execution only: verify the router is approved before signing, so
     // the user gets a clear error and a fix command rather than a cryptic revert.
     if cli.execute {
-        let allowance = read_erc20_allowance(&rpc_url, sell_token_addr, sender, router).await?;
+        let allowance =
+            read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
         let required = BigUint::from(cli.sell_amount);
         if allowance < required {
             eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
@@ -194,19 +204,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
-        // Dry-run: inject unlimited sell-token balance + allowance via storage overrides
-        // so the simulation succeeds without real funds.
-        let mut overrides = StorageOverrides::default();
+        // Dry-run: probe the token's actual balance and allowance storage slots, then inject
+        // U256::MAX into those slots so the simulation succeeds without real funds.
+        info!("Detecting storage slots for {}...", cli.sell_token);
+        let (balance_slot_result, allowance_slot_result) = tokio::join!(
+            find_balance_slot(&provider, sell_token_addr, sender),
+            find_allowance_slot(&provider, sell_token_addr, sender, router),
+        );
+        let balance_pos = balance_slot_result?;
+        let allowance_pos = allowance_slot_result?;
+        info!("Found balance slot {} and allowance slot {}", balance_pos, allowance_pos);
+
         let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
         let token_key = Bytes::copy_from_slice(sell_token_addr.as_slice());
+        let mut overrides = StorageOverrides::default();
         overrides.insert(
             token_key.clone(),
-            Bytes::copy_from_slice(&erc20_balance_slot(sender).0),
+            Bytes::copy_from_slice(&erc20_balance_slot_at(sender, balance_pos).0),
             max_val.clone(),
         );
         overrides.insert(
             token_key,
-            Bytes::copy_from_slice(&erc20_allowance_slot(sender, router).0),
+            Bytes::copy_from_slice(&erc20_allowance_slot_at(sender, router, allowance_pos).0),
             max_val,
         );
         info!("Submitting dry-run execution...");
@@ -239,63 +258,150 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Read the current `allowance(owner, spender)` from an ERC-20 token via `eth_call`.
 async fn read_erc20_allowance(
-    rpc_url: &str,
+    provider: &RootProvider<Ethereum>,
     token: Address,
     owner: Address,
     spender: Address,
 ) -> Result<BigUint, Box<dyn std::error::Error>> {
-    // Encode allowance(address,address) calldata manually — 4-byte selector + two padded addresses
-    let mut hasher = Keccak256::new();
-    hasher.update(b"allowance(address,address)");
-    let full_hash = hasher.finalize();
-    let mut calldata = full_hash[..4].to_vec();
-    calldata.extend_from_slice(&[0u8; 12]);
-    calldata.extend_from_slice(owner.as_slice());
-    calldata.extend_from_slice(&[0u8; 12]);
-    calldata.extend_from_slice(spender.as_slice());
-
-    let provider: RootProvider<Ethereum> = ProviderBuilder::default()
-        .connect_http(rpc_url.parse::<reqwest::Url>()?);
-    let req = TransactionRequest {
-        to: Some(TxKind::Call(token)),
-        input: AlloyBytes::from(calldata).into(),
-        ..Default::default()
-    };
-    let result = provider.call(req).await?;
+    let calldata = encode_call_2addr(b"allowance(address,address)", owner, spender);
+    let result = provider
+        .call(TransactionRequest {
+            to: Some(TxKind::Call(token)),
+            input: AlloyBytes::from(calldata).into(),
+            ..Default::default()
+        })
+        .await?;
     if result.len() < 32 {
         return Err(format!("allowance() returned {} bytes, expected 32", result.len()).into());
     }
     Ok(BigUint::from_bytes_be(&result[..32]))
 }
 
-/// Compute the ERC-20 `balances` mapping slot for `holder` (mapping at storage position 1).
+/// Find the storage slot position used by an ERC-20 token's `balances` mapping.
 ///
-/// Slot = `keccak256(holder_padded_to_32_bytes || uint256(1))`
-fn erc20_balance_slot(holder: Address) -> B256 {
+/// Probes slot positions 0..=[`MAX_PROBE_SLOT`] by applying a state override and calling
+/// `balanceOf`. Returns the first position whose override is reflected in the return value.
+async fn find_balance_slot(
+    provider: &RootProvider<Ethereum>,
+    token: Address,
+    holder: Address,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let calldata = encode_call_1addr(b"balanceOf(address)", holder);
+    let target = B256::from(U256::MAX);
+
+    for position in 0..=MAX_PROBE_SLOT {
+        let slot = erc20_balance_slot_at(holder, position);
+        let result = provider
+            .call(TransactionRequest {
+                to: Some(TxKind::Call(token)),
+                input: AlloyBytes::from(calldata.clone()).into(),
+                ..Default::default()
+            })
+            .overrides(state_override_single(token, slot, target))
+            .await?;
+        if result.len() >= 32 && result[..32] == *target.as_slice() {
+            return Ok(position);
+        }
+    }
+    Err(format!(
+        "could not detect balance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
+         the token may use a non-standard storage layout"
+    )
+    .into())
+}
+
+/// Find the storage slot position used by an ERC-20 token's `allowances` mapping.
+///
+/// Probes slot positions 0..=[`MAX_PROBE_SLOT`] by applying a state override and calling
+/// `allowance`. Returns the first position whose override is reflected in the return value.
+async fn find_allowance_slot(
+    provider: &RootProvider<Ethereum>,
+    token: Address,
+    owner: Address,
+    spender: Address,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let calldata = encode_call_2addr(b"allowance(address,address)", owner, spender);
+    let target = B256::from(U256::MAX);
+
+    for position in 0..=MAX_PROBE_SLOT {
+        let slot = erc20_allowance_slot_at(owner, spender, position);
+        let result = provider
+            .call(TransactionRequest {
+                to: Some(TxKind::Call(token)),
+                input: AlloyBytes::from(calldata.clone()).into(),
+                ..Default::default()
+            })
+            .overrides(state_override_single(token, slot, target))
+            .await?;
+        if result.len() >= 32 && result[..32] == *target.as_slice() {
+            return Ok(position);
+        }
+    }
+    Err(format!(
+        "could not detect allowance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
+         the token may use a non-standard storage layout"
+    )
+    .into())
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Build a `StateOverride` that sets a single storage slot on one contract.
+fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOverride {
+    let mut state_diff = B256HashMap::default();
+    state_diff.insert(slot, value);
+    let mut overrides = StateOverride::default();
+    overrides.insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
+    overrides
+}
+
+/// Compute `keccak256(address_padded32 || uint256(position))` — the Solidity mapping slot
+/// for a single-key `mapping(address => ...)` at storage base `position`.
+fn erc20_balance_slot_at(holder: Address, position: u64) -> B256 {
     let mut buf = [0u8; 64];
     buf[12..32].copy_from_slice(holder.as_slice());
-    buf[63] = 1;
+    buf[56..64].copy_from_slice(&position.to_be_bytes());
     let mut hasher = Keccak256::new();
     hasher.update(buf);
     hasher.finalize()
 }
 
-/// Compute the ERC-20 `allowances` mapping slot for `allowances[from][to]` (mapping at position 2).
+/// Compute the Solidity slot for `allowances[owner][spender]` at storage base `position`.
 ///
-/// Inner slot = `keccak256(from_padded || uint256(2))`
-/// Outer slot = `keccak256(to_padded   || inner_slot)`
-fn erc20_allowance_slot(from: Address, to: Address) -> B256 {
-    let mut inner_buf = [0u8; 64];
-    inner_buf[12..32].copy_from_slice(from.as_slice());
-    inner_buf[63] = 2;
-    let mut inner_hasher = Keccak256::new();
-    inner_hasher.update(inner_buf);
-    let inner: B256 = inner_hasher.finalize();
+/// Inner = `keccak256(owner_padded32 || uint256(position))`
+/// Outer = `keccak256(spender_padded32 || inner)`
+fn erc20_allowance_slot_at(owner: Address, spender: Address, position: u64) -> B256 {
+    let inner = erc20_balance_slot_at(owner, position);
+    let mut buf = [0u8; 64];
+    buf[12..32].copy_from_slice(spender.as_slice());
+    buf[32..64].copy_from_slice(inner.as_slice());
+    let mut hasher = Keccak256::new();
+    hasher.update(buf);
+    hasher.finalize()
+}
 
-    let mut outer_buf = [0u8; 64];
-    outer_buf[12..32].copy_from_slice(to.as_slice());
-    outer_buf[32..64].copy_from_slice(inner.as_slice());
-    let mut outer_hasher = Keccak256::new();
-    outer_hasher.update(outer_buf);
-    outer_hasher.finalize()
+/// Encode a 4-byte selector + single padded address argument.
+fn encode_call_1addr(sig: &[u8], arg: Address) -> Vec<u8> {
+    let mut hasher = Keccak256::new();
+    hasher.update(sig);
+    let hash = hasher.finalize();
+    let mut data = hash[..4].to_vec();
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(arg.as_slice());
+    data
+}
+
+/// Encode a 4-byte selector + two padded address arguments.
+fn encode_call_2addr(sig: &[u8], arg1: Address, arg2: Address) -> Vec<u8> {
+    let mut hasher = Keccak256::new();
+    hasher.update(sig);
+    let hash = hasher.finalize();
+    let mut data = hash[..4].to_vec();
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(arg1.as_slice());
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(arg2.as_slice());
+    data
 }
