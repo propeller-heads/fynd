@@ -10,8 +10,9 @@ use tycho_simulation::tycho_common::models::Address as TychoAddress;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, EncodingOptions, HealthStatus, Order, OrderSide, Quote,
-        QuoteOptions, QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
+        BackendKind, BatchQuote, BlockInfo, EncodingOptions, HealthStatus, Order, OrderSide,
+        PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, Swap,
+        Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -65,7 +66,8 @@ pub(crate) fn biguint_to_u256(n: &num_bigint::BigUint) -> alloy::primitives::U25
 
 pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::QuoteRequest, FyndError> {
     let order = dto::Order::try_from(params.order)?;
-    Ok(dto::QuoteRequest { orders: vec![order], options: params.options.into() })
+    let options = dto::QuoteOptions::try_from(params.options)?;
+    Ok(dto::QuoteRequest { orders: vec![order], options })
 }
 
 impl TryFrom<Order> for dto::Order {
@@ -99,25 +101,53 @@ impl From<OrderSide> for dto::OrderSide {
     }
 }
 
-impl From<QuoteOptions> for dto::QuoteOptions {
-    fn from(opts: QuoteOptions) -> Self {
-        dto::QuoteOptions {
+impl TryFrom<QuoteOptions> for dto::QuoteOptions {
+    type Error = FyndError;
+
+    fn try_from(opts: QuoteOptions) -> Result<Self, Self::Error> {
+        Ok(dto::QuoteOptions {
             timeout_ms: opts.timeout_ms,
             min_responses: opts.min_responses,
             max_gas: opts.max_gas,
-            encoding_options: opts.encoding_options.map(Into::into),
-        }
+            encoding_options: opts.encoding_options.map(dto::EncodingOptions::try_from).transpose()?,
+        })
     }
 }
 
-impl From<EncodingOptions> for dto::EncodingOptions {
-    fn from(opts: EncodingOptions) -> Self {
-        dto::EncodingOptions {
+impl TryFrom<EncodingOptions> for dto::EncodingOptions {
+    type Error = FyndError;
+
+    fn try_from(opts: EncodingOptions) -> Result<Self, Self::Error> {
+        use tycho_simulation::tycho_core::Bytes as TychoBytes;
+        let permit = opts.permit.map(dto::PermitSingle::try_from).transpose()?;
+        let permit2_signature = opts.permit2_signature.map(TychoBytes::from);
+        Ok(dto::EncodingOptions {
             slippage: opts.slippage,
             transfer_type: opts.transfer_type.into(),
-            permit: None,
-            permit2_signature: None,
-        }
+            permit,
+            permit2_signature,
+        })
+    }
+}
+
+impl TryFrom<PermitSingle> for dto::PermitSingle {
+    type Error = FyndError;
+
+    fn try_from(p: PermitSingle) -> Result<Self, Self::Error> {
+        use tycho_simulation::tycho_core::Bytes as TychoBytes;
+        let details = dto::PermitDetails::try_from(p.details)?;
+        let spender = TychoBytes::from(bytes_to_tycho(&p.spender)?.0);
+        Ok(dto::PermitSingle { details, spender, sig_deadline: p.sig_deadline })
+    }
+}
+
+impl TryFrom<PermitDetails> for dto::PermitDetails {
+    type Error = FyndError;
+
+    fn try_from(d: PermitDetails) -> Result<Self, Self::Error> {
+        use tycho_simulation::tycho_core::Bytes as TychoBytes;
+        let token = TychoBytes::from(bytes_to_tycho(&d.token)?.0);
+        Ok(dto::PermitDetails { token, amount: d.amount, expiration: d.expiration, nonce: d.nonce })
     }
 }
 
@@ -125,6 +155,8 @@ impl From<UserTransferType> for dto::UserTransferType {
     fn from(t: UserTransferType) -> Self {
         match t {
             UserTransferType::TransferFrom => dto::UserTransferType::TransferFrom,
+            UserTransferType::TransferFromPermit2 => dto::UserTransferType::TransferFromPermit2,
+            UserTransferType::None => dto::UserTransferType::None,
         }
     }
 }
@@ -464,5 +496,102 @@ mod tests {
             None,
         );
         assert!(matches!(dto::Order::try_from(order), Err(FyndError::Protocol(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // UserTransferType mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn user_transfer_type_permit2_maps_correctly() {
+        let result = dto::UserTransferType::from(UserTransferType::TransferFromPermit2);
+        assert!(matches!(result, dto::UserTransferType::TransferFromPermit2));
+    }
+
+    #[test]
+    fn user_transfer_type_none_maps_correctly() {
+        let result = dto::UserTransferType::from(UserTransferType::None);
+        assert!(matches!(result, dto::UserTransferType::None));
+    }
+
+    // -----------------------------------------------------------------------
+    // PermitDetails TryFrom
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn permit_details_try_from_happy_path() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        let dto_details = dto::PermitDetails::try_from(details).unwrap();
+        assert_eq!(dto_details.token.as_ref(), &[0xaa; 20]);
+        assert_eq!(dto_details.amount, BigUint::from(1_000u32));
+        assert_eq!(dto_details.expiration, BigUint::from(9_999_999u32));
+        assert_eq!(dto_details.nonce, BigUint::from(0u32));
+    }
+
+    #[test]
+    fn permit_details_try_from_invalid_token() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 4]), // wrong length
+            BigUint::from(1u32),
+            BigUint::from(1u32),
+            BigUint::from(0u32),
+        );
+        assert!(matches!(dto::PermitDetails::try_from(details), Err(FyndError::Protocol(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // PermitSingle TryFrom
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn permit_single_try_from_happy_path() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(500u32),
+            BigUint::from(1_000_000u32),
+            BigUint::from(1u32),
+        );
+        let permit = PermitSingle::new(
+            details,
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(2_000_000u32),
+        );
+        let dto_permit = dto::PermitSingle::try_from(permit).unwrap();
+        assert_eq!(dto_permit.spender.as_ref(), &[0xbb; 20]);
+        assert_eq!(dto_permit.sig_deadline, BigUint::from(2_000_000u32));
+        assert_eq!(dto_permit.details.amount, BigUint::from(500u32));
+    }
+
+    // -----------------------------------------------------------------------
+    // EncodingOptions TryFrom with permit2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoding_options_try_from_with_permit2() {
+        use crate::types::{EncodingOptions, PermitDetails, PermitSingle};
+
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        let permit = PermitSingle::new(
+            details,
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(9_999_999u32),
+        );
+        let sig = Bytes::copy_from_slice(&[0xcc; 65]);
+        let opts = EncodingOptions::new(0.005).with_permit2(permit, sig.clone());
+
+        let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
+        assert!(matches!(dto_opts.transfer_type, dto::UserTransferType::TransferFromPermit2));
+        assert!(dto_opts.permit.is_some());
+        assert_eq!(dto_opts.permit2_signature.as_ref().unwrap().as_ref(), sig.as_ref());
     }
 }
