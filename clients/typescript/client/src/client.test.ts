@@ -28,10 +28,9 @@ function makeClientWithHttpMock(
   opts?: Partial<FyndClientOptions>,
 ): FyndClient {
   const client = new FyndClient({
-    baseUrl:       'http://localhost:8080',
-    chainId:       1,
-    routerAddress: ROUTER,
-    sender:        SENDER,
+    baseUrl:  'http://localhost:8080',
+    chainId:  1,
+    sender:   SENDER,
     ...opts,
   });
 

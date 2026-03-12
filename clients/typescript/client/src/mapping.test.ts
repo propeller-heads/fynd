@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { toWireRequest, fromWireQuote, fromWireHealth } from './mapping.js';
 import { FyndError } from './error.js';
 import type { QuoteParams } from './types.js';
+import type { Address, Hex } from './types.js';
 import type { components } from '@fynd/autogen';
 
-type WireSolution = components["schemas"]["Solution"];
+type WireSolution = components["schemas"]["Quote"];
 
 const SENDER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' as const;
 const TOKEN_IN = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as const;
@@ -104,6 +105,76 @@ describe('toWireRequest', () => {
     expect(wire.options).toBeDefined();
     expect(wire.options).not.toHaveProperty('min_responses');
     expect(wire.options).not.toHaveProperty('max_gas');
+  });
+
+  it('serializes encodingOptions.slippage and transfer_type', () => {
+    const params: QuoteParams = {
+      ...baseParams,
+      options: {
+        encodingOptions: { slippage: 0.005, transferType: 'transfer_from' },
+      },
+    };
+    const wire = toWireRequest(params);
+    expect(wire.options?.encoding_options?.slippage).toBe(0.005);
+    expect(wire.options?.encoding_options?.transfer_type).toBe('transfer_from');
+    expect(wire.options?.encoding_options).not.toHaveProperty('permit');
+    expect(wire.options?.encoding_options).not.toHaveProperty('permit2_signature');
+  });
+
+  it('omits transfer_type key when not set (exactOptionalPropertyTypes)', () => {
+    const params: QuoteParams = {
+      ...baseParams,
+      options: { encodingOptions: { slippage: 0.001 } },
+    };
+    const wire = toWireRequest(params);
+    expect(wire.options?.encoding_options).not.toHaveProperty('transfer_type');
+  });
+
+  it('serializes encodingOptions with permit and permit2Signature using snake_case wire fields', () => {
+    const SPENDER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as Address;
+    const TOKEN   = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address;
+    const SIG     = '0xdeadbeef' as Hex;
+    const params: QuoteParams = {
+      ...baseParams,
+      options: {
+        encodingOptions: {
+          slippage:        0.003,
+          transferType:    'transfer_from_permit2',
+          permit2Signature: SIG,
+          permit: {
+            spender:     SPENDER,
+            sigDeadline: 1893456000n,
+            details: {
+              token:      TOKEN,
+              amount:     1000000000000000000n,
+              expiration: 1893456000n,
+              nonce:      0n,
+            },
+          },
+        },
+      },
+    };
+    const wire = toWireRequest(params);
+    const enc = wire.options?.encoding_options;
+    expect(enc?.transfer_type).toBe('transfer_from_permit2');
+    expect(enc?.permit2_signature).toBe(SIG);
+    // PermitSingle wire fields
+    expect(enc?.permit?.spender).toBe(SPENDER);
+    expect(enc?.permit?.sig_deadline).toBe('1893456000');
+    // PermitDetails wire fields
+    expect(enc?.permit?.details.token).toBe(TOKEN);
+    expect(enc?.permit?.details.amount).toBe('1000000000000000000');
+    expect(enc?.permit?.details.expiration).toBe('1893456000');
+    expect(enc?.permit?.details.nonce).toBe('0');
+  });
+
+  it('serializes UserTransferType "none" correctly', () => {
+    const params: QuoteParams = {
+      ...baseParams,
+      options: { encodingOptions: { slippage: 0.0, transferType: 'none' } },
+    };
+    const wire = toWireRequest(params);
+    expect(wire.options?.encoding_options?.transfer_type).toBe('none');
   });
 });
 
@@ -235,6 +306,57 @@ describe('fromWireQuote', () => {
     const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, RECEIVER);
     expect(quote.tokenOut).toBe(TOKEN_OUT);
     expect(quote.receiver).toBe(RECEIVER);
+  });
+
+  it('transaction is undefined when wire transaction is null', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [{ ...baseWireSolution.orders[0]!, transaction: null }],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.transaction).toBeUndefined();
+  });
+
+  it('transaction is undefined when wire transaction is absent', () => {
+    // baseWireSolution.orders[0] has no transaction field
+    const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
+    expect(quote.transaction).toBeUndefined();
+  });
+
+  it('maps transaction fields: to as Address, value as bigint, data as Hex', () => {
+    const ROUTER = '0x1111111111111111111111111111111111111111' as Address;
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          transaction: { to: ROUTER, value: '12345', data: '0xdeadbeef' },
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.transaction).toBeDefined();
+    expect(quote.transaction?.to).toBe(ROUTER);
+    expect(quote.transaction?.value).toBe(12345n);
+    expect(quote.transaction?.data).toBe('0xdeadbeef');
+  });
+
+  it('transaction.value of "0" maps to 0n', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          transaction: {
+            to:    '0x1111111111111111111111111111111111111111',
+            value: '0',
+            data:  '0x',
+          },
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.transaction?.value).toBe(0n);
   });
 });
 
