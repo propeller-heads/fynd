@@ -11,18 +11,20 @@
 
 use std::{env, str::FromStr, time::Duration};
 
-use alloy::hex;
-use alloy::network::Ethereum;
-use alloy::primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::TransactionRequest;
-use alloy::signers::{local::PrivateKeySigner, Signer};
-use alloy::sol_types::SolCall;
+use alloy::{
+    hex,
+    network::Ethereum,
+    primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256},
+    providers::{Provider, ProviderBuilder, RootProvider},
+    rpc::types::TransactionRequest,
+    signers::{local::PrivateKeySigner, Signer},
+    sol_types::SolCall,
+};
 use bytes::Bytes;
 
 mod erc20;
-use erc20::IERC20;
 use clap::Parser;
+use erc20::IERC20;
 use fynd_client::{
     EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
@@ -70,18 +72,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let rpc_url = env::var("RPC_URL")
-        .map_err(|_| "RPC_URL environment variable is required")?;
+    let rpc_url = env::var("RPC_URL").map_err(|_| "RPC_URL environment variable is required")?;
 
     // Load or generate signer. Real execution requires PRIVATE_KEY; dry-run uses an
     // ephemeral key because storage overrides inject the balance on-the-fly.
     let signer = if cli.execute {
         let pk_hex = env::var("PRIVATE_KEY")
             .map_err(|_| "--execute requires PRIVATE_KEY environment variable")?;
-        let pk_bytes = B256::from_str(&pk_hex)
-            .map_err(|e| format!("invalid PRIVATE_KEY: {e}"))?;
-        PrivateKeySigner::from_bytes(&pk_bytes)
-            .map_err(|e| format!("invalid PRIVATE_KEY: {e}"))?
+        let pk_bytes = B256::from_str(&pk_hex).map_err(|e| format!("invalid PRIVATE_KEY: {e}"))?;
+        PrivateKeySigner::from_bytes(&pk_bytes).map_err(|e| format!("invalid PRIVATE_KEY: {e}"))?
     } else {
         PrivateKeySigner::random()
     };
@@ -112,8 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse token addresses
     let sell_token_addr = Address::from_str(&cli.sell_token)
         .map_err(|e| format!("invalid sell token address: {e}"))?;
-    let buy_token_addr = Address::from_str(&cli.buy_token)
-        .map_err(|e| format!("invalid buy token address: {e}"))?;
+    let buy_token_addr =
+        Address::from_str(&cli.buy_token).map_err(|e| format!("invalid buy token address: {e}"))?;
 
     let sell_token_bytes = Bytes::copy_from_slice(sell_token_addr.as_slice());
     let buy_token_bytes = Bytes::copy_from_slice(buy_token_addr.as_slice());
@@ -127,18 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.sell_amount, cli.sell_token, cli.buy_token
     );
 
-    let order = Order::new(
-        sell_token_bytes,
-        buy_token_bytes,
-        amount,
-        OrderSide::Sell,
-        sender_bytes,
-        None,
-    );
+    let order =
+        Order::new(sell_token_bytes, buy_token_bytes, amount, OrderSide::Sell, sender_bytes, None);
     let options = QuoteOptions::default()
         .with_timeout_ms(5_000)
         .with_encoding_options(EncodingOptions::new(slippage));
-    let quote = client.quote(QuoteParams::new(order, options)).await?;
+    let quote = client
+        .quote(QuoteParams::new(order, options))
+        .await?;
 
     // Display quote
     println!("\n========== Quote ==========");
@@ -174,8 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On-chain execution only: verify the router is approved before signing, so
     // the user gets a clear error and a fix command rather than a cryptic revert.
     if cli.execute {
-        let allowance =
-            read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
+        let allowance = read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
         let required = BigUint::from(cli.sell_amount);
         if allowance < required {
             eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
@@ -194,8 +188,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build and sign the payload
-    let payload = client.signable_payload(quote, &SigningHints::default()).await?;
-    let signature = signer.sign_hash(&payload.signing_hash()).await?;
+    let payload = client
+        .signable_payload(quote, &SigningHints::default())
+        .await?;
+    let signature = signer
+        .sign_hash(&payload.signing_hash())
+        .await?;
     let signed = SignedOrder::assemble(payload, signature);
 
     let exec_options = if cli.execute {
@@ -230,7 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) }
     };
 
-    let receipt = client.execute(signed, &exec_options).await?;
+    let receipt = client
+        .execute(signed, &exec_options)
+        .await?;
 
     let settled = if cli.execute {
         tokio::time::timeout(Duration::from_secs(120), receipt)
@@ -274,4 +274,3 @@ async fn read_erc20_allowance(
     }
     Ok(BigUint::from_bytes_be(&result[..32]))
 }
-

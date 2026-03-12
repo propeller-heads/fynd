@@ -1,16 +1,16 @@
 //! ERC-20 helpers for the tutorial example: on-chain reads and storage slot detection.
 
-use alloy::network::Ethereum;
-use alloy::primitives::{
-    keccak256, map::B256HashMap, Address, Bytes as AlloyBytes, TxKind, B256, U256,
+use alloy::{
+    network::Ethereum,
+    primitives::{keccak256, map::B256HashMap, Address, Bytes as AlloyBytes, TxKind, B256, U256},
+    providers::{Provider, RootProvider},
+    rpc::types::{
+        state::{AccountOverride, StateOverride},
+        TransactionRequest,
+    },
+    sol,
+    sol_types::SolCall,
 };
-use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::types::{
-    state::{AccountOverride, StateOverride},
-    TransactionRequest,
-};
-use alloy::sol;
-use alloy::sol_types::SolCall;
 
 sol! {
     interface IERC20 {
@@ -115,9 +115,7 @@ fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOve
     let mut state_diff = B256HashMap::default();
     state_diff.insert(slot, value);
     let mut overrides = StateOverride::default();
-    overrides.insert(
-        contract,
-        AccountOverride { state_diff: Some(state_diff), ..Default::default() },
-    );
+    overrides
+        .insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
     overrides
 }
