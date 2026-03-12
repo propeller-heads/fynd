@@ -44,7 +44,7 @@ pub struct FyndBuilder {
     min_tvl: f64,
     min_token_quality: i32,
     traded_n_days_ago: u64,
-    tvl_buffer_multiplier: f64,
+    tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
     worker_router_timeout: Duration,
@@ -77,7 +77,7 @@ impl FyndBuilder {
             min_tvl: defaults::MIN_TVL,
             min_token_quality: defaults::MIN_TOKEN_QUALITY,
             traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
-            tvl_buffer_multiplier: defaults::TVL_BUFFER_MULTIPLIER,
+            tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
             worker_router_timeout: Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS),
@@ -117,9 +117,9 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the TVL buffer multiplier (default: 1.1).
-    pub fn tvl_buffer_multiplier(mut self, multiplier: f64) -> Self {
-        self.tvl_buffer_multiplier = multiplier;
+    /// Sets the TVL buffer ratio (default: 1.1).
+    pub fn tvl_buffer_ratio(mut self, multiplier: f64) -> Self {
+        self.tvl_buffer_ratio = multiplier;
         self
     }
 
@@ -191,7 +191,7 @@ impl FyndBuilder {
             self.protocols.clone(),
             self.min_tvl,
         )
-        .tvl_buffer_multiplier(self.tvl_buffer_multiplier)
+        .tvl_buffer_ratio(self.tvl_buffer_ratio)
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality)

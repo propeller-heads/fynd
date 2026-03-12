@@ -152,7 +152,7 @@ pub mod defaults {
     pub const MIN_TVL: f64 = 10.0;
     pub const MIN_TOKEN_QUALITY: i32 = 100;
     pub const TRADED_N_DAYS_AGO: u64 = 3;
-    pub const TVL_BUFFER_MULTIPLIER: f64 = 1.1;
+    pub const TVL_BUFFER_RATIO: f64 = 1.1;
     pub const RECONNECT_DELAY_SECS: u64 = 5;
 
     // Gas

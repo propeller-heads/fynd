@@ -131,7 +131,7 @@ impl TychoFeed {
                     ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
                         .skip_state_decode_failures(true),
                     ComponentFilter::with_tvl_range(
-                        self.config.min_tvl / self.config.tvl_buffer_multiplier,
+                        self.config.min_tvl / self.config.tvl_buffer_ratio,
                         self.config.min_tvl,
                     ),
                     &self.config.protocols,
