@@ -35,6 +35,9 @@ use tycho_simulation::{
 
 use fynd::feed::market_data::{SharedMarketData, SharedMarketDataRef};
 
+use crate::flash_loan::{
+    encode_flash_loan_call, encode_flash_swap_v2_call, FlashTier,
+};
 use crate::types::{EvaluatedCycle, ExecutionMode, ExecutionResult};
 
 /// Handles encoding and execution of profitable cycles.
@@ -51,6 +54,8 @@ pub struct CycleExecutor {
     bribe_pct: u32,
     rpc_url: Option<String>,
     signer: Option<PrivateKeySigner>,
+    /// Address of deployed FlashArbExecutor contract (for flash modes).
+    flash_arb_address: Option<Address>,
 }
 
 impl CycleExecutor {
@@ -60,6 +65,7 @@ impl CycleExecutor {
         bribe_pct: u32,
         rpc_url: Option<String>,
         private_key: Option<String>,
+        flash_arb_address: Option<Address>,
     ) -> anyhow::Result<Self> {
         let signer = private_key
             .map(|pk| {
@@ -69,7 +75,7 @@ impl CycleExecutor {
             })
             .transpose()?;
 
-        Ok(Self { chain, slippage_bps, bribe_pct, rpc_url, signer })
+        Ok(Self { chain, slippage_bps, bribe_pct, rpc_url, signer, flash_arb_address })
     }
 
     /// Execute (or simulate) a profitable cycle.
@@ -99,6 +105,12 @@ impl CycleExecutor {
             }
             ExecutionMode::ExecuteProtected => {
                 self.execute_protected(cycle, market_ref, source_token_addr).await
+            }
+            ExecutionMode::SimulateFlash => {
+                self.simulate_flash(cycle, market_ref, source_token_addr).await
+            }
+            ExecutionMode::ExecuteFlash => {
+                self.execute_flash(cycle, market_ref, source_token_addr).await
             }
         }
     }
@@ -177,6 +189,7 @@ impl CycleExecutor {
             encoded,
             solution,
             Bytes::from(source_token_addr.as_ref()),
+            true, // transfer_from: pull tokens from sender
         )
     }
 
@@ -845,6 +858,631 @@ impl CycleExecutor {
 
         Ok(swap_request)
     }
+
+    // ==================== Flash Loan Methods ====================
+
+    /// Build an `ExecutionSolution` for flash mode.
+    ///
+    /// `sender` and `receiver` are set to the flash arb contract address.
+    /// For Tier 2 (Balancer), all hops are included.
+    fn build_solution_flash(
+        &self,
+        cycle: &EvaluatedCycle,
+        market: &SharedMarketData,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+        flash_arb_addr: Bytes,
+    ) -> Result<ExecutionSolution, String> {
+        let mut swaps = Vec::new();
+
+        for (from_addr, to_addr, component_id) in &cycle.edges {
+            let component = market
+                .get_component(component_id)
+                .ok_or_else(|| format!("component not found: {}", component_id))?;
+
+            let swap = ExecutionSwap::new(
+                component.clone(),
+                Bytes::from(from_addr.as_ref()),
+                Bytes::from(to_addr.as_ref()),
+            );
+            swaps.push(swap);
+        }
+
+        let bps = BigUint::from(10_000u32);
+        let slippage = BigUint::from(self.slippage_bps);
+        let multiplier = &bps - &slippage;
+        let checked_amount = (&cycle.amount_out * &multiplier) / &bps;
+
+        Ok(ExecutionSolution {
+            sender: flash_arb_addr.clone(),
+            receiver: flash_arb_addr,
+            given_token: Bytes::from(source_token_addr.as_ref()),
+            given_amount: cycle.optimal_amount_in.clone(),
+            checked_token: Bytes::from(source_token_addr.as_ref()),
+            exact_out: false,
+            checked_amount,
+            swaps,
+            ..Default::default()
+        })
+    }
+
+    /// Select flash tier based on first pool's protocol.
+    ///
+    /// Tier 1 (UniV2 flash swap) when first pool is UniV2/SushiV2.
+    /// Tier 2 (Balancer flash loan) is the fallback.
+    fn select_flash_tier(
+        &self,
+        cycle: &EvaluatedCycle,
+        market: &SharedMarketData,
+    ) -> FlashTier {
+        if cycle.edges.len() < 2 {
+            // Need at least 2 hops for Tier 1 (flash swap + rest)
+            return FlashTier::BalancerLoan;
+        }
+
+        let (from_addr, _to_addr, component_id) = &cycle.edges[0];
+        let component = match market.get_component(component_id) {
+            Some(c) => c,
+            None => return FlashTier::BalancerLoan,
+        };
+
+        let proto = component.protocol_system.as_str();
+        debug!(
+            first_pool_proto = proto,
+            component_id = component_id.as_str(),
+            "flash tier: checking first pool"
+        );
+        if proto != "uniswap_v2" && proto != "sushiswap_v2" {
+            debug!("flash tier: falling back to Tier 2 (non-V2 first pool)");
+            return FlashTier::BalancerLoan;
+        }
+
+        // Pair address: component ID is the pair address for V2
+        let pair_address = component_id
+            .parse::<Address>()
+            .unwrap_or_else(|_| {
+                component
+                    .contract_addresses
+                    .first()
+                    .map(|b| Address::from_slice(b.as_ref()))
+                    .unwrap_or(Address::ZERO)
+            });
+
+        // token0 is first in component's token list (sorted, matches
+        // on-chain order). zeroForOne = input token IS token0.
+        let token0 = component.tokens.first();
+        let input_token = Bytes::from(from_addr.as_ref());
+        let zero_for_one = token0
+            .map(|t0| t0.as_ref() == input_token.as_ref())
+            .unwrap_or(true);
+
+        // Simulate first hop to get amount_out (intermediate token)
+        let sim_state = match market.get_simulation_state(component_id) {
+            Some(s) => s,
+            None => return FlashTier::BalancerLoan,
+        };
+        let token_in = match market.get_token(from_addr) {
+            Some(t) => t.clone(),
+            None => return FlashTier::BalancerLoan,
+        };
+        let to_addr = &cycle.edges[0].1;
+        let token_out = match market.get_token(to_addr) {
+            Some(t) => t.clone(),
+            None => return FlashTier::BalancerLoan,
+        };
+        let sim_result = match sim_state.get_amount_out(
+            cycle.optimal_amount_in.clone(),
+            &token_in,
+            &token_out,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "Tier 1 sim failed, using Tier 2");
+                return FlashTier::BalancerLoan;
+            }
+        };
+        let amount_out = biguint_to_u256(&sim_result.amount);
+
+        // Repay amount = optimal_amount_in + 1 wei safety margin.
+        // Flash swap fee = normal swap fee (0.3%). The K-invariant
+        // check requires getAmountIn(amountOut) which equals the
+        // input we would have spent on a normal swap. Add 1 wei
+        // to cover integer rounding in the pair's K-check.
+        let repay_amount = biguint_to_u256(
+            &(&cycle.optimal_amount_in + BigUint::from(1u64)),
+        );
+
+        info!(
+            tier = 1,
+            pair = ?pair_address,
+            zero_for_one,
+            amount_out = %amount_out,
+            repay = %repay_amount,
+            "selected Tier 1: UniV2 flash swap"
+        );
+
+        FlashTier::V2FlashSwap {
+            pair_address,
+            zero_for_one,
+            amount_out,
+            repay_amount,
+        }
+    }
+
+    /// Build an `ExecutionSolution` for V2 flash swap (Tier 1).
+    ///
+    /// Skips the first hop (the flash swap itself) and builds
+    /// hops 2..N. `given_amount` is the intermediate token amount
+    /// received from the pair.
+    fn build_solution_flash_v2(
+        &self,
+        cycle: &EvaluatedCycle,
+        market: &SharedMarketData,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+        flash_arb_addr: Bytes,
+        intermediate_amount: &BigUint,
+    ) -> Result<ExecutionSolution, String> {
+        let mut swaps = Vec::new();
+        for (from_addr, to_addr, component_id) in &cycle.edges[1..] {
+            let component = market
+                .get_component(component_id)
+                .ok_or_else(|| {
+                    format!("component not found: {}", component_id)
+                })?;
+            swaps.push(ExecutionSwap::new(
+                component.clone(),
+                Bytes::from(from_addr.as_ref()),
+                Bytes::from(to_addr.as_ref()),
+            ));
+        }
+
+        let intermediate_token = &cycle.edges[1].0;
+        let bps = BigUint::from(10_000u32);
+        let slippage = BigUint::from(self.slippage_bps);
+        let multiplier = &bps - &slippage;
+        let checked_amount = (&cycle.amount_out * &multiplier) / &bps;
+
+        Ok(ExecutionSolution {
+            sender: flash_arb_addr.clone(),
+            receiver: flash_arb_addr,
+            given_token: Bytes::from(intermediate_token.as_ref()),
+            given_amount: intermediate_amount.clone(),
+            checked_token: Bytes::from(source_token_addr.as_ref()),
+            exact_out: false,
+            checked_amount,
+            swaps,
+            ..Default::default()
+        })
+    }
+
+    /// Encode an `ExecutionSolution` for flash mode (UserTransferType::TransferFrom).
+    fn encode_solution_flash(
+        &self,
+        solution: &ExecutionSolution,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+    ) -> Result<Transaction, String> {
+        let swap_encoder_registry = SwapEncoderRegistry::new(self.chain)
+            .add_default_encoders(None)
+            .map_err(|e| format!("swap encoder registry: {}", e))?;
+
+        let encoder = TychoRouterEncoderBuilder::new()
+            .chain(self.chain)
+            .user_transfer_type(UserTransferType::TransferFrom)
+            .swap_encoder_registry(swap_encoder_registry)
+            .build()
+            .map_err(|e| format!("encoder build: {}", e))?;
+
+        let encoded_solutions = encoder
+            .encode_solutions(vec![solution.clone()])
+            .map_err(|e| format!("encode: {}", e))?;
+
+        let encoded = encoded_solutions
+            .into_iter()
+            .next()
+            .ok_or("no encoded solution produced")?;
+
+        encode_tycho_router_call_no_permit(
+            encoded,
+            solution,
+            Bytes::from(source_token_addr.as_ref()),
+            true, // transfer_from: router pulls tokens from flash_arb via approve
+        )
+    }
+
+    /// Build solution + flash calldata for any tier.
+    ///
+    /// Returns (solution, flash_calldata, router_calldata).
+    #[allow(clippy::type_complexity)]
+    fn build_flash_calldata(
+        &self,
+        cycle: &EvaluatedCycle,
+        market: &SharedMarketData,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+        flash_arb_addr: Bytes,
+        tier: &FlashTier,
+    ) -> Result<(ExecutionSolution, AlloyBytes, AlloyBytes), String> {
+        let (solution, _given_token_addr) = match tier {
+            FlashTier::V2FlashSwap { amount_out, .. } => {
+                // Tier 1: hops 2..N only
+                let intermediate_amount =
+                    num_bigint::BigUint::from_bytes_be(
+                        &amount_out.to_be_bytes::<32>(),
+                    );
+                let sol = self.build_solution_flash_v2(
+                    cycle,
+                    market,
+                    source_token_addr,
+                    flash_arb_addr,
+                    &intermediate_amount,
+                )?;
+                // For Tier 1, the given token is the intermediate
+                // token (output of first hop, input of second hop).
+                let given_tok = cycle.edges[1].0.clone();
+                (sol, given_tok)
+            }
+            FlashTier::BalancerLoan => {
+                // Tier 2: all hops
+                let sol = self.build_solution_flash(
+                    cycle,
+                    market,
+                    source_token_addr,
+                    flash_arb_addr,
+                )?;
+                let given_tok = source_token_addr.clone();
+                (sol, given_tok)
+            }
+        };
+
+        // Encode router calldata
+        let router_tx = self.encode_solution_flash(
+            &solution, source_token_addr,
+        )?;
+        let router_address = Address::from_slice(&router_tx.to);
+        let router_calldata = AlloyBytes::from(router_tx.data.clone());
+
+        if router_calldata.len() >= 4 {
+            let sel: String = router_calldata[..4]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            debug!(
+                selector = %format!("0x{}", sel),
+                router = ?router_address,
+                calldata_len = router_calldata.len(),
+                "router calldata selector"
+            );
+        }
+
+        // Wrap in appropriate FlashArbExecutor call
+        let flash_calldata = match tier {
+            FlashTier::V2FlashSwap {
+                pair_address,
+                zero_for_one,
+                amount_out,
+                repay_amount,
+            } => {
+                debug!(
+                    tier = 1,
+                    pair = ?pair_address,
+                    "encoding V2 flash swap"
+                );
+                encode_flash_swap_v2_call(
+                    *pair_address,
+                    *amount_out,
+                    *zero_for_one,
+                    *repay_amount,
+                    router_address,
+                    router_calldata.clone(),
+                )
+            }
+            FlashTier::BalancerLoan => {
+                let source_token =
+                    Address::from_slice(source_token_addr.as_ref());
+                let amount_in =
+                    biguint_to_u256(&cycle.optimal_amount_in);
+                debug!(tier = 2, "encoding Balancer flash loan");
+                encode_flash_loan_call(
+                    source_token,
+                    amount_in,
+                    router_address,
+                    router_calldata.clone(),
+                )
+            }
+        };
+
+        debug!(
+            calldata_len = flash_calldata.len(),
+            "encoded flash call for simulation"
+        );
+
+        Ok((solution, flash_calldata, router_calldata))
+    }
+
+    /// Simulate a flash cycle via eth_call (auto-selects tier).
+    async fn simulate_flash(
+        &self,
+        cycle: &EvaluatedCycle,
+        market_ref: &SharedMarketDataRef,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+    ) -> ExecutionResult {
+        let flash_arb = match self.flash_arb_address {
+            Some(addr) => addr,
+            None => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::SimulateFlash,
+                    message: "flash-arb-address required for flash mode".into(),
+                }
+            }
+        };
+        let rpc_url = match &self.rpc_url {
+            Some(u) => u.clone(),
+            None => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::SimulateFlash,
+                    message: "RPC_URL required for simulation".into(),
+                }
+            }
+        };
+
+        let flash_arb_bytes = Bytes::from(flash_arb.as_slice());
+
+        // Select tier and build solution + calldata
+        let market = market_ref.read().await;
+        let tier = self.select_flash_tier(cycle, &market);
+
+        let (_solution, flash_calldata, _router_calldata) =
+            match self.build_flash_calldata(
+                cycle,
+                &market,
+                source_token_addr,
+                flash_arb_bytes,
+                &tier,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ExecutionResult {
+                        tx_hash: None,
+                        success: false,
+                        gas_used: None,
+                        mode: ExecutionMode::SimulateFlash,
+                        message: e,
+                    }
+                }
+            };
+        drop(market);
+
+        let provider: RootProvider<Ethereum> =
+            match ProviderBuilder::default().connect(&rpc_url).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return ExecutionResult {
+                        tx_hash: None,
+                        success: false,
+                        gas_used: None,
+                        mode: ExecutionMode::SimulateFlash,
+                        message: format!("RPC connect: {}", e),
+                    }
+                }
+            };
+
+        // Use bot address as sender (the contract owner)
+        let user_address = self
+            .signer
+            .as_ref()
+            .map(|s| s.address())
+            .unwrap_or(Address::ZERO);
+
+        // eth_call doesn't need gas pricing or nonce
+        let flash_request = TransactionRequest {
+            to: Some(TxKind::Call(flash_arb)),
+            from: Some(user_address),
+            input: TransactionInput {
+                input: Some(flash_calldata),
+                data: None,
+            },
+            gas: Some(1_500_000),
+            ..Default::default()
+        };
+
+        // Use eth_call (universally supported) instead of eth_simulate
+        match provider.call(flash_request.clone()).await {
+            Ok(_output) => {
+                // eth_call succeeded (no revert). Estimate gas.
+                let gas_used = provider
+                    .estimate_gas(flash_request)
+                    .await
+                    .ok();
+                info!(
+                    gas = ?gas_used,
+                    "flash simulation passed (eth_call)"
+                );
+                ExecutionResult {
+                    tx_hash: None,
+                    success: true,
+                    gas_used: gas_used.map(|g| g as u64),
+                    mode: ExecutionMode::SimulateFlash,
+                    message: "flash simulation passed".into(),
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "flash simulation reverted");
+
+                // Diagnostic logging only
+                ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::SimulateFlash,
+                    message: format!(
+                        "flash simulation reverted: {}",
+                        e
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Execute a flash loan cycle on-chain (auto-selects tier).
+    async fn execute_flash(
+        &self,
+        cycle: &EvaluatedCycle,
+        market_ref: &SharedMarketDataRef,
+        source_token_addr: &tycho_simulation::tycho_common::models::Address,
+    ) -> ExecutionResult {
+        let flash_arb = match self.flash_arb_address {
+            Some(addr) => addr,
+            None => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::ExecuteFlash,
+                    message: "flash-arb-address required for flash mode".into(),
+                }
+            }
+        };
+        let (rpc_url, signer) = match (&self.rpc_url, &self.signer) {
+            (Some(u), Some(s)) => (u.clone(), s.clone()),
+            _ => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::ExecuteFlash,
+                    message: "RPC_URL and PRIVATE_KEY required for flash execution"
+                        .into(),
+                }
+            }
+        };
+
+        let flash_arb_bytes = Bytes::from(flash_arb.as_slice());
+
+        let market = market_ref.read().await;
+        let tier = self.select_flash_tier(cycle, &market);
+
+        let (_solution, flash_calldata, _router_calldata) =
+            match self.build_flash_calldata(
+                cycle,
+                &market,
+                source_token_addr,
+                flash_arb_bytes,
+                &tier,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ExecutionResult {
+                        tx_hash: None,
+                        success: false,
+                        gas_used: None,
+                        mode: ExecutionMode::ExecuteFlash,
+                        message: e,
+                    }
+                }
+            };
+        drop(market);
+
+        let wallet = alloy::network::EthereumWallet::from(signer.clone());
+        let chain_id = chain_to_id(self.chain);
+        let named_chain = alloy_chains::NamedChain::try_from(chain_id)
+            .unwrap_or(alloy_chains::NamedChain::Mainnet);
+        let provider = match ProviderBuilder::default()
+            .with_chain(named_chain)
+            .wallet(wallet)
+            .connect(&rpc_url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::ExecuteFlash,
+                    message: format!("RPC connect: {}", e),
+                }
+            }
+        };
+
+        let user_address = signer.address();
+        let base_provider: &RootProvider<Ethereum> = provider.root();
+        let (base_fee, priority_fee, nonce) =
+            match self.fetch_tx_params(base_provider, user_address).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return ExecutionResult {
+                        tx_hash: None,
+                        success: false,
+                        gas_used: None,
+                        mode: ExecutionMode::ExecuteFlash,
+                        message: format!("fetch tx params: {}", e),
+                    }
+                }
+            };
+        let max_fee_per_gas = base_fee + priority_fee;
+
+        let mut flash_request = TransactionRequest {
+            to: Some(TxKind::Call(flash_arb)),
+            from: Some(user_address),
+            value: None,
+            input: TransactionInput {
+                input: Some(flash_calldata),
+                data: None,
+            },
+            chain_id: Some(chain_id),
+            max_fee_per_gas: Some(max_fee_per_gas.into()),
+            max_priority_fee_per_gas: Some(priority_fee.into()),
+            nonce: Some(nonce),
+            ..Default::default()
+        };
+
+        let gas = estimate_gas_with_buffer(
+            base_provider, &flash_request, 1_000_000,
+        ).await;
+        flash_request.gas = Some(gas);
+
+        info!("sending flash loan tx...");
+        let receipt = match provider.send_transaction(flash_request).await {
+            Ok(r) => r,
+            Err(e) => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::ExecuteFlash,
+                    message: format!("flash tx send: {}", e),
+                }
+            }
+        };
+        let result = match receipt.get_receipt().await {
+            Ok(r) => r,
+            Err(e) => {
+                return ExecutionResult {
+                    tx_hash: None,
+                    success: false,
+                    gas_used: None,
+                    mode: ExecutionMode::ExecuteFlash,
+                    message: format!("flash tx receipt: {}", e),
+                }
+            }
+        };
+
+        ExecutionResult {
+            tx_hash: Some(format!("{:?}", result.transaction_hash)),
+            success: result.status(),
+            gas_used: Some(result.gas_used),
+            mode: ExecutionMode::ExecuteFlash,
+            message: if result.status() {
+                "flash arb executed successfully".into()
+            } else {
+                "flash arb tx reverted".into()
+            },
+        }
+    }
 }
 
 // ==================== Helpers ====================
@@ -911,11 +1549,16 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     call_data
 }
 
-/// Encode router call for TransferFrom mode (no permit signature needed).
+/// Encode router call (no permit signature needed).
+///
+/// `transfer_from`: when `true`, router pulls tokens from sender via
+/// `transferFrom`. When `false` (flash mode), tokens are already in the
+/// router so no pull is needed.
 fn encode_tycho_router_call_no_permit(
     encoded_solution: EncodedSolution,
     solution: &ExecutionSolution,
     native_address: Bytes,
+    transfer_from: bool,
 ) -> Result<Transaction, String> {
     let given_amount = biguint_to_u256(&solution.given_amount);
     let min_amount_out = biguint_to_u256(&solution.checked_amount);
@@ -929,7 +1572,8 @@ fn encode_tycho_router_call_no_permit(
         given_token = ?given_token,
         checked_token = ?checked_token,
         receiver = ?receiver,
-        "encoding TransferFrom router call"
+        transfer_from = transfer_from,
+        "encoding router call"
     );
 
     let method_calldata = (
@@ -940,7 +1584,7 @@ fn encode_tycho_router_call_no_permit(
         false, // wrap
         false, // unwrap
         receiver,
-        true, // transfer_from = true
+        transfer_from,
         encoded_solution.swaps.clone(),
     )
         .abi_encode();

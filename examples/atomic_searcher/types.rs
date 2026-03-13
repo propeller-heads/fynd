@@ -60,6 +60,10 @@ pub enum ExecutionMode {
     ExecutePublic,
     /// Encode + sign + send via Flashbots Protect (private mempool).
     ExecuteProtected,
+    /// Encode + eth_simulate via flash loan contract (zero capital).
+    SimulateFlash,
+    /// Encode + send real tx via flash loan contract (zero capital).
+    ExecuteFlash,
 }
 
 impl ExecutionMode {
@@ -69,12 +73,19 @@ impl ExecutionMode {
             "simulate" => Ok(Self::Simulate),
             "execute-public" => Ok(Self::ExecutePublic),
             "execute-protected" => Ok(Self::ExecuteProtected),
+            "simulate-flash" => Ok(Self::SimulateFlash),
+            "execute-flash" => Ok(Self::ExecuteFlash),
             other => Err(format!(
-                "unknown execution mode '{}'. \
-                 Valid: log-only, simulate, execute-public, execute-protected",
+                "unknown execution mode '{}'. Valid: log-only, simulate, \
+                 execute-public, execute-protected, simulate-flash, execute-flash",
                 other
             )),
         }
+    }
+
+    /// Whether this mode uses flash loans (zero upfront capital).
+    pub fn is_flash(&self) -> bool {
+        matches!(self, Self::SimulateFlash | Self::ExecuteFlash)
     }
 }
 

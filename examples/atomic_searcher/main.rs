@@ -23,6 +23,7 @@
 mod amount_optimizer;
 mod cycle_detector;
 mod executor;
+mod flash_loan;
 mod types;
 
 use std::{
@@ -117,7 +118,8 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     bribe_pct: u32,
 
-    /// Execution mode: log-only, simulate, execute-public, execute-protected.
+    /// Execution mode: log-only, simulate, execute-public, execute-protected,
+    /// simulate-flash, execute-flash.
     #[arg(long, default_value = "log-only")]
     execution_mode: String,
 
@@ -136,6 +138,11 @@ struct Args {
     /// Also reads from RPC_URL env var.
     #[arg(long, env = "RPC_URL")]
     rpc_url: Option<String>,
+
+    /// Address of deployed FlashArbExecutor contract.
+    /// Required for simulate-flash and execute-flash modes.
+    #[arg(long, env = "FLASH_ARB_ADDRESS")]
+    flash_arb_address: Option<String>,
 }
 
 // ==================== Main ====================
@@ -161,6 +168,22 @@ async fn main() -> anyhow::Result<()> {
     let execution_mode = ExecutionMode::from_str_arg(&args.execution_mode)
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    // Parse and validate flash arb address
+    let flash_arb_address = args
+        .flash_arb_address
+        .as_ref()
+        .map(|s| {
+            s.parse::<alloy::primitives::Address>()
+                .map_err(|e| anyhow::anyhow!("invalid flash-arb-address: {}", e))
+        })
+        .transpose()?;
+
+    if execution_mode.is_flash() && flash_arb_address.is_none() {
+        anyhow::bail!(
+            "flash execution modes require --flash-arb-address"
+        );
+    }
+
     let chain = parse_chain(&args.chain)?;
 
     let cycle_executor = CycleExecutor::new(
@@ -169,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
         args.bribe_pct,
         args.rpc_url.clone(),
         args.private_key.clone(),
+        flash_arb_address,
     )?;
     let source_token_addr = native_token(&chain)?;
     let protocols: Vec<String> = args

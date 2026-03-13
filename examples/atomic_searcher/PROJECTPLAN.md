@@ -1,8 +1,8 @@
 # Atomic Searcher Showcase - Project Plan
 
-## Status: PHASE 1 COMPLETE
+## Status: PHASE 1.5 COMPLETE
 
-Last updated: 2026-03-10
+Last updated: 2026-03-13
 Branch: `ms/atomic-searcher-showcase`
 Repo: `/Users/markusschmitt/Documents/GitHub/fynd`
 PR: https://github.com/propeller-heads/fynd/pull/78
@@ -25,7 +25,11 @@ examples/atomic_searcher/
   cycle_detector.rs    - Layered BF for cycle detection + tests
   amount_optimizer.rs  - Golden section search + tests
   executor.rs          - Encoding + simulation + execution via TychoRouter
+  flash_loan.rs        - Flash loan ABI, encoding, FlashTier enum
   types.rs             - CycleCandidate, EvaluatedCycle, BlockSearchResult
+  contracts/
+    FlashArbExecutor.sol     - Solidity: flash swap + flash loan
+    FlashArbExecutor.bytecode - Compiled bytecode for deployment
   README.md            - Algorithm docs, usage, references
   TEST_PLAN.md         - Live execution test plan
   PROJECTPLAN.md       - This file
@@ -63,26 +67,51 @@ in blacklist.toml. Reported to Flo/Zach in #p-tycho.
 
 ---
 
-## Next: Phase 1.5 - Flash Loans (Capital-Free Execution)
+### Phase 1.5: Flash Loans - Capital-Free Execution (DONE)
 
-**Problem:** Current execution requires WETH in the wallet (TransferFrom mode). Real
-arb bots use flash loans/flash swaps to avoid needing upfront capital, enabling
-arbitrary-sized trades with zero capital risk.
+Zero-capital arbitrage via tiered flash strategy. Single atomic tx: borrow, swap, repay, keep profit.
 
-**Options to investigate:**
-1. **TychoRouter native support**: Check if TychoRouter already has a flash-loan
-   or internal-balance mode (UserTransferType variants beyond TransferFrom)
-2. **Flash loan wrapper contract**: Thin contract that takes an Aave/Balancer flash
-   loan, calls TychoRouter, repays. Simple but requires deploying a contract.
-3. **UniV2/V3 flash swap**: Use the first pool's native flash swap callback.
-   Most gas-efficient but couples to specific pool types.
+**Architecture:** FlashArbExecutor contract + tiered Rust encoding.
 
-**Tasks:**
-- [ ] Check TychoRouter for existing flash loan / internal transfer support
-- [ ] If not supported, design minimal flash loan wrapper contract
-- [ ] Update executor.rs to use flash-loan-funded cycles
-- [ ] Test with larger trade sizes (10+ ETH) on simulation
-- [ ] Validate on mainnet
+```
+examples/atomic_searcher/
+  flash_loan.rs          - ABI, encode functions, FlashTier enum, bytecode
+  contracts/
+    FlashArbExecutor.sol     - Solidity (both tiers)
+    FlashArbExecutor.bytecode - Compiled bytecode
+```
+
+**Two tiers, auto-selected per cycle:**
+- **Tier 1: UniV2 flash swap** - When first pool is UniV2/SushiV2. Near-zero extra gas (callback overhead only). Skips first hop in TychoRouter calldata.
+- **Tier 2: Balancer V2 flash loan** - Fallback for any route. ~80-100k extra gas overhead. 0% fee (governance-controlled).
+
+**Contract:** `0x1C62E62a6e6D604B0743870B20cc5921155eDD52` on Ethereum mainnet.
+- Deploy tx: `0x05695c6a87e15ee8d99b4fc9a2213936fe11e9f838052098dce703c8fd8f6963`
+- Owner: `0xFEa8eAfEB242360627C41AcB1F5Fda247DEA163E`
+
+**Completed items:**
+- [x] FlashArbExecutor.sol with two-phase callback guard (_expectedCaller)
+- [x] Tier 1: executeFlashSwapV2 + uniswapV2Call callback
+- [x] Tier 2: executeFlashLoan + receiveFlashLoan callback (approve+TransferFrom pattern)
+- [x] flash_loan.rs with ABI, encoding, FlashTier enum
+- [x] select_flash_tier() auto-selects based on first pool's protocol
+- [x] build_solution_flash_v2() for hops 2..N (Tier 1)
+- [x] SimulateFlash / ExecuteFlash execution modes
+- [x] CLI: --flash-arb-address, simulate-flash, execute-flash
+- [x] Contract deployed and verified on mainnet
+
+**Live results (2026-03-13):**
+- Multiple successful eth_call simulations with Tier 2 (Balancer), gas: 360k-500k
+- Tier selection correctly identifies V3 first pools and falls back to Tier 2
+- Live mainnet tx: `0xaa27df37fb8c981b1a245bbbaf8d9a54c8e7c0540f6a858b2e8b48973d907fe1` (block 24651066)
+  - Reverted as expected (force-execute on net-unprofitable cycle, used for pipeline validation)
+  - Gas used: 439,285. Full encode -> sign -> send -> on-chain pipeline verified.
+
+**Key design decisions:**
+1. Approve+TransferFrom pattern (not direct transfer) to avoid TychoRouter underflow
+2. Two-phase _expectedCaller guard instead of reentrancy lock (callbacks need to re-enter)
+3. Full balance sweep for profit extraction (simpler than remainder math)
+4. 1 wei safety margin on Tier 1 repay amount (K-invariant rounding)
 
 ---
 
@@ -153,13 +182,15 @@ Paper: https://www.overleaf.com/read/ksqhzzmndmqh
 
 ## Testing Summary
 
-### Unit Tests (11, all passing)
+### Unit Tests (13, all passing)
 
 Cycle detector (6): simple_cycle, no_cycle_unprofitable, empty_graph, multi_hop,
 subgraph_depth, dedup_duplicates
 
 Amount optimizer (5): gss_optimal, gss_unprofitable, gss_small_seed, evaluate_correct,
 missing_nodes_none
+
+Flash loan (2): encode_flash_loan_call_valid, encode_flash_swap_v2_call_valid
 
 ### Live Testing (Ethereum mainnet)
 
@@ -177,6 +208,8 @@ missing_nodes_none
 4. **Token-level blacklist**: Pool-level insufficient for rebase tokens.
 5. **Direct execution**: tycho-execution + alloy directly, not FyndClient.
 6. **Will move to separate repo**: Per Alan's feedback.
+7. **Approve+TransferFrom for flash loans**: Direct transfer causes TychoRouter underflow in _verifyAmountOutWasReceived. Contract approves router, router pulls via transferFrom.
+8. **Tiered flash strategy**: V2 flash swap (near-zero gas) preferred, Balancer fallback for all routes. Auto-selected per cycle.
 
 ## How to Resume
 
@@ -187,17 +220,19 @@ git checkout ms/atomic-searcher-showcase
 # Run tests
 cargo test --example atomic_searcher
 
-# Run live (simulate mode)
+# Run live (simulate mode, requires capital)
 RUST_LOG="atomic_searcher=debug,fynd=info" cargo run --example atomic_searcher -- \
   --execution-mode simulate --force-execute \
-  --chain ethereum \
-  --private-key "$PRIVATE_KEY" \
-  --rpc-url "https://ethereum-mainnet.core.chainstack.com/71bdd37d35f18d55fed5cc5d138a8fac" \
-  --protocols "uniswap_v2,uniswap_v3,sushiswap_v2,pancakeswap_v2" \
-  --min-tvl 5.0 --seed-eth 0.01
+  --private-key "$PRIVATE_KEY" --rpc-url "$RPC_URL"
 
-# RPC that supports eth_simulateV1: use the chainstack core URL above
-# The p2pify RPC does NOT support eth_simulateV1
+# Run live (flash loan mode, zero capital)
+RUST_LOG="atomic_searcher=debug,fynd=info" cargo run --example atomic_searcher -- \
+  --execution-mode simulate-flash --force-execute \
+  --flash-arb-address "0x1C62E62a6e6D604B0743870B20cc5921155eDD52" \
+  --private-key "$PRIVATE_KEY" --rpc-url "$RPC_URL"
+
+# Execute flash arb for real (sends mainnet tx)
+# --execution-mode execute-flash (same args as above)
 ```
 
 ## References
