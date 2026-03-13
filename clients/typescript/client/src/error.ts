@@ -75,12 +75,19 @@ export class FyndError extends Error {
     return false;
   }
 
-  /** Creates a `FyndError` from a server error response. */
-  static fromWireError(wire: WireErrorResponse): FyndError {
-    const code: ErrorCode = KNOWN_SERVER_CODES.has(wire.code)
-      ? (wire.code as ServerErrorCode)
-      : { kind: 'UNKNOWN', raw: wire.code };
-    return new FyndError(wire.error, code, wire.details);
+  /** Creates a `FyndError` from a server error response or unstructured error. */
+  static fromWireError(wire: WireErrorResponse | unknown): FyndError {
+    const obj = wire as Record<string, unknown>;
+    const rawCode = obj['code'];
+    const rawError = obj['error'];
+    if (typeof rawCode !== 'string' || typeof rawError !== 'string') {
+      const message = typeof wire === 'string' ? wire : JSON.stringify(wire);
+      return new FyndError(message, 'HTTP');
+    }
+    const code: ErrorCode = KNOWN_SERVER_CODES.has(rawCode)
+      ? (rawCode as ServerErrorCode)
+      : { kind: 'UNKNOWN', raw: rawCode };
+    return new FyndError(rawError, code, obj['details']);
   }
 
   /** Creates a `CONFIG` error for invalid or missing client configuration. */

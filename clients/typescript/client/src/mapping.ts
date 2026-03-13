@@ -121,7 +121,8 @@ function fromWireBlockInfo(wire: WireBlockInfo): BlockInfo {
 
 function toWireEncodingOptions(opts: EncodingOptions): WireEncodingOptions {
   return {
-    slippage: opts.slippage,
+    // Server deserializes slippage as a string despite OpenAPI declaring number.
+    slippage: opts.slippage.toString() as unknown as number,
     ...(opts.transferType !== undefined ? { transfer_type: opts.transferType } : {}),
     ...(opts.permit !== undefined ? { permit: toWirePermitSingle(opts.permit) } : {}),
     ...(opts.permit2Signature !== undefined

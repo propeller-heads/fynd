@@ -102,7 +102,13 @@ export function viemProvider(
       });
     },
     async getTransactionReceipt(args) {
-      const receipt = await client.getTransactionReceipt(args);
+      let receipt;
+      try {
+        receipt = await client.getTransactionReceipt(args);
+      } catch {
+        // viem throws when the receipt is not yet available; settle() expects null.
+        return null;
+      }
       return {
         transactionHash: receipt.transactionHash,
         gasUsed: receipt.gasUsed,

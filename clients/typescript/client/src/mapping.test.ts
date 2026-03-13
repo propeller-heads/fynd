@@ -113,7 +113,7 @@ describe('toWireRequest', () => {
     };
     const wire = toWireRequest(params);
     expect(wire.options?.encoding_options).toBeDefined();
-    expect(wire.options?.encoding_options?.slippage).toBe(0.005);
+    expect(wire.options?.encoding_options?.slippage).toBe("0.005");
     expect(wire.options?.encoding_options?.transfer_type).toBe('transfer_from');
   });
 
