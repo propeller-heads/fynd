@@ -76,8 +76,7 @@ struct Pair {
 }
 
 fn load_pairs_file() -> PairsFile {
-    serde_json::from_str(PAIRS_JSON)
-        .unwrap_or_else(|e| panic!("failed to parse pairs.json: {e}"))
+    serde_json::from_str(PAIRS_JSON).unwrap_or_else(|e| panic!("failed to parse pairs.json: {e}"))
 }
 
 fn human_to_raw(amount: f64, decimals: u8) -> String {

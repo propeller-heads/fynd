@@ -279,9 +279,18 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
             .cloned()
             .reduce(f64::max)
             .unwrap_or(0.0);
-        let gas_b_lower = gas_diffs.iter().filter(|&&d| d < 0.0).count();
-        let gas_a_lower = gas_diffs.iter().filter(|&&d| d > 0.0).count();
-        let gas_equal = gas_diffs.iter().filter(|&&d| d == 0.0).count();
+        let gas_b_lower = gas_diffs
+            .iter()
+            .filter(|&&d| d < 0.0)
+            .count();
+        let gas_a_lower = gas_diffs
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count();
+        let gas_equal = gas_diffs
+            .iter()
+            .filter(|&&d| d == 0.0)
+            .count();
         println!("\n  Gas Estimate (negative = {label_b} cheaper):");
         println!("    {label_b} cheaper: {gas_b_lower}/{}", gas_diffs.len());
         println!("    {label_a} cheaper: {gas_a_lower}/{}", gas_diffs.len());
