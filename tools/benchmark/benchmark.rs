@@ -1,13 +1,15 @@
 mod config;
 mod exporter;
+mod requests;
 mod runner;
 
 use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
-use config::{load_requests, BenchmarkConfig, BenchmarkResults, ParallelizationMode};
+use config::{BenchmarkConfig, BenchmarkResults, ParallelizationMode};
 use exporter::{export_results, print_histogram, print_statistics};
 use fynd_client::{FyndClient, FyndClientBuilder};
+use requests::{default_request, load_request_templates, SwapRequest};
 use runner::{run_benchmark, RunnerResults};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -40,33 +42,26 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_env("RUST_LOG"))
         .with_target(true)
         .init();
 
-    // Parse CLI arguments
     let cli = Cli::parse();
 
     let parallelization_mode = ParallelizationMode::from_str(&cli.parallelization_mode)?;
 
-    // Print configuration
     info!("Solver URL: {}", cli.solver_url);
     info!("Number of requests: {}", cli.num_requests);
     info!("Parallelization mode: {:?}", parallelization_mode);
 
-    // Build the fynd client (quote-only: no Ethereum RPC required)
     let client = Arc::new(FyndClientBuilder::new(&cli.solver_url, "").build_quote_only()?);
 
-    // Check if solver is ready
     check_solver_health(&client).await?;
     info!("Solver is ready");
 
-    // Load requests
     let (requests, requests_file) = load_requests(cli.requests_file.as_deref())?;
 
-    // Run benchmark
     let benchmark_start = Instant::now();
     let RunnerResults {
         round_trip_times,
@@ -78,14 +73,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
-    // Calculate overhead
     let overheads: Vec<u64> = round_trip_times
         .iter()
         .zip(solve_times.iter())
         .map(|(rt, st)| rt.saturating_sub(*st))
         .collect();
 
-    // Print and export results
     if successful_requests > 0 {
         let failed_requests = cli.num_requests - successful_requests;
         let throughput_rps = if total_duration_ms > 0 {
@@ -118,12 +111,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 parallelization_mode,
                 requests_file,
                 num_request_templates: requests.len(),
-                chain: None,
-                rpc_url: None,
-                tycho_url: None,
-                protocols: Vec::new(),
-                worker_pools_config_path: None,
-                worker_pools_config: None,
             };
 
             let results = BenchmarkResults::new(
@@ -147,6 +134,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn load_requests(
+    requests_file: Option<&str>,
+) -> Result<(Vec<SwapRequest>, Option<String>), Box<dyn std::error::Error>> {
+    let requests = if let Some(file_path) = requests_file {
+        info!("Loading requests from: {}", file_path);
+        let loaded = load_request_templates(file_path, 10000)?;
+        info!("Loaded {} request template(s)", loaded.len());
+        loaded
+    } else {
+        info!("No requests file specified, using default request template");
+        vec![default_request(10000)]
+    };
+
+    if requests.len() == 1 {
+        println!("Request template: {}", requests[0].label);
+    } else {
+        println!("Using {} different request templates (randomized)", requests.len());
+    }
+    println!();
+
+    Ok((requests, requests_file.map(|s| s.to_string())))
 }
 
 async fn check_solver_health(client: &FyndClient) -> Result<(), Box<dyn std::error::Error>> {

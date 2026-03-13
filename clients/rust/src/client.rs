@@ -532,7 +532,7 @@ where
         token_out: Bytes,
         receiver: Bytes,
     ) -> Result<Quote, FyndError> {
-        let url = format!("{}/v1/solve", self.base_url);
+        let url = format!("{}/v1/quote", self.base_url);
         let response = self
             .http
             .post(&url)
@@ -888,7 +888,7 @@ mod tests {
         });
 
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
             .mount(&server)
@@ -918,7 +918,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
                 "error": "bad input",
                 "code": "BAD_REQUEST"
@@ -950,7 +950,7 @@ mod tests {
 
         // First attempt: service unavailable.
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
                 "error": "queue full",
                 "code": "QUEUE_FULL"
@@ -979,7 +979,7 @@ mod tests {
             "solve_time_ms": 10
         });
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(ResponseTemplate::new(200).set_body_json(success_body))
             .up_to_n_times(1)
             .mount(&server)
@@ -1007,7 +1007,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
                 "error": "queue full",
                 "code": "QUEUE_FULL"
@@ -1038,7 +1038,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/solve"))
+            .and(path("/v1/quote"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"garbage": true})),
             )

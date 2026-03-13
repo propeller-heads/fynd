@@ -102,7 +102,7 @@ async fn full_quote_roundtrip() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("order-1")))
         .expect(1)
         .mount(&server)
@@ -164,7 +164,7 @@ async fn quote_retries_once_then_succeeds() {
 
     // First request fails with a retryable error.
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
             "error": "service overloaded",
             "code": "SERVICE_OVERLOADED"
@@ -175,7 +175,7 @@ async fn quote_retries_once_then_succeeds() {
 
     // Second request succeeds.
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("retry-ok")))
         .up_to_n_times(1)
         .mount(&server)
@@ -242,7 +242,7 @@ async fn quote_with_multi_hop_route_deserializes_all_swaps() {
     });
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .expect(1)
         .mount(&server)
@@ -282,7 +282,7 @@ async fn quote_bad_request_not_retried() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
             "error": "no orders provided",
             "code": "BAD_REQUEST"
@@ -312,7 +312,7 @@ async fn quote_populates_token_out_and_receiver_from_order() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(minimal_quote_json("populated-order")),
         )
@@ -353,7 +353,7 @@ async fn quote_receiver_defaults_to_sender_when_none() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("recv-default")))
         .expect(1)
         .mount(&server)
@@ -392,7 +392,7 @@ async fn full_quote_then_signable_payload_with_all_hints() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("flow-order")))
         .expect(1)
         .mount(&server)
@@ -441,7 +441,7 @@ async fn full_quote_then_signable_payload_resolves_from_provider() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/solve"))
+        .and(path("/v1/quote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json("provider-flow")))
         .expect(1)
         .mount(&server)
