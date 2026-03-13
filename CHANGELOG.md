@@ -1,3 +1,10 @@
+## [0.12.1](https://github.com/propeller-heads/fynd/compare/0.12.0...0.12.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* blacklist malfunctioning AMPL and Fluid Lite pools ([29e5114](https://github.com/propeller-heads/fynd/commit/29e5114c5825ebe492a6158e4ddf74a76d8f4814))
+
 ## [0.12.0](https://github.com/propeller-heads/fynd/compare/0.11.0...0.12.0) (2026-03-13)
 
 
