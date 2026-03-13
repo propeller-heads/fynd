@@ -45,3 +45,5 @@ export type {
   RetryConfig,
   SigningHints,
 } from "./client.js";
+export { viemProvider } from "./viem.js";
+export type { ViemPublicClient } from "./viem.js";
