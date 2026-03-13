@@ -7,8 +7,12 @@
 //! # Usage
 //!
 //! ```bash
-//! # All supported protocols are fetched from Tycho RPC by default:
+//! # All on-chain protocols are fetched from Tycho RPC by default:
 //! fynd serve --tycho-url tycho-beta.propellerheads.xyz
+//!
+//! # Combine all on-chain protocols with specific RFQ protocols:
+//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//!            --protocols all_onchain,rfq:bebop
 //!
 //! # Or specify protocols explicitly:
 //! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
@@ -202,16 +206,27 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
         }
     };
 
-    // Resolve protocols: use CLI args, or fetch all supported from Tycho RPC
-    let protocols = if args.protocols.is_empty() {
-        fetch_protocol_systems(
+    // Resolve protocols: fetch from Tycho RPC if omitted or if "all_onchain" is used
+    let needs_fetch = args.protocols.is_empty() ||
+        args.protocols
+            .iter()
+            .any(|p| p == "all_onchain");
+    let protocols = if needs_fetch {
+        let mut fetched = fetch_protocol_systems(
             &args.tycho_url,
             args.tycho_api_key.as_deref(),
             !args.disable_tls,
             chain,
         )
         .await
-        .map_err(|e| SolverError::SetupError(format!("failed to fetch protocol systems: {}", e)))?
+        .map_err(|e| SolverError::SetupError(format!("failed to fetch protocol systems: {}", e)))?;
+        // Append any explicit protocols (e.g. rfq:bebop) alongside all_onchain
+        for p in &args.protocols {
+            if p != "all_onchain" && !fetched.contains(p) {
+                fetched.push(p.clone());
+            }
+        }
+        fetched
     } else {
         args.protocols.clone()
     };
