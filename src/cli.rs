@@ -37,9 +37,9 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::HTTP_PORT, env)]
     pub http_port: u16,
 
-    /// Tycho WebSocket URL (default: tycho-beta.propellerheads.xyz)
-    #[arg(long, default_value = "localhost:4242", env)]
-    pub tycho_url: String,
+    /// Tycho WebSocket URL. Defaults to the Fynd endpoint for the selected chain.
+    #[arg(long, env)]
+    pub tycho_url: Option<String>,
 
     /// Tycho API key
     #[arg(long, env)]
@@ -143,7 +143,7 @@ mod cli_tests {
         assert_eq!(args.http_port, 8080);
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
         assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
-        assert_eq!(args.tycho_url, "wss://custom.tycho.url");
+        assert_eq!(args.tycho_url, Some("wss://custom.tycho.url".to_string()));
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, 20.0);
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
@@ -163,7 +163,7 @@ mod cli_tests {
         assert_eq!(args.http_port, 3000);
         assert_eq!(args.tycho_api_key, None);
         assert_eq!(args.rpc_url, None);
-        assert_eq!(args.tycho_url, "localhost:4242");
+        assert_eq!(args.tycho_url, None);
         assert!(args.protocols.is_empty());
         assert_eq!(args.min_tvl, 10.0);
         assert_eq!(args.tvl_buffer_ratio, 1.1);
