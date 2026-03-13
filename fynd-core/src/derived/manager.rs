@@ -295,6 +295,12 @@ impl ComputationManager {
             }
             Err(e) => {
                 warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: SpotPriceComputation::ID,
+                        block,
+                    });
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
@@ -339,6 +345,12 @@ impl ComputationManager {
             }
             Err(e) => {
                 warn!(error = ?e, "token price computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
             }
         }
 
@@ -356,6 +368,12 @@ impl ComputationManager {
             }
             Err(e) => {
                 warn!(error = ?e, "pool depth computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
             }
         }
 
@@ -402,12 +420,30 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, RwLock};
 
     use super::*;
-    use crate::algorithm::test_utils::{setup_market, token, MockProtocolSim};
+    use crate::{
+        algorithm::test_utils::{component, setup_market, token, MockProtocolSim},
+        feed::market_data::SharedMarketData,
+        types::BlockInfo,
+    };
+
+    /// Drains all currently-pending events from a broadcast receiver into a Vec.
+    fn drain_events(rx: &mut broadcast::Receiver<DerivedDataEvent>) -> Vec<DerivedDataEvent> {
+        let mut events = vec![];
+        loop {
+            match rx.try_recv() {
+                Ok(e) => events.push(e),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        events
+    }
 
     #[test]
     fn invalid_slippage_threshold_returns_error() {
@@ -490,6 +526,94 @@ mod tests {
             .await
             .expect("manager should shutdown")
             .expect("task should complete successfully");
+    }
+
+    /// Creates a market with a component in topology but WITHOUT simulation state.
+    ///
+    /// Used to trigger `TotalFailure` in spot_price computation (full recompute with
+    /// all components missing sim_state → succeeded == 0 → failure).
+    fn market_with_component_no_sim_state() -> Arc<RwLock<SharedMarketData>> {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+
+        let mut market = SharedMarketData::new();
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components(std::iter::once(pool));
+        // Note: no update_states() — simulation state is intentionally absent
+        market.upsert_tokens([eth, usdc]);
+        Arc::new(RwLock::new(market))
+    }
+
+    /// Creates a market WITH sim_state but WITHOUT gas_price.
+    ///
+    /// Spot price computation succeeds (MockProtocolSim works), but token_price
+    /// computation fails with `MissingDependency("gas_price")`.
+    fn market_with_sim_state_no_gas_price() -> Arc<RwLock<SharedMarketData>> {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+
+        let mut market = SharedMarketData::new();
+        // Note: no update_gas_price() — gas price is intentionally absent
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components(std::iter::once(pool));
+        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.upsert_tokens([eth, usdc]);
+        Arc::new(RwLock::new(market))
+    }
+
+    #[tokio::test]
+    async fn spot_price_failure_broadcasts_computation_failed() {
+        let market = market_with_component_no_sim_state();
+        let config = ComputationManagerConfig::new();
+        let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
+
+        // Full recompute with components that have no sim_state → TotalFailure
+        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+        manager.compute_all(&changed).await;
+
+        let events = drain_events(&mut event_rx);
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
+            )),
+            "expected ComputationFailed(spot_prices) in events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_price_failure_broadcasts_computation_failed() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let market = market_with_sim_state_no_gas_price();
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (mut manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
+
+        // handle_event with added components — spot_price succeeds, token_price fails
+        let event = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        manager
+            .handle_event(&event)
+            .await
+            .unwrap();
+
+        let events = drain_events(&mut event_rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationFailed { computation_id: "token_prices", .. }
+            )),
+            "expected ComputationFailed(token_prices) in events: {events:?}"
+        );
     }
 
     #[tokio::test]

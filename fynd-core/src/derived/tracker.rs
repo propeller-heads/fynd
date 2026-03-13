@@ -54,6 +54,11 @@ pub struct ReadinessTracker {
     ready_for_block: HashSet<ComputationId>,
     /// Set of computation IDs that have been computed at least once (any block).
     ever_computed: HashSet<ComputationId>,
+    /// `require_fresh` computations that have permanently failed for the current block.
+    ///
+    /// Cleared on `NewBlock`. A computation in this set will never produce a
+    /// `ComputationComplete` for the current block.
+    failed_for_block: HashSet<ComputationId>,
     /// Requirements for this worker's algorithm.
     requirements: ComputationRequirements,
 }
@@ -65,6 +70,7 @@ impl ReadinessTracker {
             current_block: None,
             ready_for_block: HashSet::new(),
             ever_computed: HashSet::new(),
+            failed_for_block: HashSet::new(),
             requirements,
         }
     }
@@ -84,6 +90,9 @@ impl ReadinessTracker {
             DerivedDataEvent::ComputationComplete { computation_id, block } => {
                 self.on_computation_complete(computation_id, *block);
             }
+            DerivedDataEvent::ComputationFailed { computation_id, block } => {
+                self.on_computation_failed(computation_id, *block);
+            }
         }
     }
 
@@ -96,7 +105,25 @@ impl ReadinessTracker {
         {
             self.current_block = Some(block);
             self.ready_for_block.clear();
+            self.failed_for_block.clear();
             // Note: ever_computed is NOT cleared - stale data persists
+        }
+    }
+
+    /// Handles a computation failure event.
+    ///
+    /// Only tracks failures for `require_fresh` computations on the current block.
+    /// `allow_stale` failures are ignored because stale data remains usable.
+    fn on_computation_failed(&mut self, computation_id: ComputationId, block: u64) {
+        if self
+            .requirements
+            .require_fresh
+            .contains(computation_id) &&
+            self.current_block
+                .is_some_and(|b| block == b)
+        {
+            self.failed_for_block
+                .insert(computation_id);
         }
     }
 
@@ -125,6 +152,18 @@ impl ReadinessTracker {
 
         self.ready_for_block
             .insert(computation_id);
+    }
+
+    /// Returns true if any `require_fresh` computation has failed for the
+    /// current block (i.e., it will never produce a `ComputationComplete` this block).
+    ///
+    /// Workers should return an error immediately rather than waiting for a timeout when
+    /// this is true.
+    pub fn is_blocked_for_current_block(&self) -> bool {
+        self.requirements
+            .require_fresh
+            .iter()
+            .any(|id| self.failed_for_block.contains(id))
     }
 
     /// Returns true if all requirements are satisfied:
@@ -397,6 +436,89 @@ mod tests {
             block: 101,
         });
         assert!(tracker.is_ready()); // Both satisfied again
+    }
+
+    // ==================== ComputationFailed / is_blocked_for_current_block Tests
+    // ====================
+
+    #[test]
+    fn is_blocked_when_require_fresh_computation_fails_for_current_block() {
+        let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
+
+        tracker.handle_event(&DerivedDataEvent::ComputationFailed {
+            computation_id: "spot_prices",
+            block: 100,
+        });
+
+        assert!(tracker.is_blocked_for_current_block());
+    }
+
+    #[test]
+    fn is_not_blocked_for_allow_stale_computation_failure() {
+        let mut tracker = ReadinessTracker::new(stale_requirements(&["token_prices"]));
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
+
+        tracker.handle_event(&DerivedDataEvent::ComputationFailed {
+            computation_id: "token_prices",
+            block: 100,
+        });
+
+        // allow_stale failures are ignored — stale data remains usable
+        assert!(!tracker.is_blocked_for_current_block());
+    }
+
+    #[test]
+    fn failed_for_block_cleared_on_new_block() {
+        let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
+        tracker.handle_event(&DerivedDataEvent::ComputationFailed {
+            computation_id: "spot_prices",
+            block: 100,
+        });
+        assert!(tracker.is_blocked_for_current_block());
+
+        // New block clears the failure set
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 101 });
+        assert!(!tracker.is_blocked_for_current_block());
+    }
+
+    #[test]
+    fn failure_for_old_block_does_not_block_current() {
+        let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
+
+        // Failure event for block 99 (old) should not affect current block 100
+        tracker.handle_event(&DerivedDataEvent::ComputationFailed {
+            computation_id: "spot_prices",
+            block: 99,
+        });
+
+        assert!(!tracker.is_blocked_for_current_block());
+    }
+
+    #[test]
+    fn failure_then_new_block_then_success_becomes_ready() {
+        let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
+
+        // Block 100: failure
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
+        tracker.handle_event(&DerivedDataEvent::ComputationFailed {
+            computation_id: "spot_prices",
+            block: 100,
+        });
+        assert!(tracker.is_blocked_for_current_block());
+        assert!(!tracker.is_ready());
+
+        // Block 101: success
+        tracker.handle_event(&DerivedDataEvent::NewBlock { block: 101 });
+        tracker.handle_event(&DerivedDataEvent::ComputationComplete {
+            computation_id: "spot_prices",
+            block: 101,
+        });
+
+        assert!(!tracker.is_blocked_for_current_block());
+        assert!(tracker.is_ready());
     }
 
     #[test]

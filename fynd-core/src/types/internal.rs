@@ -99,6 +99,14 @@ pub enum SolveError {
     #[error("no workers ready: {0}")]
     NotReady(String),
 
+    /// A required derived data computation failed for the current block.
+    ///
+    /// Unlike `NotReady` (data hasn't arrived yet), this is a permanent failure for
+    /// this block — the data will never arrive. Workers should not be retried until
+    /// the next block.
+    #[error("computation failed: {0}")]
+    ComputationFailed(String),
+
     /// Error when encoding
     #[error("failed to encode: {0}")]
     FailedEncoding(String),
