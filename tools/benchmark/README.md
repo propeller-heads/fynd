@@ -170,5 +170,6 @@ By default, the benchmark uses a single WETH->USDC swap and the compare tool gen
 | `runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `exporter.rs` | Statistics calculation and JSON export |
 | `compare.rs` | Comparison tool entry point |
-| `requests.rs` | Token/pair definitions and random request generation |
+| `requests.rs` | Request generation and file loading |
+| `pairs.json` | Token and pair definitions for random request generation |
 | `requests_set.json` | Sample request templates |

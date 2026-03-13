@@ -65,7 +65,9 @@ struct Metrics {
 #[derive(Debug, Serialize)]
 struct Comparison {
     status_match: bool,
+    // Amount out not considering gas
     amount_out_diff_bps: Option<f64>,
+    gas_estimate_diff_pct: Option<f64>,
     route_match: bool,
 }
 
@@ -157,9 +159,19 @@ fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
         None
     };
 
+    let gas_a: u128 = a.gas_estimate.parse().unwrap_or(0);
+    let gas_b: u128 = b.gas_estimate.parse().unwrap_or(0);
+    let gas_estimate_diff_pct = if gas_a > 0 && gas_b > 0 {
+        Some((gas_b as f64 - gas_a as f64) * 100.0 / gas_a as f64)
+    } else if gas_a == 0 && gas_b == 0 {
+        Some(0.0)
+    } else {
+        None
+    };
+
     let route_match = a.route_protocols == b.route_protocols;
 
-    Comparison { status_match, amount_out_diff_bps, route_match }
+    Comparison { status_match, amount_out_diff_bps, gas_estimate_diff_pct, route_match }
 }
 
 async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, FyndError>, u64) {
@@ -230,7 +242,7 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     println!("    Identical routes:      {route_matches}/{total}");
 
     if !diffs.is_empty() {
-        println!("\n  Amount Out (positive = {label_b} better):");
+        println!("\n  Amount Out — before gas (positive = {label_b} better):");
         println!("    {label_b} better: {b_better}/{}", diffs.len());
         println!("    {label_a} better: {a_better}/{}", diffs.len());
         println!("    Equal:       {equal}/{}", diffs.len());
@@ -248,6 +260,35 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         println!("    Avg diff:    {avg:+.2} bps");
         println!("    Min diff:    {min:+.2} bps");
         println!("    Max diff:    {max:+.2} bps");
+    }
+
+    let gas_diffs: Vec<f64> = results
+        .iter()
+        .filter_map(|r| r.comparison.gas_estimate_diff_pct)
+        .collect();
+
+    if !gas_diffs.is_empty() {
+        let gas_avg: f64 = gas_diffs.iter().sum::<f64>() / gas_diffs.len() as f64;
+        let gas_min = gas_diffs
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .unwrap_or(0.0);
+        let gas_max = gas_diffs
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        let gas_b_lower = gas_diffs.iter().filter(|&&d| d < 0.0).count();
+        let gas_a_lower = gas_diffs.iter().filter(|&&d| d > 0.0).count();
+        let gas_equal = gas_diffs.iter().filter(|&&d| d == 0.0).count();
+        println!("\n  Gas Estimate (negative = {label_b} cheaper):");
+        println!("    {label_b} cheaper: {gas_b_lower}/{}", gas_diffs.len());
+        println!("    {label_a} cheaper: {gas_a_lower}/{}", gas_diffs.len());
+        println!("    Equal:        {gas_equal}/{}", gas_diffs.len());
+        println!("    Avg diff:     {gas_avg:+.2}%");
+        println!("    Min diff:     {gas_min:+.2}%");
+        println!("    Max diff:     {gas_max:+.2}%");
     }
 
     // Significant outliers
