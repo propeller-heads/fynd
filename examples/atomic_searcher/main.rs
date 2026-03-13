@@ -31,6 +31,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use tycho_simulation::tycho_common::Bytes;
 
 use clap::Parser;
 use num_bigint::BigUint;
@@ -42,6 +43,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use fynd::{
+    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         events::MarketEventHandler,
         market_data::{SharedMarketData, SharedMarketDataRef},
@@ -53,7 +55,18 @@ use fynd::{
 };
 
 use crate::executor::CycleExecutor;
-use crate::types::{BlockSearchResult, ExecutionMode};
+use crate::types::{BlockSearchResult, EvaluatedCycle, ExecutionMode};
+
+/// Default source tokens for Ethereum (WETH + major stables + WBTC).
+/// These are the highest-connectivity tokens that anchor distinct
+/// liquidity clusters. Each one gets its own BF scan per block.
+const DEFAULT_SOURCE_TOKENS_ETH: &[&str] = &[
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
+    "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", // WBTC
+];
 
 // ==================== CLI ====================
 
@@ -80,9 +93,17 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     max_hops: usize,
 
-    /// Seed amount in ETH for the initial BF scan.
-    #[arg(long, default_value_t = 1.0)]
+    /// Seed amount in ETH for the initial BF scan. Small values find more
+    /// candidates (less price impact masking mispricings). GSS independently
+    /// optimizes the actual trade amount for each candidate found.
+    #[arg(long, default_value_t = 0.001)]
     seed_eth: f64,
+
+    /// Source token addresses to search from (comma-separated, hex with 0x).
+    /// Each token gets its own BF scan per block. Default: WETH only.
+    /// Use "all" for WETH + USDC + USDT + DAI + WBTC.
+    #[arg(long)]
+    source_tokens: Option<String>,
 
     /// GSS convergence tolerance (relative).
     #[arg(long, default_value_t = 0.001)]
@@ -122,6 +143,13 @@ struct Args {
     /// simulate-flash, execute-flash.
     #[arg(long, default_value = "log-only")]
     execution_mode: String,
+
+    /// Number of top candidates to verify via RPC (eth_call + estimate_gas)
+    /// before execution. 0 = disabled (execute best Tycho estimate directly).
+    /// When > 0, simulates the top N gross-positive cycles and picks the
+    /// first that passes on-chain simulation.
+    #[arg(long, default_value_t = 0)]
+    verify_top_n: usize,
 
     /// Force execution on the best gross-positive cycle even if net-unprofitable.
     /// Useful for testing the encoding/execution pipeline on mainnet where all
@@ -194,14 +222,25 @@ async fn main() -> anyhow::Result<()> {
         args.private_key.clone(),
         flash_arb_address,
     )?;
-    let source_token_addr = native_token(&chain)?;
+    let weth_addr = native_token(&chain)?;
     let protocols: Vec<String> = args
         .protocols
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
 
-    // Seed amount in wei (1 ETH = 1e18 wei)
+    // Parse source tokens
+    let source_token_addrs: Vec<tycho_simulation::tycho_common::models::Address> =
+        parse_source_tokens(&args.source_tokens, &weth_addr);
+    info!(
+        source_tokens = source_token_addrs.len(),
+        "source tokens configured"
+    );
+
+    // Seed amount in wei (1 ETH = 1e18 wei).
+    // For non-ETH tokens the seed is still specified in ETH-equivalent
+    // terms; a small seed works universally because GSS optimizes the
+    // actual trade size independently.
     let seed_amount = BigUint::from((args.seed_eth * 1e18) as u128);
 
     // Load pool blacklist
@@ -232,9 +271,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let source_labels: Vec<String> = source_token_addrs
+        .iter()
+        .map(|a| format!("0x{}", &hex::encode(a)[..8]))
+        .collect();
     info!(
         chain = ?chain,
-        source_token = %hex::encode(&source_token_addr),
+        source_tokens = ?source_labels,
         seed_eth = args.seed_eth,
         max_hops = args.max_hops,
         protocols = ?protocols,
@@ -243,6 +286,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Set up shared market data
     let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
+
+    // Set up derived data computation (token prices for gas cost conversion)
+    let cm_config = ComputationManagerConfig::new()
+        .with_gas_token(weth_addr.clone())
+        .with_max_hop(2);
+    let (mut computation_manager, _derived_event_rx) =
+        ComputationManager::new(cm_config, market_data.clone())?;
+    let derived_store = computation_manager.store();
 
     // Set up Tycho feed with blacklist
     let feed_config = TychoFeedConfig::new(
@@ -276,10 +327,13 @@ async fn main() -> anyhow::Result<()> {
     loop {
         match event_rx.recv().await {
             Ok(event) => {
-                // Update graph
+                // Update graph and derived data (token prices)
                 if let Err(e) = graph_manager.handle_event(&event).await {
                     warn!("Graph event error: {:?}", e);
                     continue;
+                }
+                if let Err(e) = computation_manager.handle_event(&event).await {
+                    warn!("Computation manager event error: {:?}", e);
                 }
 
                 let block_number = {
@@ -302,54 +356,129 @@ async fn main() -> anyhow::Result<()> {
 
                 blocks_processed += 1;
 
-                // Run the arbitrage search
-                let result = search_block(
-                    block_number,
-                    &source_token_addr,
-                    &seed_amount,
-                    args.max_hops,
-                    graph_manager.graph(),
-                    &market_data,
-                    args.gss_tolerance,
-                    args.gss_max_iter,
-                    &blacklisted_tokens,
-                    args.min_profit_bps,
-                )
-                .await;
+                // Run BF scan for each source token, merge all cycles
+                let mut all_cycles: Vec<(EvaluatedCycle, usize)> = Vec::new();
+                let mut total_candidates = 0usize;
+                let start = Instant::now();
 
-                log_results(&result);
+                for (src_idx, src_addr) in source_token_addrs.iter().enumerate() {
+                    let result = search_block(
+                        block_number,
+                        src_addr,
+                        &seed_amount,
+                        args.max_hops,
+                        graph_manager.graph(),
+                        &market_data,
+                        &derived_store,
+                        args.gss_tolerance,
+                        args.gss_max_iter,
+                        &blacklisted_tokens,
+                        args.min_profit_bps,
+                    )
+                    .await;
+                    total_candidates += result.candidates_found;
+                    for cycle in result.cycles {
+                        all_cycles.push((cycle, src_idx));
+                    }
+                }
+
+                // Sort all cycles by net profit descending
+                all_cycles.sort_by(|a, b| b.0.net_profit.cmp(&a.0.net_profit));
+
+                let profitable = all_cycles.iter().filter(|(c, _)| c.is_profitable).count();
+                let search_ms = start.elapsed().as_millis() as u64;
+
+                let merged = BlockSearchResult {
+                    block_number,
+                    candidates_found: total_candidates,
+                    profitable_cycles: profitable,
+                    cycles: all_cycles.iter().map(|(c, _)| c.clone()).collect(),
+                    search_time_ms: search_ms,
+                };
+                log_results(&merged);
 
                 // Execute best profitable cycle if mode != LogOnly.
-                // The executor acquires the market lock only during
-                // build_solution and drops it before any network I/O,
-                // so TychoFeed writes are not blocked.
                 if execution_mode != ExecutionMode::LogOnly {
-                    // Pick best cycle: profitable first, or best gross+ if force_execute
-                    let best = result
-                        .cycles
+                    let exec_candidates: Vec<_> = all_cycles
                         .iter()
-                        .find(|c| c.is_profitable)
-                        .or_else(|| {
-                            if args.force_execute {
-                                // Pick best gross-positive cycle (highest gross_profit)
-                                result
-                                    .cycles
-                                    .iter()
-                                    .find(|c| c.gross_profit > BigUint::ZERO)
-                            } else {
-                                None
-                            }
-                        });
+                        .filter(|(c, _)| {
+                            c.is_profitable
+                                || (args.force_execute
+                                    && c.gross_profit > BigUint::ZERO)
+                        })
+                        .collect();
 
-                    if let Some(best) = best {
+                    // With --verify-top-n: simulate top N via RPC, pick
+                    // first that passes. Without: use Tycho estimates.
+                    let to_execute =
+                        if args.verify_top_n > 0 && !exec_candidates.is_empty()
+                        {
+                            let verify_mode = if execution_mode.is_flash() {
+                                ExecutionMode::SimulateFlash
+                            } else {
+                                ExecutionMode::Simulate
+                            };
+                            let n =
+                                args.verify_top_n.min(exec_candidates.len());
+                            info!(count = n, "verifying top candidates via RPC");
+
+                            let mut found = None;
+                            for (cycle, src_idx) in
+                                exec_candidates.iter().take(n)
+                            {
+                                let src_addr =
+                                    &source_token_addrs[*src_idx];
+                                let sim = cycle_executor
+                                    .execute_cycle(
+                                        cycle,
+                                        &market_data,
+                                        src_addr,
+                                        &verify_mode,
+                                    )
+                                    .await;
+                                if sim.success {
+                                    info!(
+                                        gas_tycho = %cycle.gas_cost,
+                                        gas_rpc = ?sim.gas_used,
+                                        "RPC verification passed"
+                                    );
+                                    found = Some((
+                                        (*cycle).clone(),
+                                        *src_idx,
+                                    ));
+                                    break;
+                                }
+                                info!(
+                                    msg = %sim.message,
+                                    "RPC verification failed, trying next"
+                                );
+                            }
+                            if found.is_none() && n > 0 {
+                                info!(
+                                    "all {} candidates failed RPC verification",
+                                    n
+                                );
+                            }
+                            found
+                        } else {
+                            exec_candidates
+                                .first()
+                                .map(|(c, idx)| ((*c).clone(), *idx))
+                        };
+
+                    if let Some((ref best, src_idx)) = to_execute {
+                        let src_addr = &source_token_addrs[src_idx];
                         if !best.is_profitable {
-                            info!("force-execute: using best gross+ cycle (net-unprofitable)");
+                            info!(
+                                source = %format!("0x{}", &hex::encode(src_addr)[..8]),
+                                "force-execute: using best gross+ cycle (net-unprofitable)"
+                            );
                         }
                         let exec_result = cycle_executor
                             .execute_cycle(
                                 best,
                                 &market_data,
-                                &source_token_addr,
+                                src_addr,
                                 &execution_mode,
                             )
                             .await;
@@ -377,6 +506,47 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ==================== Source Token Parsing ====================
+
+/// Parse source token addresses from CLI arg.
+///
+/// - `None` => just WETH (native token)
+/// - `"all"` => WETH + USDC + USDT + DAI + WBTC
+/// - comma-separated hex addresses => those addresses
+fn parse_source_tokens(
+    arg: &Option<String>,
+    weth_addr: &tycho_simulation::tycho_common::models::Address,
+) -> Vec<tycho_simulation::tycho_common::models::Address> {
+    let Some(raw) = arg else {
+        return vec![weth_addr.clone()];
+    };
+
+    if raw.trim().eq_ignore_ascii_case("all") {
+        return DEFAULT_SOURCE_TOKENS_ETH
+            .iter()
+            .filter_map(|hex_str| {
+                let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+                hex::decode(stripped).ok().map(Bytes::from)
+            })
+            .collect();
+    }
+
+    let mut addrs: Vec<tycho_simulation::tycho_common::models::Address> = raw
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim().strip_prefix("0x").unwrap_or(s.trim());
+            hex::decode(s).ok().map(Bytes::from)
+        })
+        .collect();
+
+    if addrs.is_empty() {
+        warn!("no valid source tokens parsed, falling back to WETH");
+        addrs.push(weth_addr.clone());
+    }
+
+    addrs
+}
+
 // ==================== Search Logic ====================
 
 #[allow(clippy::too_many_arguments)]
@@ -387,6 +557,7 @@ async fn search_block(
     max_hops: usize,
     graph: &StableDiGraph<()>,
     market_data: &SharedMarketDataRef,
+    derived_store: &SharedDerivedDataRef,
     gss_tolerance: f64,
     gss_max_iter: usize,
     blacklisted_tokens: &HashSet<Vec<u8>>,
@@ -493,16 +664,35 @@ async fn search_block(
         };
     }
 
-    // Get gas price for profit calculation
+    // Get gas price and token price for profit calculation.
+    // Gas cost is denominated in ETH (wei). For WETH source the conversion
+    // is 1:1. For non-WETH sources we look up the token's price relative
+    // to WETH from the derived TokenGasPrices (numerator/denominator).
     let gas_price_wei = market_subset
         .gas_price()
         .map(|gp| gp.effective_gas_price())
-        .unwrap_or_else(|| BigUint::from(30_000_000_000u64)); // 30 gwei fallback
+        .unwrap_or_else(|| BigUint::from(30_000_000_000u64));
 
-    // For WETH-denominated cycles, gas cost in source token = gas cost in ETH = gas_price * gas_used
-    // So gas_token_price is 1:1 (numerator = 1, denominator = 1)
-    let gas_token_price_num = BigUint::from(1u64);
-    let gas_token_price_den = BigUint::from(1u64);
+    let weth_bytes: Vec<u8> =
+        hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+    let is_weth_source = source_token_addr.as_ref() == weth_bytes.as_slice();
+
+    let (gas_token_price_num, gas_token_price_den) = if is_weth_source {
+        (BigUint::from(1u64), BigUint::from(1u64))
+    } else {
+        let derived = derived_store.read().await;
+        derived
+            .token_prices()
+            .and_then(|prices| prices.get(source_token_addr))
+            .map(|price| (price.numerator.clone(), price.denominator.clone()))
+            .unwrap_or_else(|| {
+                warn!(
+                    source = %format!("0x{}", &hex::encode(source_token_addr)[..8]),
+                    "no token price for source, using gas_cost=0"
+                );
+                (BigUint::ZERO, BigUint::from(1u64))
+            })
+    };
 
     // Phase 2: Optimize each candidate via golden section search
     let mut cycles: Vec<_> = candidates
