@@ -1,3 +1,10 @@
+## [0.12.0](https://github.com/propeller-heads/fynd/compare/0.11.0...0.12.0) (2026-03-13)
+
+
+### Features
+
+* Don't allow intermediate cyclical swaps ([eb515e2](https://github.com/propeller-heads/fynd/commit/eb515e2d202c9607b6497d567d99e1f7ef294657))
+
 ## [0.11.0](https://github.com/propeller-heads/fynd/compare/0.10.0...0.11.0) (2026-03-12)
 
 
