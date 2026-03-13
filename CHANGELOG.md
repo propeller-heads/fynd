@@ -1,3 +1,20 @@
+## [0.13.0](https://github.com/propeller-heads/fynd/compare/0.12.1...0.13.0) (2026-03-13)
+
+
+### Features
+
+* Comparison example ([d81668f](https://github.com/propeller-heads/fynd/commit/d81668f9f3f1f78cfafd19ba303ef7b4beb74680))
+
+
+### Bug Fixes
+
+* rename all refs of /v1/solve to /v1/quote ([0c4d661](https://github.com/propeller-heads/fynd/commit/0c4d6613a075a436ca1db039c4c95cbf9ccf6a26))
+
+
+### Reverts
+
+* Restore /v1/solve endpoint in FyndClient ([878fcb2](https://github.com/propeller-heads/fynd/commit/878fcb2a0aecb1f2fcd702b94e41eba41bd375c0))
+
 ## [0.12.1](https://github.com/propeller-heads/fynd/compare/0.12.0...0.12.1) (2026-03-13)
 
 
