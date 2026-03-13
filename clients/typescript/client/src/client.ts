@@ -98,6 +98,9 @@ export interface FyndClientOptions {
  *
  * Provides methods to request quotes, build signable payloads, and execute
  * signed swap transactions on-chain.
+ *
+ * Requires `provider` for building signable payloads and executing transactions.
+ * Optionally accepts a separate `submitProvider` for broadcasting (falls back to `provider`).
  */
 export class FyndClient {
   private readonly http: AutogenClient;
@@ -109,9 +112,18 @@ export class FyndClient {
   }
 
   /**
-   * Requests a swap quote from the solver with automatic retry on transient errors.
+   * Requests a swap quote from the solver.
    *
-   * @throws {FyndError} With a server or client error code on failure.
+   * Retries automatically on transient server errors (`TIMEOUT`, `QUEUE_FULL`,
+   * `SERVICE_OVERLOADED`, `STALE_DATA`, `NOT_READY`) using exponential backoff
+   * with jitter. Configure retry behavior via {@link FyndClientOptions.retry}
+   * (defaults: 3 attempts, 100ms initial backoff, 2s max backoff).
+   *
+   * Each request is subject to an HTTP timeout controlled by
+   * {@link FyndClientOptions.timeoutMs} (default: 30s).
+   *
+   * @throws {FyndError} With a server error code (`NO_ROUTE_FOUND`, `INSUFFICIENT_LIQUIDITY`, etc.) on non-retryable failures.
+   * @throws {FyndError} With code `HTTP` on network-level failures.
    */
   async quote(params: QuoteParams): Promise<Quote> {
     const tokenOut = params.order.tokenOut;
@@ -165,7 +177,10 @@ export class FyndClient {
   /**
    * Returns the solver's health status.
    *
-   * @throws {FyndError} If the server returns an error or is unreachable.
+   * Unlike {@link quote}, this method does not retry on transient errors.
+   *
+   * @throws {FyndError} With a server error code if the solver reports unhealthy.
+   * @throws {FyndError} With code `HTTP` on network-level failures.
    */
   async health(): Promise<HealthStatus> {
     const { data, error } = await this.http.GET("/v1/health");
@@ -179,11 +194,23 @@ export class FyndClient {
   }
 
   /**
-   * Builds an unsigned transaction payload from a quote, ready for wallet signing.
+   * Builds an unsigned EIP-1559 transaction payload from a quote, ready for wallet signing.
    *
-   * @remarks Requires a `provider` and `sender` to be configured (via options or hints).
-   * @throws {FyndError} With code `CONFIG` if provider/sender is missing or quote has no transaction.
-   * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the call reverts.
+   * Fetches the sender's nonce and current gas fees from the provider unless
+   * overridden via {@link SigningHints}. The gas limit defaults to `quote.gasEstimate`.
+   *
+   * The quote must include a `transaction` field (returned when `encodingOptions`
+   * is set in the quote request). The `to`, `value`, and `data` fields are read
+   * from `quote.transaction`.
+   *
+   * When `hints.simulate` is `true`, the transaction is executed via `eth_call`
+   * before returning. This catches reverts early but adds one RPC round-trip.
+   *
+   * @param quote - A quote obtained from {@link quote}. Must have `transaction` populated.
+   * @param hints - Optional overrides for nonce, gas fees, gas limit, sender, and simulation.
+   * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
+   * @throws {FyndError} With code `CONFIG` if `quote.transaction` is absent (forgot `encodingOptions`).
+   * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the `eth_call` reverts.
    */
   async signablePayload(quote: Quote, hints?: SigningHints): Promise<SignablePayload> {
     if (quote.backend !== 'fynd') {
@@ -248,9 +275,24 @@ export class FyndClient {
   /**
    * Broadcasts a signed order on-chain and returns a handle to await settlement.
    *
-   * Call {@link ExecutionReceipt.settle} on the result to wait for confirmation.
+   * Uses `submitProvider` if configured, otherwise falls back to `provider`.
+   * The signed transaction is serialized as an EIP-1559 envelope and sent via
+   * `eth_sendRawTransaction`.
    *
-   * @throws {FyndError} With code `CONFIG` if no provider is configured or the signature is invalid.
+   * Call {@link ExecutionReceipt.settle} on the returned handle to poll for
+   * the transaction receipt. Settlement polling has a default timeout of
+   * {@link DEFAULT_SETTLE_TIMEOUT_MS} (120s), configurable via {@link SettleOptions.timeoutMs}.
+   * The settled result includes `gasCost` (gasUsed * effectiveGasPrice) and
+   * `settledAmount` (parsed from ERC-20/ERC-6909 Transfer logs to the receiver).
+   *
+   * When `dryRun` is `true`, the transaction is simulated via `eth_call` and
+   * `eth_estimateGas` without broadcasting. The returned `settle()` resolves
+   * immediately with estimated gas cost and decoded return data.
+   *
+   * @param order - A signed order from {@link assembleSignedOrder}.
+   * @param options - Set `dryRun: true` to simulate without broadcasting.
+   * @throws {FyndError} With code `CONFIG` if no provider is configured.
+   * @throws {FyndError} With code `CONFIG` if the signature has an invalid v byte.
    * @throws {FyndError} With code `SIMULATE_FAILED` when `dryRun` is `true` and the simulation reverts.
    */
   async execute(order: SignedOrder, options?: ExecutionOptions): Promise<ExecutionReceipt> {
