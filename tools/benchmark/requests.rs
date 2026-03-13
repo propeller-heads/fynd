@@ -1,11 +1,15 @@
+// Shared by both benchmark and compare examples; each uses a different subset.
+#![allow(dead_code)]
+
 use std::str::FromStr;
 
 use alloy::hex;
 use bytes::Bytes;
 use fynd_client::{Order, OrderSide, QuoteOptions, QuoteParams};
 use num_bigint::BigUint;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize)]
 pub struct SwapRequest {
     pub label: String,
     token_in_addr: String,
@@ -13,6 +17,18 @@ pub struct SwapRequest {
     raw_amount: String,
     sender_addr: String,
     timeout_ms: u64,
+}
+
+/// Default WETH → USDC request used by the benchmark when no file is provided.
+pub fn default_request(timeout_ms: u64) -> SwapRequest {
+    SwapRequest {
+        label: "1 WETH -> USDC".to_string(),
+        token_in_addr: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+        token_out_addr: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+        raw_amount: "1000000000000000000".to_string(),
+        sender_addr: SENDER.to_string(),
+        timeout_ms,
+    }
 }
 
 impl SwapRequest {
@@ -172,9 +188,12 @@ fn default_sender() -> String {
     SENDER.to_string()
 }
 
-pub fn load_requests_from_file(
+/// Load all request templates from a JSON file.
+///
+/// Returns one `SwapRequest` per entry in the file. Use this when you need the
+/// full template pool (e.g. benchmark randomly samples from them during the run).
+pub fn load_request_templates(
     path: &str,
-    n: usize,
     timeout_ms: u64,
 ) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(path)?;
@@ -183,9 +202,9 @@ pub fn load_requests_from_file(
         return Err("requests file contains no requests".into());
     }
 
-    let requests = (0..n)
-        .map(|_| {
-            let tmpl = &templates[fastrand::usize(..templates.len())];
+    let requests = templates
+        .iter()
+        .map(|tmpl| {
             let order = &tmpl.orders[0];
             let in_sym = symbol_for_address(&order.token_in);
             let out_sym = symbol_for_address(&order.token_out);
@@ -199,6 +218,24 @@ pub fn load_requests_from_file(
                 timeout_ms,
             }
         })
+        .collect();
+
+    Ok(requests)
+}
+
+/// Load requests from a JSON file and randomly sample `n` from them.
+///
+/// Use this when you need a fixed number of pre-generated requests
+/// (e.g. compare sends the same N requests to both solvers).
+pub fn load_requests_from_file(
+    path: &str,
+    n: usize,
+    timeout_ms: u64,
+) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
+    let templates = load_request_templates(path, timeout_ms)?;
+
+    let requests = (0..n)
+        .map(|_| templates[fastrand::usize(..templates.len())].clone())
         .collect();
 
     Ok(requests)

@@ -3,7 +3,8 @@ use std::{sync::Arc, time::Instant};
 use fynd_client::{FyndClient, FyndError, Quote, QuoteStatus};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::config::{ParallelizationMode, RequestTemplate};
+use crate::config::ParallelizationMode;
+use crate::requests::SwapRequest;
 
 /// Results from a benchmark run.
 pub struct RunnerResults {
@@ -19,7 +20,7 @@ impl ParallelizationMode {
     pub async fn run(
         &self,
         client: Arc<FyndClient>,
-        requests: &[RequestTemplate],
+        requests: &[SwapRequest],
         num_requests: usize,
     ) -> RunnerResults {
         match self {
@@ -37,7 +38,7 @@ impl ParallelizationMode {
 /// Main benchmark runner that dispatches to the appropriate parallelization mode
 pub async fn run_benchmark(
     client: Arc<FyndClient>,
-    requests: &[RequestTemplate],
+    requests: &[SwapRequest],
     num_requests: usize,
     mode: &ParallelizationMode,
 ) -> RunnerResults {
@@ -48,7 +49,7 @@ pub async fn run_benchmark(
 /// Sequential execution: wait for each response before firing the next request
 async fn run_sequential(
     client: Arc<FyndClient>,
-    requests: &[RequestTemplate],
+    requests: &[SwapRequest],
     num_requests: usize,
 ) -> RunnerResults {
     let mut round_trip_times = Vec::new();
@@ -65,8 +66,7 @@ async fn run_sequential(
 
         let template = fastrand::choice(requests).unwrap();
         let params = template
-            .to_quote_params()
-            .expect("templates validated at load time");
+            .to_quote_params();
 
         let start = Instant::now();
         let result = client.quote(params).await;
@@ -96,7 +96,7 @@ async fn run_sequential(
 /// When one request completes, immediately fire a new one to maintain the concurrency level.
 async fn run_fixed_concurrency(
     client: Arc<FyndClient>,
-    requests: &[RequestTemplate],
+    requests: &[SwapRequest],
     num_requests: usize,
     concurrency: usize,
 ) -> RunnerResults {
@@ -132,9 +132,7 @@ async fn run_fixed_concurrency(
 
         let task = tokio::spawn(async move {
             let template = fastrand::choice(requests.as_slice()).unwrap();
-            let params = template
-                .to_quote_params()
-                .expect("templates validated at load time");
+            let params = template.to_quote_params();
 
             let start = Instant::now();
             let result = client.quote(params).await;
@@ -210,7 +208,7 @@ async fn run_fixed_concurrency(
 /// All requests are spawned as independent tasks (fire-and-forget pattern).
 async fn run_rate_based(
     client: Arc<FyndClient>,
-    requests: &[RequestTemplate],
+    requests: &[SwapRequest],
     num_requests: usize,
     interval_ms: u64,
 ) -> RunnerResults {
@@ -246,9 +244,7 @@ async fn run_rate_based(
 
         let task = tokio::spawn(async move {
             let template = fastrand::choice(requests.as_slice()).unwrap();
-            let params = template
-                .to_quote_params()
-                .expect("templates validated at load time");
+            let params = template.to_quote_params();
 
             let start = Instant::now();
             let result = client.quote(params).await;
