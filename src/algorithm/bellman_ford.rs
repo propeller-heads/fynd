@@ -13,7 +13,8 @@
 //! Three optimizations keep simulation calls within budget:
 //! - **Subgraph extraction**: BFS prunes the graph to nodes reachable within `max_hops`
 //! - **SPFA queuing**: Only re-relaxes edges from nodes whose distance improved
-//! - **Top-N re-simulation**: Re-simulates the top 3 candidate layers to handle divergence
+//! - **No-revisit constraint**: Token and pool revisits are forbidden during relaxation,
+//!   so re-simulation matches relaxation exactly (no state-override divergence)
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -24,11 +25,7 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
 use tracing::{debug, instrument, trace, warn};
-use tycho_simulation::{
-    evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
-    tycho_common::simulation::protocol_sim::ProtocolSim,
-    tycho_core::models::token::Token,
-};
+use tycho_simulation::tycho_core::models::{token::Token, Address};
 
 use super::{Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
 use crate::{
@@ -153,9 +150,10 @@ impl Algorithm for BellmanFordAlgorithm {
         );
 
         // Layered BF relaxation with SPFA optimization: distance[hop][node] tracks
-        // the best amount reachable at each node using exactly `hop` edges. This
-        // correctly handles paths that revisit intermediate tokens (e.g.,
-        // WETH -> AMPL -> WETH -> USDC) because each layer is independent.
+        // the best amount reachable at each node using exactly `hop` edges.
+        // Token and pool revisits are forbidden: before updating distance[k+1][v],
+        // we walk the predecessor chain to verify neither the destination token nor
+        // the edge's pool already appear in the path.
         //
         // SPFA: instead of scanning all nodes per layer, we track which nodes were
         // updated and only relax their outgoing edges in the next layer. This reduces
@@ -199,16 +197,6 @@ impl Algorithm for BellmanFordAlgorithm {
                 break;
             }
 
-            // Log source node distance at this layer (useful for debugging hub-revisit paths)
-            let src_idx = token_in_node.index();
-            if k > 0 && !distance[k][src_idx].is_zero() {
-                trace!(
-                    layer = k,
-                    source_distance = %distance[k][src_idx],
-                    "source token reachable at layer (hub revisit)"
-                );
-            }
-
             let mut next_active: HashSet<NodeIndex> = HashSet::new();
 
             for &u in &active_nodes {
@@ -231,6 +219,15 @@ impl Algorithm for BellmanFordAlgorithm {
                     let Some(token_v) = token_map.get(&v) else {
                         continue;
                     };
+
+                    // Forbid token revisits: skip if v's token already appears in the path
+                    if path_contains_token(u, k, &graph[v], &predecessor, graph) {
+                        continue;
+                    }
+                    // Forbid pool revisits: skip if this component already used in the path
+                    if path_contains_pool(u, k, component_id, &predecessor) {
+                        continue;
+                    }
 
                     let Some(sim_state) = market_subset.get_simulation_state(component_id) else {
                         continue;
@@ -266,9 +263,6 @@ impl Algorithm for BellmanFordAlgorithm {
         }
 
         // Collect all candidate layers where destination is reachable.
-        // Instead of picking only the relaxation-best, we re-simulate multiple
-        // candidates to handle re-simulation divergence (where the relaxation-optimal
-        // path may not be the true best after state-override re-simulation).
         let out_idx = token_out_node.index();
         let mut candidates: Vec<(usize, BigUint)> = Vec::new();
         for (k, layer) in distance.iter().enumerate().skip(1) {
@@ -289,9 +283,9 @@ impl Algorithm for BellmanFordAlgorithm {
         // Sort by relaxation amount descending (best candidates first)
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
-        // Re-simulate top candidates and pick the one with best net_amount_out.
-        // Cap at 3 to bound re-simulation cost.
-        let top_n = candidates.len().min(3);
+        // Re-simulate the best candidate. Without pool revisits, relaxation amounts
+        // match re-simulation amounts, so the relaxation ranking is reliable.
+        let top_n = candidates.len().min(1);
         let mut best_result: Option<(RouteResult, BigUint)> = None;
 
         for &(layer, ref _relaxation_amount) in candidates.iter().take(top_n) {
@@ -352,15 +346,12 @@ impl Algorithm for BellmanFordAlgorithm {
             });
         };
 
-        // Check for duplicate pool usage in the route
         let component_ids: Vec<&str> = result
             .route
             .swaps
             .iter()
             .map(|s| s.component_id.as_str())
             .collect();
-        let unique_components: HashSet<&str> = component_ids.iter().copied().collect();
-        let has_duplicate_pools = unique_components.len() < component_ids.len();
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
         debug!(
@@ -370,8 +361,6 @@ impl Algorithm for BellmanFordAlgorithm {
             amount_out = %final_amount_out,
             net_amount_out = %result.net_amount_out,
             route = %component_ids.join(" -> "),
-            has_duplicate_pools,
-            candidates_evaluated = top_n,
             "bellman_ford route found"
         );
 
@@ -426,6 +415,55 @@ fn extract_subgraph(
     edges
 }
 
+/// Returns true if `target_token` already appears in the predecessor chain ending at
+/// node `u` at layer `k`. Walks backward from (u, k) to the source in O(max_hops).
+fn path_contains_token(
+    u: NodeIndex,
+    k: usize,
+    target_token: &Address,
+    predecessor: &[Vec<Option<(NodeIndex, ComponentId)>>],
+    graph: &StableDiGraph<()>,
+) -> bool {
+    let mut current = u;
+    for layer in (1..=k).rev() {
+        if graph[current] == *target_token {
+            return true;
+        }
+        match &predecessor[layer][current.index()] {
+            Some((prev, _)) => current = *prev,
+            None => break,
+        }
+    }
+    // Check the source node (layer 0)
+    if graph[current] == *target_token {
+        return true;
+    }
+    false
+}
+
+/// Returns true if `target_pool` (component_id) already appears in the predecessor
+/// chain ending at node `u` at layer `k`. Walks backward in O(max_hops).
+fn path_contains_pool(
+    u: NodeIndex,
+    k: usize,
+    target_pool: &ComponentId,
+    predecessor: &[Vec<Option<(NodeIndex, ComponentId)>>],
+) -> bool {
+    let mut current = u;
+    for layer in (1..=k).rev() {
+        match &predecessor[layer][current.index()] {
+            Some((prev, cid)) => {
+                if cid == target_pool {
+                    return true;
+                }
+                current = *prev;
+            }
+            None => break,
+        }
+    }
+    false
+}
+
 /// Reconstructs the path from token_out back to token_in by walking the layered
 /// predecessor structure. Each layer k holds the predecessor for hop k.
 fn reconstruct_layered_path(
@@ -464,11 +502,10 @@ fn reconstruct_layered_path(
     Ok(path)
 }
 
-/// Re-simulates the path with exact amounts and state overrides for revisited pools.
+/// Re-simulates the path with exact amounts.
 ///
-/// This produces the authoritative final amounts. During SPFA relaxation, each edge
-/// was evaluated against original pool state. Re-simulation applies state overrides
-/// when the same pool is visited more than once.
+/// Each pool is visited at most once (enforced during relaxation), so no state
+/// overrides are needed; every pool uses its original state.
 fn simulate_path(
     path: &[(NodeIndex, NodeIndex, ComponentId)],
     amount_in: &BigUint,
@@ -478,10 +515,6 @@ fn simulate_path(
 ) -> Result<(Route, BigUint), AlgorithmError> {
     let mut current_amount = amount_in.clone();
     let mut swaps = Vec::with_capacity(path.len());
-
-    // Track state overrides for pools we've already swapped through
-    let mut native_state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-    let mut vm_state_override: Option<Box<dyn ProtocolSim>> = None;
 
     for (from_node, to_node, component_id) in path {
         let token_in = token_map
@@ -503,30 +536,14 @@ fn simulate_path(
                 kind: "component",
                 id: Some(component_id.clone()),
             })?;
-        let component_state = market
+        let sim_state = market
             .get_simulation_state(component_id)
             .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "simulation state",
                 id: Some(component_id.clone()),
             })?;
 
-        let is_vm = component_state
-            .as_any()
-            .downcast_ref::<EVMPoolState<PreCachedDB>>()
-            .is_some();
-
-        // Use override if pool was already visited
-        let state_override = if is_vm {
-            vm_state_override.as_ref()
-        } else {
-            native_state_overrides.get(component_id)
-        };
-
-        let state = state_override
-            .map(Box::as_ref)
-            .unwrap_or(component_state);
-
-        let result = state
+        let result = sim_state
             .get_amount_out(current_amount.clone(), token_in, token_out)
             .map_err(|e| AlgorithmError::SimulationFailed {
                 component_id: component_id.clone(),
@@ -543,12 +560,6 @@ fn simulate_path(
             gas_estimate: result.gas,
         });
 
-        // Store updated state for subsequent hops
-        if is_vm {
-            vm_state_override = Some(result.new_state);
-        } else {
-            native_state_overrides.insert(component_id, result.new_state);
-        }
         current_amount = result.amount;
     }
 
@@ -602,6 +613,8 @@ mod tests {
         tycho_common::models::Address,
         tycho_ethereum::gas::{BlockGasPrice, GasPrice},
     };
+
+    use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
     use crate::{
@@ -848,11 +861,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_source_token_may_be_revisited_for_better_output() {
-        // The layered BF allows revisiting any token (including the source)
-        // if it produces a better result after re-simulation. With top-N
-        // re-simulation, paths like A->B->A->B->C can beat A->B->C when
-        // pool state overrides create favorable exchange rates.
+    async fn test_token_revisit_blocked() {
+        // Hub-revisit path A->B->C->B->D would give higher output (13200 vs 400)
+        // but is blocked because B is visited twice. The algorithm should use the
+        // direct A->B->D path instead.
+        let token_a = token(0x01, "A");
+        let token_c = token(0x02, "C");
+        let token_b = token(0x03, "B");
+        let token_d = token(0x04, "D");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2)),
+            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3)),
+            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(100)),
+            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2)),
+        ]);
+
+        let algo = bf_algorithm(5, 1000);
+        let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, &ord)
+            .await
+            .unwrap();
+
+        // Must use A->B->D (2 hops), not A->B->C->B->D (4 hops with B revisit)
+        assert_eq!(result.route.swaps.len(), 2, "should use 2-hop path, not hub-revisit");
+        assert_eq!(result.route.swaps[0].component_id, "pool_ab");
+        assert_eq!(result.route.swaps[1].component_id, "pool_bd");
+        // A(0x01)->B(0x03): multiply by 2 = 200, B(0x03)->D(0x04): multiply by 2 = 400
+        assert_eq!(result.route.swaps[1].amount_out, BigUint::from(400u64));
+    }
+
+    #[tokio::test]
+    async fn test_pool_revisit_blocked() {
+        // If pool_ab connects A-B and the graph could use it twice (via layered
+        // distances at different hops), verify it only appears once.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -862,7 +906,7 @@ mod tests {
             ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3)),
         ]);
 
-        let algo = bf_algorithm(4, 1000);
+        let algo = bf_algorithm(5, 1000);
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
@@ -870,119 +914,57 @@ mod tests {
             .await
             .unwrap();
 
-        // Top-N re-simulation finds a path at least as good as the 2-hop (600)
-        let final_amount = result
+        // Verify no pool appears twice
+        let pool_ids: Vec<&str> = result
             .route
             .swaps
-            .last()
-            .unwrap()
-            .amount_out
-            .clone();
-        assert!(
-            final_amount >= BigUint::from(600u64),
-            "should find at least the baseline 2-hop output: got {final_amount}"
+            .iter()
+            .map(|s| s.component_id.as_str())
+            .collect();
+        let unique: HashSet<&str> = pool_ids.iter().copied().collect();
+        assert_eq!(
+            pool_ids.len(),
+            unique.len(),
+            "no pool should be used twice, route: {pool_ids:?}"
         );
     }
 
     #[tokio::test]
-    async fn test_hub_token_revisit_allowed() {
-        // Verify BF can find profitable paths that revisit intermediate tokens.
-        // MockProtocolSim uses directional pricing: token_in < token_out => multiply,
-        // token_in > token_out => divide. So for a profitable roundtrip B->C->B,
-        // we need a separate pool for C->B with a high multiplier in that direction.
-        //
-        // Token addresses: A=0x01 < B=0x02 < C=0x03 < D=0x04
-        //
-        // pool_ab (mult=2): A->B = 100*2=200
-        // pool_bc (mult=2): B->C = 200*2=400
-        // pool_cb (mult=100): C->B direction: C(0x03) > B(0x02), so divides by 100.
-        //   400/100 = 4. That's a loss.
-        //
-        // For a profitable C->B, we need C < B in address ordering.
-        // Use tokens: A=0x01, C=0x02, B=0x03, D=0x04
-        // Then C(0x02) < B(0x03), so pool_cb with mult=5: C->B = amount * 5
+    async fn test_no_route_when_only_cycle_path_exists() {
+        // The only path from A to C goes through B twice: A->B->A->B->C
+        // (there's no direct A->C and no non-revisiting multi-hop path)
+        // With revisits forbidden, this should return NoPath.
         let token_a = token(0x01, "A");
-        let token_c = token(0x02, "C"); // Lower address than B
-        let token_b = token(0x03, "B"); // Hub token
-        let token_d = token(0x04, "D");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
 
-        // pool_ab: A(0x01)->B(0x03), A < B so multiply: 100 * 2 = 200
-        // pool_bc: B(0x03)->C(0x02), B > C so divide: 200 / 3 = 66
-        // pool_cb: C(0x02)->B(0x03), C < B so multiply: 66 * 100 = 6600
-        // pool_bd: B(0x03)->D(0x04), B < D so multiply: 6600 * 2 = 13200
-        // Direct: A->B->D = 200 * 2 = 400
+        // pool_ab connects A-B. pool_bc connects B-C but with insufficient
+        // liquidity for the direct B->C from A->B output. The only "working"
+        // path would revisit A or B.
+        //
+        // Simpler: A connects only to B, B connects only back to A and to C.
+        // With max_hops=1, we can't reach C from A (needs 2 hops).
+        // But with max_hops=2 and only pool_ab, we can reach B but not C.
         let (market, manager) = setup_market_bf(vec![
             ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3)),
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(100)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2)),
         ]);
 
-        let algo = bf_algorithm(4, 1000);
-        let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
+        // token_c is in the market but not connected
+        {
+            let mut m = market.write().await;
+            m.upsert_tokens(vec![token_c.clone()]);
+        }
+
+        let algo = bf_algorithm(5, 1000);
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
             .find_best_route(manager.graph(), market, None, &ord)
-            .await
-            .unwrap();
-
-        // The 4-hop path A->B->C->B->D should produce 13200
-        // which is much better than direct A->B->D = 400
-        let final_amount = result
-            .route
-            .swaps
-            .last()
-            .unwrap()
-            .amount_out
-            .clone();
-        let direct_amount = BigUint::from(400u64);
+            .await;
         assert!(
-            final_amount > direct_amount,
-            "hub-revisiting path ({final_amount}) should beat direct path ({direct_amount})"
+            matches!(result, Err(AlgorithmError::NoPath { .. })),
+            "should return NoPath when only cycle-based paths exist"
         );
-        assert_eq!(result.route.swaps.len(), 4, "should use 4-hop path through hub");
-    }
-
-    #[tokio::test]
-    async fn test_state_overrides_for_revisited_pools() {
-        // Setup: A->B via pool1 (multiplier=2), B->C via pool1 is not possible
-        // since pool1 only connects A-B. Instead test with two different pools
-        // where the same component_id would be revisited.
-        //
-        // Actually, for a more meaningful test: create a graph where the
-        // re-simulation step visits the same pool (which happens when the same
-        // pool connects different token pairs in a multi-token pool).
-        // For this test we verify simulate_path handles state overrides correctly.
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-
-        let (market, _) =
-            setup_market_bf(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2))]);
-
-        let market_read = market.read().await;
-        let token_map: HashMap<NodeIndex, Token> = HashMap::from([
-            (NodeIndex::new(0), token_a.clone()),
-            (NodeIndex::new(1), token_b.clone()),
-            (NodeIndex::new(0), token_a.clone()), // dummy re-insert to simulate a path
-        ]);
-
-        // Single-hop path
-        let path = vec![(NodeIndex::new(0), NodeIndex::new(1), "pool1".to_string())];
-
-        let mut graph_manager = PetgraphStableDiGraphManager::<()>::default();
-        graph_manager.initialize_graph(&market_read.component_topology());
-
-        let (route, amount_out) = simulate_path(
-            &path,
-            &BigUint::from(100u64),
-            &market_read,
-            &token_map,
-            graph_manager.graph(),
-        )
-        .unwrap();
-
-        assert_eq!(route.swaps.len(), 1);
-        assert_eq!(amount_out, BigUint::from(200u64));
     }
 
     #[tokio::test]
