@@ -442,7 +442,7 @@ mod tests {
     // ====================
 
     #[test]
-    fn is_blocked_when_require_fresh_computation_fails_for_current_block() {
+    fn test_is_blocked_when_require_fresh_computation_fails_for_current_block() {
         let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
         tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
 

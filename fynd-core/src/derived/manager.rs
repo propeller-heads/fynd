@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spot_price_failure_broadcasts_computation_failed() {
+    async fn test_spot_price_failure_broadcasts_computation_failed() {
         let market = market_with_component_no_sim_state();
         let config = ComputationManagerConfig::new();
         let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
