@@ -170,4 +170,14 @@ pub mod defaults {
     pub const POOL_MIN_HOPS: usize = 1;
     pub const POOL_MAX_HOPS: usize = 3;
     pub const POOL_TIMEOUT_MS: u64 = 100;
+
+    /// Returns the default Tycho Fynd endpoint URL for the given chain.
+    pub fn default_tycho_url(chain: &str) -> &str {
+        match chain.to_lowercase().as_str() {
+            "ethereum" => "tycho-fynd-ethereum.propellerheads.xyz",
+            "base" => "tycho-fynd-base.propellerheads.xyz",
+            "unichain" => "tycho-fynd-unichain.propellerheads.xyz",
+            _ => "localhost:4242",
+        }
+    }
 }

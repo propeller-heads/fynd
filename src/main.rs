@@ -193,6 +193,19 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
+    // Resolve Tycho URL, falling back to chain-specific Fynd endpoint
+    let tycho_url = match &args.tycho_url {
+        Some(url) => url.clone(),
+        None => {
+            let default = defaults::default_tycho_url(&args.chain);
+            info!(
+                "No --tycho-url provided. Using default for {}: {}",
+                args.chain, default
+            );
+            default.to_string()
+        }
+    };
+
     // Resolve RPC URL, falling back to public endpoint with a warning
     let rpc_url = match &args.rpc_url {
         Some(url) => url.clone(),
@@ -213,7 +226,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
             .any(|p| p == "all_onchain");
     let protocols = if needs_fetch {
         let mut fetched = fetch_protocol_systems(
-            &args.tycho_url,
+            &tycho_url,
             args.tycho_api_key.as_deref(),
             !args.disable_tls,
             chain,
@@ -242,7 +255,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
 
     // Build solver with all fields from CLI
     let mut builder =
-        FyndBuilder::new(chain, pools_config.pools, args.tycho_url.clone(), rpc_url, protocols)
+        FyndBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
             .http_host(args.http_host.clone())
             .http_port(args.http_port)
             .min_tvl(args.min_tvl)
