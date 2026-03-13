@@ -3,8 +3,7 @@ use std::{sync::Arc, time::Instant};
 use fynd_client::{FyndClient, FyndError, Quote, QuoteStatus};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::config::ParallelizationMode;
-use crate::requests::SwapRequest;
+use crate::{config::ParallelizationMode, requests::SwapRequest};
 
 /// Results from a benchmark run.
 pub struct RunnerResults {
@@ -65,8 +64,7 @@ async fn run_sequential(
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
         let template = fastrand::choice(requests).unwrap();
-        let params = template
-            .to_quote_params();
+        let params = template.to_quote_params();
 
         let start = Instant::now();
         let result = client.quote(params).await;

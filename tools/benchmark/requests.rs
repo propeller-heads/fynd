@@ -45,7 +45,9 @@ impl SwapRequest {
 }
 
 fn parse_address(hex_str: &str) -> Bytes {
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let stripped = hex_str
+        .strip_prefix("0x")
+        .unwrap_or(hex_str);
     Bytes::from(hex::decode(stripped).unwrap_or_else(|e| panic!("bad address '{hex_str}': {e}")))
 }
 

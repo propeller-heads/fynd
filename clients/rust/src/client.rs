@@ -532,7 +532,7 @@ where
         token_out: Bytes,
         receiver: Bytes,
     ) -> Result<Quote, FyndError> {
-        let url = format!("{}/v1/solve", self.base_url);
+        let url = format!("{}/v1/quote", self.base_url);
         let response = self
             .http
             .post(&url)

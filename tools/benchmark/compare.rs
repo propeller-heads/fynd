@@ -114,7 +114,10 @@ fn status_str(status: QuoteStatus) -> &'static str {
 }
 
 fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
-    let swaps = quote.route().map(|r| r.swaps()).unwrap_or_default();
+    let swaps = quote
+        .route()
+        .map(|r| r.swaps())
+        .unwrap_or_default();
     Metrics {
         status: status_str(quote.status()).to_string(),
         amount_out: quote.amount_out().to_string(),
@@ -122,7 +125,10 @@ fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
         solve_time_ms: quote.solve_time_ms(),
         round_trip_ms,
         num_swaps: swaps.len(),
-        route_protocols: swaps.iter().map(|s| s.protocol().to_string()).collect(),
+        route_protocols: swaps
+            .iter()
+            .map(|s| s.protocol().to_string())
+            .collect(),
     }
 }
 
@@ -158,7 +164,9 @@ fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
 
 async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, FyndError>, u64) {
     let start = Instant::now();
-    let result = client.quote(req.to_quote_params()).await;
+    let result = client
+        .quote(req.to_quote_params())
+        .await;
     let round_trip_ms = start.elapsed().as_millis() as u64;
     (result, round_trip_ms)
 }
@@ -179,9 +187,18 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         .filter_map(|r| r.comparison.amount_out_diff_bps)
         .collect();
 
-    let b_better = diffs.iter().filter(|&&d| d > 0.0).count();
-    let a_better = diffs.iter().filter(|&&d| d < 0.0).count();
-    let equal = diffs.iter().filter(|&&d| d == 0.0).count();
+    let b_better = diffs
+        .iter()
+        .filter(|&&d| d > 0.0)
+        .count();
+    let a_better = diffs
+        .iter()
+        .filter(|&&d| d < 0.0)
+        .count();
+    let equal = diffs
+        .iter()
+        .filter(|&&d| d == 0.0)
+        .count();
 
     let both_success = results
         .iter()
@@ -218,8 +235,16 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         println!("    {label_a} better: {a_better}/{}", diffs.len());
         println!("    Equal:       {equal}/{}", diffs.len());
         let avg: f64 = diffs.iter().sum::<f64>() / diffs.len() as f64;
-        let min = diffs.iter().cloned().reduce(f64::min).unwrap_or(0.0);
-        let max = diffs.iter().cloned().reduce(f64::max).unwrap_or(0.0);
+        let min = diffs
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .unwrap_or(0.0);
+        let max = diffs
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .unwrap_or(0.0);
         println!("    Avg diff:    {avg:+.2} bps");
         println!("    Min diff:    {min:+.2} bps");
         println!("    Max diff:    {max:+.2} bps");
@@ -235,14 +260,26 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         })
         .collect();
     significant.sort_by(|a, b| {
-        let da = a.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
-        let db = b.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
-        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        let da = a
+            .comparison
+            .amount_out_diff_bps
+            .unwrap_or(0.0)
+            .abs();
+        let db = b
+            .comparison
+            .amount_out_diff_bps
+            .unwrap_or(0.0)
+            .abs();
+        db.partial_cmp(&da)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     if !significant.is_empty() {
         println!("\n  Significant differences (>1 bps):");
         for r in significant.iter().take(10) {
-            let diff = r.comparison.amount_out_diff_bps.unwrap_or(0.0);
+            let diff = r
+                .comparison
+                .amount_out_diff_bps
+                .unwrap_or(0.0);
             let winner = if diff > 0.0 { label_b } else { label_a };
             println!("    [{:>3}] {:<30} {diff:+.2} bps ({winner} better)", r.index, r.label,);
         }

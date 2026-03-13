@@ -8,9 +8,13 @@ use crate::requests::SwapRequest;
 pub enum ParallelizationMode {
     Sequential,
     #[serde(rename = "fixed_concurrency")]
-    FixedConcurrency { concurrency: usize },
+    FixedConcurrency {
+        concurrency: usize,
+    },
     #[serde(rename = "rate_based")]
-    RateBased { interval_ms: u64 },
+    RateBased {
+        interval_ms: u64,
+    },
 }
 
 impl ParallelizationMode {
