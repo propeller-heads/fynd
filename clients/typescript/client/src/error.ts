@@ -17,7 +17,7 @@ export type ServerErrorCode =
   | 'ALGORITHM_ERROR'
   | { kind: 'UNKNOWN'; raw: string };
 
-export type ClientErrorCode = 'HTTP' | 'DESERIALIZE' | 'CONFIG' | 'SIMULATE_FAILED';
+export type ClientErrorCode = 'HTTP' | 'DESERIALIZE' | 'CONFIG' | 'SIMULATE_FAILED' | 'SETTLE_TIMEOUT';
 export type ErrorCode = ServerErrorCode | ClientErrorCode;
 
 const KNOWN_SERVER_CODES = new Set([
@@ -76,5 +76,9 @@ export class FyndError extends Error {
 
   static simulateFailed(reason: string): FyndError {
     return new FyndError(reason, 'SIMULATE_FAILED');
+  }
+
+  static timeout(message: string): FyndError {
+    return new FyndError(message, 'SETTLE_TIMEOUT');
   }
 }

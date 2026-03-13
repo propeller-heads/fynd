@@ -31,8 +31,14 @@ export interface SettledOrder {
   gasCost: bigint;
 }
 
+export interface SettleOptions {
+  timeoutMs?: number;
+}
+
+export const DEFAULT_SETTLE_TIMEOUT_MS = 120_000;
+
 export interface ExecutionReceipt {
-  settle(): Promise<SettledOrder>;
+  settle(options?: SettleOptions): Promise<SettledOrder>;
 }
 
 /**

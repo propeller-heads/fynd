@@ -3,13 +3,15 @@ import { createFyndClient, type FyndClient as AutogenClient } from "@fynd/autoge
 import type { components } from "@fynd/autogen";
 import { FyndError } from "./error.js";
 import * as mapping from "./mapping.js";
-import type {
-  Eip1559Transaction,
-  ExecutionReceipt,
-  FyndPayload,
-  SettledOrder,
-  SignablePayload,
-  SignedOrder,
+import {
+  DEFAULT_SETTLE_TIMEOUT_MS,
+  type Eip1559Transaction,
+  type ExecutionReceipt,
+  type FyndPayload,
+  type SettledOrder,
+  type SettleOptions,
+  type SignablePayload,
+  type SignedOrder,
 } from "./signing.js";
 import type { Address, Hex, HealthStatus, Quote, QuoteParams } from "./types.js";
 
@@ -240,7 +242,9 @@ export class FyndClient {
     const receiver = quote.receiver;
 
     return {
-      settle: async (): Promise<SettledOrder> => {
+      settle: async (options?: SettleOptions): Promise<SettledOrder> => {
+        const timeout = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
+        const deadline = Date.now() + timeout;
         for (;;) {
           const receipt = await provider.getTransactionReceipt({ hash: txHash });
           if (receipt !== null) {
@@ -252,6 +256,11 @@ export class FyndClient {
               gasCost,
               ...(settledAmount !== undefined ? { settledAmount } : {}),
             };
+          }
+          if (Date.now() >= deadline) {
+            throw FyndError.timeout(
+              `transaction ${txHash} did not settle within ${timeout}ms`,
+            );
           }
           await sleep(2_000);
         }

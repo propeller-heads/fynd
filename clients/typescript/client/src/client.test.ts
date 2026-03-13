@@ -486,6 +486,25 @@ describe('FyndClient.execute — standard path', () => {
     const signedOrder = makeSignedOrder(makeDummyQuote());
     await expect(client.execute(signedOrder)).rejects.toThrow(FyndError);
   });
+
+  it('settle() throws SETTLE_TIMEOUT when receipt never arrives', async () => {
+    const provider = makeMockProvider();
+    provider.sendRawTransaction.mockResolvedValueOnce('0xhash123' as Hex);
+    provider.getTransactionReceipt.mockResolvedValue(null);
+
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      chainId: 1,
+      sender:  SENDER,
+      provider,
+    });
+
+    const signedOrder = makeSignedOrder(makeDummyQuote());
+    const executionReceipt = await client.execute(signedOrder);
+    await expect(executionReceipt.settle({ timeoutMs: 0 })).rejects.toThrow(
+      expect.objectContaining({ code: 'SETTLE_TIMEOUT' }),
+    );
+  });
 });
 
 describe('FyndClient.execute — dry-run path', () => {

@@ -26,10 +26,11 @@ export type {
   FyndPayload,
   PrimitiveSignature,
   SettledOrder,
+  SettleOptions,
   SignablePayload,
   SignedOrder,
 } from "./signing.js";
-export { assembleSignedOrder, signingHash } from "./signing.js";
+export { assembleSignedOrder, DEFAULT_SETTLE_TIMEOUT_MS, signingHash } from "./signing.js";
 export {
   permit2SigningHash,
   encodingOptions,
