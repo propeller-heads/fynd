@@ -23,7 +23,7 @@ use std::{
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
-use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use petgraph::{graph::NodeIndex, prelude::EdgeRef, Direction};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::tycho_core::models::{token::Token, Address};
 
@@ -103,8 +103,9 @@ impl Algorithm for BellmanFordAlgorithm {
                     reason: NoPathReason::DestinationTokenNotInGraph,
                 })?;
 
-            // Extract subgraph (BFS from token_in up to max_hops)
-            let subgraph_edges = extract_subgraph(token_in_node, self.max_hops, graph);
+            // Extract subgraph (bidirectional BFS: token_in forward, token_out backward)
+            let subgraph_edges =
+                extract_subgraph(token_in_node, token_out_node, self.max_hops, graph);
 
             if subgraph_edges.is_empty() {
                 return Err(AlgorithmError::NoPath {
@@ -378,36 +379,70 @@ impl Algorithm for BellmanFordAlgorithm {
     }
 }
 
-/// Extracts a subgraph via BFS from `start` up to `max_depth` hops.
+/// Extracts a subgraph via bidirectional BFS, keeping only edges that lie on
+/// some path from `start` to `end` within `max_depth` hops.
 ///
-/// Returns a list of (from_node, to_node, component_id) tuples representing
-/// all edges reachable within the hop budget.
+/// 1. Forward BFS from `start` (following outgoing edges) records the minimum
+///    hop distance from `start` to each reachable node.
+/// 2. Backward BFS from `end` (following incoming edges) records the minimum
+///    hop distance from each node to `end`.
+/// 3. An edge (u -> v) is kept only if
+///    `dist_from_start[u] + 1 + dist_to_end[v] <= max_depth`.
 fn extract_subgraph(
     start: NodeIndex,
+    end: NodeIndex,
     max_depth: usize,
     graph: &StableDiGraph<()>,
 ) -> Vec<(NodeIndex, NodeIndex, ComponentId)> {
-    let mut visited = HashSet::new();
+    // Forward BFS from start (outgoing edges)
+    let mut dist_from_start: HashMap<NodeIndex, usize> = HashMap::new();
     let mut queue = VecDeque::new();
-    let mut edges = Vec::new();
-
-    visited.insert(start);
+    dist_from_start.insert(start, 0);
     queue.push_back((start, 0usize));
-
     while let Some((node, depth)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
-
-        for edge in graph.edges(node) {
+        for edge in graph.edges_directed(node, Direction::Outgoing) {
             let target = edge.target();
-            let component_id = &edge.weight().component_id;
-
-            edges.push((node, target, component_id.clone()));
-
-            if !visited.contains(&target) {
-                visited.insert(target);
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                dist_from_start.entry(target)
+            {
+                e.insert(depth + 1);
                 queue.push_back((target, depth + 1));
+            }
+        }
+    }
+
+    // Backward BFS from end (incoming edges)
+    let mut dist_to_end: HashMap<NodeIndex, usize> = HashMap::new();
+    dist_to_end.insert(end, 0);
+    queue.push_back((end, 0usize));
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        for edge in graph.edges_directed(node, Direction::Incoming) {
+            let source = edge.source();
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                dist_to_end.entry(source)
+            {
+                e.insert(depth + 1);
+                queue.push_back((source, depth + 1));
+            }
+        }
+    }
+
+    // Collect edges where the hop budget allows a start-to-end path through them
+    let mut edges = Vec::new();
+    for &node in dist_from_start.keys() {
+        let d_start = dist_from_start[&node];
+        for edge in graph.edges_directed(node, Direction::Outgoing) {
+            let target = edge.target();
+            if let Some(&d_end) = dist_to_end.get(&target) {
+                if d_start + 1 + d_end <= max_depth {
+                    edges.push((node, target, edge.weight().component_id.clone()));
+                }
             }
         }
     }
@@ -1098,13 +1133,17 @@ mod tests {
             ("pool_de", &token_d, &token_e, MockProtocolSim::new(4)),
         ]);
 
-        // Extract subgraph from A with depth 2
+        // Extract subgraph from A to C with depth 2
         let graph = manager.graph();
         let token_a_node = graph
             .node_indices()
             .find(|&n| graph[n] == token_a.address)
             .unwrap();
-        let subgraph = extract_subgraph(token_a_node, 2, graph);
+        let token_c_node = graph
+            .node_indices()
+            .find(|&n| graph[n] == token_c.address)
+            .unwrap();
+        let subgraph = extract_subgraph(token_a_node, token_c_node, 2, graph);
 
         // Subgraph should contain edges for A-B and B-C, not D-E
         let component_ids: HashSet<_> = subgraph
