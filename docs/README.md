@@ -34,7 +34,8 @@ Fynd puts you in control:
 1. **Real-time market state** via Tycho Stream, covering all [Tycho-supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
 2. **50ms solution times:** You choose the balance between routing quality and latency.
 3. **Custom algorithms:** Plug in your own algorithm or customize the pre-built one. Fynd runs multiple algorithms in parallel and picks the best result.
-4. **Vertical scaling:** Scale up to meet your speed requirements.
+4. **Execution on your terms:** Encode and execute swaps on-chain with full control over fees, slippage, and token transfer method.
+5. **Vertical scaling:** Scale up to meet your speed requirements.
 
 ### Key Design Principles
 
