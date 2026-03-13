@@ -54,7 +54,9 @@ pub struct ServeArgs {
     pub rpc_url: Option<String>,
 
     /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3).
-    /// If omitted, all supported protocols are fetched from Tycho RPC.
+    /// If omitted, all on-chain protocols are fetched from Tycho RPC.
+    /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
+    /// e.g., --protocols all_onchain,rfq:bebop.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 
