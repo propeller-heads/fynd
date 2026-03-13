@@ -22,6 +22,7 @@ const ERC20_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,uint256)'
 // ERC-6909 Transfer(address,address,address,uint256,uint256)
 const ERC6909_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,address,uint256,uint256)'));
 
+/** Minimal transaction receipt, compatible with viem and ethers receipts. */
 export interface MinimalReceipt {
   transactionHash: Hex;
   gasUsed: bigint;
@@ -29,6 +30,11 @@ export interface MinimalReceipt {
   logs: Array<{ address: Address; topics: readonly Hex[]; data: Hex }>;
 }
 
+/**
+ * Blockchain provider interface used by {@link FyndClient} for signing and execution.
+ *
+ * Use {@link viemProvider} to create one from a viem `PublicClient`.
+ */
 export interface EthProvider {
   getTransactionCount(args: { address: Address }): Promise<number>;
   estimateFeesPerGas(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
@@ -38,35 +44,61 @@ export interface EthProvider {
   getTransactionReceipt(args: { hash: Hex }): Promise<MinimalReceipt | null>;
 }
 
+/** Configuration for exponential backoff retry on transient quote errors. */
 export interface RetryConfig {
-  maxAttempts?: number;      // default: 3
-  initialBackoffMs?: number; // default: 100
-  maxBackoffMs?: number;     // default: 2_000
+  /** Maximum number of attempts (default: 3). */
+  maxAttempts?: number;
+  /** Initial backoff delay in milliseconds (default: 100). */
+  initialBackoffMs?: number;
+  /** Maximum backoff delay in milliseconds (default: 2000). */
+  maxBackoffMs?: number;
 }
 
+/** Overrides for transaction parameters when building a signable payload. */
 export interface SigningHints {
+  /** Override the sender address (defaults to {@link FyndClientOptions.sender}). */
   sender?: Address;
+  /** Override the nonce (defaults to on-chain pending nonce). */
   nonce?: number;
+  /** Override `maxFeePerGas` (defaults to provider estimate). */
   maxFeePerGas?: bigint;
+  /** Override `maxPriorityFeePerGas` (defaults to provider estimate). */
   maxPriorityFeePerGas?: bigint;
+  /** Override gas limit (defaults to `quote.gasEstimate`). */
   gasLimit?: bigint;
+  /** When `true`, simulate the transaction via `eth_call` before returning. */
   simulate?: boolean;
 }
 
+/** Options for {@link FyndClient.execute}. */
 export interface ExecutionOptions {
+  /** When `true`, simulate execution without broadcasting a transaction. */
   dryRun?: boolean;
 }
 
+/** Configuration for constructing a {@link FyndClient}. */
 export interface FyndClientOptions {
+  /** Base URL of the Fynd API (e.g. `"https://api.fynd.exchange"`). */
   baseUrl: string;
+  /** EVM chain ID for transaction signing. */
   chainId: number;
+  /** Default sender address, used when {@link SigningHints.sender} is not set. */
   sender?: Address;
-  timeoutMs?: number;    // default: 30_000
+  /** HTTP request timeout in milliseconds (default: 30000). */
+  timeoutMs?: number;
   retry?: RetryConfig;
+  /** Provider for reading chain state and simulating transactions. */
   provider?: EthProvider;
+  /** Separate provider for broadcasting transactions; falls back to `provider`. */
   submitProvider?: EthProvider;
 }
 
+/**
+ * Client for the Fynd swap routing API.
+ *
+ * Provides methods to request quotes, build signable payloads, and execute
+ * signed swap transactions on-chain.
+ */
 export class FyndClient {
   private readonly http: AutogenClient;
   private readonly options: FyndClientOptions;
@@ -76,6 +108,11 @@ export class FyndClient {
     this.options = options;
   }
 
+  /**
+   * Requests a swap quote from the solver with automatic retry on transient errors.
+   *
+   * @throws {FyndError} With a server or client error code on failure.
+   */
   async quote(params: QuoteParams): Promise<Quote> {
     const tokenOut = params.order.tokenOut;
     const receiver = params.order.receiver ?? params.order.sender;
@@ -125,6 +162,11 @@ export class FyndClient {
     return mapping.fromWireQuote(data, tokenOut, receiver);
   }
 
+  /**
+   * Returns the solver's health status.
+   *
+   * @throws {FyndError} If the server returns an error or is unreachable.
+   */
   async health(): Promise<HealthStatus> {
     const { data, error } = await this.http.GET("/v1/health");
     if (error !== undefined) {
@@ -136,6 +178,13 @@ export class FyndClient {
     return mapping.fromWireHealth(data);
   }
 
+  /**
+   * Builds an unsigned transaction payload from a quote, ready for wallet signing.
+   *
+   * @remarks Requires a `provider` and `sender` to be configured (via options or hints).
+   * @throws {FyndError} With code `CONFIG` if provider/sender is missing or quote has no transaction.
+   * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the call reverts.
+   */
   async signablePayload(quote: Quote, hints?: SigningHints): Promise<SignablePayload> {
     if (quote.backend !== 'fynd') {
       throw new Error('not implemented: Turbine backend signing');
@@ -196,6 +245,14 @@ export class FyndClient {
     return { kind: 'fynd', payload };
   }
 
+  /**
+   * Broadcasts a signed order on-chain and returns a handle to await settlement.
+   *
+   * Call {@link ExecutionReceipt.settle} on the result to wait for confirmation.
+   *
+   * @throws {FyndError} With code `CONFIG` if no provider is configured or the signature is invalid.
+   * @throws {FyndError} With code `SIMULATE_FAILED` when `dryRun` is `true` and the simulation reverts.
+   */
   async execute(order: SignedOrder, options?: ExecutionOptions): Promise<ExecutionReceipt> {
     const { payload, signature } = order;
     const tx = payload.payload.tx;

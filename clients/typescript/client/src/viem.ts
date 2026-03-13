@@ -2,10 +2,9 @@ import type { Address, Hex } from './types.js';
 import type { EthProvider } from './client.js';
 
 /**
- * Minimal subset of viem's PublicClient used by FyndClient.
+ * Minimal subset of viem's `PublicClient` used by {@link viemProvider}.
  *
- * Declaring this interface avoids coupling to viem's full
- * type surface while remaining structurally compatible.
+ * Any viem `PublicClient` created via `createPublicClient` satisfies this interface.
  */
 export interface ViemPublicClient {
   getTransactionCount(
@@ -53,10 +52,13 @@ export interface ViemPublicClient {
 }
 
 /**
- * Wraps a viem PublicClient into an EthProvider for FyndClient.
+ * Adapts a viem `PublicClient` into an {@link EthProvider} for use with {@link FyndClient}.
  *
- * @param client - A viem PublicClient (from createPublicClient)
- * @param sender - The sender address, used for estimateGas calls
+ * @example
+ * ```ts
+ * const provider = viemProvider(publicClient, senderAddress);
+ * const client = new FyndClient({ baseUrl, chainId, provider });
+ * ```
  */
 export function viemProvider(
   client: ViemPublicClient,
