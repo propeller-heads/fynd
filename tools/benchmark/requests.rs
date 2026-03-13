@@ -1,8 +1,36 @@
-use serde_json::Value;
+use std::str::FromStr;
+
+use alloy::hex;
+use bytes::Bytes;
+use fynd_client::{Order, OrderSide, QuoteOptions, QuoteParams};
+use num_bigint::BigUint;
+use serde::Deserialize;
 
 pub struct SwapRequest {
-    pub body: Value,
     pub label: String,
+    token_in_addr: String,
+    token_out_addr: String,
+    raw_amount: String,
+    sender_addr: String,
+    timeout_ms: u64,
+}
+
+impl SwapRequest {
+    pub fn to_quote_params(&self) -> QuoteParams {
+        let token_in = parse_address(&self.token_in_addr);
+        let token_out = parse_address(&self.token_out_addr);
+        let sender = parse_address(&self.sender_addr);
+        let amount = BigUint::from_str(&self.raw_amount)
+            .unwrap_or_else(|e| panic!("bad amount '{}': {e}", self.raw_amount));
+        let order = Order::new(token_in, token_out, amount, OrderSide::Sell, sender, None);
+        let options = QuoteOptions::default().with_timeout_ms(self.timeout_ms);
+        QuoteParams::new(order, options)
+    }
+}
+
+fn parse_address(hex_str: &str) -> Bytes {
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    Bytes::from(hex::decode(stripped).unwrap_or_else(|e| panic!("bad address '{hex_str}': {e}")))
 }
 
 struct Token {
@@ -16,6 +44,8 @@ struct Pair {
     token_out: &'static str,
     amounts: &'static [f64],
 }
+
+const SENDER: &str = "0x0000000000000000000000000000000000000001";
 
 const TOKENS: &[Token] = &[
     Token { symbol: "WETH", address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", decimals: 18 },
@@ -48,7 +78,6 @@ const PAIRS: &[Pair] = &[
     Pair { token_in: "WBTC", token_out: "WETH", amounts: &[15.0, 25.0, 50.0, 100.0] },
     Pair { token_in: "USDC", token_out: "USDT", amounts: &[1e6, 2.5e6, 5e6] },
     Pair { token_in: "USDT", token_out: "USDC", amounts: &[1e6, 2.5e6, 5e6] },
-    // Lesser-known / mid-cap tokens
     Pair { token_in: "WETH", token_out: "PEPE", amounts: &[500.0, 1000.0, 2500.0] },
     Pair { token_in: "PEPE", token_out: "WETH", amounts: &[125e9, 500e9, 1e12] },
     Pair { token_in: "WETH", token_out: "LINK", amounts: &[500.0, 1000.0, 2500.0] },
@@ -96,24 +125,12 @@ fn human_to_raw(amount: f64, decimals: u8) -> String {
     format!("{:.0}", raw)
 }
 
-fn build_request_body(
-    token_in: &Token,
-    token_out: &Token,
-    raw_amount: &str,
-    timeout_ms: u64,
-) -> Value {
-    serde_json::json!({
-        "orders": [{
-            "token_in": token_in.address,
-            "token_out": token_out.address,
-            "amount": raw_amount,
-            "side": "sell",
-            "sender": "0x0000000000000000000000000000000000000001"
-        }],
-        "options": {
-            "timeout_ms": timeout_ms
-        }
-    })
+fn symbol_for_address(addr: &str) -> &str {
+    TOKENS
+        .iter()
+        .find(|t| t.address.eq_ignore_ascii_case(addr))
+        .map(|t| t.symbol)
+        .unwrap_or(&addr[..10.min(addr.len())])
 }
 
 pub fn generate_requests(n: usize, timeout_ms: u64) -> Vec<SwapRequest> {
@@ -126,11 +143,33 @@ pub fn generate_requests(n: usize, timeout_ms: u64) -> Vec<SwapRequest> {
             let raw = human_to_raw(amount, token_in.decimals);
 
             SwapRequest {
-                body: build_request_body(token_in, token_out, &raw, timeout_ms),
                 label: format!("{amount} {} -> {}", token_in.symbol, token_out.symbol),
+                token_in_addr: token_in.address.to_string(),
+                token_out_addr: token_out.address.to_string(),
+                raw_amount: raw,
+                sender_addr: SENDER.to_string(),
+                timeout_ms,
             }
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct FileRequest {
+    orders: Vec<FileOrder>,
+}
+
+#[derive(Deserialize)]
+struct FileOrder {
+    token_in: String,
+    token_out: String,
+    amount: String,
+    #[serde(default = "default_sender")]
+    sender: String,
+}
+
+fn default_sender() -> String {
+    SENDER.to_string()
 }
 
 pub fn load_requests_from_file(
@@ -139,7 +178,7 @@ pub fn load_requests_from_file(
     timeout_ms: u64,
 ) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(path)?;
-    let templates: Vec<Value> = serde_json::from_str(&content)?;
+    let templates: Vec<FileRequest> = serde_json::from_str(&content)?;
     if templates.is_empty() {
         return Err("requests file contains no requests".into());
     }
@@ -147,45 +186,17 @@ pub fn load_requests_from_file(
     let requests = (0..n)
         .map(|_| {
             let tmpl = &templates[fastrand::usize(..templates.len())];
-            let order = &tmpl["orders"][0];
-            let token_in_addr = order["token_in"].as_str().unwrap_or("");
-            let token_out_addr = order["token_out"]
-                .as_str()
-                .unwrap_or("");
-            let amount = order["amount"].as_str().unwrap_or("0");
-
-            let in_sym = TOKENS
-                .iter()
-                .find(|t| {
-                    t.address
-                        .eq_ignore_ascii_case(token_in_addr)
-                })
-                .map(|t| t.symbol)
-                .unwrap_or(&token_in_addr[..10.min(token_in_addr.len())]);
-            let out_sym = TOKENS
-                .iter()
-                .find(|t| {
-                    t.address
-                        .eq_ignore_ascii_case(token_out_addr)
-                })
-                .map(|t| t.symbol)
-                .unwrap_or(&token_out_addr[..10.min(token_out_addr.len())]);
+            let order = &tmpl.orders[0];
+            let in_sym = symbol_for_address(&order.token_in);
+            let out_sym = symbol_for_address(&order.token_out);
 
             SwapRequest {
-                body: serde_json::json!({
-                    "orders": [{
-                        "token_in": token_in_addr,
-                        "token_out": token_out_addr,
-                        "amount": amount,
-                        "side": order["side"].as_str().unwrap_or("sell"),
-                        "sender": order["sender"].as_str()
-                            .unwrap_or("0x0000000000000000000000000000000000000001")
-                    }],
-                    "options": {
-                        "timeout_ms": timeout_ms
-                    }
-                }),
-                label: format!("{amount} {in_sym} -> {out_sym}"),
+                label: format!("{} {in_sym} -> {out_sym}", order.amount),
+                token_in_addr: order.token_in.clone(),
+                token_out_addr: order.token_out.clone(),
+                raw_amount: order.amount.clone(),
+                sender_addr: order.sender.clone(),
+                timeout_ms,
             }
         })
         .collect();

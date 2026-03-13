@@ -1,11 +1,11 @@
 mod requests;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
+use fynd_client::{FyndClient, FyndClientBuilder, FyndError, Quote, QuoteStatus, RetryConfig};
 use requests::{generate_requests, load_requests_from_file, SwapRequest};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 
 /// Compare solver output quality between two running instances.
 ///
@@ -55,7 +55,6 @@ struct Cli {
 struct Metrics {
     status: String,
     amount_out: String,
-    amount_out_net_gas: String,
     gas_estimate: String,
     solve_time_ms: u64,
     round_trip_ms: u64,
@@ -67,7 +66,6 @@ struct Metrics {
 struct Comparison {
     status_match: bool,
     amount_out_diff_bps: Option<f64>,
-    net_gas_diff_bps: Option<f64>,
     route_match: bool,
 }
 
@@ -75,12 +73,9 @@ struct Comparison {
 struct RequestResult {
     index: usize,
     label: String,
-    request: Value,
     metrics_a: Metrics,
     metrics_b: Metrics,
     comparison: Comparison,
-    response_a: Value,
-    response_b: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,71 +95,41 @@ struct OutputConfig {
     seed: u64,
 }
 
-#[derive(Deserialize)]
-struct HealthResponse {
-    healthy: bool,
-    num_solver_pools: Option<usize>,
-    last_update_ms: Option<u64>,
+fn build_client(url: &str, timeout_ms: u64) -> Result<FyndClient, Box<dyn std::error::Error>> {
+    let client = FyndClientBuilder::new(url, "")
+        .with_timeout(Duration::from_millis(timeout_ms))
+        .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
+        .build_quote_only()?;
+    Ok(client)
 }
 
-fn extract_metrics(response: &Value, round_trip_ms: u64) -> Metrics {
-    let order = response
-        .get("orders")
-        .and_then(|o| o.as_array())
-        .and_then(|a| a.first())
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    let swaps = order
-        .get("route")
-        .and_then(|r| r.get("swaps"))
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Metrics {
-        status: order
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("error")
-            .to_string(),
-        amount_out: order
-            .get("amount_out")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string(),
-        amount_out_net_gas: order
-            .get("amount_out_net_gas")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string(),
-        gas_estimate: order
-            .get("gas_estimate")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string(),
-        solve_time_ms: response
-            .get("solve_time_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        round_trip_ms,
-        num_swaps: swaps.len(),
-        route_protocols: swaps
-            .iter()
-            .filter_map(|s| {
-                s.get("protocol")
-                    .and_then(|p| p.as_str())
-            })
-            .map(String::from)
-            .collect(),
+fn status_str(status: QuoteStatus) -> &'static str {
+    match status {
+        QuoteStatus::Success => "success",
+        QuoteStatus::NoRouteFound => "no_route_found",
+        QuoteStatus::InsufficientLiquidity => "insufficient_liquidity",
+        QuoteStatus::Timeout => "timeout",
+        QuoteStatus::NotReady => "not_ready",
     }
 }
 
-fn error_metrics(error: &str, round_trip_ms: u64) -> Metrics {
+fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
+    let swaps = quote.route().map(|r| r.swaps()).unwrap_or_default();
+    Metrics {
+        status: status_str(quote.status()).to_string(),
+        amount_out: quote.amount_out().to_string(),
+        gas_estimate: quote.gas_estimate().to_string(),
+        solve_time_ms: quote.solve_time_ms(),
+        round_trip_ms,
+        num_swaps: swaps.len(),
+        route_protocols: swaps.iter().map(|s| s.protocol().to_string()).collect(),
+    }
+}
+
+fn error_metrics(error: &FyndError, round_trip_ms: u64) -> Metrics {
     Metrics {
         status: format!("error: {error}"),
         amount_out: "0".to_string(),
-        amount_out_net_gas: "0".to_string(),
         gas_estimate: "0".to_string(),
         solve_time_ms: 0,
         round_trip_ms,
@@ -186,67 +151,16 @@ fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
         None
     };
 
-    let net_a: u128 = a
-        .amount_out_net_gas
-        .parse()
-        .unwrap_or(0);
-    let net_b: u128 = b
-        .amount_out_net_gas
-        .parse()
-        .unwrap_or(0);
-    let net_gas_diff_bps = if net_a > 0 && net_b > 0 {
-        Some((net_b as f64 - net_a as f64) * 10000.0 / net_a as f64)
-    } else if net_a == 0 && net_b == 0 {
-        Some(0.0)
-    } else {
-        None
-    };
-
     let route_match = a.route_protocols == b.route_protocols;
 
-    Comparison { status_match, amount_out_diff_bps, net_gas_diff_bps, route_match }
+    Comparison { status_match, amount_out_diff_bps, route_match }
 }
 
-async fn check_health(
-    client: &reqwest::Client,
-    url: &str,
-    label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let resp: HealthResponse = client
-        .get(format!("{url}/v1/health"))
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    if !resp.healthy {
-        return Err(format!("{label}: solver is not healthy").into());
-    }
-
-    println!(
-        "  {label}: healthy (pools={}, last_update={}ms)",
-        resp.num_solver_pools.unwrap_or(0),
-        resp.last_update_ms.unwrap_or(0),
-    );
-    Ok(())
-}
-
-async fn send_quote(client: &reqwest::Client, url: &str, body: &Value) -> (Value, u64) {
+async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, FyndError>, u64) {
     let start = Instant::now();
-    let result = client
-        .post(format!("{url}/v1/quote"))
-        .json(body)
-        .send()
-        .await;
+    let result = client.quote(req.to_quote_params()).await;
     let round_trip_ms = start.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(resp) => match resp.json::<Value>().await {
-            Ok(json) => (json, round_trip_ms),
-            Err(e) => (serde_json::json!({"_error": format!("parse error: {e}")}), round_trip_ms),
-        },
-        Err(e) => (serde_json::json!({"_error": format!("{e}")}), round_trip_ms),
-    }
+    (result, round_trip_ms)
 }
 
 fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
@@ -265,23 +179,9 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         .filter_map(|r| r.comparison.amount_out_diff_bps)
         .collect();
 
-    let net_diffs: Vec<f64> = results
-        .iter()
-        .filter_map(|r| r.comparison.net_gas_diff_bps)
-        .collect();
-
-    let b_better = diffs
-        .iter()
-        .filter(|&&d| d > 0.0)
-        .count();
-    let a_better = diffs
-        .iter()
-        .filter(|&&d| d < 0.0)
-        .count();
-    let equal = diffs
-        .iter()
-        .filter(|&&d| d == 0.0)
-        .count();
+    let b_better = diffs.iter().filter(|&&d| d > 0.0).count();
+    let a_better = diffs.iter().filter(|&&d| d < 0.0).count();
+    let equal = diffs.iter().filter(|&&d| d == 0.0).count();
 
     let both_success = results
         .iter()
@@ -318,34 +218,8 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         println!("    {label_a} better: {a_better}/{}", diffs.len());
         println!("    Equal:       {equal}/{}", diffs.len());
         let avg: f64 = diffs.iter().sum::<f64>() / diffs.len() as f64;
-        let min = diffs
-            .iter()
-            .cloned()
-            .reduce(f64::min)
-            .unwrap_or(0.0);
-        let max = diffs
-            .iter()
-            .cloned()
-            .reduce(f64::max)
-            .unwrap_or(0.0);
-        println!("    Avg diff:    {avg:+.2} bps");
-        println!("    Min diff:    {min:+.2} bps");
-        println!("    Max diff:    {max:+.2} bps");
-    }
-
-    if !net_diffs.is_empty() {
-        let avg: f64 = net_diffs.iter().sum::<f64>() / net_diffs.len() as f64;
-        let min = net_diffs
-            .iter()
-            .cloned()
-            .reduce(f64::min)
-            .unwrap_or(0.0);
-        let max = net_diffs
-            .iter()
-            .cloned()
-            .reduce(f64::max)
-            .unwrap_or(0.0);
-        println!("\n  Amount Out Net Gas (positive = {label_b} better):");
+        let min = diffs.iter().cloned().reduce(f64::min).unwrap_or(0.0);
+        let max = diffs.iter().cloned().reduce(f64::max).unwrap_or(0.0);
         println!("    Avg diff:    {avg:+.2} bps");
         println!("    Min diff:    {min:+.2} bps");
         println!("    Max diff:    {max:+.2} bps");
@@ -361,26 +235,14 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         })
         .collect();
     significant.sort_by(|a, b| {
-        let da = a
-            .comparison
-            .amount_out_diff_bps
-            .unwrap_or(0.0)
-            .abs();
-        let db = b
-            .comparison
-            .amount_out_diff_bps
-            .unwrap_or(0.0)
-            .abs();
-        db.partial_cmp(&da)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let da = a.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
+        let db = b.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
+        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
     });
     if !significant.is_empty() {
         println!("\n  Significant differences (>1 bps):");
         for r in significant.iter().take(10) {
-            let diff = r
-                .comparison
-                .amount_out_diff_bps
-                .unwrap_or(0.0);
+            let diff = r.comparison.amount_out_diff_bps.unwrap_or(0.0);
             let winner = if diff > 0.0 { label_b } else { label_a };
             println!("    [{:>3}] {:<30} {diff:+.2} bps ({winner} better)", r.index, r.label,);
         }
@@ -407,13 +269,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fastrand::seed(cli.seed);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(cli.timeout_ms))
-        .build()?;
+    let client_a = build_client(&cli.url_a, cli.timeout_ms)?;
+    let client_b = build_client(&cli.url_b, cli.timeout_ms)?;
 
     println!("Checking solver health...");
-    check_health(&client, &cli.url_a, &cli.label_a).await?;
-    check_health(&client, &cli.url_b, &cli.label_b).await?;
+
+    let health_a = client_a.health().await?;
+    if !health_a.healthy() {
+        return Err(format!("{}: solver is not healthy", cli.label_a).into());
+    }
+    println!(
+        "  {}: healthy (pools={}, last_update={}ms)",
+        cli.label_a,
+        health_a.num_solver_pools(),
+        health_a.last_update_ms(),
+    );
+
+    let health_b = client_b.health().await?;
+    if !health_b.healthy() {
+        return Err(format!("{}: solver is not healthy", cli.label_b).into());
+    }
+    println!(
+        "  {}: healthy (pools={}, last_update={}ms)",
+        cli.label_b,
+        health_b.num_solver_pools(),
+        health_b.last_update_ms(),
+    );
 
     let requests: Vec<SwapRequest> = if let Some(ref path) = cli.requests_file {
         load_requests_from_file(path, cli.num_requests, cli.timeout_ms)?
@@ -426,28 +307,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::with_capacity(cli.num_requests);
 
     for (i, req) in requests.iter().enumerate() {
-        let (resp_a, rt_a) = send_quote(&client, &cli.url_a, &req.body).await;
-        let (resp_b, rt_b) = send_quote(&client, &cli.url_b, &req.body).await;
+        let (result_a, rt_a) = send_quote(&client_a, req).await;
+        let (result_b, rt_b) = send_quote(&client_b, req).await;
 
-        let is_error_a = resp_a.get("_error").is_some();
-        let is_error_b = resp_b.get("_error").is_some();
-
-        let metrics_a = if is_error_a {
-            let msg = resp_a["_error"]
-                .as_str()
-                .unwrap_or("unknown");
-            error_metrics(msg, rt_a)
-        } else {
-            extract_metrics(&resp_a, rt_a)
+        let metrics_a = match &result_a {
+            Ok(quote) => quote_metrics(quote, rt_a),
+            Err(err) => error_metrics(err, rt_a),
         };
 
-        let metrics_b = if is_error_b {
-            let msg = resp_b["_error"]
-                .as_str()
-                .unwrap_or("unknown");
-            error_metrics(msg, rt_b)
-        } else {
-            extract_metrics(&resp_b, rt_b)
+        let metrics_b = match &result_b {
+            Ok(quote) => quote_metrics(quote, rt_b),
+            Err(err) => error_metrics(err, rt_b),
         };
 
         let comparison = compare_metrics(&metrics_a, &metrics_b);
@@ -472,12 +342,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         results.push(RequestResult {
             index: i,
             label: req.label.clone(),
-            request: req.body.clone(),
             metrics_a,
             metrics_b,
             comparison,
-            response_a: resp_a,
-            response_b: resp_b,
         });
     }
 
