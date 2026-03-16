@@ -1,3 +1,8 @@
+//! Load-test subcommand.
+//!
+//! Sends quote requests to a single solver, measures round-trip time,
+//! server solve time, and overhead, then prints statistics and histograms.
+
 use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
@@ -11,31 +16,38 @@ use crate::{
     runner::{run_benchmark, RunnerResults},
 };
 
-/// Load-test a running Fynd solver (latency and throughput)
+/// Measure solver latency and throughput under load.
 #[derive(Parser, Debug)]
-#[command(about = "Benchmark fynd with various parallelization strategies", long_about = None)]
+#[command(
+    about = "Load-test a Fynd solver with configurable parallelization",
+    long_about = "Load-test a Fynd solver with configurable parallelization.\n\n\
+        Always build with --release for accurate measurements."
+)]
 pub struct Args {
-    /// Solver URL to benchmark against
+    /// Base URL of the solver to benchmark
     #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]
     pub solver_url: String,
 
-    /// Number of requests to benchmark
+    /// Total number of quote requests to send
     #[arg(long, short = 'n', env = "NUM_REQUESTS", default_value = "1")]
     pub num_requests: usize,
 
-    /// Parallelization mode: sequential, fixed:N, or rate:Nms
+    /// How to schedule requests: "sequential", "fixed:N" (N concurrent),
+    /// or "rate:N" (one request every N ms)
     #[arg(long, short = 'm', env = "PARALLELIZATION_MODE", default_value = "sequential")]
     pub parallelization_mode: String,
 
-    /// Path to JSON file with request templates
+    /// JSON file of request templates (see requests_set.json for format).
+    /// Defaults to a single 1 WETH -> USDC swap.
     #[arg(long, env = "REQUESTS_FILE")]
     pub requests_file: Option<String>,
 
-    /// Output file for results (if not specified, results are not exported to file)
+    /// Write full results (config + all timings) to this JSON file
     #[arg(long, env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
 }
 
+/// Execute the load-test: health-check, send requests, print stats.
 pub async fn run(args: Args) -> anyhow::Result<()> {
     let parallelization_mode = ParallelizationMode::from_str(&args.parallelization_mode)
         .map_err(|e| anyhow::anyhow!("{e}"))?;

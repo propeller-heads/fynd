@@ -1,3 +1,8 @@
+//! Compare subcommand.
+//!
+//! Sends identical quote requests to two solver instances and reports
+//! per-request diffs in amount out (bps), gas estimate, and route selection.
+
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -6,45 +11,53 @@ use serde::Serialize;
 
 use crate::requests::{generate_requests, load_requests_from_file, SwapRequest};
 
-/// Compare solver output quality between two running instances.
+/// Diff output quality between two running Fynd solvers.
 ///
-/// Start solver A (e.g. main) on port 3000 and solver B (e.g. branch) on port 3001,
-/// then run this tool to send identical requests to both and compare results.
+/// Run two solvers on different ports (use git worktrees to avoid build
+/// conflicts), then compare their quote responses head-to-head.
 #[derive(Parser, Debug)]
+#[command(
+    about = "Compare output quality between two Fynd solvers",
+    long_about = "Compare output quality between two Fynd solvers.\n\n\
+        Sends identical quote requests to both and reports amount-out diff (bps), \
+        gas estimate diff, and route-selection differences.\n\n\
+        Requires two healthy solvers, typically on different ports."
+)]
 pub struct Args {
-    /// Solver A URL
+    /// Base URL of solver A (baseline)
     #[arg(long, default_value = "http://localhost:3000")]
     pub url_a: String,
 
-    /// Solver B URL
+    /// Base URL of solver B (candidate)
     #[arg(long, default_value = "http://localhost:3001")]
     pub url_b: String,
 
-    /// Label for solver A
+    /// Human-readable label for solver A in output
     #[arg(long, default_value = "main")]
     pub label_a: String,
 
-    /// Label for solver B
+    /// Human-readable label for solver B in output
     #[arg(long, default_value = "branch")]
     pub label_b: String,
 
-    /// Number of requests to send
+    /// Number of quote requests to send to each solver
     #[arg(short = 'n', long, default_value_t = 100)]
     pub num_requests: usize,
 
-    /// Path to requests JSON file (benchmark format)
+    /// JSON file of request templates. Without this, requests are
+    /// randomly generated from the built-in token-pair set.
     #[arg(long)]
     pub requests_file: Option<String>,
 
-    /// Output file for full results JSON
+    /// Path to write full per-request results JSON
     #[arg(long, default_value = "comparison_results.json")]
     pub output: String,
 
-    /// Request timeout in milliseconds
+    /// Per-request timeout in milliseconds
     #[arg(long, default_value_t = 15000)]
     pub timeout_ms: u64,
 
-    /// Random seed for reproducibility
+    /// RNG seed for deterministic request generation
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
 }
@@ -145,6 +158,7 @@ fn error_metrics(error: &FyndError, round_trip_ms: u64) -> Metrics {
     }
 }
 
+/// Compute amount-out diff (bps), gas diff (%), and route-match between two quotes.
 fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
     let status_match = a.status == b.status;
 
@@ -182,6 +196,7 @@ async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, Fy
     (result, round_trip_ms)
 }
 
+/// Print an aggregated comparison table with win/loss counts, bps stats, and outliers.
 fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     let total = results.len();
     let status_matches = results
@@ -349,6 +364,7 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     println!("\n{}", "=".repeat(70));
 }
 
+/// Execute the comparison: health-check both solvers, send requests, print summary.
 pub async fn run(args: Args) -> anyhow::Result<()> {
     fastrand::seed(args.seed);
 

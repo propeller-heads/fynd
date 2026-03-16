@@ -1,3 +1,8 @@
+//! CLI entry point for fynd-benchmark.
+//!
+//! Dispatches to the `load` (latency/throughput) and `compare`
+//! (output-quality diff) subcommands.
+
 mod benchmark;
 mod compare;
 mod config;
@@ -9,7 +14,12 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "fynd-benchmark")]
+#[command(
+    name = "fynd-benchmark",
+    about = "Benchmark and compare Fynd solver instances",
+    long_about = "Benchmark and compare Fynd solver instances.\n\n\
+        Requires at least one running Fynd solver. See the quickstart guide for setup."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -17,9 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Load-test a running Fynd solver (latency and throughput)
+    /// Measure solver latency and throughput under load
     Load(benchmark::Args),
-    /// Compare output quality between two running Fynd solvers
+    /// Diff output quality (amount out, gas, routes) between two solvers
     Compare(compare::Args),
 }
 
