@@ -118,11 +118,11 @@ struct Args {
     blacklist: String,
 
     /// Token addresses to exclude (comma-separated). Cycles through these tokens
-    /// are filtered out. Use for rebase tokens (AMPL) or other tokens with broken
-    /// simulations.
+    /// are filtered out. Use for rebase tokens (AMPL), fee-on-transfer tokens,
+    /// or scam tokens with phantom balances.
     #[arg(
         long,
-        default_value = "0xd46ba6d942050d489dbd938a2c909a5d5039a161"
+        default_value = "0xd46ba6d942050d489dbd938a2c909a5d5039a161,0xBd15d0c77133d3200756dC4D7a4F577Dbb2cf6A3,0x934c90247ba5ab6c86338e8bc07fd8ab0e559425"
     )]
     blacklist_tokens: String,
 
