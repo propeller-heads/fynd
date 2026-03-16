@@ -50,8 +50,7 @@ fn make_client(
         http,
         base_url,
         retry,
-        Address::ZERO, // router address
-        1,             // chain_id
+        1, // chain_id
         default_sender,
         provider,
         submit_provider,
@@ -70,7 +69,7 @@ fn make_quote_params() -> QuoteParams {
     QuoteParams::new(order, QuoteOptions::default())
 }
 
-/// Return a minimal valid wire `Quote` JSON with one order.
+/// Return a minimal valid wire `Quote` JSON with one order, including an encoded transaction.
 fn minimal_quote_json(order_id: &str) -> serde_json::Value {
     serde_json::json!({
         "orders": [{
@@ -85,6 +84,11 @@ fn minimal_quote_json(order_id: &str) -> serde_json::Value {
                 "number": 1234567,
                 "hash": "0xabcdef",
                 "timestamp": 1700000000
+            },
+            "transaction": {
+                "to": "0x0101010101010101010101010101010101010101",
+                "value": "0",
+                "data": "0x1234"
             }
         }],
         "total_gas_estimate": "50000",

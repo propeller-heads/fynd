@@ -1,15 +1,29 @@
-//! Tutorial Example: Quote and Execute a Swap using ERC-20 Approvals
+//! Permit2 Example: Quote and Execute a Swap using Permit2 Token Authorization
 //!
-//! This example demonstrates how to use FyndClient to quote and execute a token
-//! swap using standard ERC-20 `approve` + `transferFrom`.
+//! This example mirrors the tutorial but uses Permit2 (AllowanceTransfer) instead
+//! of a standard ERC-20 `approve` + `transferFrom`.
+//!
+//! With Permit2, you sign an off-chain EIP-712 message granting the Tycho Router a
+//! temporary, nonce-protected allowance — no approve transaction is required if the
+//! Permit2 contract already has an unlimited ERC-20 approval (the common wallet default).
 //!
 //! # Dry-run (default)
 //!
 //! Uses an ephemeral key and ERC-20 storage overrides so no funds are required.
+//! Because the ephemeral address has never interacted with Permit2, its nonce is 0
+//! and the generated signature is valid without any chain-state setup.
 //!
 //! # On-chain execution (`--execute`)
 //!
-//! Requires `PRIVATE_KEY` env var and a funded wallet.
+//! Requires `PRIVATE_KEY`, a funded wallet, and an existing ERC-20 approval from
+//! your address to the Permit2 contract (not the router):
+//!
+//! ```sh
+//! cast send <TOKEN> "approve(address,uint256)" \
+//!   0x000000000022D473030F116dDEE9F6B43aC78BA3 \
+//!   115792089237316195423570985008687907853269984665640564039457584007913129639935 \
+//!   --rpc-url $RPC_URL --private-key $PRIVATE_KEY
+//! ```
 
 use std::{env, str::FromStr, time::Duration};
 
@@ -17,25 +31,35 @@ use alloy::{
     hex,
     network::Ethereum,
     primitives::{Address, B256, U256},
-    providers::{ProviderBuilder, RootProvider},
+    providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
 use bytes::Bytes;
-
-mod erc20;
 use clap::Parser;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
+    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
+    PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
 };
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Tutorial CLI: Quote and execute a swap via the Fynd solver
+mod erc20;
+mod permit2;
+
+use permit2::PERMIT2_ADDRESS;
+
+/// Max uint160 — used as the Permit2 approved amount (unlimited).
+fn max_uint160() -> BigUint {
+    // 20 bytes of 0xFF = 2^160 - 1
+    BigUint::from_bytes_be(&[0xFF; 20])
+}
+
+/// Permit2 tutorial: quote and execute a swap using Permit2 token authorization.
 #[derive(Parser)]
-#[command(name = "tutorial")]
-#[command(about = "Get a quote from the Fynd solver and execute the swap (dry-run by default)")]
+#[command(name = "tutorial_with_permit2")]
+#[command(about = "Get a Fynd quote and execute the swap via Permit2 (no approve tx needed)")]
 struct Cli {
     /// Sell token address (defaults to USDC on mainnet)
     #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
@@ -57,6 +81,15 @@ struct Cli {
     #[arg(long, default_value_t = 50u32)]
     slippage_bps: u32,
 
+    /// Tycho Router contract address — this is the Permit2 spender.
+    /// Consult Fynd documentation for the correct address on your network.
+    #[arg(long)]
+    router: String,
+
+    /// Permit2 contract address (defaults to the canonical cross-chain deployment)
+    #[arg(long, default_value = "0x000000000022D473030F116dDEE9F6B43aC78BA3")]
+    permit2: String,
+
     /// Submit the swap on-chain instead of dry-running it.
     /// Requires the PRIVATE_KEY environment variable to be set.
     #[arg(long)]
@@ -74,7 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://eth.llamarpc.com".to_string());
 
     // Load or generate signer. Real execution requires PRIVATE_KEY; dry-run uses an
-    // ephemeral key because storage overrides inject the balance on-the-fly.
+    // ephemeral key — the ephemeral address has nonce 0 in Permit2 so no chain setup
+    // is needed, and ERC-20 balance/allowance are injected via storage overrides.
     let signer = if cli.execute {
         let pk_hex = env::var("PRIVATE_KEY")
             .map_err(|_| "--execute requires PRIVATE_KEY environment variable")?;
@@ -107,11 +141,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Solver is not healthy. Please wait for market data to load.".into());
     }
 
-    // Parse token addresses
+    // Parse addresses
     let sell_token_addr = Address::from_str(&cli.sell_token)
         .map_err(|e| format!("invalid sell token address: {e}"))?;
     let buy_token_addr =
         Address::from_str(&cli.buy_token).map_err(|e| format!("invalid buy token address: {e}"))?;
+    let router_addr =
+        Address::from_str(&cli.router).map_err(|e| format!("invalid router address: {e}"))?;
+    let permit2_addr =
+        Address::from_str(&cli.permit2).map_err(|e| format!("invalid permit2 address: {e}"))?;
 
     let sell_token_bytes = Bytes::copy_from_slice(sell_token_addr.as_slice());
     let buy_token_bytes = Bytes::copy_from_slice(buy_token_addr.as_slice());
@@ -119,6 +157,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let amount = BigUint::from(cli.sell_amount);
     let slippage = cli.slippage_bps as f64 / 10_000.0;
+
+    // On-chain execution: verify the Permit2 contract is approved by the user, then
+    // read the current nonce. Dry-run: use nonce 0 and a far-future deadline since
+    // the ephemeral key has never interacted with Permit2.
+    let (nonce, expiration, sig_deadline) = if cli.execute {
+        let allowance =
+            erc20::read_erc20_allowance(&provider, sell_token_addr, sender, permit2_addr).await?;
+        if allowance < amount {
+            eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
+            eprintln!("  Token:     {:#x}", sell_token_addr);
+            eprintln!("  Permit2:   {:#x}", permit2_addr);
+            eprintln!("  Allowance: {}", allowance);
+            eprintln!("  Required:  {}", amount);
+            eprintln!("\nApprove Permit2 with:");
+            eprintln!(
+                "  cast send {:#x} \"approve(address,uint256)\" {:#x} {} \\\n    \
+                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
+                sell_token_addr,
+                permit2_addr,
+                u128::MAX,
+            );
+            return Err("insufficient allowance to Permit2".into());
+        }
+
+        let nonce =
+            permit2::read_nonce(&provider, permit2_addr, sender, sell_token_addr, router_addr)
+                .await?;
+        info!("Permit2 nonce for sender: {}", nonce);
+
+        let block = provider
+            .get_block_by_number(Default::default())
+            .await?
+            .ok_or("could not fetch latest block")?;
+        let now = block.header.timestamp;
+        (nonce, now + 3_600, now + 1_800) // expiration: +1h, sig_deadline: +30m
+    } else {
+        // Dry-run: ephemeral key, nonce is naturally 0, use max uint48 as deadline.
+        // 2^48 - 1 = max uint48, well past any realistic expiry
+        (0u64, 281_474_976_710_655u64, 281_474_976_710_655u64)
+    };
+
+    // Build the fynd-client permit struct — this is also the value that gets signed.
+    let fynd_permit = FyndPermitSingle::new(
+        FyndPermitDetails::new(
+            Bytes::copy_from_slice(sell_token_addr.as_slice()),
+            max_uint160(),
+            BigUint::from(expiration),
+            BigUint::from(nonce),
+        ),
+        Bytes::copy_from_slice(router_addr.as_slice()),
+        BigUint::from(sig_deadline),
+    );
+
+    // Compute the Permit2 EIP-712 hash and sign it off-chain.
+    let chain_id = provider.get_chain_id().await?;
+    info!("Signing Permit2 EIP-712 hash (chain_id={}, nonce={})...", chain_id, nonce);
+    let permit2_addr_bytes = Bytes::copy_from_slice(permit2_addr.as_slice());
+    let signing_hash = fynd_permit.eip712_signing_hash(chain_id, &permit2_addr_bytes)?;
+    let sig = signer
+        .sign_hash(&alloy::primitives::B256::from(signing_hash))
+        .await?;
+    let signature = Bytes::copy_from_slice(&sig.as_bytes());
 
     info!(
         "Requesting quote: {} atomic units of {} -> {}",
@@ -129,7 +229,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Order::new(sell_token_bytes, buy_token_bytes, amount, OrderSide::Sell, sender_bytes, None);
     let options = QuoteOptions::default()
         .with_timeout_ms(5_000)
-        .with_encoding_options(EncodingOptions::new(slippage));
+        .with_encoding_options(
+            EncodingOptions::new(slippage).with_permit2(fynd_permit, signature)?,
+        );
     let quote = client
         .quote(QuoteParams::new(order, options))
         .await?;
@@ -156,57 +258,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("============================\n");
 
-    // Extract router address before signable_payload consumes the quote
-    let tx = quote
-        .transaction()
-        .ok_or("Quote has no calldata. Ensure encoding_options were set in the request.")?;
-    let router = Address::from_slice(tx.to().as_ref());
-
-    // On-chain execution only: verify the router is approved before signing, so
-    // the user gets a clear error and a fix command rather than a cryptic revert.
-    if cli.execute {
-        let allowance =
-            erc20::read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
-        let required = BigUint::from(cli.sell_amount);
-        if allowance < required {
-            eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
-            eprintln!("  Token:     {:#x}", sell_token_addr);
-            eprintln!("  Router:    {:#x}", router);
-            eprintln!("  Allowance: {}", allowance);
-            eprintln!("  Required:  {}", required);
-            eprintln!("\nApprove the router with:");
-            eprintln!(
-                "  cast send {:#x} \"approve(address,uint256)\" {:#x} {} \\\n    \
-                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                sell_token_addr, router, cli.sell_amount,
-            );
-            return Err("insufficient sell-token allowance".into());
-        }
-    }
-
-    // Build and sign the payload
+    // Build and sign the Fynd order payload
     let payload = client
         .signable_payload(quote, &SigningHints::default())
         .await?;
-    let signature = signer
+    let order_sig = signer
         .sign_hash(&payload.signing_hash())
         .await?;
-    let signed = SignedOrder::assemble(payload, signature);
+    let signed = SignedOrder::assemble(payload, order_sig);
 
     let exec_options = if cli.execute {
         info!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
-        // Dry-run: probe the token's actual balance and allowance storage slots, then inject
-        // U256::MAX into those slots so the simulation succeeds without real funds.
+        // Dry-run: inject ERC-20 balance and allowance-to-Permit2 via storage overrides.
+        // No Permit2 state override is needed because the ephemeral key's nonce is 0
+        // and the EIP-712 signature is valid.
         info!("Detecting storage slots for {}...", cli.sell_token);
         let (balance_slot_result, allowance_slot_result) = tokio::join!(
             erc20::find_balance_slot(&provider, sell_token_addr, sender),
-            erc20::find_allowance_slot(&provider, sell_token_addr, sender, router),
+            erc20::find_allowance_slot(&provider, sell_token_addr, sender, PERMIT2_ADDRESS),
         );
         let balance_pos = balance_slot_result?;
         let allowance_pos = allowance_slot_result?;
-        info!("Found balance slot {} and allowance slot {}", balance_pos, allowance_pos);
+        info!("Found balance slot {} and allowance-to-Permit2 slot {}", balance_pos, allowance_pos);
 
         let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
         let token_key = Bytes::copy_from_slice(sell_token_addr.as_slice());
@@ -218,7 +293,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         overrides.insert(
             token_key,
-            Bytes::copy_from_slice(&erc20::allowance_slot_at(sender, router, allowance_pos).0),
+            Bytes::copy_from_slice(
+                &erc20::allowance_slot_at(sender, PERMIT2_ADDRESS, allowance_pos).0,
+            ),
             max_val,
         );
         info!("Submitting dry-run execution...");

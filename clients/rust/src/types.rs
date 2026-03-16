@@ -2,6 +2,256 @@ use bytes::Bytes;
 use num_bigint::BigUint;
 
 // ============================================================================
+// ENCODING TYPES
+// ============================================================================
+
+/// Token transfer method used when building an on-chain swap transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserTransferType {
+    /// Use standard ERC-20 `approve` + `transferFrom`. Default.
+    #[default]
+    TransferFrom,
+    /// Use Permit2 single-token authorization. Requires [`EncodingOptions::with_permit2`].
+    TransferFromPermit2,
+    /// Funds are already present in the Tycho Router; no token transfer performed.
+    None,
+}
+
+/// Per-token details for a Permit2 single-token authorization.
+#[derive(Debug, Clone)]
+pub struct PermitDetails {
+    pub(crate) token: bytes::Bytes,
+    pub(crate) amount: num_bigint::BigUint,
+    pub(crate) expiration: num_bigint::BigUint,
+    pub(crate) nonce: num_bigint::BigUint,
+}
+
+impl PermitDetails {
+    pub fn new(
+        token: bytes::Bytes,
+        amount: num_bigint::BigUint,
+        expiration: num_bigint::BigUint,
+        nonce: num_bigint::BigUint,
+    ) -> Self {
+        Self { token, amount, expiration, nonce }
+    }
+}
+
+/// A single Permit2 authorization, covering one token for one spender.
+#[derive(Debug, Clone)]
+pub struct PermitSingle {
+    pub(crate) details: PermitDetails,
+    pub(crate) spender: bytes::Bytes,
+    pub(crate) sig_deadline: num_bigint::BigUint,
+}
+
+impl PermitSingle {
+    pub fn new(
+        details: PermitDetails,
+        spender: bytes::Bytes,
+        sig_deadline: num_bigint::BigUint,
+    ) -> Self {
+        Self { details, spender, sig_deadline }
+    }
+
+    /// Compute the Permit2 EIP-712 signing hash for this permit.
+    ///
+    /// Pass the returned bytes to your signer's `sign_hash` method, then supply the
+    /// 65-byte result as the `signature` argument to [`EncodingOptions::with_permit2`].
+    ///
+    /// `permit2_address` must be the 20-byte address of the Permit2 contract
+    /// (canonical cross-chain deployment: `0x000000000022D473030F116dDEE9F6B43aC78BA3`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::FyndError::Protocol`] if any address field is not exactly 20 bytes,
+    /// or if `amount` / `expiration` / `nonce` exceed their respective Solidity types.
+    pub fn eip712_signing_hash(
+        &self,
+        chain_id: u64,
+        permit2_address: &bytes::Bytes,
+    ) -> Result<[u8; 32], crate::error::FyndError> {
+        use alloy::sol_types::{eip712_domain, SolStruct};
+
+        let permit2_addr = p2_bytes_to_address(permit2_address, "permit2_address")?;
+        let token = p2_bytes_to_address(&self.details.token, "token")?;
+        let spender = p2_bytes_to_address(&self.spender, "spender")?;
+
+        let amount = p2_biguint_to_uint160(&self.details.amount)?;
+        let expiration = p2_biguint_to_uint48(&self.details.expiration)?;
+        let nonce = p2_biguint_to_uint48(&self.details.nonce)?;
+        let sig_deadline = crate::mapping::biguint_to_u256(&self.sig_deadline);
+
+        let domain = eip712_domain! {
+            name: "Permit2",
+            chain_id: chain_id,
+            verifying_contract: permit2_addr,
+        };
+        #[allow(non_snake_case)]
+        let permit = permit2_sol::PermitSingle {
+            details: permit2_sol::PermitDetails { token, amount, expiration, nonce },
+            spender,
+            sigDeadline: sig_deadline,
+        };
+        Ok(permit.eip712_signing_hash(&domain).0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers for eip712_signing_hash
+// ---------------------------------------------------------------------------
+
+mod permit2_sol {
+    use alloy::sol;
+
+    sol! {
+        struct PermitDetails {
+            address token;
+            uint160 amount;
+            uint48 expiration;
+            uint48 nonce;
+        }
+        struct PermitSingle {
+            PermitDetails details;
+            address spender;
+            uint256 sigDeadline;
+        }
+    }
+}
+
+fn p2_bytes_to_address(
+    b: &bytes::Bytes,
+    field: &str,
+) -> Result<alloy::primitives::Address, crate::error::FyndError> {
+    let arr: [u8; 20] = b.as_ref().try_into().map_err(|_| {
+        crate::error::FyndError::Protocol(format!(
+            "expected 20-byte address for {field}, got {} bytes",
+            b.len()
+        ))
+    })?;
+    Ok(alloy::primitives::Address::from(arr))
+}
+
+fn p2_biguint_to_uint160(
+    n: &num_bigint::BigUint,
+) -> Result<alloy::primitives::Uint<160, 3>, crate::error::FyndError> {
+    let bytes = n.to_bytes_be();
+    if bytes.len() > 20 {
+        return Err(crate::error::FyndError::Protocol(format!(
+            "permit amount exceeds uint160 ({} bytes)",
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; 20];
+    arr[20 - bytes.len()..].copy_from_slice(&bytes);
+    Ok(alloy::primitives::Uint::<160, 3>::from_be_bytes(arr))
+}
+
+fn p2_biguint_to_uint48(
+    n: &num_bigint::BigUint,
+) -> Result<alloy::primitives::Uint<48, 1>, crate::error::FyndError> {
+    let bytes = n.to_bytes_be();
+    if bytes.len() > 6 {
+        return Err(crate::error::FyndError::Protocol(format!(
+            "permit value exceeds uint48 ({} bytes)",
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; 6];
+    arr[6 - bytes.len()..].copy_from_slice(&bytes);
+    Ok(alloy::primitives::Uint::<48, 1>::from_be_bytes(arr))
+}
+
+/// Options that instruct the server to return ABI-encoded calldata in the quote response.
+///
+/// Pass via [`QuoteOptions::with_encoding_options`] to opt into calldata generation. Without this,
+/// the server returns routing information only and [`Quote::transaction`] will be `None`.
+#[derive(Debug, Clone)]
+pub struct EncodingOptions {
+    pub(crate) slippage: f64,
+    pub(crate) transfer_type: UserTransferType,
+    pub(crate) permit: Option<PermitSingle>,
+    pub(crate) permit2_signature: Option<bytes::Bytes>,
+}
+
+impl EncodingOptions {
+    /// Create encoding options with the given slippage tolerance.
+    ///
+    /// `slippage` is a fraction (e.g. `0.005` for 0.5%). The transfer type defaults to
+    /// [`UserTransferType::TransferFrom`].
+    pub fn new(slippage: f64) -> Self {
+        Self {
+            slippage,
+            transfer_type: UserTransferType::TransferFrom,
+            permit: None,
+            permit2_signature: None,
+        }
+    }
+
+    /// Enable Permit2 token transfer with a pre-computed EIP-712 signature.
+    ///
+    /// `signature` must be the 65-byte result of signing the Permit2 typed-data hash
+    /// externally (ECDSA: 32-byte r, 32-byte s, 1-byte v).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::FyndError::Protocol`] if `signature` is not exactly 65 bytes.
+    pub fn with_permit2(
+        mut self,
+        permit: PermitSingle,
+        signature: bytes::Bytes,
+    ) -> Result<Self, crate::error::FyndError> {
+        if signature.len() != 65 {
+            return Err(crate::error::FyndError::Protocol(format!(
+                "Permit2 signature must be exactly 65 bytes, got {}",
+                signature.len()
+            )));
+        }
+        self.transfer_type = UserTransferType::TransferFromPermit2;
+        self.permit = Some(permit);
+        self.permit2_signature = Some(signature);
+        Ok(self)
+    }
+
+    /// Use funds already present in the Tycho Router (no token transfer performed).
+    pub fn with_no_transfer(mut self) -> Self {
+        self.transfer_type = UserTransferType::None;
+        self
+    }
+}
+
+/// An encoded EVM transaction returned by the server when [`EncodingOptions`] was set.
+///
+/// Contains everything needed to submit the swap on-chain.
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    to: Bytes,
+    value: BigUint,
+    data: Vec<u8>,
+}
+
+impl Transaction {
+    pub(crate) fn new(to: Bytes, value: BigUint, data: Vec<u8>) -> Self {
+        Self { to, value, data }
+    }
+
+    /// Router contract address (20 raw bytes).
+    pub fn to(&self) -> &Bytes {
+        &self.to
+    }
+
+    /// Native value to send with the transaction (token units; usually `0` for ERC-20 swaps).
+    pub fn value(&self) -> &BigUint {
+        &self.value
+    }
+
+    /// ABI-encoded calldata.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+// ============================================================================
 // ORDER SIDE
 // ============================================================================
 
@@ -91,6 +341,7 @@ pub struct QuoteOptions {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
+    pub(crate) encoding_options: Option<EncodingOptions>,
 }
 
 impl QuoteOptions {
@@ -112,6 +363,13 @@ impl QuoteOptions {
     /// Discard quotes whose estimated gas cost exceeds `gas`.
     pub fn with_max_gas(mut self, gas: BigUint) -> Self {
         self.max_gas = Some(gas);
+        self
+    }
+
+    /// Request server-side calldata generation. The resulting [`Quote::transaction`] will be
+    /// populated when this option is set.
+    pub fn with_encoding_options(mut self, opts: EncodingOptions) -> Self {
+        self.encoding_options = Some(opts);
         self
     }
 
@@ -316,6 +574,9 @@ pub struct Quote {
     /// Defaults to `sender` if the order had no explicit receiver.
     /// Populated by `quote()` from the corresponding `Order`.
     receiver: Bytes,
+    /// ABI-encoded on-chain transaction. Present only when [`EncodingOptions`] was set in the
+    /// request via [`QuoteOptions::with_encoding_options`].
+    transaction: Option<Transaction>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -384,6 +645,14 @@ impl Quote {
         &self.receiver
     }
 
+    /// The server-encoded on-chain transaction, present when [`EncodingOptions`] was set.
+    ///
+    /// Contains the router contract address, native value, and ABI-encoded calldata ready to
+    /// submit. Returns `None` when no [`EncodingOptions`] were passed in the request.
+    pub fn transaction(&self) -> Option<&Transaction> {
+        self.transaction.as_ref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -404,6 +673,7 @@ impl Quote {
         block: BlockInfo,
         token_out: Bytes,
         receiver: Bytes,
+        transaction: Option<Transaction>,
     ) -> Self {
         Self {
             order_id,
@@ -417,6 +687,7 @@ impl Quote {
             block,
             token_out,
             receiver,
+            transaction,
             solve_time_ms: 0,
         }
     }
@@ -549,5 +820,147 @@ mod tests {
         assert!(opts.timeout_ms().is_none());
         assert!(opts.min_responses().is_none());
         assert!(opts.max_gas().is_none());
+    }
+
+    #[test]
+    fn encoding_options_with_permit2_sets_fields() {
+        let token = Bytes::copy_from_slice(&[0xaa; 20]);
+        let spender = Bytes::copy_from_slice(&[0xbb; 20]);
+        let sig = Bytes::copy_from_slice(&[0xcc; 65]);
+        let details = PermitDetails::new(
+            token,
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        let permit = PermitSingle::new(details, spender, BigUint::from(9_999_999u32));
+
+        let opts = EncodingOptions::new(0.005)
+            .with_permit2(permit, sig.clone())
+            .unwrap();
+
+        assert_eq!(opts.transfer_type, UserTransferType::TransferFromPermit2);
+        assert!(opts.permit.is_some());
+        assert_eq!(opts.permit2_signature.as_ref().unwrap(), &sig);
+    }
+
+    #[test]
+    fn encoding_options_with_permit2_rejects_wrong_signature_length() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        let permit = PermitSingle::new(
+            details,
+            Bytes::copy_from_slice(&[0xbb; 20]),
+            BigUint::from(9_999_999u32),
+        );
+        let bad_sig = Bytes::copy_from_slice(&[0xcc; 64]); // 64 bytes, not 65
+        assert!(matches!(
+            EncodingOptions::new(0.005).with_permit2(permit, bad_sig),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn encoding_options_with_no_transfer_sets_variant() {
+        let opts = EncodingOptions::new(0.005).with_no_transfer();
+        assert_eq!(opts.transfer_type, UserTransferType::None);
+        assert!(opts.permit.is_none());
+        assert!(opts.permit2_signature.is_none());
+    }
+
+    fn sample_permit_single() -> PermitSingle {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(9_999_999u32),
+            BigUint::from(0u32),
+        );
+        PermitSingle::new(details, Bytes::copy_from_slice(&[0xbb; 20]), BigUint::from(9_999_999u32))
+    }
+
+    #[test]
+    fn eip712_signing_hash_returns_32_bytes() {
+        let permit = sample_permit_single();
+        let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
+        let hash = permit
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        assert_eq!(hash.len(), 32);
+        // Non-zero: alloy should never hash to all-zeros for a real input
+        assert_ne!(hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn eip712_signing_hash_is_deterministic() {
+        let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
+        let h1 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        let h2 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn eip712_signing_hash_differs_by_chain_id() {
+        let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
+        let h1 = sample_permit_single()
+            .eip712_signing_hash(1, &permit2_addr)
+            .unwrap();
+        let h137 = sample_permit_single()
+            .eip712_signing_hash(137, &permit2_addr)
+            .unwrap();
+        assert_ne!(h1, h137);
+    }
+
+    #[test]
+    fn eip712_signing_hash_invalid_permit2_address() {
+        let permit = sample_permit_single();
+        let bad_addr = Bytes::copy_from_slice(&[0xcc; 4]);
+        assert!(matches!(
+            permit.eip712_signing_hash(1, &bad_addr),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn eip712_signing_hash_invalid_token_address() {
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 4]), // wrong length
+            BigUint::from(1u32),
+            BigUint::from(1u32),
+            BigUint::from(0u32),
+        );
+        let permit =
+            PermitSingle::new(details, Bytes::copy_from_slice(&[0xbb; 20]), BigUint::from(1u32));
+        let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
+        assert!(matches!(
+            permit.eip712_signing_hash(1, &permit2_addr),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn eip712_signing_hash_amount_exceeds_uint160() {
+        // 21 bytes > 20 bytes (uint160 = 160 bits = 20 bytes)
+        let oversized_amount = BigUint::from_bytes_be(&[0x01; 21]);
+        let details = PermitDetails::new(
+            Bytes::copy_from_slice(&[0xaa; 20]),
+            oversized_amount,
+            BigUint::from(1u32),
+            BigUint::from(0u32),
+        );
+        let permit =
+            PermitSingle::new(details, Bytes::copy_from_slice(&[0xbb; 20]), BigUint::from(1u32));
+        let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
+        assert!(matches!(
+            permit.eip712_signing_hash(1, &permit2_addr),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
     }
 }
