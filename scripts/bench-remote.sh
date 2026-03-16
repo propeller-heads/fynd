@@ -226,8 +226,7 @@ RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --requests-file "${REQUESTS_FILE}" \\
     --warmup-secs ${WARMUP_SECS} \\
     --health-timeout-secs ${HEALTH_TIMEOUT} \\
-    --output-file scale_results_remote.json 2>&1 | \
-    grep -E '(--- Testing|=== CPU|Pool:|Requests per|Workers|--------|^\s+[0-9]|INFO.*(Scale results|healthy|warming|Loaded|Worker counts))'
+    --output-file scale_results_remote.json 2>&1
 BENCH_EOF
 
 # ---------- fetch results ----------
