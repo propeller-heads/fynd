@@ -171,7 +171,7 @@ where
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
             BlockInfo::new(
                 last_block.number(),
-                format!("{:?}", last_block.hash()),
+                last_block.hash().to_string(),
                 last_block.timestamp(),
             )
         };

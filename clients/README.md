@@ -12,24 +12,31 @@ clients/
     autogen/                # Auto-generated TypeScript types + fetch client
 ```
 
-## Regenerating clients/openapi.json
+## Regenerating derived artefacts
 
-`clients/openapi.json` is generated from the Rust source via the `openapi` subcommand. It must be kept in
-sync with the code — CI will fail if it drifts.
+`clients/openapi.json` and `clients/typescript/autogen/src/schema.d.ts` are both generated files
+committed to source control. CI drift checks verify they match the binary output on every PR.
 
-After changing any HTTP handler, request/response type, or route:
-
-```bash
-cargo run --locked -- openapi > clients/openapi.json
-```
-
-## Regenerating the TypeScript autogen schema
-
-`clients/typescript/autogen/src/schema.d.ts` is generated from `clients/openapi.json` using
-[openapi-typescript](https://openapi-ts.dev/). Regenerate it after updating `clients/openapi.json`:
+After changing any HTTP handler, request/response type, or route, run:
 
 ```bash
-npx openapi-typescript@7.13.0 clients/openapi.json -o clients/typescript/autogen/src/schema.d.ts
+./scripts/update-openapi.sh
 ```
 
-Both files are committed to source control. CI drift checks verify they match the binary output on every PR.
+This rebuilds the server binary, exports `clients/openapi.json`, then regenerates the TypeScript schema
+in one step. Commit both files afterwards.
+
+### What the script does
+
+| Step | Command |
+|------|---------|
+| Export OpenAPI spec | `cargo run -- openapi > clients/openapi.json` |
+| Regenerate TS schema | `npx openapi-typescript clients/openapi.json -o clients/typescript/autogen/src/schema.d.ts` |
+
+## Adding a new client
+
+1. Create your client under `clients/<language>/`.
+2. If your client has generated artefacts (types, SDKs) derived from `clients/openapi.json`, add the
+   regeneration command to `scripts/update-openapi.sh` so a single script keeps everything in sync.
+3. Add a CI drift check (similar to the existing `TypeScript Autogen Drift Check`) that fails if the
+   committed artefact diverges from the generated output.

@@ -41,3 +41,4 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
 serde_json = { workspace = true }
+hex = { workspace = true }
