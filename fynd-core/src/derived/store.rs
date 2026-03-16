@@ -39,20 +39,12 @@ impl DerivedData {
         Arc::new(RwLock::new(Self::new()))
     }
 
-    /// Returns the block number at which any data was last computed.
-    ///
-    /// Returns the maximum block across all computed values, so it returns `Some` as long as
-    /// any computation has run. Used by health checks.
-    pub fn last_block(&self) -> Option<u64> {
-        [
-            self.token_prices_block(),
-            self.token_prices_deps_block(),
-            self.pool_depths_block(),
-            self.spot_prices_block(),
-        ]
-        .into_iter()
-        .flatten()
-        .max()
+    /// Returns `true` if all derived data types has been computed at least once.
+    pub fn derived_data_ready(&self) -> bool {
+        self.token_prices_block().is_some() &&
+            self.token_prices_deps_block().is_some() &&
+            self.pool_depths_block().is_some() &&
+            self.spot_prices_block().is_some()
     }
 
     // -------------------------------------------------------------------------
@@ -216,16 +208,16 @@ mod tests {
     #[test]
     fn last_block_returns_max_across_computations() {
         let mut store = DerivedData::new();
-        assert_eq!(store.last_block(), None);
+        assert!(!store.derived_data_ready());
 
         store.set_spot_prices(Default::default(), 5);
-        assert_eq!(store.last_block(), Some(5));
+        assert!(!store.derived_data_ready());
 
         store.set_token_prices(Default::default(), 10);
-        assert_eq!(store.last_block(), Some(10));
+        assert!(!store.derived_data_ready());
 
         store.set_pool_depths(Default::default(), 9);
-        assert_eq!(store.last_block(), Some(10)); // max is still 10
+        assert!(store.derived_data_ready());
     }
 
     #[test]
@@ -240,6 +232,6 @@ mod tests {
         assert!(store.token_prices().is_none());
         assert!(store.spot_prices().is_none());
         assert!(store.pool_depths().is_none());
-        assert_eq!(store.last_block(), None);
+        assert!(!store.derived_data_ready());
     }
 }

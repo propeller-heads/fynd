@@ -9,8 +9,8 @@ use super::{dto, ApiError, AppState};
 use crate::api::error::ErrorResponse;
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_f64, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse, SpotPriceEntry,
-    TokenPriceEntry,
+    price_to_f64, ComputationBlocks, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse,
+    SpotPriceEntry, TokenPriceEntry,
 };
 
 /// Configures API routes under /v1 namespace.
@@ -192,9 +192,17 @@ pub async fn get_prices(
 
     // Acquire read lock, check staleness first (avoid cloning if 503), then clone
     let store = state.derived_data.read().await;
-    let last_block = store
-        .last_block()
+    let token_prices_block = store
+        .token_prices_block()
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+    if want_spot && store.spot_prices_block().is_none() {
+        return Err(ApiError::StaleData { age_ms: u64::MAX });
+    }
+    if want_depths && store.pool_depths_block().is_none() {
+        return Err(ApiError::StaleData { age_ms: u64::MAX });
+    }
+    let spot_prices_block = store.spot_prices_block();
+    let pool_depths_block = store.pool_depths_block();
     let token_prices = store.token_prices().cloned();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
     let pool_depths_data = if want_depths { store.pool_depths().cloned() } else { None };
@@ -270,7 +278,11 @@ pub async fn get_prices(
     let response = PricesResponse {
         prices,
         gas_token: state.gas_token.clone(),
-        last_block,
+        blocks: ComputationBlocks {
+            token_prices: token_prices_block,
+            spot_prices: spot_prices_block,
+            pool_depths: pool_depths_block,
+        },
         spot_prices,
         pool_depths,
     };

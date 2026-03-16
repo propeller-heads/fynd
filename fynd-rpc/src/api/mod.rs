@@ -149,8 +149,7 @@ impl HealthTracker {
         self.derived_data
             .read()
             .await
-            .last_block()
-            .is_some()
+            .derived_data_ready()
     }
 }
 
