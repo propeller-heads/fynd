@@ -356,26 +356,32 @@ async fn main() -> anyhow::Result<()> {
 
                 blocks_processed += 1;
 
-                // Run BF scan for each source token, merge all cycles
+                // Run BF scan for each source token in parallel
+                let start = Instant::now();
+                let search_futures: Vec<_> = source_token_addrs
+                    .iter()
+                    .map(|src_addr| {
+                        search_block(
+                            block_number,
+                            src_addr,
+                            &weth_addr,
+                            &seed_amount,
+                            args.max_hops,
+                            graph_manager.graph(),
+                            &market_data,
+                            &derived_store,
+                            args.gss_tolerance,
+                            args.gss_max_iter,
+                            &blacklisted_tokens,
+                            args.min_profit_bps,
+                        )
+                    })
+                    .collect();
+                let results = futures::future::join_all(search_futures).await;
+
                 let mut all_cycles: Vec<(EvaluatedCycle, usize)> = Vec::new();
                 let mut total_candidates = 0usize;
-                let start = Instant::now();
-
-                for (src_idx, src_addr) in source_token_addrs.iter().enumerate() {
-                    let result = search_block(
-                        block_number,
-                        src_addr,
-                        &seed_amount,
-                        args.max_hops,
-                        graph_manager.graph(),
-                        &market_data,
-                        &derived_store,
-                        args.gss_tolerance,
-                        args.gss_max_iter,
-                        &blacklisted_tokens,
-                        args.min_profit_bps,
-                    )
-                    .await;
+                for (src_idx, result) in results.into_iter().enumerate() {
                     total_candidates += result.candidates_found;
                     for cycle in result.cycles {
                         all_cycles.push((cycle, src_idx));
@@ -553,6 +559,7 @@ fn parse_source_tokens(
 async fn search_block(
     block_number: u64,
     source_token_addr: &tycho_simulation::tycho_core::models::Address,
+    native_token_addr: &tycho_simulation::tycho_core::models::Address,
     seed_amount: &BigUint,
     max_hops: usize,
     graph: &StableDiGraph<()>,
@@ -673,11 +680,10 @@ async fn search_block(
         .map(|gp| gp.effective_gas_price())
         .unwrap_or_else(|| BigUint::from(30_000_000_000u64));
 
-    let weth_bytes: Vec<u8> =
-        hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
-    let is_weth_source = source_token_addr.as_ref() == weth_bytes.as_slice();
+    let is_native_source =
+        source_token_addr.as_ref() == native_token_addr.as_ref();
 
-    let (gas_token_price_num, gas_token_price_den) = if is_weth_source {
+    let (gas_token_price_num, gas_token_price_den) = if is_native_source {
         (BigUint::from(1u64), BigUint::from(1u64))
     } else {
         let derived = derived_store.read().await;
