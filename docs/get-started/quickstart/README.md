@@ -248,6 +248,6 @@ compatible tool. Available metrics: solve duration, response counts, failure typ
 ### 7. Validating and Executing the Solutions
 
 The repository includes an end-to-end example
-at [`examples/quickstart/`](https://github.com/propeller-heads/fynd/tree/main/examples/quickstart) that demonstrates
+at [`examples/tutorial/`](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) that demonstrates
 quoting, simulating, and executing swaps against a running solver.
 See [executing-the-solutions.md](executing-the-solutions.md "mention") for the full walkthrough.

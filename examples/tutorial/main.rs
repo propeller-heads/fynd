@@ -1,30 +1,29 @@
-//! Tutorial Example: Quote and Execute a Swap via FyndClient
+//! Tutorial Example: Quote and Execute a Swap using ERC-20 Approvals
 //!
-//! This example demonstrates how to:
-//! 1. Build a FyndClient and check solver health
-//! 2. Request a swap quote with server-side calldata encoding
-//! 3. Display the route and pricing
-//! 4. Execute the swap — dry-run (default) or on-chain (--execute)
+//! This example demonstrates how to use FyndClient to quote and execute a token
+//! swap using standard ERC-20 `approve` + `transferFrom`.
 //!
-//! Dry-run uses an ephemeral key and ERC-20 storage overrides; no funds required.
-//! On-chain execution requires `PRIVATE_KEY` env var and a funded wallet.
+//! # Dry-run (default)
+//!
+//! Uses an ephemeral key and ERC-20 storage overrides so no funds are required.
+//!
+//! # On-chain execution (`--execute`)
+//!
+//! Requires `PRIVATE_KEY` env var and a funded wallet.
 
 use std::{env, str::FromStr, time::Duration};
 
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256},
-    providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::TransactionRequest,
+    primitives::{Address, B256, U256},
+    providers::{ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
-    sol_types::SolCall,
 };
 use bytes::Bytes;
 
 mod erc20;
 use clap::Parser;
-use erc20::IERC20;
 use fynd_client::{
     EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
@@ -72,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let rpc_url = env::var("RPC_URL").map_err(|_| "RPC_URL environment variable is required")?;
+    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://eth.llamarpc.com".to_string());
 
     // Load or generate signer. Real execution requires PRIVATE_KEY; dry-run uses an
     // ephemeral key because storage overrides inject the balance on-the-fly.
@@ -141,9 +140,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Amount in:    {}", quote.amount_in());
     println!("Amount out:   {}", quote.amount_out());
     println!("Gas estimate: {}", quote.gas_estimate());
-    if let Some(impact) = quote.price_impact_bps() {
-        println!("Price impact: {:.2}%", impact as f64 / 100.0);
-    }
     println!("Solve time:   {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
         println!("Route ({} hops):", route.swaps().len());
@@ -169,7 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On-chain execution only: verify the router is approved before signing, so
     // the user gets a clear error and a fix command rather than a cryptic revert.
     if cli.execute {
-        let allowance = read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
+        let allowance =
+            erc20::read_erc20_allowance(&provider, sell_token_addr, sender, router).await?;
         let required = BigUint::from(cli.sell_amount);
         if allowance < required {
             eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
@@ -252,25 +249,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Gas cost (wei): {}", settled.gas_cost());
 
     Ok(())
-}
-
-/// Read the current `allowance(owner, spender)` from an ERC-20 token via `eth_call`.
-async fn read_erc20_allowance(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> Result<BigUint, Box<dyn std::error::Error>> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let result = provider
-        .call(TransactionRequest {
-            to: Some(TxKind::Call(token)),
-            input: AlloyBytes::from(calldata).into(),
-            ..Default::default()
-        })
-        .await?;
-    if result.len() < 32 {
-        return Err(format!("allowance() returned {} bytes, expected 32", result.len()).into());
-    }
-    Ok(BigUint::from_bytes_be(&result[..32]))
 }

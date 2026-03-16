@@ -80,13 +80,7 @@ impl PermitSingle {
         let amount = p2_biguint_to_uint160(&self.details.amount)?;
         let expiration = p2_biguint_to_uint48(&self.details.expiration)?;
         let nonce = p2_biguint_to_uint48(&self.details.nonce)?;
-        let sig_deadline = {
-            let bytes = self.sig_deadline.to_bytes_be();
-            let mut arr = [0u8; 32];
-            let len = bytes.len().min(32);
-            arr[32 - len..].copy_from_slice(&bytes[..len]);
-            alloy::primitives::U256::from_be_bytes(arr)
-        };
+        let sig_deadline = crate::mapping::biguint_to_u256(&self.sig_deadline);
 
         let domain = eip712_domain! {
             name: "Permit2",

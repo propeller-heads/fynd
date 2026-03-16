@@ -30,11 +30,9 @@ use std::{env, str::FromStr, time::Duration};
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, B256, U256},
+    primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::TransactionRequest,
     signers::{local::PrivateKeySigner, Signer},
-    sol_types::SolCall,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -50,7 +48,6 @@ use tracing_subscriber::EnvFilter;
 mod erc20;
 mod permit2;
 
-use erc20::IERC20;
 use permit2::PERMIT2_ADDRESS;
 
 /// Max uint160 — used as the Permit2 approved amount (unlimited).
@@ -61,7 +58,7 @@ fn max_uint160() -> BigUint {
 
 /// Permit2 tutorial: quote and execute a swap using Permit2 token authorization.
 #[derive(Parser)]
-#[command(name = "permit2")]
+#[command(name = "tutorial_with_permit2")]
 #[command(about = "Get a Fynd quote and execute the swap via Permit2 (no approve tx needed)")]
 struct Cli {
     /// Sell token address (defaults to USDC on mainnet)
@@ -107,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let rpc_url = env::var("RPC_URL").map_err(|_| "RPC_URL environment variable is required")?;
+    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://eth.llamarpc.com".to_string());
 
     // Load or generate signer. Real execution requires PRIVATE_KEY; dry-run uses an
     // ephemeral key — the ephemeral address has nonce 0 in Permit2 so no chain setup
@@ -166,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the ephemeral key has never interacted with Permit2.
     let (nonce, expiration, sig_deadline) = if cli.execute {
         let allowance =
-            read_erc20_allowance(&provider, sell_token_addr, sender, permit2_addr).await?;
+            erc20::read_erc20_allowance(&provider, sell_token_addr, sender, permit2_addr).await?;
         if allowance < amount {
             eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
             eprintln!("  Token:     {:#x}", sell_token_addr);
@@ -245,9 +242,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Amount in:    {}", quote.amount_in());
     println!("Amount out:   {}", quote.amount_out());
     println!("Gas estimate: {}", quote.gas_estimate());
-    if let Some(impact) = quote.price_impact_bps() {
-        println!("Price impact: {:.2}%", impact as f64 / 100.0);
-    }
     println!("Solve time:   {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
         println!("Route ({} hops):", route.swaps().len());
@@ -332,25 +326,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Gas cost (wei): {}", settled.gas_cost());
 
     Ok(())
-}
-
-/// Read the current `allowance(owner, spender)` from an ERC-20 token via `eth_call`.
-async fn read_erc20_allowance(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> Result<BigUint, Box<dyn std::error::Error>> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let result = provider
-        .call(TransactionRequest {
-            to: Some(TxKind::Call(token)),
-            input: AlloyBytes::from(calldata).into(),
-            ..Default::default()
-        })
-        .await?;
-    if result.len() < 32 {
-        return Err(format!("allowance() returned {} bytes, expected 32", result.len()).into());
-    }
-    Ok(BigUint::from_bytes_be(&result[..32]))
 }

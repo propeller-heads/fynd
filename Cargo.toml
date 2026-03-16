@@ -157,5 +157,5 @@ name = "compare"
 path = "tools/benchmark/compare.rs"
 
 [[example]]
-name = "permit2"
-path = "examples/permit2/main.rs"
+name = "tutorial_with_permit2"
+path = "examples/tutorial_with_permit2/main.rs"

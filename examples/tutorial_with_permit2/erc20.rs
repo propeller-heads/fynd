@@ -1,4 +1,4 @@
-//! ERC-20 helpers for the permit2 example: on-chain reads and storage slot detection.
+//! ERC-20 helpers for the tutorial_with_permit2 example: on-chain reads and storage slot detection.
 
 use alloy::{
     network::Ethereum,
@@ -118,4 +118,25 @@ fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOve
     overrides
         .insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
     overrides
+}
+
+/// Read the current `allowance(owner, spender)` from an ERC-20 token via `eth_call`.
+pub async fn read_erc20_allowance(
+    provider: &RootProvider<Ethereum>,
+    token: Address,
+    owner: Address,
+    spender: Address,
+) -> Result<num_bigint::BigUint, Box<dyn std::error::Error>> {
+    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
+    let result = provider
+        .call(TransactionRequest {
+            to: Some(TxKind::Call(token)),
+            input: AlloyBytes::from(calldata).into(),
+            ..Default::default()
+        })
+        .await?;
+    if result.len() < 32 {
+        return Err(format!("allowance() returned {} bytes, expected 32", result.len()).into());
+    }
+    Ok(num_bigint::BigUint::from_bytes_be(&result[..32]))
 }

@@ -32,10 +32,7 @@ pub(crate) fn bytes_to_alloy_address(
 /// Convert a client `bytes::Bytes` address to a tycho DTO-format address.
 fn bytes_to_tycho(b: &bytes::Bytes) -> Result<TychoAddress, FyndError> {
     if b.len() != 20 {
-        return Err(FyndError::Protocol(format!(
-            "expected 20-byte address, got {} bytes",
-            b.len()
-        )));
+        return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
     }
     // hex_bytes::Bytes has From<bytes::Bytes>
     Ok(TychoAddress::from(b.clone()))
@@ -52,15 +49,8 @@ fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
 // ============================================================================
 
 /// Convert a [`num_bigint::BigUint`] to an [`alloy::primitives::U256`].
-///
-/// Serialises `n` as a big-endian byte string, right-pads into 32 bytes, and
-/// constructs a `U256` from the resulting fixed-width representation.
 pub(crate) fn biguint_to_u256(n: &num_bigint::BigUint) -> alloy::primitives::U256 {
-    let bytes = n.to_bytes_be();
-    let mut arr = [0u8; 32];
-    let len = bytes.len().min(32);
-    arr[32 - len..].copy_from_slice(&bytes[..len]);
-    alloy::primitives::U256::from_be_bytes(arr)
+    alloy::primitives::U256::from_be_slice(&n.to_bytes_be())
 }
 
 // ============================================================================
