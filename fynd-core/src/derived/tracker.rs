@@ -438,11 +438,8 @@ mod tests {
         assert!(tracker.is_ready()); // Both satisfied again
     }
 
-    // ==================== ComputationFailed / is_blocked_for_current_block Tests
-    // ====================
-
     #[test]
-    fn test_is_blocked_when_require_fresh_computation_fails_for_current_block() {
+    fn test_fresh_failure_blocks_current_block() {
         let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
         tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
 
@@ -455,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn is_not_blocked_for_allow_stale_computation_failure() {
+    fn test_stale_failure_is_ignored() {
         let mut tracker = ReadinessTracker::new(stale_requirements(&["token_prices"]));
         tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
 
@@ -469,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_for_block_cleared_on_new_block() {
+    fn test_failure_cleared_on_new_block() {
         let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
         tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
         tracker.handle_event(&DerivedDataEvent::ComputationFailed {
@@ -484,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_for_old_block_does_not_block_current() {
+    fn test_old_block_failure_does_not_block() {
         let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
         tracker.handle_event(&DerivedDataEvent::NewBlock { block: 100 });
 
@@ -498,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_then_new_block_then_success_becomes_ready() {
+    fn test_failure_recovers_on_next_block() {
         let mut tracker = ReadinessTracker::new(fresh_requirements(&["spot_prices"]));
 
         // Block 100: failure
