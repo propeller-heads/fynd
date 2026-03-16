@@ -53,6 +53,8 @@ pub struct FyndBuilder {
     blacklist: BlacklistConfig,
     /// Custom encoder override. If `None`, a default encoder is created during build.
     encoder: Option<Encoder>,
+    /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
+    gas_price_stale_threshold: Option<Duration>,
 }
 
 impl FyndBuilder {
@@ -84,6 +86,7 @@ impl FyndBuilder {
             worker_router_min_responses: defaults::WORKER_ROUTER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
             encoder: None,
+            gas_price_stale_threshold: None,
         }
     }
 
@@ -172,6 +175,12 @@ impl FyndBuilder {
         self
     }
 
+    /// Sets the gas price staleness threshold. Health returns 503 when exceeded.
+    pub fn gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
+        self.gas_price_stale_threshold = threshold;
+        self
+    }
+
     pub fn build(self) -> Result<Fynd> {
         info!(
             host = %self.http_host,
@@ -219,7 +228,8 @@ impl FyndBuilder {
                 .map_err(|e| anyhow::anyhow!("failed to create computation manager: {}", e))?;
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let health_tracker =
-            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
+            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data))
+                .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
 

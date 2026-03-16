@@ -103,6 +103,11 @@ pub struct ServeArgs {
     /// Path to blacklist TOML config file (optional)
     #[arg(long, env, default_value = "blacklist.toml")]
     pub blacklist_config: Option<PathBuf>,
+
+    /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
+    /// Disabled by default.
+    #[arg(long)]
+    pub gas_price_stale_threshold_secs: Option<u64>,
 }
 
 #[cfg(test)]
