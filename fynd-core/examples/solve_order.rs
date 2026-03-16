@@ -26,8 +26,8 @@ use fynd_core::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     types::{constants::native_token, Order, OrderSide},
-    EncodingOptions, QuoteOptions, QuoteRequest, WorkerPoolRouter, WorkerPoolRouterConfig,
-    SolverPoolHandle, WorkerPoolBuilder,
+    EncodingOptions, QuoteOptions, QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
+    WorkerPoolRouter, WorkerPoolRouterConfig,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;

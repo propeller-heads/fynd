@@ -26,9 +26,9 @@ pub mod derived;
 pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
-pub mod worker_pool_router;
 pub mod types;
 pub mod worker_pool;
+pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};

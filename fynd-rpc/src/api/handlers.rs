@@ -69,7 +69,10 @@ pub async fn quote(
         }
     }
 
-    let core_quote = state.worker_router.quote(core_request).await?;
+    let core_quote = state
+        .worker_router
+        .quote(core_request)
+        .await?;
 
     info!(
         solve_time_ms = core_quote.solve_time_ms(),
