@@ -12,6 +12,9 @@ WARMUP_SECS="${WARMUP_SECS:-30}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 PROTOCOLS="${PROTOCOLS:-uniswap_v2,uniswap_v3}"
 TYCHO_URL="${TYCHO_URL:?TYCHO_URL must be set}"
+# Strip protocol prefix — the solver handles TLS internally
+TYCHO_URL="${TYCHO_URL#https://}"
+TYCHO_URL="${TYCHO_URL#http://}"
 TYCHO_API_KEY="${TYCHO_API_KEY:?TYCHO_API_KEY must be set}"
 HTTP_PORT="${HTTP_PORT:-3456}"
 POOL_CONFIG="${POOL_CONFIG:-single_pool.toml}"
@@ -187,7 +190,7 @@ rsync -az --progress \
 	--exclude target/ \
 	--exclude .git/ \
 	--exclude .idea/ \
-	--exclude clients/typescript/node_modules/ \
+	--exclude node_modules/ \
 	"${REPO_ROOT}/" \
 	"ec2-user@${PUBLIC_IP}:${REMOTE_DIR}/"
 echo "Code synced."
@@ -224,7 +227,7 @@ RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --warmup-secs ${WARMUP_SECS} \\
     --health-timeout-secs ${HEALTH_TIMEOUT} \\
     --output-file scale_results_remote.json 2>&1 | \
-    grep -E '(=== CPU|Pool:|Requests per|Workers|--------|^\s+[0-9]|INFO.*Scale results)'
+    grep -E '(--- Testing|=== CPU|Pool:|Requests per|Workers|--------|^\s+[0-9]|INFO.*(Scale results|healthy|warming|Loaded|Worker counts))'
 BENCH_EOF
 
 # ---------- fetch results ----------

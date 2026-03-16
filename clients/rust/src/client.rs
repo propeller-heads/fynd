@@ -525,12 +525,19 @@ where
     pub async fn health(&self) -> Result<HealthStatus, FyndError> {
         let url = format!("{}/v1/health", self.base_url);
         let response = self.http.get(&url).send().await?;
-        if !response.status().is_success() {
-            let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        // The server returns HealthStatus JSON for both 200 and 503 (not-ready).
+        // Try parsing as HealthStatus first, then fall back to ErrorResponse.
+        if let Ok(dh) = serde_json::from_str::<fynd_rpc_types::HealthStatus>(&body) {
+            return Ok(HealthStatus::from(dh));
+        }
+        if let Ok(dto_err) = serde_json::from_str::<fynd_rpc_types::ErrorResponse>(&body) {
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
-        let dh: fynd_rpc_types::HealthStatus = response.json().await?;
-        Ok(HealthStatus::from(dh))
+        Err(FyndError::Protocol(format!(
+            "unexpected health response ({status}): {body}"
+        )))
     }
 
     /// Build a signable payload for a given order quote.

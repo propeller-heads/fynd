@@ -213,7 +213,12 @@ async fn wait_for_health(url: &str, timeout: Duration) -> Result<()> {
         if Instant::now() >= deadline {
             bail!("solver did not become healthy within {}s", timeout.as_secs());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                bail!("interrupted by ctrl+c");
+            }
+        }
     }
 }
 
@@ -289,8 +294,16 @@ pub async fn run(args: Args) -> Result<()> {
         let handle = fynd.server_handle();
         let server_task = tokio::spawn(fynd.run());
 
-        let result =
-            run_iteration(&solver_url, &parallelization_mode, &requests, &args, workers).await;
+        let result = tokio::select! {
+            r = run_iteration(
+                &solver_url, &parallelization_mode, &requests, &args, workers,
+            ) => r,
+            _ = tokio::signal::ctrl_c() => {
+                handle.stop(true).await;
+                let _ = server_task.await;
+                bail!("interrupted by ctrl+c");
+            }
+        };
 
         handle.stop(true).await;
         if let Err(e) = server_task.await {
