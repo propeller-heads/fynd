@@ -172,12 +172,17 @@ pub mod defaults {
     pub const POOL_TIMEOUT_MS: u64 = 100;
 
     /// Returns the default Tycho Fynd endpoint URL for the given chain.
-    pub fn default_tycho_url(chain: &str) -> &str {
+    ///
+    /// Returns an error if the chain is not recognized.
+    pub fn default_tycho_url(chain: &str) -> Result<&str, String> {
         match chain.to_lowercase().as_str() {
-            "ethereum" => "tycho-fynd-ethereum.propellerheads.xyz",
-            "base" => "tycho-fynd-base.propellerheads.xyz",
-            "unichain" => "tycho-fynd-unichain.propellerheads.xyz",
-            _ => "localhost:4242",
+            "ethereum" => Ok("tycho-fynd-ethereum.propellerheads.xyz"),
+            "base" => Ok("tycho-fynd-base.propellerheads.xyz"),
+            "unichain" => Ok("tycho-fynd-unichain.propellerheads.xyz"),
+            other => Err(format!(
+                "no default Tycho URL for chain '{}'. Please provide --tycho-url explicitly.",
+                other
+            )),
         }
     }
 }
