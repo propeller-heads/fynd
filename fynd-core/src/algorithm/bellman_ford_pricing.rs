@@ -259,15 +259,17 @@ pub(crate) fn resimulate_path(
                 error: format!("{:?}", e),
             })?;
 
-        swaps.push(Swap {
-            component_id: component_id.clone(),
-            protocol: component.protocol_system.clone(),
-            token_in: token_in.address.clone(),
-            token_out: token_out.address.clone(),
-            amount_in: current_amount.clone(),
-            amount_out: result.amount.clone(),
-            gas_estimate: result.gas,
-        });
+        swaps.push(Swap::new(
+            component_id.clone(),
+            component.protocol_system.clone(),
+            token_in.address.clone(),
+            token_out.address.clone(),
+            current_amount.clone(),
+            result.amount.clone(),
+            result.gas,
+            component.clone(),
+            state.clone_box(),
+        ));
 
         if is_vm {
             vm_state_override = Some(result.new_state);
@@ -428,8 +430,8 @@ mod tests {
         let dai = token(2, "DAI");
 
         let (market, gm) = setup_market_and_graph(vec![
-            ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000)),
-            ("usdc_dai", &usdc, &dai, MockProtocolSim::new(1)),
+            ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("usdc_dai", &usdc, &dai, MockProtocolSim::new(1.0)),
         ]);
 
         let graph = gm.graph();
@@ -466,10 +468,10 @@ mod tests {
         let target = token(3, "TARGET");
 
         let (market, gm) = setup_market_and_graph(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2)),
-            ("a_target", &a, &target, MockProtocolSim::new(3)),
-            ("eth_b", &eth, &b, MockProtocolSim::new(4)),
-            ("b_target", &b, &target, MockProtocolSim::new(1)),
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_target", &a, &target, MockProtocolSim::new(3.0)),
+            ("eth_b", &eth, &b, MockProtocolSim::new(4.0)),
+            ("b_target", &b, &target, MockProtocolSim::new(1.0)),
         ]);
 
         let graph = gm.graph();
@@ -497,9 +499,9 @@ mod tests {
         let c = token(3, "C");
 
         let (market, gm) = setup_market_and_graph(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2)),
-            ("a_b", &a, &b, MockProtocolSim::new(3)),
-            ("b_c", &b, &c, MockProtocolSim::new(4)),
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_b", &a, &b, MockProtocolSim::new(3.0)),
+            ("b_c", &b, &c, MockProtocolSim::new(4.0)),
         ]);
 
         let graph = gm.graph();
@@ -524,7 +526,7 @@ mod tests {
         let usdc = token(1, "USDC");
 
         let (market, gm) =
-            setup_market_and_graph(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000))]);
+            setup_market_and_graph(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
 
         let graph = gm.graph();
         let eth_node = graph
@@ -548,7 +550,7 @@ mod tests {
         // Re-simulate
         let (route, amount_out) =
             resimulate_path(&path, &BigUint::from(100u64), &market, result.token_map()).unwrap();
-        assert_eq!(route.swaps.len(), 1);
+        assert_eq!(route.swaps().len(), 1);
         assert_eq!(amount_out, BigUint::from(200_000u64));
     }
 
@@ -560,8 +562,8 @@ mod tests {
         let b = token(2, "B");
 
         let (market, gm) = setup_market_and_graph(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2)),
-            ("a_b", &a, &b, MockProtocolSim::new(3)),
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_b", &a, &b, MockProtocolSim::new(3.0)),
         ]);
 
         let graph = gm.graph();

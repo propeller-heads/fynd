@@ -763,9 +763,9 @@ mod tests {
         let c = token(4, "C");
 
         let (market, derived) = setup_test_env(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2)),
-            ("a_b", &a, &b, MockProtocolSim::new(2)),
-            ("b_c", &b, &c, MockProtocolSim::new(2)),
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_b", &a, &b, MockProtocolSim::new(2.0)),
+            ("b_c", &b, &c, MockProtocolSim::new(2.0)),
         ])
         .await;
         let changed = ChangedComponents::default();
@@ -790,8 +790,8 @@ mod tests {
 
         // Two pools with different spot prices; BF picks higher output
         let (market, derived) = setup_test_env(vec![
-            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000)),
-            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000)),
+            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
+            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
         ])
         .await;
         let changed = ChangedComponents::default();
