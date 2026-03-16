@@ -4,11 +4,13 @@ Benchmark and comparison tooling for Fynd solvers. Requires one or more running 
 
 ## Commands
 
-Two subcommands available via `cargo run -p fynd-benchmark --release --`:
+Three subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver. Measures latency (round-trip, solve time, overhead) and throughput. Supports sequential, fixed-concurrency, and rate-based parallelization modes. Prints statistics and ASCII histograms to stdout; optionally exports results to JSON.
 
 - **`compare`** — Compare output quality between two solver instances. Sends identical quote requests to both and reports differences in amount out (bps), gas estimates, route selection, and status. Requires two solvers running on different ports (use git worktrees to run different branches simultaneously).
+
+- **`download-trades`** — Download real DEX trades from Dune Analytics for benchmarking. Queries the `dex.trades` table and saves results in the request JSON format. Requires the `DUNE_API_KEY` environment variable.
 
 Run `--help` on either subcommand for detailed options.
 
