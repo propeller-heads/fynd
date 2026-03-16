@@ -177,7 +177,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_prices_block_tracks_independently() {
+    fn test_token_prices_block_tracks_independently() {
         let mut store = DerivedData::new();
         assert_eq!(store.token_prices_block(), None);
 
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn spot_prices_block_tracks_independently() {
+    fn test_spot_prices_block_tracks_independently() {
         let mut store = DerivedData::new();
         store.set_spot_prices(Default::default(), 10);
         assert_eq!(store.spot_prices_block(), Some(10));
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_depths_block_tracks_independently() {
+    fn test_pool_depths_block_tracks_independently() {
         let mut store = DerivedData::new();
         store.set_pool_depths(Default::default(), 7);
         assert_eq!(store.pool_depths_block(), Some(7));
@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn last_block_returns_max_across_computations() {
+    fn test_derived_data_ready() {
         let mut store = DerivedData::new();
         assert!(!store.derived_data_ready());
 
@@ -216,12 +216,15 @@ mod tests {
         store.set_token_prices(Default::default(), 10);
         assert!(!store.derived_data_ready());
 
+        store.set_token_prices_deps(Default::default(), 10);
+        assert!(!store.derived_data_ready());
+
         store.set_pool_depths(Default::default(), 9);
         assert!(store.derived_data_ready());
     }
 
     #[test]
-    fn clear_all_resets_all_fields() {
+    fn test_clear_all_resets_all_fields() {
         let mut store = DerivedData::new();
         store.set_token_prices(Default::default(), 1);
         store.set_spot_prices(Default::default(), 1);

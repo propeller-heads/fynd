@@ -27,7 +27,7 @@
 //! # Dependencies
 //!
 //! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
-//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
+//! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::{HashMap, HashSet};

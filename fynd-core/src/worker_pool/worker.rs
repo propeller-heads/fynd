@@ -587,7 +587,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
-            failed_items: vec![],
+                failed_items: vec![],
             });
 
         // Should return immediately since already ready
@@ -686,7 +686,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
-            failed_items: vec![],
+                failed_items: vec![],
             });
 
         // Now wait - should succeed immediately since we're already ready
@@ -733,7 +733,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: TokenGasPriceComputation::ID,
                 block: 1,
-            failed_items: vec![],
+                failed_items: vec![],
             });
         notify.notify_waiters();
 
@@ -822,7 +822,7 @@ mod tests {
             .send(DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
-            failed_items: vec![],
+                failed_items: vec![],
             })
             .unwrap();
 

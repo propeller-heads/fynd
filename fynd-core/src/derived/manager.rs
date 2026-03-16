@@ -595,7 +595,8 @@ mod tests {
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
         market.upsert_components([pool1, pool2]);
         // Only pool1 has simulation state; pool2 intentionally has none
-        market.update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market
+            .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc, dai]);
         Arc::new(RwLock::new(market))
     }
@@ -640,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_price_failure_broadcasts_computation_failed() {
+    async fn test_token_price_failure_broadcasts_computation_failed() {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let market = market_with_sim_state_no_gas_price();
@@ -693,7 +694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_all_partial_spot_price_failure_broadcasts_computation_complete() {
+    async fn partial_spot_price_failure_broadcasts_computation_complete() {
         // market_with_mixed_sim_states has pool1 (with sim state) and pool2 (without)
         // → spot price computation partially succeeds → ComputationComplete with failed_items
         let market = market_with_mixed_sim_states();
