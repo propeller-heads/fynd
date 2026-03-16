@@ -197,7 +197,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     let tycho_url = match &args.tycho_url {
         Some(url) => url.clone(),
         None => {
-            let default = defaults::default_tycho_url(&args.chain);
+            let default = defaults::default_tycho_url(&args.chain)
+                .map_err(SolverError::SetupError)?;
             info!(
                 "No --tycho-url provided. Using default for {}: {}",
                 args.chain, default
