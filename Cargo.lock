@@ -3340,6 +3340,7 @@ dependencies = [
  "fastrand",
  "fynd-client",
  "num-bigint",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

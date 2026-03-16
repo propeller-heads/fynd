@@ -127,11 +127,12 @@ cargo run -p fynd-benchmark --release -- compare \
 | `--url-b` | `http://localhost:3001` | Solver B base URL |
 | `--label-a` | `main` | Label for solver A in output |
 | `--label-b` | `branch` | Label for solver B in output |
-| `-n` | `100` | Number of requests to send |
+| `-n` | `500` | Number of requests to send |
 | `--requests-file` | (none) | Path to JSON file with custom requests |
 | `--output` | `comparison_results.json` | Path for full results JSON |
 | `--timeout-ms` | `15000` | Per-request timeout |
 | `--seed` | `42` | Random seed for reproducibility |
+| `--rpc-url` | (none) | Ethereum RPC URL for gas price (enables net-of-gas comparison) |
 
 ### Custom Requests
 
@@ -151,15 +152,49 @@ You can supply your own requests via `--requests-file`. The file should be a JSO
 ]
 ```
 
+### Net-of-Gas Comparison
+
+Pass `--rpc-url` to enable net-of-gas output comparison. The tool fetches the current gas price and approximates gas cost in the output token for trades involving WETH. This is important when comparing algorithms with different route depths (e.g., a 3-hop route may have higher gross output but also higher gas).
+
+```bash
+cargo run -p fynd-benchmark --release -- compare \
+  --rpc-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
+  -n 500
+```
+
+The net-of-gas estimate works for trades where token_in or token_out is WETH. For other pairs, the tool reports gross output and gas separately.
+
 ### Output
 
-Prints a summary table to stdout and writes detailed per-request results to `comparison_results.json`. Positive bps diffs mean solver B returned more output.
+Prints a summary table to stdout and writes detailed per-request results to `comparison_results.json`. The summary includes:
+
+- **Coverage**: how many trades each solver found routes for
+- **Head-to-head win rate**: which solver returns more output (gross and net-of-gas)
+- **Gas estimate comparison**: which solver uses less gas
+- **Solve time**: latency percentiles for each solver
+- **Route depth**: average number of swaps per solver
+- **Significant outliers**: trades with >1 bps difference
+
+Positive bps diffs mean solver B returned more output.
 
 ---
 
 ## Request Templates
 
 By default, the benchmark uses a single WETH->USDC swap and the compare tool generates random requests from a built-in set of token pairs. Both tools accept `--requests-file` to use custom request sets. See `requests_set.json` in this directory for the format.
+
+### Using Real Trade Data
+
+For more representative coverage, use real on-chain trades. A 1k sample (`trades_1k_requests.json`) is included in this directory:
+
+```bash
+cargo run -p fynd-benchmark --release -- compare \
+  --requests-file tools/benchmark/trades_1k_requests.json \
+  --rpc-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
+  -n 500
+```
+
+You can generate larger datasets from Dune Analytics using the trade-sample tool. The requests file format is a JSON array where each entry has an `orders` array with `token_in`, `token_out`, `amount`, `side`, and `sender` fields.
 
 ## File Layout
 
@@ -174,3 +209,4 @@ By default, the benchmark uses a single WETH->USDC swap and the compare tool gen
 | `src/requests.rs` | Request generation and file loading |
 | `src/pairs.json` | Token and pair definitions for random request generation |
 | `requests_set.json` | Sample request templates |
+| `trades_1k_requests.json` | 1k real Dune trades for representative benchmarking |

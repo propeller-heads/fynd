@@ -101,7 +101,7 @@ mod tests {
         };
         assert_eq!(args.url_a, "http://localhost:3000");
         assert_eq!(args.url_b, "http://localhost:3001");
-        assert_eq!(args.num_requests, 100);
+        assert_eq!(args.num_requests, 500);
         assert_eq!(args.timeout_ms, 15000);
         assert_eq!(args.seed, 42);
     }
@@ -127,6 +127,8 @@ mod tests {
             "99",
             "--output",
             "out.json",
+            "--rpc-url",
+            "https://eth.example.com",
         ])
         .unwrap();
         let Command::Compare(args) = cli.command else {
@@ -140,6 +142,7 @@ mod tests {
         assert_eq!(args.timeout_ms, 5000);
         assert_eq!(args.seed, 99);
         assert_eq!(args.output, "out.json");
+        assert_eq!(args.rpc_url.as_deref(), Some("https://eth.example.com"));
     }
 
     #[test]

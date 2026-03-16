@@ -34,6 +34,14 @@ pub fn default_request(timeout_ms: u64) -> SwapRequest {
 }
 
 impl SwapRequest {
+    pub fn token_in_addr(&self) -> &str {
+        &self.token_in_addr
+    }
+
+    pub fn token_out_addr(&self) -> &str {
+        &self.token_out_addr
+    }
+
     pub fn to_quote_params(&self) -> QuoteParams {
         let token_in = parse_address(&self.token_in_addr);
         let token_out = parse_address(&self.token_out_addr);
