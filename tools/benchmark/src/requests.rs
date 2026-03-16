@@ -1,3 +1,8 @@
+//! Request generation and loading.
+//!
+//! Provides a default WETH→USDC swap, random generation from an embedded
+//! token-pair set (`pairs.json`), and loading from user-supplied JSON files.
+
 use std::str::FromStr;
 
 use alloy::hex;
@@ -16,7 +21,7 @@ pub struct SwapRequest {
     timeout_ms: u64,
 }
 
-/// Default WETH → USDC request used by the benchmark when no file is provided.
+/// Default 1 WETH → USDC request, used when no `--requests-file` is given.
 pub fn default_request(timeout_ms: u64) -> SwapRequest {
     SwapRequest {
         label: "1 WETH -> USDC".to_string(),
@@ -89,6 +94,7 @@ fn symbol_for_address(addr: &str, tokens: &[Token]) -> String {
         .unwrap_or_else(|| addr[..10.min(addr.len())].to_string())
 }
 
+/// Build `n` random requests by sampling pairs and amounts from `pairs.json`.
 pub fn generate_requests(n: usize, timeout_ms: u64) -> Vec<SwapRequest> {
     let file = load_pairs_file();
     (0..n)
@@ -137,10 +143,7 @@ fn default_sender() -> String {
     SENDER.to_string()
 }
 
-/// Load all request templates from a JSON file.
-///
-/// Returns one `SwapRequest` per entry in the file. Use this when you need the
-/// full template pool (e.g. benchmark randomly samples from them during the run).
+/// Load all request templates from a JSON file (one `SwapRequest` per entry).
 pub fn load_request_templates(
     path: &str,
     timeout_ms: u64,
@@ -173,10 +176,7 @@ pub fn load_request_templates(
     Ok(requests)
 }
 
-/// Load requests from a JSON file and randomly sample `n` from them.
-///
-/// Use this when you need a fixed number of pre-generated requests
-/// (e.g. compare sends the same N requests to both solvers).
+/// Load templates from a JSON file and randomly sample `n` requests from them.
 pub fn load_requests_from_file(
     path: &str,
     n: usize,

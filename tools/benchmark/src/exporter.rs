@@ -1,8 +1,10 @@
+//! Statistics calculation, console rendering, and JSON export.
+
 use crate::config::{BenchmarkResults, TimingStats};
 
 impl TimingStats {
-    /// Calculates comprehensive statistics from timing measurements.
-    /// Returns min, max, mean, median, p95, p99, and standard deviation.
+    /// Derive min/max/mean/median/p95/p99/stddev from raw measurements.
+    /// Warns when fewer than 50 samples are provided.
     pub fn from_measurements(times: &[u64]) -> Option<Self> {
         if times.is_empty() {
             return None;
@@ -40,7 +42,6 @@ impl TimingStats {
         Some(Self { min, max, mean, median, p95, p99, std_dev })
     }
 
-    /// Prints formatted statistics to the console with a given label.
     pub fn print(&self, label: &str) {
         println!("\n{}", label);
         println!("  Min:     {}ms", self.min);
@@ -53,16 +54,13 @@ impl TimingStats {
     }
 }
 
-/// Prints formatted statistics to the console with a given label.
 pub fn print_statistics(times: &[u64], label: &str) {
     if let Some(stats) = TimingStats::from_measurements(times) {
         stats.print(label);
     }
 }
 
-/// Prints an ASCII histogram with fixed-range buckets:
-/// 0-100ms in 10ms steps, 100ms+ in 50ms steps.
-/// Trims leading/trailing empty buckets but preserves interior gaps.
+/// Render an ASCII histogram (10ms buckets up to 100ms, then 50ms buckets).
 pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     if times.is_empty() {
         return;
@@ -126,8 +124,7 @@ pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     }
 }
 
-/// Exports benchmark results to a JSON file with complete configuration and statistics.
-/// The output includes worker pool configuration content and all timing measurements.
+/// Serialize `BenchmarkResults` to a pretty-printed JSON file.
 pub fn export_results(
     results: BenchmarkResults,
     output_file: String,

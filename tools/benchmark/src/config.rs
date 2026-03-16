@@ -1,8 +1,9 @@
+//! Shared configuration and statistics types for the load-test subcommand.
+
 use serde::Serialize;
 
 use crate::requests::SwapRequest;
 
-/// Parallelization mode for benchmark execution
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParallelizationMode {

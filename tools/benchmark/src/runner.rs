@@ -1,3 +1,8 @@
+//! Benchmark execution engine.
+//!
+//! Implements three scheduling strategies (sequential, fixed-concurrency,
+//! rate-based) that send quote requests and collect timing data.
+
 use std::{sync::Arc, time::Instant};
 
 use fynd_client::{FyndClient, FyndError, Quote, QuoteStatus};
@@ -5,7 +10,6 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::{config::ParallelizationMode, requests::SwapRequest};
 
-/// Results from a benchmark run.
 pub struct RunnerResults {
     pub round_trip_times: Vec<u64>,
     pub solve_times: Vec<u64>,
@@ -34,7 +38,7 @@ impl ParallelizationMode {
     }
 }
 
-/// Main benchmark runner that dispatches to the appropriate parallelization mode
+/// Dispatch to the scheduling strategy selected by `mode`.
 pub async fn run_benchmark(
     client: Arc<FyndClient>,
     requests: &[SwapRequest],
@@ -307,10 +311,8 @@ async fn run_rate_based(
     }
 }
 
-/// Processes the result of a `FyndClient::quote` call, extracting timing and order counts.
-///
-/// Returns `Some((solve_time_ms, is_first, orders_found, orders_not_found))` on success,
-/// `None` on failure.
+/// Extract timing and order counts from a quote result.
+/// Returns `None` on failure (logged at error level).
 fn handle_result(
     result: Result<Quote, FyndError>,
     round_trip_ms: u64,
