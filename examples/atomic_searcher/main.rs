@@ -895,7 +895,7 @@ fn log_results(result: &BlockSearchResult) {
 async fn deploy_flash_arb(rpc_url: &str, private_key: &str) -> anyhow::Result<()> {
     use alloy::{
         network::{Ethereum, EthereumWallet},
-        primitives::{Address, Bytes as AlloyBytes},
+        primitives::{Address, Bytes as AlloyBytes, TxKind},
         providers::{Provider, ProviderBuilder, RootProvider},
         rpc::types::{TransactionInput, TransactionRequest},
         signers::local::PrivateKeySigner,
@@ -913,6 +913,7 @@ async fn deploy_flash_arb(rpc_url: &str, private_key: &str) -> anyhow::Result<()
     let wallet = EthereumWallet::from(signer);
 
     let provider = ProviderBuilder::default()
+        .with_recommended_fillers()
         .wallet(wallet)
         .connect(rpc_url)
         .await
@@ -939,7 +940,7 @@ async fn deploy_flash_arb(rpc_url: &str, private_key: &str) -> anyhow::Result<()
 
     let tx = TransactionRequest {
         from: Some(deployer),
-        to: None,
+        to: Some(TxKind::Create),
         input: TransactionInput {
             input: Some(AlloyBytes::from(deploy_data)),
             data: None,
