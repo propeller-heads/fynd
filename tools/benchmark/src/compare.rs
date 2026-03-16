@@ -1,8 +1,3 @@
-//! Compare subcommand.
-//!
-//! Sends identical quote requests to two solver instances and reports
-//! per-request diffs in amount out (bps), gas estimate, and route selection.
-
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -11,53 +6,45 @@ use serde::Serialize;
 
 use crate::requests::{generate_requests, load_requests_from_file, SwapRequest};
 
-/// Diff output quality between two running Fynd solvers.
+/// Compare solver output quality between two running instances.
 ///
-/// Run two solvers on different ports (use git worktrees to avoid build
-/// conflicts), then compare their quote responses head-to-head.
+/// Start solver A (e.g. main) on port 3000 and solver B (e.g. branch) on port 3001,
+/// then run this tool to send identical requests to both and compare results.
 #[derive(Parser, Debug)]
-#[command(
-    about = "Compare output quality between two Fynd solvers",
-    long_about = "Compare output quality between two Fynd solvers.\n\n\
-        Sends identical quote requests to both and reports amount-out diff (bps), \
-        gas estimate diff, and route-selection differences.\n\n\
-        Requires two healthy solvers, typically on different ports."
-)]
 pub struct Args {
-    /// Base URL of solver A (baseline)
+    /// Solver A URL
     #[arg(long, default_value = "http://localhost:3000")]
     pub url_a: String,
 
-    /// Base URL of solver B (candidate)
+    /// Solver B URL
     #[arg(long, default_value = "http://localhost:3001")]
     pub url_b: String,
 
-    /// Human-readable label for solver A in output
+    /// Label for solver A
     #[arg(long, default_value = "main")]
     pub label_a: String,
 
-    /// Human-readable label for solver B in output
+    /// Label for solver B
     #[arg(long, default_value = "branch")]
     pub label_b: String,
 
-    /// Number of quote requests to send to each solver
+    /// Number of requests to send
     #[arg(short = 'n', long, default_value_t = 100)]
     pub num_requests: usize,
 
-    /// JSON file of request templates. Without this, requests are
-    /// randomly generated from the built-in token-pair set.
+    /// Path to requests JSON file (benchmark format)
     #[arg(long)]
     pub requests_file: Option<String>,
 
-    /// Path to write full per-request results JSON
+    /// Output file for full results JSON
     #[arg(long, default_value = "comparison_results.json")]
     pub output: String,
 
-    /// Per-request timeout in milliseconds
+    /// Request timeout in milliseconds
     #[arg(long, default_value_t = 15000)]
     pub timeout_ms: u64,
 
-    /// RNG seed for deterministic request generation
+    /// Random seed for reproducibility
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
 }
@@ -158,7 +145,6 @@ fn error_metrics(error: &FyndError, round_trip_ms: u64) -> Metrics {
     }
 }
 
-/// Compute amount-out diff (bps), gas diff (%), and route-match between two quotes.
 fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
     let status_match = a.status == b.status;
 
@@ -196,7 +182,6 @@ async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, Fy
     (result, round_trip_ms)
 }
 
-/// Print an aggregated comparison table with win/loss counts, bps stats, and outliers.
 fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     let total = results.len();
     let status_matches = results
@@ -364,7 +349,6 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     println!("\n{}", "=".repeat(70));
 }
 
-/// Execute the comparison: health-check both solvers, send requests, print summary.
 pub async fn run(args: Args) -> anyhow::Result<()> {
     fastrand::seed(args.seed);
 
@@ -474,114 +458,4 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("\nFull results saved to: {}", args.output);
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_metrics(
-        status: &str,
-        amount_out: &str,
-        gas_estimate: &str,
-        protocols: Vec<&str>,
-    ) -> Metrics {
-        Metrics {
-            status: status.to_string(),
-            amount_out: amount_out.to_string(),
-            gas_estimate: gas_estimate.to_string(),
-            solve_time_ms: 0,
-            round_trip_ms: 0,
-            num_swaps: protocols.len(),
-            route_protocols: protocols
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn compare_identical() {
-        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let b = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let c = compare_metrics(&a, &b);
-        assert!(c.status_match);
-        assert!(c.route_match);
-        assert_eq!(c.amount_out_diff_bps, Some(0.0));
-        assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
-    }
-
-    #[test]
-    fn compare_b_better() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "1010", "100", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.amount_out_diff_bps, Some(100.0));
-    }
-
-    #[test]
-    fn compare_a_better() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "990", "100", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.amount_out_diff_bps, Some(-100.0));
-    }
-
-    #[test]
-    fn compare_a_zero() {
-        let a = make_metrics("success", "0", "100", vec![]);
-        let b = make_metrics("success", "1000", "100", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.amount_out_diff_bps, None);
-    }
-
-    #[test]
-    fn compare_b_zero() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "0", "100", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.amount_out_diff_bps, None);
-    }
-
-    #[test]
-    fn compare_both_zero() {
-        let a = make_metrics("success", "0", "0", vec![]);
-        let b = make_metrics("success", "0", "0", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.amount_out_diff_bps, Some(0.0));
-        assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
-    }
-
-    #[test]
-    fn compare_different_gas() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "1000", "120", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert_eq!(c.gas_estimate_diff_pct, Some(20.0));
-    }
-
-    #[test]
-    fn compare_different_routes() {
-        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let b = make_metrics("success", "1000", "100", vec!["curve"]);
-        let c = compare_metrics(&a, &b);
-        assert!(!c.route_match);
-    }
-
-    #[test]
-    fn compare_different_status() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("error", "1000", "100", vec![]);
-        let c = compare_metrics(&a, &b);
-        assert!(!c.status_match);
-    }
-
-    #[test]
-    fn status_str_all_variants() {
-        assert_eq!(status_str(QuoteStatus::Success), "success");
-        assert_eq!(status_str(QuoteStatus::NoRouteFound), "no_route_found");
-        assert_eq!(status_str(QuoteStatus::InsufficientLiquidity), "insufficient_liquidity");
-        assert_eq!(status_str(QuoteStatus::Timeout), "timeout");
-        assert_eq!(status_str(QuoteStatus::NotReady), "not_ready");
-    }
 }

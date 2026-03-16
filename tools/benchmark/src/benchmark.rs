@@ -1,8 +1,3 @@
-//! Load-test subcommand.
-//!
-//! Sends quote requests to a single solver, measures round-trip time,
-//! server solve time, and overhead, then prints statistics and histograms.
-
 use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
@@ -10,51 +5,40 @@ use fynd_client::{FyndClient, FyndClientBuilder};
 use tracing::info;
 
 use crate::{
-    config::{
-        BenchmarkConfig, BenchmarkResults, BenchmarkStatistics, ParallelizationMode, TimingStats,
-    },
+    config::{BenchmarkConfig, BenchmarkResults, ParallelizationMode},
     exporter::{export_results, print_histogram, print_statistics},
     requests::{default_request, load_request_templates, SwapRequest},
-    runner::RunnerResults,
+    runner::{run_benchmark, RunnerResults},
 };
 
-/// Measure solver latency and throughput under load.
+/// Load-test a running Fynd solver (latency and throughput)
 #[derive(Parser, Debug)]
-#[command(
-    about = "Load-test a Fynd solver with configurable parallelization",
-    long_about = "Load-test a Fynd solver with configurable parallelization.\n\n\
-        Always build with --release for accurate measurements."
-)]
+#[command(about = "Benchmark fynd with various parallelization strategies", long_about = None)]
 pub struct Args {
-    /// Base URL of the solver to benchmark
+    /// Solver URL to benchmark against
     #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]
     pub solver_url: String,
 
-    /// Total number of quote requests to send
+    /// Number of requests to benchmark
     #[arg(long, short = 'n', env = "NUM_REQUESTS", default_value = "1")]
     pub num_requests: usize,
 
-    /// How to schedule requests: "sequential", "fixed:N" (N concurrent),
-    /// or "rate:N" (one request every N ms)
+    /// Parallelization mode: sequential, fixed:N, or rate:Nms
     #[arg(long, short = 'm', env = "PARALLELIZATION_MODE", default_value = "sequential")]
     pub parallelization_mode: String,
 
-    /// JSON file of request templates (see requests_set.json for format).
-    /// Defaults to a single 1 WETH -> USDC swap.
+    /// Path to JSON file with request templates
     #[arg(long, env = "REQUESTS_FILE")]
     pub requests_file: Option<String>,
 
-    /// Write full results (config + all timings) to this JSON file
+    /// Output file for results (if not specified, results are not exported to file)
     #[arg(long, env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
 }
 
-/// Execute the load-test: health-check, send requests, print stats.
 pub async fn run(args: Args) -> anyhow::Result<()> {
-    let parallelization_mode: ParallelizationMode = args
-        .parallelization_mode
-        .parse()
-        .map_err(|e: Box<dyn std::error::Error>| anyhow::anyhow!("{e}"))?;
+    let parallelization_mode = ParallelizationMode::from_str(&args.parallelization_mode)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     info!("Solver URL: {}", args.solver_url);
     info!("Number of requests: {}", args.num_requests);
@@ -76,10 +60,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         round_trip_times,
         solve_times,
         successful_requests,
-        orders_solved,
-        orders_unsolved,
-    } = parallelization_mode
-        .run(Arc::clone(&client), &requests, args.num_requests)
+        orders_found: orders_solved,
+        orders_not_found: orders_not_solved,
+    } = run_benchmark(Arc::clone(&client), &requests, args.num_requests, &parallelization_mode)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
@@ -101,7 +84,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         println!("Successful HTTP requests: {}/{}", successful_requests, args.num_requests);
         println!("Failed HTTP requests:     {}", failed_requests);
         println!("Orders solved:            {}", orders_solved);
-        println!("Orders not solved:        {}", orders_unsolved);
+        println!("Orders not solved:        {}", orders_not_solved);
         println!("Total duration:      {:.2}s", total_duration_ms as f64 / 1000.0);
         println!("Throughput:          {:.2} req/s", throughput_rps);
 
@@ -123,25 +106,19 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 num_request_templates: requests.len(),
             };
 
-            let statistics = BenchmarkStatistics {
-                round_trip: TimingStats::from_measurements(&round_trip_times).unwrap(),
-                solve_time: TimingStats::from_measurements(&solve_times).unwrap(),
-                overhead: TimingStats::from_measurements(&overheads).unwrap(),
-            };
-            let results = BenchmarkResults {
+            let results = BenchmarkResults::new(
                 config,
-                request_templates: requests,
+                requests,
                 successful_requests,
                 failed_requests,
                 orders_solved,
-                orders_unsolved,
+                orders_not_solved,
                 total_duration_ms,
                 throughput_rps,
-                round_trip_times_ms: round_trip_times,
-                solve_times_ms: solve_times,
-                overhead_times_ms: overheads,
-                statistics,
-            };
+                round_trip_times,
+                solve_times,
+                overheads,
+            );
 
             export_results(results, output_file).map_err(|e| anyhow::anyhow!("{e}"))?;
         }

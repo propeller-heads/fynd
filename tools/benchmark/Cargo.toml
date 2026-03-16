@@ -11,20 +11,14 @@ clap              = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
 anyhow            = { workspace = true }
-fynd-rpc          = { workspace = true }
-toml              = { workspace = true }
-tycho-simulation  = { workspace = true }
 tracing           = { workspace = true }
 tracing-subscriber = { workspace = true }
 alloy             = { workspace = true }
 bytes             = { workspace = true }
 num-bigint        = { workspace = true }
+reqwest           = { version = "0.12", features = ["json"] }
 fastrand          = "2.3"
 
 [[bin]]
 name = "fynd-benchmark"
 path = "src/main.rs"
-
-[dev-dependencies]
-wiremock = "0.6"
-tokio = { workspace = true, features = ["test-util"] }

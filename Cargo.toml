@@ -43,7 +43,6 @@ tycho-simulation = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
 alloy = { workspace = true, features = [
     "providers",
     "signer-local",
@@ -60,7 +59,6 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 tycho-execution = { workspace = true }
 bytes = { workspace = true }
-fynd-client = { workspace = true }
 
 [workspace]
 members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
@@ -142,3 +140,10 @@ fynd-client = { path = "clients/rust" }
 # Dev dependencies
 rstest = "0.18"
 
+[[example]]
+name = "tutorial"
+path = "examples/tutorial/main.rs"
+
+[[example]]
+name = "tutorial_with_permit2"
+path = "examples/tutorial_with_permit2/main.rs"
