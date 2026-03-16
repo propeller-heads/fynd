@@ -1,3 +1,21 @@
+## [0.15.0](https://github.com/propeller-heads/fynd/compare/0.14.1...0.15.0) (2026-03-16)
+
+
+### Features
+
+* **ts-client:** add permit2 module with signing hash and builder helpers ([7baa252](https://github.com/propeller-heads/fynd/commit/7baa252da7de632cd3dfc93d637cb8c10cc49cef))
+* **ts-client:** add Permit2, EncodingOptions, and Transaction domain types ([8efc71c](https://github.com/propeller-heads/fynd/commit/8efc71cc95d955e9f0fd37dc953455a2bbc3883c))
+* **ts-client:** add viemProvider adapter for FyndClient ([f0663ff](https://github.com/propeller-heads/fynd/commit/f0663fff0ab91872c0986ae69b4d87a6df84081a))
+* **ts-client:** export new Permit2 types and builder functions ([8640d56](https://github.com/propeller-heads/fynd/commit/8640d5602dea4fd7160dbb388aad515150846c15))
+* **ts-client:** remove routerAddress, read transaction from quote ([f2951a2](https://github.com/propeller-heads/fynd/commit/f2951a224cc20aedd5ed79e9ec885cb1e3a29327))
+* **ts-client:** update mapping layer for encoding options and transaction ([155a940](https://github.com/propeller-heads/fynd/commit/155a940e20c51f8f7efc2470a795a1b6db70b013))
+
+
+### Bug Fixes
+
+* **ts-client:** add timeout to settle() to prevent infinite polling ([8adcc28](https://github.com/propeller-heads/fynd/commit/8adcc2884d0b3fb1e1e59ca332f5780001bdc07d))
+* **ts-client:** fix slippage serialization, error parsing, and viem receipt polling ([90f2fcc](https://github.com/propeller-heads/fynd/commit/90f2fcc8539a91cb7c690100df0e639d5243f204))
+
 ## [0.14.1](https://github.com/propeller-heads/fynd/compare/0.14.0...0.14.1) (2026-03-16)
 
 ## [0.14.0](https://github.com/propeller-heads/fynd/compare/0.13.0...0.14.0) (2026-03-16)
