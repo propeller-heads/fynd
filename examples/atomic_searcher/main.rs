@@ -171,6 +171,11 @@ struct Args {
     /// Required for simulate-flash and execute-flash modes.
     #[arg(long, env = "FLASH_ARB_ADDRESS")]
     flash_arb_address: Option<String>,
+
+    /// Deploy a new FlashArbExecutor contract and print the address.
+    /// Requires --rpc-url and --private-key. Exits after deployment.
+    #[arg(long, default_value_t = false)]
+    deploy_flash_arb: bool,
 }
 
 // ==================== Main ====================
@@ -205,6 +210,20 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("invalid flash-arb-address: {}", e))
         })
         .transpose()?;
+
+    // Deploy FlashArbExecutor if requested
+    if args.deploy_flash_arb {
+        let rpc_url = args
+            .rpc_url
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--deploy-flash-arb requires --rpc-url"))?;
+        let pk = args
+            .private_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--deploy-flash-arb requires --private-key"))?;
+        deploy_flash_arb(rpc_url, pk).await?;
+        return Ok(());
+    }
 
     if execution_mode.is_flash() && flash_arb_address.is_none() {
         anyhow::bail!(
@@ -865,4 +884,103 @@ fn log_results(result: &BlockSearchResult) {
     if result.cycles.len() > 5 {
         info!("... and {} more cycles", result.cycles.len() - 5);
     }
+}
+
+// ==================== Contract Deployment ====================
+
+/// Deploy the FlashArbExecutor contract on-chain.
+///
+/// The constructor takes one argument: the Balancer V2 Vault address.
+/// The Vault address is the same on all chains where Balancer V2 is deployed.
+async fn deploy_flash_arb(rpc_url: &str, private_key: &str) -> anyhow::Result<()> {
+    use alloy::{
+        network::{Ethereum, EthereumWallet},
+        primitives::{Address, Bytes as AlloyBytes},
+        providers::{Provider, ProviderBuilder, RootProvider},
+        rpc::types::{TransactionInput, TransactionRequest},
+        signers::local::PrivateKeySigner,
+    };
+    use std::str::FromStr;
+
+    let pk = if private_key.starts_with("0x") {
+        private_key.to_string()
+    } else {
+        format!("0x{}", private_key)
+    };
+    let signer = PrivateKeySigner::from_str(&pk)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {}", e))?;
+    let deployer = signer.address();
+    let wallet = EthereumWallet::from(signer);
+
+    let provider = ProviderBuilder::default()
+        .wallet(wallet)
+        .connect(rpc_url)
+        .await
+        .map_err(|e| anyhow::anyhow!("RPC connect: {}", e))?;
+
+    // Balancer V2 Vault (same address on all deployed chains)
+    let balancer_vault: Address = flash_loan::BALANCER_VAULT;
+
+    // Build deployment bytecode: contract bytecode + ABI-encoded constructor arg
+    let bytecode_hex = flash_loan::FLASH_ARB_BYTECODE.trim();
+    let mut deploy_data = hex::decode(bytecode_hex)
+        .map_err(|e| anyhow::anyhow!("invalid bytecode hex: {}", e))?;
+    // Constructor arg: address is left-padded to 32 bytes
+    let mut constructor_arg = [0u8; 32];
+    constructor_arg[12..].copy_from_slice(balancer_vault.as_slice());
+    deploy_data.extend_from_slice(&constructor_arg);
+
+    info!(
+        deployer = %deployer,
+        balancer_vault = %balancer_vault,
+        bytecode_len = deploy_data.len(),
+        "deploying FlashArbExecutor..."
+    );
+
+    let tx = TransactionRequest {
+        from: Some(deployer),
+        to: None,
+        input: TransactionInput {
+            input: Some(AlloyBytes::from(deploy_data)),
+            data: None,
+        },
+        ..Default::default()
+    };
+
+    // Use root() to get a concrete Ethereum provider for type inference
+    let base_provider: &RootProvider<Ethereum> = provider.root();
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("send deploy tx: {}", e))?;
+
+    info!(tx_hash = %pending.tx_hash(), "deployment tx sent, waiting for receipt...");
+
+    let receipt = pending
+        .get_receipt()
+        .await
+        .map_err(|e| anyhow::anyhow!("deploy receipt: {}", e))?;
+
+    if !receipt.status() {
+        anyhow::bail!("deployment tx reverted (tx: {:?})", receipt.transaction_hash);
+    }
+
+    let contract_addr = receipt
+        .contract_address
+        .ok_or_else(|| anyhow::anyhow!("no contract address in receipt"))?;
+
+    info!(
+        address = %contract_addr,
+        tx_hash = %receipt.transaction_hash,
+        gas_used = receipt.gas_used,
+        "FlashArbExecutor deployed"
+    );
+    // Suppress unused variable warning (base_provider anchors the type)
+    let _ = base_provider;
+    println!("\nFlashArbExecutor deployed at: {contract_addr}");
+    println!(
+        "\nUse with:\n  --flash-arb-address {contract_addr} --execution-mode execute-flash"
+    );
+
+    Ok(())
 }

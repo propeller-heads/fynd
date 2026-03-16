@@ -74,6 +74,7 @@ Every flag, its type, default, and what it does.
 | `--private-key` | string | (none) | Same as `PRIVATE_KEY` env var. CLI flag takes precedence. |
 | `--rpc-url` | string | (none) | Same as `RPC_URL` env var. CLI flag takes precedence. |
 | `--flash-arb-address` | string | (none) | Same as `FLASH_ARB_ADDRESS` env var. CLI flag takes precedence. |
+| `--deploy-flash-arb` | bool | `false` | Deploy a new FlashArbExecutor contract and print the address. Requires `--rpc-url` and `--private-key`. Exits after deployment. |
 
 ---
 
@@ -204,6 +205,39 @@ The searcher automatically picks the best flash strategy for each cycle:
 
 - **Tier 1 (UniV2 Flash Swap)**: Used when the first pool in the cycle is `uniswap_v2` or `sushiswap_v2`. Borrows the intermediate token from the pair itself, executes remaining hops via TychoRouter, then repays. Near-zero extra gas overhead.
 - **Tier 2 (Balancer V2 Flash Loan)**: Fallback for all other routes. Borrows the source token from Balancer Vault, executes all hops, repays principal + fee. Adds ~80-100k gas overhead.
+
+### Deploying FlashArbExecutor
+
+Flash modes require a deployed FlashArbExecutor contract. Deploy once per chain:
+
+```bash
+cargo run --release --example atomic_searcher -- \
+  --deploy-flash-arb \
+  --rpc-url "https://base-mainnet.g.alchemy.com/v2/YOUR_KEY" \
+  --private-key "0x..."
+```
+
+This deploys the contract with the Balancer V2 Vault as the flash loan provider, prints the contract address, and exits. Save the address for subsequent runs:
+
+```bash
+export FLASH_ARB_ADDRESS="0x..."  # printed by --deploy-flash-arb
+```
+
+The deploying wallet becomes the contract owner and the only address that can call `executeFlashSwapV2` / `executeFlashLoan` / `rescueTokens`.
+
+### Recommended: execute-flash
+
+`execute-flash` is the recommended execution mode. It requires zero token capital (only gas ETH), handles approvals atomically inside the contract, and avoids the per-trade approval overhead of `execute-public` / `execute-protected`.
+
+```bash
+cargo run --release --example atomic_searcher -- \
+  --chain base \
+  --tycho-url tycho-base-beta.propellerheads.xyz \
+  --protocols uniswap_v2,uniswap_v3 \
+  --execution-mode execute-flash \
+  --flash-arb-address $FLASH_ARB_ADDRESS \
+  --rpc-url $RPC_URL
+```
 
 ### Mode Requirements Summary
 
@@ -382,7 +416,7 @@ This is normal. On Ethereum mainnet, professional MEV searchers extract most cyc
 - **No MEV-Share integration.** The `execute-protected` mode uses Flashbots Protect (private mempool) but does not participate in MEV-Share auctions.
 - **No cycle merging.** Cycles that share edges could share gas costs, but this optimization is not implemented.
 - **Single-block horizon.** The searcher evaluates each block independently with no state prediction or multi-block strategies.
-- **Flash Tier 1 is Ethereum-only.** UniV2 flash swaps depend on `uniswap_v2`/`sushiswap_v2` pairs. On Base (no sushiswap_v2), Tier 1 is only available if the first pool is `uniswap_v2`. Tier 2 requires Balancer V2 Vault, which is only deployed on Ethereum.
+- **Flash Tier 1 availability varies by chain.** UniV2 flash swaps require the first pool in the cycle to be `uniswap_v2` or `sushiswap_v2`. On Base (no `sushiswap_v2`), Tier 1 only works when the first pool is `uniswap_v2`. Tier 2 (Balancer V2 flash loan) is available on Ethereum, Base, and most other chains where the Balancer V2 Vault is deployed (`0xBA12222222228d8Ba445958a75a0704d566BF2C8`).
 - **GSS precision limit.** The golden section search caps at ~1000 ETH input to avoid f64 precision loss. Cycles requiring larger inputs are capped.
 - **The `all` shortcut for `--source-tokens` uses hardcoded Ethereum addresses.** On Base or Unichain, specify token addresses explicitly.
 - **Chain ID fallback.** Unsupported chains silently fall back to Ethereum mainnet (chain ID 1) for transaction encoding.
