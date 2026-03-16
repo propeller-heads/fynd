@@ -197,12 +197,9 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     let tycho_url = match &args.tycho_url {
         Some(url) => url.clone(),
         None => {
-            let default = defaults::default_tycho_url(&args.chain)
-                .map_err(SolverError::SetupError)?;
-            info!(
-                "No --tycho-url provided. Using default for {}: {}",
-                args.chain, default
-            );
+            let default =
+                defaults::default_tycho_url(&args.chain).map_err(SolverError::SetupError)?;
+            info!("No --tycho-url provided. Using default for {}: {}", args.chain, default);
             default.to_string()
         }
     };
@@ -255,18 +252,17 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     info!(?protocols, "starting with {} protocol(s)", protocols.len());
 
     // Build solver with all fields from CLI
-    let mut builder =
-        FyndBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
-            .http_host(args.http_host.clone())
-            .http_port(args.http_port)
-            .min_tvl(args.min_tvl)
-            .min_token_quality(args.min_token_quality)
-            .traded_n_days_ago(args.traded_n_days_ago)
-            .tvl_buffer_ratio(args.tvl_buffer_ratio)
-            .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
-            .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
-            .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
-            .worker_router_min_responses(args.worker_router_min_responses);
+    let mut builder = FyndBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
+        .http_host(args.http_host.clone())
+        .http_port(args.http_port)
+        .min_tvl(args.min_tvl)
+        .min_token_quality(args.min_token_quality)
+        .traded_n_days_ago(args.traded_n_days_ago)
+        .tvl_buffer_ratio(args.tvl_buffer_ratio)
+        .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
+        .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
+        .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
+        .worker_router_min_responses(args.worker_router_min_responses);
 
     if args.disable_tls {
         builder = builder.disable_tls();
