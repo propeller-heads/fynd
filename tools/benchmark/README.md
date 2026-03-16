@@ -11,7 +11,7 @@ Tools for measuring Fynd's performance and comparing output quality between solv
 Measures Fynd's performance with various parallelization strategies.
 
 ```bash
-cargo run --example benchmark --release -- [OPTIONS]
+cargo run -p fynd-benchmark --release -- load [OPTIONS]
 ```
 
 **Important:** Always use `--release` for accurate performance measurements.
@@ -36,18 +36,18 @@ cargo run --example benchmark --release -- [OPTIONS]
 
 ```bash
 # Sequential benchmark (10 requests)
-cargo run --example benchmark --release -- -n 10
+cargo run -p fynd-benchmark --release -- load -n 10
 
 # Fixed concurrency with 10 parallel requests
-cargo run --example benchmark --release -- -m fixed:10 -n 100
+cargo run -p fynd-benchmark --release -- load -m fixed:10 -n 100
 
 # Rate-based with custom requests
-cargo run --example benchmark --release -- \
+cargo run -p fynd-benchmark --release -- load \
   -m rate:50 -n 100 \
   --requests-file tools/benchmark/requests_set.json
 
 # Export results to file
-cargo run --example benchmark --release -- -m fixed:10 -n 1000 --output-file results.json
+cargo run -p fynd-benchmark --release -- load -m fixed:10 -n 1000 --output-file results.json
 ```
 
 ### Output
@@ -61,7 +61,7 @@ Console output shows real-time progress, summary statistics, and ASCII histogram
 Sends identical quote requests to two running Fynd instances and compares output quality (amount out, gas, routes).
 
 ```bash
-cargo run --example compare --release -- [OPTIONS]
+cargo run -p fynd-benchmark --release -- compare [OPTIONS]
 ```
 
 ### Setup
@@ -111,7 +111,7 @@ Both should return `{"healthy": true, ...}` before running the comparison.
 #### 5. Run the comparison
 
 ```bash
-cargo run --example compare --release -- \
+cargo run -p fynd-benchmark --release -- compare \
   --url-a http://localhost:3000 \
   --url-b http://localhost:3001 \
   --label-a main \
@@ -165,11 +165,12 @@ By default, the benchmark uses a single WETH->USDC swap and the compare tool gen
 
 | File | Description |
 |------|-------------|
-| `benchmark.rs` | Performance benchmark entry point |
-| `config.rs` | Benchmark config, request templates, statistics types |
-| `runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
-| `exporter.rs` | Statistics calculation and JSON export |
-| `compare.rs` | Comparison tool entry point |
-| `requests.rs` | Request generation and file loading |
-| `pairs.json` | Token and pair definitions for random request generation |
+| `src/main.rs` | CLI entry point with `load` and `compare` subcommands |
+| `src/benchmark.rs` | Load-test implementation |
+| `src/compare.rs` | Comparison tool implementation |
+| `src/config.rs` | Benchmark config, request templates, statistics types |
+| `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
+| `src/exporter.rs` | Statistics calculation and JSON export |
+| `src/requests.rs` | Request generation and file loading |
+| `src/pairs.json` | Token and pair definitions for random request generation |
 | `requests_set.json` | Sample request templates |

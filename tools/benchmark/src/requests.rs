@@ -1,6 +1,3 @@
-// Shared by both benchmark and compare tools.
-#![allow(dead_code)]
-
 use std::str::FromStr;
 
 use alloy::hex;

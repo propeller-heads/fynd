@@ -1,66 +1,59 @@
-mod config;
-mod exporter;
-mod requests;
-mod runner;
-
 use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
-use config::{BenchmarkConfig, BenchmarkResults, ParallelizationMode};
-use exporter::{export_results, print_histogram, print_statistics};
 use fynd_client::{FyndClient, FyndClientBuilder};
-use requests::{default_request, load_request_templates, SwapRequest};
-use runner::{run_benchmark, RunnerResults};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
-/// Benchmark tool for measuring fynd's performance
+use crate::{
+    config::{BenchmarkConfig, BenchmarkResults, ParallelizationMode},
+    exporter::{export_results, print_histogram, print_statistics},
+    requests::{default_request, load_request_templates, SwapRequest},
+    runner::{run_benchmark, RunnerResults},
+};
+
+/// Load-test a running Fynd solver (latency and throughput)
 #[derive(Parser, Debug)]
-#[command(name = "benchmark")]
 #[command(about = "Benchmark fynd with various parallelization strategies", long_about = None)]
-struct Cli {
+pub struct Args {
     /// Solver URL to benchmark against
     #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]
-    solver_url: String,
+    pub solver_url: String,
 
     /// Number of requests to benchmark
     #[arg(long, short = 'n', env = "NUM_REQUESTS", default_value = "1")]
-    num_requests: usize,
+    pub num_requests: usize,
 
     /// Parallelization mode: sequential, fixed:N, or rate:Nms
     #[arg(long, short = 'm', env = "PARALLELIZATION_MODE", default_value = "sequential")]
-    parallelization_mode: String,
+    pub parallelization_mode: String,
 
     /// Path to JSON file with request templates
     #[arg(long, env = "REQUESTS_FILE")]
-    requests_file: Option<String>,
+    pub requests_file: Option<String>,
 
     /// Output file for results (if not specified, results are not exported to file)
     #[arg(long, env = "OUTPUT_FILE")]
-    output_file: Option<String>,
+    pub output_file: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_env("RUST_LOG"))
-        .with_target(true)
-        .init();
+pub async fn run(args: Args) -> anyhow::Result<()> {
+    let parallelization_mode = ParallelizationMode::from_str(&args.parallelization_mode)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let cli = Cli::parse();
-
-    let parallelization_mode = ParallelizationMode::from_str(&cli.parallelization_mode)?;
-
-    info!("Solver URL: {}", cli.solver_url);
-    info!("Number of requests: {}", cli.num_requests);
+    info!("Solver URL: {}", args.solver_url);
+    info!("Number of requests: {}", args.num_requests);
     info!("Parallelization mode: {:?}", parallelization_mode);
 
-    let client = Arc::new(FyndClientBuilder::new(&cli.solver_url, "").build_quote_only()?);
+    let client = Arc::new(
+        FyndClientBuilder::new(&args.solver_url, "")
+            .build_quote_only()
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    );
 
     check_solver_health(&client).await?;
     info!("Solver is ready");
 
-    let (requests, requests_file) = load_requests(cli.requests_file.as_deref())?;
+    let (requests, requests_file) = load_requests(args.requests_file.as_deref())?;
 
     let benchmark_start = Instant::now();
     let RunnerResults {
@@ -69,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         successful_requests,
         orders_found: orders_solved,
         orders_not_found: orders_not_solved,
-    } = run_benchmark(Arc::clone(&client), &requests, cli.num_requests, &parallelization_mode)
+    } = run_benchmark(Arc::clone(&client), &requests, args.num_requests, &parallelization_mode)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
@@ -80,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     if successful_requests > 0 {
-        let failed_requests = cli.num_requests - successful_requests;
+        let failed_requests = args.num_requests - successful_requests;
         let throughput_rps = if total_duration_ms > 0 {
             (successful_requests as f64 * 1000.0) / total_duration_ms as f64
         } else {
@@ -88,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         println!("\n=== Results ===");
-        println!("Successful HTTP requests: {}/{}", successful_requests, cli.num_requests);
+        println!("Successful HTTP requests: {}/{}", successful_requests, args.num_requests);
         println!("Failed HTTP requests:     {}", failed_requests);
         println!("Orders solved:            {}", orders_solved);
         println!("Orders not solved:        {}", orders_not_solved);
@@ -104,10 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_statistics(&overheads, "Overhead (round-trip - solve time):");
         print_histogram(&overheads, "Overhead", 50);
 
-        if let Some(output_file) = cli.output_file {
+        if let Some(output_file) = args.output_file {
             let config = BenchmarkConfig {
-                solver_url: cli.solver_url.clone(),
-                num_requests: cli.num_requests,
+                solver_url: args.solver_url.clone(),
+                num_requests: args.num_requests,
                 parallelization_mode,
                 requests_file,
                 num_request_templates: requests.len(),
@@ -127,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 overheads,
             );
 
-            export_results(results, output_file)?;
+            export_results(results, output_file).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
     } else {
         tracing::warn!("No successful requests!");
@@ -138,10 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn load_requests(
     requests_file: Option<&str>,
-) -> Result<(Vec<SwapRequest>, Option<String>), Box<dyn std::error::Error>> {
+) -> anyhow::Result<(Vec<SwapRequest>, Option<String>)> {
     let requests = if let Some(file_path) = requests_file {
         info!("Loading requests from: {}", file_path);
-        let loaded = load_request_templates(file_path, 10000)?;
+        let loaded =
+            load_request_templates(file_path, 10000).map_err(|e| anyhow::anyhow!("{e}"))?;
         info!("Loaded {} request template(s)", loaded.len());
         loaded
     } else {
@@ -159,12 +153,15 @@ fn load_requests(
     Ok((requests, requests_file.map(|s| s.to_string())))
 }
 
-async fn check_solver_health(client: &FyndClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn check_solver_health(client: &FyndClient) -> anyhow::Result<()> {
     info!("Checking solver health...");
 
-    let health = client.health().await?;
+    let health = client
+        .health()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !health.healthy() {
-        return Err("Solver is not healthy".into());
+        return Err(anyhow::anyhow!("Solver is not healthy"));
     }
 
     info!(

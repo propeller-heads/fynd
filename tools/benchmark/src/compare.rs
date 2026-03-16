@@ -1,54 +1,52 @@
-mod requests;
-
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use fynd_client::{FyndClient, FyndClientBuilder, FyndError, Quote, QuoteStatus, RetryConfig};
-use requests::{generate_requests, load_requests_from_file, SwapRequest};
 use serde::Serialize;
+
+use crate::requests::{generate_requests, load_requests_from_file, SwapRequest};
 
 /// Compare solver output quality between two running instances.
 ///
 /// Start solver A (e.g. main) on port 3000 and solver B (e.g. branch) on port 3001,
 /// then run this tool to send identical requests to both and compare results.
 #[derive(Parser, Debug)]
-#[command(name = "compare")]
-struct Cli {
+pub struct Args {
     /// Solver A URL
     #[arg(long, default_value = "http://localhost:3000")]
-    url_a: String,
+    pub url_a: String,
 
     /// Solver B URL
     #[arg(long, default_value = "http://localhost:3001")]
-    url_b: String,
+    pub url_b: String,
 
     /// Label for solver A
     #[arg(long, default_value = "main")]
-    label_a: String,
+    pub label_a: String,
 
     /// Label for solver B
     #[arg(long, default_value = "branch")]
-    label_b: String,
+    pub label_b: String,
 
     /// Number of requests to send
     #[arg(short = 'n', long, default_value_t = 100)]
-    num_requests: usize,
+    pub num_requests: usize,
 
     /// Path to requests JSON file (benchmark format)
     #[arg(long)]
-    requests_file: Option<String>,
+    pub requests_file: Option<String>,
 
     /// Output file for full results JSON
     #[arg(long, default_value = "comparison_results.json")]
-    output: String,
+    pub output: String,
 
     /// Request timeout in milliseconds
     #[arg(long, default_value_t = 15000)]
-    timeout_ms: u64,
+    pub timeout_ms: u64,
 
     /// Random seed for reproducibility
     #[arg(long, default_value_t = 42)]
-    seed: u64,
+    pub seed: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,11 +95,12 @@ struct OutputConfig {
     seed: u64,
 }
 
-fn build_client(url: &str, timeout_ms: u64) -> Result<FyndClient, Box<dyn std::error::Error>> {
+fn build_client(url: &str, timeout_ms: u64) -> anyhow::Result<FyndClient> {
     let client = FyndClientBuilder::new(url, "")
         .with_timeout(Duration::from_millis(timeout_ms))
         .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
-        .build_quote_only()?;
+        .build_quote_only()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(client)
 }
 
@@ -350,48 +349,52 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     println!("\n{}", "=".repeat(70));
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+pub async fn run(args: Args) -> anyhow::Result<()> {
+    fastrand::seed(args.seed);
 
-    fastrand::seed(cli.seed);
-
-    let client_a = build_client(&cli.url_a, cli.timeout_ms)?;
-    let client_b = build_client(&cli.url_b, cli.timeout_ms)?;
+    let client_a = build_client(&args.url_a, args.timeout_ms)?;
+    let client_b = build_client(&args.url_b, args.timeout_ms)?;
 
     println!("Checking solver health...");
 
-    let health_a = client_a.health().await?;
+    let health_a = client_a
+        .health()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !health_a.healthy() {
-        return Err(format!("{}: solver is not healthy", cli.label_a).into());
+        return Err(anyhow::anyhow!("{}: solver is not healthy", args.label_a));
     }
     println!(
         "  {}: healthy (pools={}, last_update={}ms)",
-        cli.label_a,
+        args.label_a,
         health_a.num_solver_pools(),
         health_a.last_update_ms(),
     );
 
-    let health_b = client_b.health().await?;
+    let health_b = client_b
+        .health()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !health_b.healthy() {
-        return Err(format!("{}: solver is not healthy", cli.label_b).into());
+        return Err(anyhow::anyhow!("{}: solver is not healthy", args.label_b));
     }
     println!(
         "  {}: healthy (pools={}, last_update={}ms)",
-        cli.label_b,
+        args.label_b,
         health_b.num_solver_pools(),
         health_b.last_update_ms(),
     );
 
-    let requests: Vec<SwapRequest> = if let Some(ref path) = cli.requests_file {
-        load_requests_from_file(path, cli.num_requests, cli.timeout_ms)?
+    let requests: Vec<SwapRequest> = if let Some(ref path) = args.requests_file {
+        load_requests_from_file(path, args.num_requests, args.timeout_ms)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
-        generate_requests(cli.num_requests, cli.timeout_ms)
+        generate_requests(args.num_requests, args.timeout_ms)
     };
 
-    println!("\nSending {} requests to both solvers...\n", cli.num_requests);
+    println!("\nSending {} requests to both solvers...\n", args.num_requests);
 
-    let mut results = Vec::with_capacity(cli.num_requests);
+    let mut results = Vec::with_capacity(args.num_requests);
 
     for (i, req) in requests.iter().enumerate() {
         let (result_a, rt_a) = send_quote(&client_a, req).await;
@@ -420,7 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  [{:>3}/{}] {icon} {:<30} A:{:<12} B:{:<12}{diff_str}",
             i + 1,
-            cli.num_requests,
+            args.num_requests,
             req.label,
             metrics_a.status,
             metrics_b.status,
@@ -435,24 +438,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    print_summary(&results, &cli.label_a, &cli.label_b);
+    print_summary(&results, &args.label_a, &args.label_b);
 
     let output = Output {
         config: OutputConfig {
-            url_a: cli.url_a,
-            url_b: cli.url_b,
-            label_a: cli.label_a,
-            label_b: cli.label_b,
-            num_requests: cli.num_requests,
-            timeout_ms: cli.timeout_ms,
-            seed: cli.seed,
+            url_a: args.url_a,
+            url_b: args.url_b,
+            label_a: args.label_a,
+            label_b: args.label_b,
+            num_requests: args.num_requests,
+            timeout_ms: args.timeout_ms,
+            seed: args.seed,
         },
         results,
     };
 
     let json = serde_json::to_string_pretty(&output)?;
-    std::fs::write(&cli.output, &json)?;
-    println!("\nFull results saved to: {}", cli.output);
+    std::fs::write(&args.output, &json)?;
+    println!("\nFull results saved to: {}", args.output);
 
     Ok(())
 }

@@ -3256,8 +3256,6 @@ dependencies = [
  "clap",
  "dialoguer 0.11.0",
  "dotenv",
- "fastrand",
- "fynd-client",
  "fynd-core",
  "fynd-rpc",
  "fynd-rpc-types",
@@ -3267,7 +3265,6 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
- "reqwest",
  "rstest",
  "serde",
  "serde_json",
@@ -3279,6 +3276,25 @@ dependencies = [
  "tycho-execution",
  "tycho-simulation",
  "utoipa 5.4.0",
+]
+
+[[package]]
+name = "fynd-benchmark"
+version = "0.15.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bytes",
+ "clap",
+ "fastrand",
+ "fynd-client",
+ "num-bigint",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.22",
 ]
 
 [[package]]
