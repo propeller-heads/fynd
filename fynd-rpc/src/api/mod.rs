@@ -20,7 +20,7 @@ pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::SharedMarketDataRef,
-    order_manager::OrderManager,
+    worker_pool_router::WorkerPoolRouter,
 };
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
@@ -113,8 +113,8 @@ impl HealthTracker {
 /// Shared application state for HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// OrderManager for solving requests across multiple solver pools.
-    pub order_manager: Arc<OrderManager>,
+    /// WorkerPoolRouter for solving requests across multiple solver pools.
+    pub worker_router: Arc<WorkerPoolRouter>,
     /// Health tracker for monitoring data freshness.
     pub health_tracker: HealthTracker,
     /// Shared derived data (token prices, spot prices, pool depths).
@@ -128,13 +128,13 @@ pub struct AppState {
 impl AppState {
     /// Creates new application state.
     pub fn new(
-        order_manager: OrderManager,
+        worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
     ) -> Self {
         Self {
-            order_manager: Arc::new(order_manager),
+            worker_router: Arc::new(worker_router),
             health_tracker,
             #[cfg(feature = "experimental")]
             derived_data,

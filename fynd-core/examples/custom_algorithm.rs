@@ -34,7 +34,7 @@ use fynd_core::{
     },
     types::{constants::native_token, RouteResult},
     Algorithm, AlgorithmConfig, AlgorithmError, ComputationRequirements, EncodingOptions,
-    MostLiquidAlgorithm, Order, OrderManager, OrderManagerConfig, OrderSide, QuoteOptions,
+    MostLiquidAlgorithm, Order, OrderSide, QuoteOptions, WorkerPoolRouter, WorkerPoolRouterConfig,
     QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
 };
 use num_bigint::BigUint;
@@ -171,14 +171,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Worker pool algorithm: {}", worker_pool.algorithm());
 
-    // 7. OrderManager
+    // 7. WorkerPoolRouter
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(None)
         .expect("Failed to create default swap encoder registry");
     let encoder = Encoder::new(chain, swap_encoder_registry).expect("Failed to create encoder");
-    let order_manager = OrderManager::new(
+    let worker_router = WorkerPoolRouter::new(
         vec![SolverPoolHandle::new("custom-solver", task_handle)],
-        OrderManagerConfig::default().with_timeout(Duration::from_secs(10)),
+        WorkerPoolRouterConfig::default().with_timeout(Duration::from_secs(10)),
         encoder,
     );
 
@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
     let request = QuoteRequest::new(vec![order], options);
-    let solution = order_manager.quote(request).await?;
+    let solution = worker_router.quote(request).await?;
     println!(" done ({}ms)\n", solution.solve_time_ms());
 
     // 11. Display results

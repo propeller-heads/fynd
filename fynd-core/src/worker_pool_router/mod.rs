@@ -1,6 +1,6 @@
-//! Order Manager for orchestrating multiple solver pools.
+//! Orchestrates multiple solver pools to find the best quote per request.
 //!
-//! The OrderManager sits between the API layer and multiple solver pools.
+//! The WorkerPoolRouter sits between the API layer and multiple solver pools.
 //! It fans out each order to all configured solvers, manages timeouts,
 //! and selects the best quote based on `amount_out_net_gas`.
 
@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use config::OrderManagerConfig;
+use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
@@ -70,20 +70,20 @@ pub(crate) struct OrderResponses {
 }
 
 /// Orchestrates multiple solver pools to find the best quote.
-pub struct OrderManager {
+pub struct WorkerPoolRouter {
     /// All registered solver pools.
     solver_pools: Vec<SolverPoolHandle>,
-    /// Configuration for the order manager.
-    config: OrderManagerConfig,
+    /// Configuration for the worker router.
+    config: WorkerPoolRouterConfig,
     /// Encoder for encoding solutions into on-chain transactions.
     encoder: Encoder,
 }
 
-impl OrderManager {
-    /// Creates a new OrderManager with the given solver pools, config, and encoder.
+impl WorkerPoolRouter {
+    /// Creates a new WorkerPoolRouter with the given solver pools, config, and encoder.
     pub fn new(
         solver_pools: Vec<SolverPoolHandle>,
-        config: OrderManagerConfig,
+        config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
         Self { solver_pools, config, encoder }
@@ -222,7 +222,7 @@ impl OrderManager {
                                     min_responses,
                                     "early return: min_responses reached"
                                 );
-                                counter!("order_manager_early_returns_total").increment(1);
+                                counter!("worker_router_early_returns_total").increment(1);
                                 break;
                             }
                         }
@@ -247,8 +247,8 @@ impl OrderManager {
 
         // Record metrics
         let duration = start_time.elapsed().as_secs_f64();
-        histogram!("order_manager_solve_duration_seconds").record(duration);
-        histogram!("order_manager_solver_responses").record(quotes.len() as f64);
+        histogram!("worker_router_solve_duration_seconds").record(duration);
+        histogram!("worker_router_solver_responses").record(quotes.len() as f64);
 
         // Record failures by pool and error type
         for (pool_name, error) in &failed_solvers {
@@ -259,7 +259,7 @@ impl OrderManager {
                 SolveError::Internal(_) => "internal",
                 _ => "other",
             };
-            counter!("order_manager_solver_failures_total", "pool" => pool_name.clone(), "error_type" => error_type).increment(1);
+            counter!("worker_router_solver_failures_total", "pool" => pool_name.clone(), "error_type" => error_type).increment(1);
         }
 
         if !failed_solvers.is_empty() {
@@ -305,8 +305,8 @@ impl OrderManager {
             .max_by_key(|(_, q)| q.amount_out_net_gas())
         {
             // Record metrics for successful selection
-            counter!("order_manager_orders_total", "status" => "success").increment(1);
-            counter!("order_manager_best_quote_pool", "pool" => pool_name.clone()).increment(1);
+            counter!("worker_router_orders_total", "status" => "success").increment(1);
+            counter!("worker_router_best_quote_pool", "pool" => pool_name.clone()).increment(1);
 
             debug!(
                 order_id = %best.order_id(),
@@ -320,7 +320,7 @@ impl OrderManager {
         // No valid quote found - return a NoRouteFound response
         // Try to get any response to extract block info, or create a placeholder
         if let Some((_, any_q)) = responses.quotes.first() {
-            counter!("order_manager_orders_total", "status" => "no_route").increment(1);
+            counter!("worker_router_orders_total", "status" => "no_route").increment(1);
             OrderQuote::new(
                 responses.order_id.clone(),
                 QuoteStatus::NoRouteFound,
@@ -363,7 +363,7 @@ impl OrderManager {
                 QuoteStatus::NotReady => "not_ready",
                 _ => "no_route",
             };
-            counter!("order_manager_orders_total", "status" => status_label).increment(1);
+            counter!("worker_router_orders_total", "status" => status_label).increment(1);
 
             OrderQuote::new(
                 responses.order_id.clone(),
@@ -495,14 +495,14 @@ mod tests {
 
     #[test]
     fn test_config_default() {
-        let config = OrderManagerConfig::default();
+        let config = WorkerPoolRouterConfig::default();
         assert_eq!(config.default_timeout(), Duration::from_secs(1));
         assert_eq!(config.min_responses(), 1);
     }
 
     #[test]
     fn test_config_builder() {
-        let config = OrderManagerConfig::default()
+        let config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(500))
             .with_min_responses(2);
         assert_eq!(config.default_timeout(), Duration::from_millis(500));
@@ -510,24 +510,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_order_manager_no_pools() {
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
+    async fn test_router_no_pools() {
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         assert!(matches!(result, Err(SolveError::Internal(_))));
     }
 
     #[tokio::test]
-    async fn test_order_manager_single_pool_success() {
+    async fn test_router_single_pool_success() {
         let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_quote(900)), 0);
 
-        let manager =
-            OrderManager::new(vec![pool], OrderManagerConfig::default(), default_encoder());
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -540,24 +541,24 @@ mod tests {
             .data()
             .is_empty());
 
-        drop(manager);
+        drop(worker_router);
         worker.abort();
     }
 
     #[tokio::test]
-    async fn test_order_manager_selects_best_of_two() {
+    async fn test_router_selects_best_of_two() {
         // Pool A: worse quote (net gas = 800)
         let (pool_a, worker_a) = create_mock_pool("pool_a", Ok(make_single_quote(800)), 0);
         // Pool B: better quote (net gas = 950)
         let (pool_b, worker_b) = create_mock_pool("pool_b", Ok(make_single_quote(950)), 0);
 
         // Wait for both responses to test best selection logic
-        let config = OrderManagerConfig::default().with_min_responses(2);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
+        let config = WorkerPoolRouterConfig::default().with_min_responses(2);
+        let worker_router = WorkerPoolRouter::new(vec![pool_a, pool_b], config, default_encoder());
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -570,21 +571,21 @@ mod tests {
             .data()
             .is_empty());
 
-        drop(manager);
+        drop(worker_router);
         worker_a.abort();
         worker_b.abort();
     }
 
     #[tokio::test]
-    async fn test_order_manager_timeout() {
+    async fn test_router_timeout() {
         // Pool that takes too long
         let (pool, worker) = create_mock_pool("slow_pool", Ok(make_single_quote(900)), 500);
 
-        let config = OrderManagerConfig::default().with_timeout(Duration::from_millis(50));
-        let manager = OrderManager::new(vec![pool], config, default_encoder());
+        let config = WorkerPoolRouterConfig::default().with_timeout(Duration::from_millis(50));
+        let worker_router = WorkerPoolRouter::new(vec![pool], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -595,27 +596,27 @@ mod tests {
             QuoteStatus::Timeout | QuoteStatus::NoRouteFound
         ));
 
-        drop(manager);
+        drop(worker_router);
         worker.abort();
     }
 
     #[tokio::test]
-    async fn test_order_manager_early_return_on_min_responses() {
+    async fn test_router_early_return_on_min_responses() {
         // Pool A: fast
         let (pool_a, worker_a) = create_mock_pool("fast_pool", Ok(make_single_quote(800)), 0);
         // Pool B: slow (but we won't wait for it)
         let (pool_b, worker_b) = create_mock_pool("slow_pool", Ok(make_single_quote(950)), 500);
 
-        let config = OrderManagerConfig::default()
+        let config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(1000))
             .with_min_responses(1);
-        let manager = OrderManager::new(vec![pool_a, pool_b], config, default_encoder());
+        let worker_router = WorkerPoolRouter::new(vec![pool_a, pool_b], config, default_encoder());
 
         let start = Instant::now();
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok());
@@ -633,7 +634,7 @@ mod tests {
             .data()
             .is_empty());
 
-        drop(manager);
+        drop(worker_router);
         worker_a.abort();
         worker_b.abort();
     }
@@ -673,8 +674,9 @@ mod tests {
             None => QuoteOptions::default(),
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
-        let result = manager.select_best(&responses, &options);
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.select_best(&responses, &options);
 
         if should_pass {
             assert_eq!(result.status(), QuoteStatus::Success);
@@ -684,7 +686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_order_manager_captures_solver_errors() {
+    async fn test_router_captures_solver_errors() {
         // Pool that returns an error
         let (pool, worker) = create_mock_pool(
             "error_pool",
@@ -692,11 +694,11 @@ mod tests {
             0,
         );
 
-        let manager =
-            OrderManager::new(vec![pool], OrderManagerConfig::default(), default_encoder());
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = manager.quote(request).await;
+        let result = worker_router.quote(request).await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -704,7 +706,7 @@ mod tests {
         // Should be NoRouteFound since the only solver returned an error
         assert_eq!(quote.orders()[0].status(), QuoteStatus::NoRouteFound);
 
-        drop(manager);
+        drop(worker_router);
         worker.abort();
     }
 
@@ -719,8 +721,9 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
-        let result = manager.select_best(&responses, &QuoteOptions::default());
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.select_best(&responses, &QuoteOptions::default());
 
         assert_eq!(result.status(), QuoteStatus::Timeout);
     }
@@ -736,8 +739,9 @@ mod tests {
             ],
         };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
-        let result = manager.select_best(&responses, &QuoteOptions::default());
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.select_best(&responses, &QuoteOptions::default());
 
         // Mixed failures (not all timeouts) should return NoRouteFound
         assert_eq!(result.status(), QuoteStatus::NoRouteFound);
@@ -748,8 +752,9 @@ mod tests {
         let responses =
             OrderResponses { order_id: "test".to_string(), quotes: vec![], failed_solvers: vec![] };
 
-        let manager = OrderManager::new(vec![], OrderManagerConfig::default(), default_encoder());
-        let result = manager.select_best(&responses, &QuoteOptions::default());
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.select_best(&responses, &QuoteOptions::default());
 
         // No failures but also no quotes means NoRouteFound
         assert_eq!(result.status(), QuoteStatus::NoRouteFound);

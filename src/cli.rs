@@ -82,13 +82,13 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::RECONNECT_DELAY_SECS)]
     pub reconnect_delay_secs: u64,
 
-    /// Order manager timeout in milliseconds
-    #[arg(long, default_value_t = defaults::ORDER_MANAGER_TIMEOUT_MS)]
-    pub order_manager_timeout_ms: u64,
+    /// Worker router timeout in milliseconds
+    #[arg(long, default_value_t = defaults::WORKER_ROUTER_TIMEOUT_MS)]
+    pub worker_router_timeout_ms: u64,
 
     /// Minimum solver responses before early return (0 = wait for all)
-    #[arg(long, default_value_t = defaults::ORDER_MANAGER_MIN_RESPONSES)]
-    pub order_manager_min_responses: usize,
+    #[arg(long, default_value_t = defaults::WORKER_ROUTER_MIN_RESPONSES)]
+    pub worker_router_min_responses: usize,
 
     /// Path to worker pools TOML config file
     #[arg(short, long, env, default_value = "worker_pools.toml")]
@@ -164,8 +164,8 @@ mod cli_tests {
         assert_eq!(args.tvl_buffer_multiplier, 1.1);
         assert_eq!(args.gas_refresh_interval_secs, 30);
         assert_eq!(args.reconnect_delay_secs, 5);
-        assert_eq!(args.order_manager_timeout_ms, 100);
-        assert_eq!(args.order_manager_min_responses, 0);
+        assert_eq!(args.worker_router_timeout_ms, 100);
+        assert_eq!(args.worker_router_min_responses, 0);
     }
 
     #[test]
