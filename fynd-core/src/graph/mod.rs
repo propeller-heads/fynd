@@ -73,6 +73,7 @@ impl<'a, D> Path<'a, D> {
     }
 
     /// Creates a new reversed Path from the current one.
+    #[allow(dead_code)]
     pub fn reversed(self) -> Self {
         let reversed_tokens = self.tokens.into_iter().rev().collect();
         let reversed_edge_data = self
