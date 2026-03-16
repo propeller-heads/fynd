@@ -287,6 +287,35 @@ async fn main() -> anyhow::Result<()> {
     // Set up shared market data
     let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
 
+    // Set up gas price fetcher (needs RPC_URL to fetch on-chain gas prices)
+    let mut feed_gas_signal = None;
+    if let Some(rpc_url) = &args.rpc_url {
+        use fynd::feed::gas::GasPriceFetcher;
+        use tycho_simulation::tycho_ethereum::rpc::EthereumRpcClient;
+
+        match EthereumRpcClient::new(rpc_url) {
+            Ok(eth_client) => {
+                let (mut fetcher, signal_tx) =
+                    GasPriceFetcher::new(eth_client, market_data.clone());
+                feed_gas_signal = Some(signal_tx);
+                tokio::spawn(async move {
+                    if let Err(e) = fetcher.run().await {
+                        error!("gas price fetcher error: {}", e);
+                    }
+                });
+                info!("gas price fetcher started (via RPC)");
+            }
+            Err(e) => {
+                warn!("no gas price fetcher: {}", e);
+            }
+        }
+    } else {
+        warn!(
+            "RPC_URL not set, gas price fetcher disabled \
+             (non-WETH source tokens will have inaccurate gas costs)"
+        );
+    }
+
     // Set up derived data computation (token prices for gas cost conversion)
     let cm_config = ComputationManagerConfig::new()
         .with_gas_token(weth_addr.clone())
@@ -307,7 +336,10 @@ async fn main() -> anyhow::Result<()> {
     .blacklisted_components(blacklist);
 
     let health_tracker = fynd::api::HealthTracker::new();
-    let feed = TychoFeed::new(feed_config, market_data.clone(), health_tracker);
+    let mut feed = TychoFeed::new(feed_config, market_data.clone(), health_tracker);
+    if let Some(signal_tx) = feed_gas_signal {
+        feed = feed.with_gas_price_worker_signal_tx(signal_tx);
+    }
     let mut event_rx = feed.subscribe();
 
     // Spawn the feed in a background task
