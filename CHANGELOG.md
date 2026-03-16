@@ -1,3 +1,17 @@
+## [0.14.0](https://github.com/propeller-heads/fynd/compare/0.13.0...0.14.0) (2026-03-16)
+
+
+### Features
+
+* add quote example exercising health check and two quote requests ([a43ab65](https://github.com/propeller-heads/fynd/commit/a43ab65a40276caefa84396826de0b1a6d238d3e))
+
+
+### Bug Fixes
+
+* **ci:** point drift check errors to update-openapi.sh ([61e1a84](https://github.com/propeller-heads/fynd/commit/61e1a84dd4da1b68ec5c5e0d587960b13c1eb5d3))
+* strip spurious surrounding quotes from BlockInfo.hash on deserialize ([57c0f90](https://github.com/propeller-heads/fynd/commit/57c0f9075a98d4176250ee22625c5f50f9be52ce))
+* use Display instead of Debug when formatting block hash in worker ([fae8700](https://github.com/propeller-heads/fynd/commit/fae8700966ab46e021231b6b2132f549d5c28570))
+
 ## [0.13.0](https://github.com/propeller-heads/fynd/compare/0.12.1...0.13.0) (2026-03-13)
 
 
