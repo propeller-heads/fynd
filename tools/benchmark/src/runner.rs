@@ -38,7 +38,6 @@ impl ParallelizationMode {
     }
 }
 
-
 /// Sequential execution: wait for each response before firing the next request
 async fn run_sequential(
     client: Arc<FyndClient>,

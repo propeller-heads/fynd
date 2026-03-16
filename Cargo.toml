@@ -44,6 +44,7 @@ tycho-simulation = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
 alloy = { workspace = true, features = [
     "providers",
     "signer-local",

@@ -159,9 +159,12 @@ pub fn load_request_templates(
         .iter()
         .enumerate()
         .map(|(i, tmpl)| {
-            let order = tmpl.orders.first().ok_or_else(|| -> Box<dyn std::error::Error> {
-                format!("request template at index {i} has no orders").into()
-            })?;
+            let order = tmpl
+                .orders
+                .first()
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("request template at index {i} has no orders").into()
+                })?;
             let in_sym = symbol_for_address(&order.token_in, &file.tokens);
             let out_sym = symbol_for_address(&order.token_out, &file.tokens);
 
@@ -376,7 +379,10 @@ mod tests {
         let result = load_request_templates(path.to_str().unwrap(), 5000);
         std::fs::remove_file(&path).ok();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no orders"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no orders"));
     }
 
     #[test]
