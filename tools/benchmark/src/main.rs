@@ -6,7 +6,6 @@
 mod benchmark;
 mod compare;
 mod config;
-mod download;
 mod exporter;
 mod requests;
 mod runner;
@@ -32,8 +31,6 @@ enum Command {
     Load(benchmark::Args),
     /// Diff output quality (amount out, gas, routes) between two solvers
     Compare(compare::Args),
-    /// Download real DEX trades from Dune Analytics for benchmarking
-    DownloadTrades(download::Args),
 }
 
 #[tokio::main]
@@ -47,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Load(args) => benchmark::run(args).await,
         Command::Compare(args) => compare::run(args).await,
-        Command::DownloadTrades(args) => download::run(args).await,
     }
 }
 
@@ -147,46 +143,6 @@ mod tests {
         assert_eq!(args.seed, 99);
         assert_eq!(args.output, "out.json");
         assert_eq!(args.rpc_url.as_deref(), Some("https://eth.example.com"));
-    }
-
-    #[test]
-    fn download_trades_defaults() {
-        let cli = Cli::try_parse_from(["bin", "download-trades"]).unwrap();
-        let Command::DownloadTrades(args) = cli.command else {
-            panic!("expected DownloadTrades");
-        };
-        assert_eq!(args.limit, 1000);
-        assert_eq!(args.min_usd, 100.0);
-        assert_eq!(args.hours, 24);
-        assert_eq!(args.chain, "ethereum");
-        assert_eq!(args.output, "trades_1k_requests.json");
-    }
-
-    #[test]
-    fn download_trades_custom_args() {
-        let cli = Cli::try_parse_from([
-            "bin",
-            "download-trades",
-            "-n",
-            "500",
-            "--min-usd",
-            "1000",
-            "--hours",
-            "48",
-            "--chain",
-            "base",
-            "-o",
-            "out.json",
-        ])
-        .unwrap();
-        let Command::DownloadTrades(args) = cli.command else {
-            panic!("expected DownloadTrades");
-        };
-        assert_eq!(args.limit, 500);
-        assert_eq!(args.min_usd, 1000.0);
-        assert_eq!(args.hours, 48);
-        assert_eq!(args.chain, "base");
-        assert_eq!(args.output, "out.json");
     }
 
     #[test]

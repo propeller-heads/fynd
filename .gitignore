@@ -5,4 +5,3 @@ clients/typescript/client/dist/
 clients/typescript/node_modules/
 comparison_results.json
 .env
-trades_*_requests.json

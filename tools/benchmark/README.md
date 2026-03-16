@@ -185,68 +185,28 @@ By default, the benchmark uses a single WETH->USDC swap and the compare tool gen
 
 ### Using Real Trade Data
 
-For more representative coverage, download real on-chain trades from Dune Analytics using the `download-trades` subcommand:
+For more representative coverage, use real on-chain trades. A 1k sample (`trades_1k_requests.json`) is included in this directory:
 
 ```bash
-# Download 1k recent Ethereum trades (requires DUNE_API_KEY)
-export DUNE_API_KEY="your_key"
-cargo run -p fynd-benchmark --release -- download-trades
-
-# Then use them in a comparison
 cargo run -p fynd-benchmark --release -- compare \
-  --requests-file trades_1k_requests.json \
+  --requests-file tools/benchmark/trades_1k_requests.json \
   --rpc-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
   -n 500
 ```
 
-See the [Download Trades](#download-trades) section for all options.
-
-## Download Trades
-
-Downloads real DEX trades from Dune Analytics and saves them in the request JSON format used by `load` and `compare`.
-
-```bash
-cargo run -p fynd-benchmark --release -- download-trades [OPTIONS]
-```
-
-**Prerequisites:** Requires the `DUNE_API_KEY` environment variable. Get one at https://dune.com/settings/api.
-
-### Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-n` | `1000` | Number of trades to download |
-| `--min-usd` | `100` | Minimum trade size in USD |
-| `--hours` | `24` | Lookback window in hours |
-| `--chain` | `ethereum` | Blockchain to query |
-| `-o` | `trades_1k_requests.json` | Output file path |
-
-### Examples
-
-```bash
-# Default: 1k recent Ethereum trades
-cargo run -p fynd-benchmark --release -- download-trades
-
-# 500 large trades from the last week
-cargo run -p fynd-benchmark --release -- download-trades -n 500 --min-usd 10000 --hours 168
-
-# Base chain trades
-cargo run -p fynd-benchmark --release -- download-trades --chain base -o trades_base.json
-```
-
----
+You can generate larger datasets from Dune Analytics using the trade-sample tool. The requests file format is a JSON array where each entry has an `orders` array with `token_in`, `token_out`, `amount`, `side`, and `sender` fields.
 
 ## File Layout
 
 | File | Description |
 |------|-------------|
-| `src/main.rs` | CLI entry point with `load`, `compare`, and `download-trades` subcommands |
+| `src/main.rs` | CLI entry point with `load` and `compare` subcommands |
 | `src/benchmark.rs` | Load-test implementation |
 | `src/compare.rs` | Comparison tool implementation |
-| `src/download.rs` | Dune Analytics trade downloader |
 | `src/config.rs` | Benchmark config, request templates, statistics types |
 | `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `src/exporter.rs` | Statistics calculation and JSON export |
 | `src/requests.rs` | Request generation and file loading |
 | `src/pairs.json` | Token and pair definitions for random request generation |
 | `requests_set.json` | Sample request templates |
+| `trades_1k_requests.json` | 1k real Dune trades for representative benchmarking |
