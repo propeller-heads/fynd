@@ -8,7 +8,7 @@
 //! # Dependencies
 //!
 //! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
-//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
+//! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::HashSet;
@@ -26,7 +26,7 @@ use tycho_simulation::{
 
 use crate::{
     derived::{
-        computation::{ComputationId, DerivedComputation},
+        computation::{ComputationId, ComputationOutput, DerivedComputation, FailedItem},
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
@@ -138,7 +138,7 @@ impl DerivedComputation for PoolDepthComputation {
         let tokens = snapshot.token_registry_ref();
 
         let mut succeeded = 0usize;
-        let mut failed = 0usize;
+        let mut failed_items: Vec<FailedItem> = Vec::new();
 
         for component_id in &components_to_compute {
             // Get token addresses: changed.added for new components, topology for existing
@@ -154,6 +154,10 @@ impl DerivedComputation for PoolDepthComputation {
             let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
                 warn!(component_id, "missing simulation state, skipping pool");
                 pool_depths.retain(|key, _| &key.0 != component_id);
+                failed_items.push(FailedItem {
+                    key: component_id.to_string(),
+                    error: "missing simulation state".to_string(),
+                });
                 continue;
             };
 
@@ -164,6 +168,10 @@ impl DerivedComputation for PoolDepthComputation {
             let Ok(pool_tokens) = pool_tokens else {
                 warn!(component_id, "missing token metadata, skipping pool");
                 pool_depths.retain(|key, _| &key.0 != component_id);
+                failed_items.push(FailedItem {
+                    key: component_id.to_string(),
+                    error: "missing token metadata".to_string(),
+                });
                 continue;
             };
 
@@ -181,7 +189,10 @@ impl DerivedComputation for PoolDepthComputation {
                         "missing spot price, skipping pair"
                     );
                     pool_depths.remove(&key);
-                    failed += 1;
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                        error: "missing spot price".to_string(),
+                    });
                     continue;
                 };
 
@@ -203,7 +214,13 @@ impl DerivedComputation for PoolDepthComputation {
                         token_in.decimals, token_out.decimals
                     );
                     pool_depths.remove(&key);
-                    failed += 1;
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                        error: format!(
+                            "extreme decimal mismatch ({}→{})",
+                            token_in.decimals, token_out.decimals
+                        ),
+                    });
                     continue;
                 }
 
@@ -219,7 +236,10 @@ impl DerivedComputation for PoolDepthComputation {
                         "spot price too small to compute depth, skipping pair"
                     );
                     pool_depths.remove(&key);
-                    failed += 1;
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                        error: format!("spot price too small: {spot_price}"),
+                    });
                     continue;
                 }
 
@@ -285,16 +305,27 @@ impl DerivedComputation for PoolDepthComputation {
                             "pool depth failed, skipping pair"
                         );
                         pool_depths.remove(&key);
-                        failed += 1;
+                        failed_items.push(FailedItem {
+                            key: format!(
+                                "{}/{}/{}",
+                                component_id, token_in.address, token_out.address
+                            ),
+                            error: format!("{e}: {probe_info}, {limits_info}"),
+                        });
                     }
                 }
             }
         }
 
-        debug!(succeeded, failed, total = pool_depths.len(), "pool depth computation complete");
+        debug!(
+            succeeded,
+            failed = failed_items.len(),
+            total = pool_depths.len(),
+            "pool depth computation complete"
+        );
         Span::current().record("updated_pool_depths", pool_depths.len());
 
-        Ok(pool_depths)
+        Ok(ComputationOutput::with_failures(pool_depths, failed_items))
     }
 }
 
@@ -366,7 +397,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.is_empty());
+        assert!(output.data.is_empty());
     }
 
     #[tokio::test]
@@ -423,19 +454,20 @@ mod tests {
             updated: vec![],
             is_full_recompute: true,
         };
-        let spot_prices = spot_comp
+        let spot_output = spot_comp
             .compute(&market, &derived, &changed)
             .await
             .expect("spot price computation should succeed");
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_prices, 0);
+            .set_spot_prices(spot_output.data, 0);
 
-        let pool_depths = PoolDepthComputation::default()
+        let pool_depths_output = PoolDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .expect("computation should succeed");
+        let pool_depths = pool_depths_output.data;
 
         assert_eq!(pool_depths.len(), 2, "should have depths for both directions");
 
@@ -684,5 +716,63 @@ mod tests {
                 slippage * 100.0
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_missing_spot_price() {
+        let eth = token(0x01, "ETH");
+        let usdc = token(0x02, "USDC");
+
+        let (market, _) = setup_market(vec![(
+            "pool",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[eth.clone(), usdc.clone()]),
+        )]);
+        let derived = DerivedData::new_shared();
+
+        // Provide spot price for only one direction so the other becomes a FailedItem
+        let mut partial_spot = SpotPrices::new();
+        let key_eth_usdc = ("pool".to_string(), eth.address.clone(), usdc.address.clone());
+        partial_spot.insert(key_eth_usdc, 2000.0);
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(partial_spot, 0);
+
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+
+        let output = PoolDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("should succeed with partial results");
+
+        assert!(output.has_failures(), "missing USDC→ETH spot price should produce a failed item");
+
+        // ETH→USDC direction should succeed
+        let key_eth_usdc: PoolDepthKey = ("pool".into(), eth.address.clone(), usdc.address.clone());
+        assert!(output.data.contains_key(&key_eth_usdc), "ETH→USDC depth should be present");
+
+        // USDC→ETH direction should be in failed_items
+        let usdc_eth_key = format!("pool/{}/{}", usdc.address, eth.address);
+        assert!(
+            output
+                .failed_items
+                .iter()
+                .any(|item| item.key == usdc_eth_key &&
+                    item.error
+                        .contains("missing spot price")),
+            "USDC→ETH should appear in failed_items with missing spot price error"
+        );
     }
 }

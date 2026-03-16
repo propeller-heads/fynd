@@ -87,7 +87,7 @@ impl ReadinessTracker {
             DerivedDataEvent::NewBlock { block } => {
                 self.on_new_block(*block);
             }
-            DerivedDataEvent::ComputationComplete { computation_id, block } => {
+            DerivedDataEvent::ComputationComplete { computation_id, block, .. } => {
                 self.on_computation_complete(computation_id, *block);
             }
             DerivedDataEvent::ComputationFailed { computation_id, block } => {
@@ -267,6 +267,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready());
         assert_eq!(tracker.current_block(), Some(100));
@@ -288,6 +289,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 99,
+            failed_items: vec![],
         });
 
         assert!(!tracker.is_ready());
@@ -301,12 +303,14 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(!tracker.is_ready()); // still missing spot_prices
 
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready());
     }
@@ -320,6 +324,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
 
         // Complete spot_prices for block 101 (newer block)
@@ -327,6 +332,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 101,
+            failed_items: vec![],
         });
 
         assert!(!tracker.is_ready()); // token_prices not ready for block 101
@@ -355,6 +361,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready());
 
@@ -374,6 +381,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 99,
+            failed_items: vec![],
         });
 
         assert!(tracker.is_ready()); // Old block is fine for stale
@@ -387,6 +395,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready());
 
@@ -416,6 +425,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(!tracker.is_ready()); // Missing fresh spot_prices
 
@@ -423,6 +433,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 100,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready());
 
@@ -434,6 +445,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 101,
+            failed_items: vec![],
         });
         assert!(tracker.is_ready()); // Both satisfied again
     }
@@ -512,6 +524,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "spot_prices",
             block: 101,
+            failed_items: vec![],
         });
 
         assert!(!tracker.is_blocked_for_current_block());
@@ -537,6 +550,7 @@ mod tests {
         tracker.handle_event(&DerivedDataEvent::ComputationComplete {
             computation_id: "token_prices",
             block: 100,
+            failed_items: vec![],
         });
 
         let missing = tracker.missing();

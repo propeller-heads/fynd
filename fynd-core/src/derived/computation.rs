@@ -116,6 +116,41 @@ impl ComputationRequirements {
     }
 }
 
+/// A single item that failed during a computation.
+#[derive(Debug, Clone)]
+pub struct FailedItem {
+    /// Human-readable key for the failed item.
+    /// - spot_prices/pool_depths: "component_id/token_in/token_out"
+    /// - token_prices: "token_address"
+    pub key: String,
+    /// Display string of the error.
+    pub error: String,
+}
+
+/// Computation result with optional partial failure details.
+///
+/// `Err(...)` = total failure (no usable data).
+/// `Ok(output)` = some data produced; `output.failed_items` may be non-empty.
+#[derive(Debug, Clone)]
+pub struct ComputationOutput<T> {
+    pub data: T,
+    pub failed_items: Vec<FailedItem>,
+}
+
+impl<T> ComputationOutput<T> {
+    pub fn success(data: T) -> Self {
+        Self { data, failed_items: vec![] }
+    }
+
+    pub fn with_failures(data: T, failed_items: Vec<FailedItem>) -> Self {
+        Self { data, failed_items }
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failed_items.is_empty()
+    }
+}
+
 /// Trait for derived data computations.
 ///
 /// Implement this trait to define a new type of derived data that can be
@@ -191,11 +226,10 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// Computations should acquire locks only when needed and release them as early
     /// as possible to minimize contention. Use `.read().await` for async lock acquisition.
-    // TODO: Support Partial Failures, including IDs for which computation failed.
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Self::Output, ComputationError>;
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError>;
 }

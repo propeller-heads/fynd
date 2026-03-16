@@ -404,7 +404,7 @@ where
                             self.ready_notify.notify_waiters();
 
                             // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block } = &event {
+                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
                                 if self.requirements.is_required(computation_id) {
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
@@ -587,6 +587,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+            failed_items: vec![],
             });
 
         // Should return immediately since already ready
@@ -685,6 +686,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+            failed_items: vec![],
             });
 
         // Now wait - should succeed immediately since we're already ready
@@ -731,6 +733,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: TokenGasPriceComputation::ID,
                 block: 1,
+            failed_items: vec![],
             });
         notify.notify_waiters();
 
@@ -819,6 +822,7 @@ mod tests {
             .send(DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+            failed_items: vec![],
             })
             .unwrap();
 
