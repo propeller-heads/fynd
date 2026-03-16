@@ -105,13 +105,22 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
         .health_tracker
         .derived_data_ready()
         .await;
-    let is_healthy = data_fresh && derived_data_ready;
+    let gas_price_age_ms = state
+        .health_tracker
+        .gas_price_age_ms()
+        .await;
+    let gas_stale = state
+        .health_tracker
+        .gas_price_stale()
+        .await;
+    let is_healthy = data_fresh && derived_data_ready && !gas_stale;
 
     let status = dto::HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
         num_solver_pools: state.worker_router.num_pools(),
         derived_data_ready,
+        gas_price_age_ms,
     };
 
     if is_healthy {

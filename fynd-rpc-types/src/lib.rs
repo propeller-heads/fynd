@@ -396,6 +396,10 @@ pub struct HealthStatus {
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(example = true))]
     pub derived_data_ready: bool,
+    /// Time since last gas price update in milliseconds, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 12000))]
+    pub gas_price_age_ms: Option<u64>,
 }
 
 /// Error response body.

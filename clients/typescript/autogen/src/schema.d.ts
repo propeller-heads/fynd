@@ -117,6 +117,12 @@ export interface components {
              */
             derived_data_ready?: boolean;
             /**
+             * Format: int64
+             * @description Time since last gas price update in milliseconds, if available.
+             * @example 12000
+             */
+            gas_price_age_ms?: number | null;
+            /**
              * @description Whether the service is healthy.
              * @example true
              */

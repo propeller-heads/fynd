@@ -12,7 +12,7 @@ pub mod prices;
 
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use actix_web::web;
@@ -71,12 +71,25 @@ pub struct ExperimentalApiDoc;
 pub struct HealthTracker {
     market_data: SharedMarketDataRef,
     derived_data: SharedDerivedDataRef,
+    gas_price_stale_threshold: Option<Duration>,
+    created_at: Instant,
 }
 
 impl HealthTracker {
     /// Creates a new health tracker.
     pub fn new(market_data: SharedMarketDataRef, derived_data: SharedDerivedDataRef) -> Self {
-        Self { market_data, derived_data }
+        Self {
+            market_data,
+            derived_data,
+            gas_price_stale_threshold: None,
+            created_at: Instant::now(),
+        }
+    }
+
+    /// Sets the gas price staleness threshold. Health returns 503 when exceeded.
+    pub fn with_gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
+        self.gas_price_stale_threshold = threshold;
+        self
     }
 
     /// Returns milliseconds since the last market data update.
@@ -93,6 +106,32 @@ impl HealthTracker {
                     .saturating_mul(1000)
             }
             None => u64::MAX, // Never updated
+        }
+    }
+
+    /// Returns milliseconds since the last gas price update, if available.
+    pub async fn gas_price_age_ms(&self) -> Option<u64> {
+        let data = self.market_data.read().await;
+        let gas_price = data.gas_price()?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let block_ms = gas_price
+            .block_timestamp
+            .saturating_mul(1000);
+        Some(now_ms.saturating_sub(block_ms))
+    }
+
+    /// Returns whether the gas price is stale according to the configured threshold.
+    ///
+    /// During startup (before `threshold` has elapsed), a missing gas price is not
+    /// considered stale — the first fetch may not have completed yet.
+    pub async fn gas_price_stale(&self) -> bool {
+        let Some(threshold) = self.gas_price_stale_threshold else { return false };
+        match self.gas_price_age_ms().await {
+            Some(age_ms) => age_ms > threshold.as_millis() as u64,
+            None => self.created_at.elapsed() > threshold,
         }
     }
 

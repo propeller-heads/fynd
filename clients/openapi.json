@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.7.0"
+    "version": "0.13.0"
   },
   "paths": {
     "/v1/health": {
@@ -216,6 +216,16 @@
             "type": "boolean",
             "description": "Whether derived data has been computed at least once.\n\nThis indicates overall readiness, not per-block freshness. Some algorithms\nrequire fresh derived data for each block — they are ready to receive orders\nbut will wait for recomputation before solving.",
             "example": true
+          },
+          "gas_price_age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Time since last gas price update in milliseconds, if available.",
+            "example": 12000,
+            "minimum": 0
           },
           "healthy": {
             "type": "boolean",
