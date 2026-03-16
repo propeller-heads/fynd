@@ -135,3 +135,65 @@ pub fn export_results(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_returns_none() {
+        assert!(TimingStats::from_measurements(&[]).is_none());
+    }
+
+    #[test]
+    fn single_element() {
+        let stats = TimingStats::from_measurements(&[100]).unwrap();
+        assert_eq!(stats.min, 100);
+        assert_eq!(stats.max, 100);
+        assert_eq!(stats.mean, 100);
+        assert_eq!(stats.median, 100);
+        assert_eq!(stats.p95, 100);
+        assert_eq!(stats.p99, 100);
+        assert!((stats.std_dev - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn known_five_values() {
+        let stats = TimingStats::from_measurements(&[50, 10, 40, 20, 30]).unwrap();
+        assert_eq!(stats.min, 10);
+        assert_eq!(stats.max, 50);
+        assert_eq!(stats.mean, 30); // 150 / 5
+        assert_eq!(stats.median, 30); // sorted[2]
+        let expected_std = (200.0_f64).sqrt(); // ~14.14
+        assert!((stats.std_dev - expected_std).abs() < 0.01);
+    }
+
+    #[test]
+    fn all_same() {
+        let stats = TimingStats::from_measurements(&[42; 10]).unwrap();
+        assert_eq!(stats.min, 42);
+        assert_eq!(stats.max, 42);
+        assert_eq!(stats.mean, 42);
+        assert_eq!(stats.median, 42);
+        assert!((stats.std_dev - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn two_elements() {
+        let stats = TimingStats::from_measurements(&[10, 20]).unwrap();
+        assert_eq!(stats.min, 10);
+        assert_eq!(stats.max, 20);
+        assert_eq!(stats.mean, 15);
+        assert_eq!(stats.median, 20); // sorted[1] (upper-middle)
+    }
+
+    #[test]
+    fn large_dataset_percentiles() {
+        let data: Vec<u64> = (1..=100).collect();
+        let stats = TimingStats::from_measurements(&data).unwrap();
+        assert_eq!(stats.min, 1);
+        assert_eq!(stats.max, 100);
+        assert_eq!(stats.p95, 96);
+        assert_eq!(stats.p99, 100);
+    }
+}
