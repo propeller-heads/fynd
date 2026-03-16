@@ -209,8 +209,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
     .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
     .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
-    .order_manager_timeout(Duration::from_millis(args.order_manager_timeout_ms))
-    .order_manager_min_responses(args.order_manager_min_responses);
+    .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
+    .worker_router_min_responses(args.worker_router_min_responses);
 
     if args.disable_tls {
         builder = builder.disable_tls();

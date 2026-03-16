@@ -473,7 +473,7 @@ pub enum OrderValidationError {
 ///
 /// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Quote`]).
+/// not the total WorkerPoolRouter orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleOrderQuote {
     /// The solution for the order.
@@ -525,7 +525,7 @@ pub struct OrderQuote {
     #[serde(skip_serializing_if = "Option::is_none")]
     price_impact_bps: Option<i32>,
     /// Amount out minus gas cost in output token terms.
-    /// Used by OrderManager to compare solutions from different solvers.
+    /// Used by WorkerPoolRouter to compare solutions from different solvers.
     #[serde_as(as = "DisplayFromStr")]
     amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.

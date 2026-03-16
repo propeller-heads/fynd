@@ -14,17 +14,17 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "order_manager_solve_duration_seconds{quantile=\"0.5\"}",
+          "expr": "worker_router_solve_duration_seconds{quantile=\"0.5\"}",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "order_manager_solve_duration_seconds{quantile=\"0.95\"}",
+          "expr": "worker_router_solve_duration_seconds{quantile=\"0.95\"}",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "order_manager_solve_duration_seconds{quantile=\"0.99\"}",
+          "expr": "worker_router_solve_duration_seconds{quantile=\"0.99\"}",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -45,7 +45,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(order_manager_orders_total[1m]))",
+          "expr": "sum(rate(worker_router_orders_total[1m]))",
           "legendFormat": "requests/s",
           "refId": "A"
         }
@@ -66,7 +66,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(order_manager_orders_total[1m])) by (status)",
+          "expr": "sum(rate(worker_router_orders_total[1m])) by (status)",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
@@ -87,12 +87,12 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "order_manager_solver_responses{quantile=\"0.5\"}",
+          "expr": "worker_router_solver_responses{quantile=\"0.5\"}",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "order_manager_solver_responses{quantile=\"0.95\"}",
+          "expr": "worker_router_solver_responses{quantile=\"0.95\"}",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -112,7 +112,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(order_manager_solver_failures_total[1m])) by (pool, error_type)",
+          "expr": "sum(rate(worker_router_solver_failures_total[1m])) by (pool, error_type)",
           "legendFormat": "{{pool}} — {{error_type}}",
           "refId": "A"
         }
@@ -180,7 +180,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(order_manager_early_returns_total[1m]))",
+          "expr": "sum(rate(worker_router_early_returns_total[1m]))",
           "legendFormat": "early returns",
           "refId": "A"
         },
@@ -211,7 +211,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(increase(order_manager_best_solution_pool[5m])) by (pool)",
+          "expr": "sum(increase(worker_router_best_solution_pool[5m])) by (pool)",
           "legendFormat": "{{pool}}",
           "refId": "A"
         }

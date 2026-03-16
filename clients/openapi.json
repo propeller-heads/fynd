@@ -307,7 +307,7 @@
           },
           "amount_out_net_gas": {
             "type": "string",
-            "description": "Amount out minus gas cost in output token terms.\nUsed by OrderManager to compare solutions from different solvers.",
+            "description": "Amount out minus gas cost in output token terms.\nUsed by WorkerPoolRouter to compare solutions from different solvers.",
             "example": "3498000000"
           },
           "block": {

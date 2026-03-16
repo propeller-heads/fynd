@@ -3,7 +3,7 @@
 //! The worker pool manages multiple dedicated OS threads for CPU-bound route finding.
 //! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
 //! A pool is configured with a specific algorithm (by name), allowing multiple pools
-//! with different algorithms to compete via the OrderManager.
+//! with different algorithms to compete via the WorkerPoolRouter.
 use std::thread::JoinHandle;
 
 use tokio::sync::broadcast;

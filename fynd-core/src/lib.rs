@@ -18,7 +18,7 @@
 //! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderQuote`)
 //! - **feed**: Market data structures and event handling
 //! - **worker_pool**: Multi-threaded solver pool management with algorithm registry
-//! - **order_manager**: Request orchestration across multiple solver pools
+//! - **worker_pool_router**: Request orchestration across multiple solver pools
 
 // Public modules
 pub mod algorithm;
@@ -26,15 +26,14 @@ pub mod derived;
 pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
-pub mod order_manager;
 pub mod types;
 pub mod worker_pool;
+pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
-pub use order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle};
 pub use types::{
     BlockInfo, ComponentId, EncodingOptions, Order, OrderQuote, OrderSide, OrderValidationError,
     PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
@@ -46,3 +45,4 @@ pub use worker_pool::{
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };
+pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};

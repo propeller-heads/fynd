@@ -9,9 +9,9 @@ use fynd_core::{
     feed::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
-    order_manager::{config::OrderManagerConfig, OrderManager, SolverPoolHandle},
     types::constants::native_token,
     worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
+    worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info, warn};
@@ -27,7 +27,7 @@ use crate::{
 /// The builder does the following:
 /// - Creates a new Tycho feed
 /// - Creates worker pools (one task queue per pool)
-/// - Creates a new order manager
+/// - Creates a new WorkerPoolRouter
 /// - Creates a new HTTP server
 /// - Returns a running server handle
 pub struct FyndBuilder {
@@ -46,8 +46,8 @@ pub struct FyndBuilder {
     tvl_buffer_multiplier: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
-    order_manager_timeout: Duration,
-    order_manager_min_responses: usize,
+    worker_router_timeout: Duration,
+    worker_router_min_responses: usize,
     /// Blacklist configuration for filtering components and protocols.
     blacklist: BlacklistConfig,
     /// Custom encoder override. If `None`, a default encoder is created during build.
@@ -78,8 +78,8 @@ impl FyndBuilder {
             tvl_buffer_multiplier: defaults::TVL_BUFFER_MULTIPLIER,
             gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
             reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
-            order_manager_timeout: Duration::from_millis(defaults::ORDER_MANAGER_TIMEOUT_MS),
-            order_manager_min_responses: defaults::ORDER_MANAGER_MIN_RESPONSES,
+            worker_router_timeout: Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS),
+            worker_router_min_responses: defaults::WORKER_ROUTER_MIN_RESPONSES,
             blacklist: BlacklistConfig::default(),
             encoder: None,
         }
@@ -127,15 +127,15 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the order manager timeout (default: 100ms).
-    pub fn order_manager_timeout(mut self, timeout: Duration) -> Self {
-        self.order_manager_timeout = timeout;
+    /// Sets the worker router timeout (default: 100ms).
+    pub fn worker_router_timeout(mut self, timeout: Duration) -> Self {
+        self.worker_router_timeout = timeout;
         self
     }
 
     /// Sets the minimum number of solver responses before early return (default: 0, wait for all).
-    pub fn order_manager_min_responses(mut self, min: usize) -> Self {
-        self.order_manager_min_responses = min;
+    pub fn worker_router_min_responses(mut self, min: usize) -> Self {
+        self.worker_router_min_responses = min;
         self
     }
 
@@ -289,13 +289,14 @@ impl FyndBuilder {
             }
         };
 
-        let order_manager_config = OrderManagerConfig::default()
-            .with_timeout(self.order_manager_timeout)
-            .with_min_responses(self.order_manager_min_responses);
-        let order_manager = OrderManager::new(solver_pool_handles, order_manager_config, encoder);
+        let worker_router_config = WorkerPoolRouterConfig::default()
+            .with_timeout(self.worker_router_timeout)
+            .with_min_responses(self.worker_router_min_responses);
+        let worker_router =
+            WorkerPoolRouter::new(solver_pool_handles, worker_router_config, encoder);
 
         let app_state = AppState::new(
-            order_manager,
+            worker_router,
             health_tracker,
             #[cfg(feature = "experimental")]
             Arc::clone(&derived_data),

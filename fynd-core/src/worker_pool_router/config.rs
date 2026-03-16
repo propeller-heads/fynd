@@ -1,10 +1,10 @@
-//! Configuration for the OrderManager.
+//! Configuration for the WorkerPoolRouter.
 
 use std::time::Duration;
 
-/// Configuration for the OrderManager.
+/// Configuration for the WorkerPoolRouter.
 #[derive(Debug, Clone)]
-pub struct OrderManagerConfig {
+pub struct WorkerPoolRouterConfig {
     /// Default timeout per order (can be overridden per-request).
     default_timeout: Duration,
     /// Minimum number of solver responses to wait for before returning early.
@@ -18,7 +18,7 @@ pub struct OrderManagerConfig {
     min_responses: usize,
 }
 
-impl Default for OrderManagerConfig {
+impl Default for WorkerPoolRouterConfig {
     fn default() -> Self {
         Self {
             default_timeout: Duration::from_millis(1000),
@@ -27,7 +27,7 @@ impl Default for OrderManagerConfig {
     }
 }
 
-impl OrderManagerConfig {
+impl WorkerPoolRouterConfig {
     /// Returns the default timeout per order.
     pub fn default_timeout(&self) -> Duration {
         self.default_timeout

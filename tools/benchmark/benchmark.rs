@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_statistics(&round_trip_times, "Round-trip times (client → server → client):");
         print_histogram(&round_trip_times, "Round-trip", 50);
 
-        print_statistics(&solve_times, "Server solve times (OrderManager timing):");
+        print_statistics(&solve_times, "Server solve times (WorkerPoolRouter timing):");
         print_histogram(&solve_times, "Solve time", 50);
 
         print_statistics(&overheads, "Overhead (round-trip - solve time):");
