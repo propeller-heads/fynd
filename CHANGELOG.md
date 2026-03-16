@@ -1,3 +1,22 @@
+## [0.16.0](https://github.com/propeller-heads/fynd/compare/0.15.0...0.16.0) (2026-03-16)
+
+
+### Features
+
+* **client:** expose Permit2 transfer support in FyndClient ([08373bf](https://github.com/propeller-heads/fynd/commit/08373bfc5e6cb7150ef041aef6bbc0b40bb7dcb3))
+* **client:** use server-supplied calldata from OrderQuote [ENG-5697] ([5e95a8a](https://github.com/propeller-heads/fynd/commit/5e95a8a65798d9d148d01fa6b34f8f12b78afbe7))
+* **example:** add permit2 example using Permit2 token authorization ([0bbd0e1](https://github.com/propeller-heads/fynd/commit/0bbd0e156273c75915531ef43e45a8c1a4f441d2))
+* **example:** check sell-token allowance before on-chain execution ([f4b6f0f](https://github.com/propeller-heads/fynd/commit/f4b6f0f28d62b213726cd49b03d408145a3b8cdd))
+* **example:** detect ERC-20 balance/allowance slots via eth_call probing ([123bd0a](https://github.com/propeller-heads/fynd/commit/123bd0a8dab41e677518c4b934aa8979c63c34ce))
+* **example:** rewrite tutorial using FyndClient, add --execute flag ([fb8a44b](https://github.com/propeller-heads/fynd/commit/fb8a44bb83f9d91f99d8d81321a4ebce07cddfde))
+
+
+### Bug Fixes
+
+* address PR [#90](https://github.com/propeller-heads/fynd/issues/90) review findings ([de2eee1](https://github.com/propeller-heads/fynd/commit/de2eee13f40d4701786add8ed9213ae33c8c686a))
+* **client:** address PR review findings on Permit2 types ([629e426](https://github.com/propeller-heads/fynd/commit/629e4266ef5c7cf2fbdd275eaca4c2fd6f308736))
+* **example:** approve exact sell amount instead of max uint256 ([2bdb963](https://github.com/propeller-heads/fynd/commit/2bdb9636bd3359e02fa0ed0fc5a2f3aa7290c0d9))
+
 ## [0.15.0](https://github.com/propeller-heads/fynd/compare/0.14.1...0.15.0) (2026-03-16)
 
 
