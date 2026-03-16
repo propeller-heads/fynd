@@ -21,6 +21,11 @@ const baseQuote: Quote = {
   },
   tokenOut: TOKEN_OUT,
   receiver: SENDER,
+  transaction: {
+    to: ROUTER,
+    value: 0n,
+    data: '0x',
+  },
 };
 
 const basePayload: SignablePayload = {
