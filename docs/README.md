@@ -46,9 +46,8 @@ Fynd puts you in control:
 ### Supported Chains
 
 * Ethereum Mainnet
-* **Coming soon:**
-  * Base&#x20;
-  * Unichain
+* Base
+* Unichain
 
 ### Supported Protocols
 

@@ -36,14 +36,10 @@ description: >-
 In one terminal:
 
 ```bash
-export TYCHO_URL=tycho-beta.propellerheads.xyz
 export TYCHO_API_KEY=your_api_key
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 
-RUST_LOG=info cargo run --release -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3,uniswap_v3,vm:curve \
-  --min-tvl 50
+RUST_LOG=info cargo run --release -- serve
 ```
 
 Wait for it to be ready: [#id-3.1-check-solver-health](./#id-3.1-check-solver-health "mention")
@@ -124,7 +120,7 @@ cargo run --example tutorial -- \
 | `--sell-token`    | USDC address          | Token address to sell                                                |
 | `--buy-token`     | WETH address          | Token address to buy                                                 |
 | `--sell-amount`   | 10.0                  | Amount to sell (human readable)                                      |
-| `--chain`         | ethereum              | Blockchain (currently only ethereum is available)                    |
+| `--chain`         | ethereum              | Blockchain (ethereum, base, unichain)                                |
 | `--solver-url`    | http://localhost:3000 | Solver API URL                                                       |
 | `--tvl-threshold` | 10.0                  | Min pool TVL in ETH                                                  |
 | `--simulate-only` | false                 | Only simulate, don't prompt for execution                            |
