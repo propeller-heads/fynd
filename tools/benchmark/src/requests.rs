@@ -155,23 +155,26 @@ pub fn load_request_templates(
     }
 
     let file = load_pairs_file();
-    let requests = templates
+    let requests: Vec<SwapRequest> = templates
         .iter()
-        .map(|tmpl| {
-            let order = &tmpl.orders[0];
+        .enumerate()
+        .map(|(i, tmpl)| {
+            let order = tmpl.orders.first().ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("request template at index {i} has no orders").into()
+            })?;
             let in_sym = symbol_for_address(&order.token_in, &file.tokens);
             let out_sym = symbol_for_address(&order.token_out, &file.tokens);
 
-            SwapRequest {
+            Ok::<_, Box<dyn std::error::Error>>(SwapRequest {
                 label: format!("{} {in_sym} -> {out_sym}", order.amount),
                 token_in_addr: order.token_in.clone(),
                 token_out_addr: order.token_out.clone(),
                 raw_amount: order.amount.clone(),
                 sender_addr: order.sender.clone(),
                 timeout_ms,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     Ok(requests)
 }
@@ -362,6 +365,18 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no requests"));
+    }
+
+    #[test]
+    fn load_request_templates_empty_orders() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_templates_empty_orders.json");
+        let content = serde_json::json!([{ "orders": [] }]);
+        std::fs::write(&path, content.to_string()).unwrap();
+        let result = load_request_templates(path.to_str().unwrap(), 5000);
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no orders"));
     }
 
     #[test]
