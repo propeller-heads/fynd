@@ -475,3 +475,113 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_metrics(
+        status: &str,
+        amount_out: &str,
+        gas_estimate: &str,
+        protocols: Vec<&str>,
+    ) -> Metrics {
+        Metrics {
+            status: status.to_string(),
+            amount_out: amount_out.to_string(),
+            gas_estimate: gas_estimate.to_string(),
+            solve_time_ms: 0,
+            round_trip_ms: 0,
+            num_swaps: protocols.len(),
+            route_protocols: protocols
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn compare_identical() {
+        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
+        let b = make_metrics("success", "1000", "100", vec!["uniswap"]);
+        let c = compare_metrics(&a, &b);
+        assert!(c.status_match);
+        assert!(c.route_match);
+        assert_eq!(c.amount_out_diff_bps, Some(0.0));
+        assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
+    }
+
+    #[test]
+    fn compare_b_better() {
+        let a = make_metrics("success", "1000", "100", vec![]);
+        let b = make_metrics("success", "1010", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, Some(100.0));
+    }
+
+    #[test]
+    fn compare_a_better() {
+        let a = make_metrics("success", "1000", "100", vec![]);
+        let b = make_metrics("success", "990", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, Some(-100.0));
+    }
+
+    #[test]
+    fn compare_a_zero() {
+        let a = make_metrics("success", "0", "100", vec![]);
+        let b = make_metrics("success", "1000", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, None);
+    }
+
+    #[test]
+    fn compare_b_zero() {
+        let a = make_metrics("success", "1000", "100", vec![]);
+        let b = make_metrics("success", "0", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, None);
+    }
+
+    #[test]
+    fn compare_both_zero() {
+        let a = make_metrics("success", "0", "0", vec![]);
+        let b = make_metrics("success", "0", "0", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, Some(0.0));
+        assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
+    }
+
+    #[test]
+    fn compare_different_gas() {
+        let a = make_metrics("success", "1000", "100", vec![]);
+        let b = make_metrics("success", "1000", "120", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.gas_estimate_diff_pct, Some(20.0));
+    }
+
+    #[test]
+    fn compare_different_routes() {
+        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
+        let b = make_metrics("success", "1000", "100", vec!["curve"]);
+        let c = compare_metrics(&a, &b);
+        assert!(!c.route_match);
+    }
+
+    #[test]
+    fn compare_different_status() {
+        let a = make_metrics("success", "1000", "100", vec![]);
+        let b = make_metrics("error", "1000", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert!(!c.status_match);
+    }
+
+    #[test]
+    fn status_str_all_variants() {
+        assert_eq!(status_str(QuoteStatus::Success), "success");
+        assert_eq!(status_str(QuoteStatus::NoRouteFound), "no_route_found");
+        assert_eq!(status_str(QuoteStatus::InsufficientLiquidity), "insufficient_liquidity");
+        assert_eq!(status_str(QuoteStatus::Timeout), "timeout");
+        assert_eq!(status_str(QuoteStatus::NotReady), "not_ready");
+    }
+}

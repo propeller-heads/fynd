@@ -22,3 +22,8 @@ fastrand          = "2.3"
 [[bin]]
 name = "fynd-benchmark"
 path = "src/main.rs"
+
+[dev-dependencies]
+wiremock = "0.6"
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

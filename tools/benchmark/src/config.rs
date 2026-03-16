@@ -48,6 +48,81 @@ impl ParallelizationMode {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequential() {
+        let mode = ParallelizationMode::from_str("sequential").unwrap();
+        assert!(matches!(mode, ParallelizationMode::Sequential));
+    }
+
+    #[test]
+    fn fixed_valid() {
+        let mode = ParallelizationMode::from_str("fixed:4").unwrap();
+        assert!(matches!(mode, ParallelizationMode::FixedConcurrency { concurrency: 4 }));
+    }
+
+    #[test]
+    fn fixed_one() {
+        let mode = ParallelizationMode::from_str("fixed:1").unwrap();
+        assert!(matches!(mode, ParallelizationMode::FixedConcurrency { concurrency: 1 }));
+    }
+
+    #[test]
+    fn fixed_zero() {
+        let err = ParallelizationMode::from_str("fixed:0").unwrap_err();
+        assert!(err.to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn fixed_non_numeric() {
+        assert!(ParallelizationMode::from_str("fixed:abc").is_err());
+    }
+
+    #[test]
+    fn fixed_empty() {
+        assert!(ParallelizationMode::from_str("fixed:").is_err());
+    }
+
+    #[test]
+    fn rate_valid() {
+        let mode = ParallelizationMode::from_str("rate:100").unwrap();
+        assert!(matches!(mode, ParallelizationMode::RateBased { interval_ms: 100 }));
+    }
+
+    #[test]
+    fn rate_one() {
+        let mode = ParallelizationMode::from_str("rate:1").unwrap();
+        assert!(matches!(mode, ParallelizationMode::RateBased { interval_ms: 1 }));
+    }
+
+    #[test]
+    fn rate_zero() {
+        let err = ParallelizationMode::from_str("rate:0").unwrap_err();
+        assert!(err.to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn rate_non_numeric() {
+        assert!(ParallelizationMode::from_str("rate:abc").is_err());
+    }
+
+    #[test]
+    fn invalid_mode() {
+        let err = ParallelizationMode::from_str("invalid").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Invalid parallelization mode"));
+    }
+
+    #[test]
+    fn empty_string() {
+        assert!(ParallelizationMode::from_str("").is_err());
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct BenchmarkConfig {
     pub solver_url: String,
