@@ -10,10 +10,12 @@ use fynd_client::{FyndClient, FyndClientBuilder};
 use tracing::info;
 
 use crate::{
-    config::{BenchmarkConfig, BenchmarkResults, ParallelizationMode},
+    config::{
+        BenchmarkConfig, BenchmarkResults, BenchmarkStatistics, ParallelizationMode, TimingStats,
+    },
     exporter::{export_results, print_histogram, print_statistics},
     requests::{default_request, load_request_templates, SwapRequest},
-    runner::{run_benchmark, RunnerResults},
+    runner::RunnerResults,
 };
 
 /// Measure solver latency and throughput under load.
@@ -49,8 +51,10 @@ pub struct Args {
 
 /// Execute the load-test: health-check, send requests, print stats.
 pub async fn run(args: Args) -> anyhow::Result<()> {
-    let parallelization_mode = ParallelizationMode::from_str(&args.parallelization_mode)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let parallelization_mode: ParallelizationMode = args
+        .parallelization_mode
+        .parse()
+        .map_err(|e: Box<dyn std::error::Error>| anyhow::anyhow!("{e}"))?;
 
     info!("Solver URL: {}", args.solver_url);
     info!("Number of requests: {}", args.num_requests);
@@ -72,9 +76,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         round_trip_times,
         solve_times,
         successful_requests,
-        orders_found: orders_solved,
-        orders_not_found: orders_not_solved,
-    } = run_benchmark(Arc::clone(&client), &requests, args.num_requests, &parallelization_mode)
+        orders_solved,
+        orders_unsolved,
+    } = parallelization_mode
+        .run(Arc::clone(&client), &requests, args.num_requests)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
@@ -96,7 +101,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         println!("Successful HTTP requests: {}/{}", successful_requests, args.num_requests);
         println!("Failed HTTP requests:     {}", failed_requests);
         println!("Orders solved:            {}", orders_solved);
-        println!("Orders not solved:        {}", orders_not_solved);
+        println!("Orders not solved:        {}", orders_unsolved);
         println!("Total duration:      {:.2}s", total_duration_ms as f64 / 1000.0);
         println!("Throughput:          {:.2} req/s", throughput_rps);
 
@@ -118,19 +123,25 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 num_request_templates: requests.len(),
             };
 
-            let results = BenchmarkResults::new(
+            let statistics = BenchmarkStatistics {
+                round_trip: TimingStats::from_measurements(&round_trip_times).unwrap(),
+                solve_time: TimingStats::from_measurements(&solve_times).unwrap(),
+                overhead: TimingStats::from_measurements(&overheads).unwrap(),
+            };
+            let results = BenchmarkResults {
                 config,
-                requests,
+                request_templates: requests,
                 successful_requests,
                 failed_requests,
                 orders_solved,
-                orders_not_solved,
+                orders_unsolved,
                 total_duration_ms,
                 throughput_rps,
-                round_trip_times,
-                solve_times,
-                overheads,
-            );
+                round_trip_times_ms: round_trip_times,
+                solve_times_ms: solve_times,
+                overhead_times_ms: overheads,
+                statistics,
+            };
 
             export_results(results, output_file).map_err(|e| anyhow::anyhow!("{e}"))?;
         }

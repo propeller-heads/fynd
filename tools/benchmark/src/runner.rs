@@ -14,8 +14,8 @@ pub struct RunnerResults {
     pub round_trip_times: Vec<u64>,
     pub solve_times: Vec<u64>,
     pub successful_requests: usize,
-    pub orders_found: usize,
-    pub orders_not_found: usize,
+    pub orders_solved: usize,
+    pub orders_unsolved: usize,
 }
 
 impl ParallelizationMode {
@@ -38,16 +38,6 @@ impl ParallelizationMode {
     }
 }
 
-/// Dispatch to the scheduling strategy selected by `mode`.
-pub async fn run_benchmark(
-    client: Arc<FyndClient>,
-    requests: &[SwapRequest],
-    num_requests: usize,
-    mode: &ParallelizationMode,
-) -> RunnerResults {
-    mode.run(client, requests, num_requests)
-        .await
-}
 
 /// Sequential execution: wait for each response before firing the next request
 async fn run_sequential(
@@ -58,8 +48,8 @@ async fn run_sequential(
     let mut round_trip_times = Vec::new();
     let mut solve_times = Vec::new();
     let mut successful_requests = 0;
-    let mut total_orders_found = 0usize;
-    let mut total_orders_not_found = 0usize;
+    let mut total_solved = 0usize;
+    let mut total_unsolved = 0usize;
 
     tracing::info!("Running {} requests sequentially...", num_requests);
 
@@ -74,14 +64,12 @@ async fn run_sequential(
         let result = client.quote(params).await;
         let round_trip_ms = start.elapsed().as_millis() as u64;
 
-        if let Some((solve_time, _is_first, found, not_found)) =
-            handle_result(result, round_trip_ms, i == 1)
-        {
+        if let Some((solve_time, solved, unsolved)) = handle_result(result, round_trip_ms, i == 1) {
             successful_requests += 1;
             round_trip_times.push(round_trip_ms);
             solve_times.push(solve_time);
-            total_orders_found += found;
-            total_orders_not_found += not_found;
+            total_solved += solved;
+            total_unsolved += unsolved;
         }
     }
 
@@ -89,8 +77,8 @@ async fn run_sequential(
         round_trip_times,
         solve_times,
         successful_requests,
-        orders_found: total_orders_found,
-        orders_not_found: total_orders_not_found,
+        orders_solved: total_solved,
+        orders_unsolved: total_unsolved,
     }
 }
 
@@ -109,8 +97,8 @@ async fn run_fixed_concurrency(
     let round_trip_times = Arc::new(Mutex::new(Vec::new()));
     let solve_times = Arc::new(Mutex::new(Vec::new()));
     let successful_requests = Arc::new(Mutex::new(0usize));
-    let orders_found = Arc::new(Mutex::new(0usize));
-    let orders_not_found = Arc::new(Mutex::new(0usize));
+    let orders_solved = Arc::new(Mutex::new(0usize));
+    let orders_unsolved = Arc::new(Mutex::new(0usize));
     let completed_count = Arc::new(Mutex::new(0usize));
     let first_response_printed = Arc::new(Mutex::new(false));
 
@@ -127,8 +115,8 @@ async fn run_fixed_concurrency(
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
         let successful_requests = successful_requests.clone();
-        let orders_found = orders_found.clone();
-        let orders_not_found = orders_not_found.clone();
+        let orders_solved = orders_solved.clone();
+        let orders_unsolved = orders_unsolved.clone();
         let completed_count = completed_count.clone();
         let first_response_printed = first_response_printed.clone();
 
@@ -155,7 +143,7 @@ async fn run_fixed_concurrency(
             print!("Request {}/{}: ", current_count, num_requests);
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
-            if let Some((solve_time, _printed_first, found, not_found)) =
+            if let Some((solve_time, solved, unsolved)) =
                 handle_result(result, round_trip_ms, is_first)
             {
                 round_trip_times
@@ -167,8 +155,8 @@ async fn run_fixed_concurrency(
                     .await
                     .push(solve_time);
                 *successful_requests.lock().await += 1;
-                *orders_found.lock().await += found;
-                *orders_not_found.lock().await += not_found;
+                *orders_solved.lock().await += solved;
+                *orders_unsolved.lock().await += unsolved;
             }
 
             drop(permit);
@@ -190,10 +178,10 @@ async fn run_fixed_concurrency(
     let successful_requests = Arc::try_unwrap(successful_requests)
         .unwrap()
         .into_inner();
-    let orders_found = Arc::try_unwrap(orders_found)
+    let orders_solved = Arc::try_unwrap(orders_solved)
         .unwrap()
         .into_inner();
-    let orders_not_found = Arc::try_unwrap(orders_not_found)
+    let orders_unsolved = Arc::try_unwrap(orders_unsolved)
         .unwrap()
         .into_inner();
 
@@ -201,8 +189,8 @@ async fn run_fixed_concurrency(
         round_trip_times,
         solve_times,
         successful_requests,
-        orders_found,
-        orders_not_found,
+        orders_solved,
+        orders_unsolved,
     }
 }
 
@@ -224,8 +212,8 @@ async fn run_rate_based(
     let round_trip_times = Arc::new(Mutex::new(Vec::new()));
     let solve_times = Arc::new(Mutex::new(Vec::new()));
     let successful_requests = Arc::new(Mutex::new(0usize));
-    let orders_found = Arc::new(Mutex::new(0usize));
-    let orders_not_found = Arc::new(Mutex::new(0usize));
+    let orders_solved = Arc::new(Mutex::new(0usize));
+    let orders_unsolved = Arc::new(Mutex::new(0usize));
     let first_response_printed = Arc::new(Mutex::new(false));
 
     let mut tasks = Vec::new();
@@ -240,8 +228,8 @@ async fn run_rate_based(
         let round_trip_times = round_trip_times.clone();
         let solve_times = solve_times.clone();
         let successful_requests = successful_requests.clone();
-        let orders_found = orders_found.clone();
-        let orders_not_found = orders_not_found.clone();
+        let orders_solved = orders_solved.clone();
+        let orders_unsolved = orders_unsolved.clone();
         let first_response_printed = first_response_printed.clone();
 
         let task = tokio::spawn(async move {
@@ -262,7 +250,7 @@ async fn run_rate_based(
             print!("Request {}: ", i);
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
-            if let Some((solve_time, _printed_first, found, not_found)) =
+            if let Some((solve_time, solved, unsolved)) =
                 handle_result(result, round_trip_ms, is_first)
             {
                 round_trip_times
@@ -274,8 +262,8 @@ async fn run_rate_based(
                     .await
                     .push(solve_time);
                 *successful_requests.lock().await += 1;
-                *orders_found.lock().await += found;
-                *orders_not_found.lock().await += not_found;
+                *orders_solved.lock().await += solved;
+                *orders_unsolved.lock().await += unsolved;
             }
         });
 
@@ -295,10 +283,10 @@ async fn run_rate_based(
     let successful_requests = Arc::try_unwrap(successful_requests)
         .unwrap()
         .into_inner();
-    let orders_found = Arc::try_unwrap(orders_found)
+    let orders_solved = Arc::try_unwrap(orders_solved)
         .unwrap()
         .into_inner();
-    let orders_not_found = Arc::try_unwrap(orders_not_found)
+    let orders_unsolved = Arc::try_unwrap(orders_unsolved)
         .unwrap()
         .into_inner();
 
@@ -306,15 +294,15 @@ async fn run_rate_based(
         round_trip_times,
         solve_times,
         successful_requests,
-        orders_found,
-        orders_not_found,
+        orders_solved,
+        orders_unsolved,
     }
 }
 
 /// Pure logic: given quote status and solve time, return (solve_time, found, not_found).
 fn classify_quote(status: QuoteStatus, solve_time_ms: u64) -> (u64, usize, usize) {
-    let orders_found = usize::from(status == QuoteStatus::Success);
-    (solve_time_ms, orders_found, 1 - orders_found)
+    let solved = usize::from(status == QuoteStatus::Success);
+    (solve_time_ms, solved, 1 - solved)
 }
 
 /// Extract timing and order counts from a quote result.
@@ -323,17 +311,17 @@ fn handle_result(
     result: Result<Quote, FyndError>,
     round_trip_ms: u64,
     is_first: bool,
-) -> Option<(u64, bool, usize, usize)> {
+) -> Option<(u64, usize, usize)> {
     match result {
         Ok(quote) => {
-            let (solve_time, orders_found, orders_not_found) =
+            let (solve_time, solved, unsolved) =
                 classify_quote(quote.status(), quote.solve_time_ms());
 
             tracing::info!(
                 "✓ Round-trip: {}ms, Server solve time: {}ms, Orders solved: {}/1",
                 round_trip_ms,
                 solve_time,
-                orders_found,
+                solved,
             );
 
             if is_first {
@@ -345,7 +333,7 @@ fn handle_result(
                 );
             }
 
-            Some((solve_time, is_first, orders_found, orders_not_found))
+            Some((solve_time, solved, unsolved))
         }
         Err(e) => {
             tracing::error!("✗ Request failed: {}", e);
