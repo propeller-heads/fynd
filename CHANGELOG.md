@@ -1,3 +1,13 @@
+## [0.16.1](https://github.com/propeller-heads/fynd/compare/0.16.0...0.16.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** build baseline rustdoc from full workspace to fix dep resolution ([8711131](https://github.com/propeller-heads/fynd/commit/8711131281834763ca2ceb901b70b78aa3eda3dc))
+* **ci:** use --workspace to build baseline rustdoc for all member crates ([6cb6f67](https://github.com/propeller-heads/fynd/commit/6cb6f6780fff61750259a6bb25e6b4cae70bf570))
+* correct indentation of types trigger in semver-check workflow ([7b586cb](https://github.com/propeller-heads/fynd/commit/7b586cbad41da53cf00c39578f79b83510f07254))
+* **deps:** bump tycho minimum versions to match locked versions ([1da3534](https://github.com/propeller-heads/fynd/commit/1da3534a4641c37e3e4012e49b1ba6a8fb939bfc))
+
 ## [0.16.0](https://github.com/propeller-heads/fynd/compare/0.15.0...0.16.0) (2026-03-16)
 
 
