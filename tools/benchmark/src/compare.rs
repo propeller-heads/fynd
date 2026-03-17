@@ -117,11 +117,7 @@ struct OutputConfig {
 fn build_client(url: &str, timeout_ms: u64) -> anyhow::Result<FyndClient> {
     let client = FyndClientBuilder::new(url, "")
         .with_timeout(Duration::from_millis(timeout_ms))
-        .with_retry(RetryConfig::new(
-            1,
-            Duration::from_millis(0),
-            Duration::from_millis(0),
-        ))
+        .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
         .build_quote_only()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(client)
@@ -138,7 +134,10 @@ fn status_str(status: QuoteStatus) -> &'static str {
 }
 
 fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
-    let swaps = quote.route().map(|r| r.swaps()).unwrap_or_default();
+    let swaps = quote
+        .route()
+        .map(|r| r.swaps())
+        .unwrap_or_default();
     Metrics {
         status: status_str(quote.status()).to_string(),
         amount_in: quote.amount_in().to_string(),
@@ -148,7 +147,10 @@ fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
         solve_time_ms: quote.solve_time_ms(),
         round_trip_ms,
         num_swaps: swaps.len(),
-        route_protocols: swaps.iter().map(|s| s.protocol().to_string()).collect(),
+        route_protocols: swaps
+            .iter()
+            .map(|s| s.protocol().to_string())
+            .collect(),
     }
 }
 
@@ -190,8 +192,14 @@ fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
         None
     };
 
-    let net_a: u128 = a.amount_out_net_gas.parse().unwrap_or(0);
-    let net_b: u128 = b.amount_out_net_gas.parse().unwrap_or(0);
+    let net_a: u128 = a
+        .amount_out_net_gas
+        .parse()
+        .unwrap_or(0);
+    let net_b: u128 = b
+        .amount_out_net_gas
+        .parse()
+        .unwrap_or(0);
     let net_amount_out_diff_bps = if net_a > 0 && net_b > 0 {
         Some((net_b as f64 - net_a as f64) * 10000.0 / net_a as f64)
     } else if net_a == 0 && net_b == 0 {
@@ -213,7 +221,9 @@ fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
 
 async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, FyndError>, u64) {
     let start = Instant::now();
-    let result = client.quote(req.to_quote_params()).await;
+    let result = client
+        .quote(req.to_quote_params())
+        .await;
     let round_trip_ms = start.elapsed().as_millis() as u64;
     (result, round_trip_ms)
 }
@@ -262,9 +272,18 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         .filter_map(|r| r.comparison.amount_out_diff_bps)
         .collect();
 
-    let b_wins = diffs.iter().filter(|&&d| d > 0.0).count();
-    let a_wins = diffs.iter().filter(|&&d| d < 0.0).count();
-    let ties = diffs.iter().filter(|&&d| d == 0.0).count();
+    let b_wins = diffs
+        .iter()
+        .filter(|&&d| d > 0.0)
+        .count();
+    let a_wins = diffs
+        .iter()
+        .filter(|&&d| d < 0.0)
+        .count();
+    let ties = diffs
+        .iter()
+        .filter(|&&d| d == 0.0)
+        .count();
     let contested = b_wins + a_wins + ties;
 
     if contested > 0 {
@@ -277,14 +296,19 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
             "    {label_a} wins:  {a_wins:>6}  ({:.1}%)",
             a_wins as f64 / contested as f64 * 100.0
         );
-        println!(
-            "    Ties:         {ties:>6}  ({:.1}%)",
-            ties as f64 / contested as f64 * 100.0
-        );
+        println!("    Ties:         {ties:>6}  ({:.1}%)", ties as f64 / contested as f64 * 100.0);
 
         let avg: f64 = diffs.iter().sum::<f64>() / diffs.len() as f64;
-        let min = diffs.iter().cloned().reduce(f64::min).unwrap_or(0.0);
-        let max = diffs.iter().cloned().reduce(f64::max).unwrap_or(0.0);
+        let min = diffs
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .unwrap_or(0.0);
+        let max = diffs
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .unwrap_or(0.0);
         println!("    Avg diff:    {avg:+.2} bps  (min {min:+.2}, max {max:+.2})");
     }
 
@@ -296,15 +320,22 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         .collect();
 
     if !net_diffs.is_empty() {
-        let net_b_wins = net_diffs.iter().filter(|&&d| d > 0.0).count();
-        let net_a_wins = net_diffs.iter().filter(|&&d| d < 0.0).count();
-        let net_ties = net_diffs.iter().filter(|&&d| d == 0.0).count();
+        let net_b_wins = net_diffs
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count();
+        let net_a_wins = net_diffs
+            .iter()
+            .filter(|&&d| d < 0.0)
+            .count();
+        let net_ties = net_diffs
+            .iter()
+            .filter(|&&d| d == 0.0)
+            .count();
         let net_total = net_b_wins + net_a_wins + net_ties;
 
         if net_total > 0 {
-            println!(
-                "\n  Head-to-head net of gas ({net_total} trades, server-side):"
-            );
+            println!("\n  Head-to-head net of gas ({net_total} trades, server-side):");
             println!(
                 "    {label_b} wins:  {net_b_wins:>6}  ({:.1}%)",
                 net_b_wins as f64 / net_total as f64 * 100.0
@@ -319,8 +350,16 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
             );
 
             let net_avg: f64 = net_diffs.iter().sum::<f64>() / net_diffs.len() as f64;
-            let net_min = net_diffs.iter().cloned().reduce(f64::min).unwrap_or(0.0);
-            let net_max = net_diffs.iter().cloned().reduce(f64::max).unwrap_or(0.0);
+            let net_min = net_diffs
+                .iter()
+                .cloned()
+                .reduce(f64::min)
+                .unwrap_or(0.0);
+            let net_max = net_diffs
+                .iter()
+                .cloned()
+                .reduce(f64::max)
+                .unwrap_or(0.0);
             println!(
                 "    Avg diff:    {net_avg:+.2} bps  \
                  (min {net_min:+.2}, max {net_max:+.2})"
@@ -336,8 +375,14 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
 
     if !gas_diffs.is_empty() {
         let gas_avg: f64 = gas_diffs.iter().sum::<f64>() / gas_diffs.len() as f64;
-        let gas_b_lower = gas_diffs.iter().filter(|&&d| d < 0.0).count();
-        let gas_a_lower = gas_diffs.iter().filter(|&&d| d > 0.0).count();
+        let gas_b_lower = gas_diffs
+            .iter()
+            .filter(|&&d| d < 0.0)
+            .count();
+        let gas_a_lower = gas_diffs
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count();
         println!("\n  Gas Estimate (negative = {label_b} cheaper):");
         println!("    {label_b} cheaper: {gas_b_lower}/{}", gas_diffs.len());
         println!("    {label_a} cheaper: {gas_a_lower}/{}", gas_diffs.len());
@@ -379,10 +424,7 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         if avg_a > 0.0 {
             let pct = (avg_b - avg_a) / avg_a * 100.0;
             let word = if pct < 0.0 { "faster" } else { "slower" };
-            println!(
-                "    {label_b} is {:.1}% {word} on average",
-                pct.abs()
-            );
+            println!("    {label_b} is {:.1}% {word} on average", pct.abs());
         }
     }
 
@@ -400,9 +442,17 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
 
     if !swaps_a.is_empty() && !swaps_b.is_empty() {
         let avg_sa = swaps_a.iter().sum::<usize>() as f64 / swaps_a.len() as f64;
-        let max_sa = swaps_a.iter().max().copied().unwrap_or(0);
+        let max_sa = swaps_a
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(0);
         let avg_sb = swaps_b.iter().sum::<usize>() as f64 / swaps_b.len() as f64;
-        let max_sb = swaps_b.iter().max().copied().unwrap_or(0);
+        let max_sb = swaps_b
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(0);
         println!("\n  Route Depth:");
         println!("    {label_a} avg swaps: {avg_sa:.1}  (max {max_sa})");
         println!("    {label_b} avg swaps: {avg_sb:.1}  (max {max_sb})");
@@ -424,19 +474,28 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
         })
         .collect();
     significant.sort_by(|a, b| {
-        let da = a.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
-        let db = b.comparison.amount_out_diff_bps.unwrap_or(0.0).abs();
-        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        let da = a
+            .comparison
+            .amount_out_diff_bps
+            .unwrap_or(0.0)
+            .abs();
+        let db = b
+            .comparison
+            .amount_out_diff_bps
+            .unwrap_or(0.0)
+            .abs();
+        db.partial_cmp(&da)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     if !significant.is_empty() {
         println!("\n  Significant differences (>1 bps):");
         for r in significant.iter().take(10) {
-            let diff = r.comparison.amount_out_diff_bps.unwrap_or(0.0);
+            let diff = r
+                .comparison
+                .amount_out_diff_bps
+                .unwrap_or(0.0);
             let winner = if diff > 0.0 { label_b } else { label_a };
-            println!(
-                "    [{:>3}] {:<30} {diff:+.2} bps ({winner} better)",
-                r.index, r.label,
-            );
+            println!("    [{:>3}] {:<30} {diff:+.2} bps ({winner} better)", r.index, r.label,);
         }
     }
 
@@ -447,10 +506,7 @@ fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
             let sa = &r.metrics_a.status;
             let sb = &r.metrics_b.status;
             if (sa == "success") != (sb == "success") {
-                println!(
-                    "    [{:>3}] {:<30} {label_a}={sa}, {label_b}={sb}",
-                    r.index, r.label,
-                );
+                println!("    [{:>3}] {:<30} {label_a}={sa}, {label_b}={sb}", r.index, r.label,);
             }
         }
     }
@@ -503,18 +559,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?
     };
 
-    println!(
-        "\nSending {} requests to both solvers (parallel)...\n",
-        args.num_requests
-    );
+    println!("\nSending {} requests to both solvers (parallel)...\n", args.num_requests);
 
     let mut results = Vec::with_capacity(args.num_requests);
 
     for (i, req) in requests.iter().enumerate() {
-        let ((result_a, rt_a), (result_b, rt_b)) = tokio::join!(
-            send_quote(&client_a, req),
-            send_quote(&client_b, req),
-        );
+        let ((result_a, rt_a), (result_b, rt_b)) =
+            tokio::join!(send_quote(&client_a, req), send_quote(&client_b, req),);
 
         let metrics_a = match &result_a {
             Ok(quote) => quote_metrics(quote, rt_a),
@@ -534,11 +585,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             .map(|d| format!(" ({d:+.1} bps)"))
             .unwrap_or_default();
 
-        let icon = if comparison.status_match && comparison.route_match {
-            "="
-        } else {
-            "!"
-        };
+        let icon = if comparison.status_match && comparison.route_match { "=" } else { "!" };
 
         println!(
             "  [{:>3}/{}] {icon} {:<30} A:{:<12} B:{:<12}{diff_str}",
@@ -602,7 +649,10 @@ mod tests {
             solve_time_ms: 0,
             round_trip_ms: 0,
             num_swaps: protocols.len(),
-            route_protocols: protocols.into_iter().map(String::from).collect(),
+            route_protocols: protocols
+                .into_iter()
+                .map(String::from)
+                .collect(),
         }
     }
 
@@ -688,10 +738,7 @@ mod tests {
     fn status_str_all_variants() {
         assert_eq!(status_str(QuoteStatus::Success), "success");
         assert_eq!(status_str(QuoteStatus::NoRouteFound), "no_route_found");
-        assert_eq!(
-            status_str(QuoteStatus::InsufficientLiquidity),
-            "insufficient_liquidity"
-        );
+        assert_eq!(status_str(QuoteStatus::InsufficientLiquidity), "insufficient_liquidity");
         assert_eq!(status_str(QuoteStatus::Timeout), "timeout");
         assert_eq!(status_str(QuoteStatus::NotReady), "not_ready");
     }

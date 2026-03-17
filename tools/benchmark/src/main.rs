@@ -54,11 +54,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Load(args) => benchmark::run(args).await,
         Command::Compare(args) => compare::run(args).await,
-        Command::DownloadTrades(args) => {
-            requests::download_trades(&args.output)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
+        Command::DownloadTrades(args) => requests::download_trades(&args.output)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 

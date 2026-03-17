@@ -192,9 +192,7 @@ pub fn load_embedded_trades(
                 token_in_addr: order.token_in.clone(),
                 token_out_addr: order.token_out.clone(),
                 raw_amount: order.amount.clone(),
-                sender_addr: order
-                    .sender
-                    .clone(),
+                sender_addr: order.sender.clone(),
                 timeout_ms,
             })
         })
@@ -207,9 +205,7 @@ pub fn load_embedded_trades(
 }
 
 /// Download the full 10k aggregator trade dataset from GitHub Releases.
-pub async fn download_trades(
-    output_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn download_trades(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Downloading aggregator trades from {TRADES_DOWNLOAD_URL}...");
     let client = reqwest::Client::new();
     let resp = client
@@ -221,7 +217,9 @@ pub async fn download_trades(
         return Err(format!(
             "download failed: HTTP {} ({})",
             resp.status(),
-            resp.status().canonical_reason().unwrap_or("unknown")
+            resp.status()
+                .canonical_reason()
+                .unwrap_or("unknown")
         )
         .into());
     }
