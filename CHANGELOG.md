@@ -1,3 +1,11 @@
+## [0.17.0](https://github.com/propeller-heads/fynd/compare/0.16.2...0.17.0) (2026-03-17)
+
+
+### Features
+
+* add all_onchain keyword for combining on-chain and RFQ protocols ([5d440a6](https://github.com/propeller-heads/fynd/commit/5d440a6ab88e48fcefe988b463a730617d16651f))
+* default to all protocol systems when --protocols is omitted ([c0c8abd](https://github.com/propeller-heads/fynd/commit/c0c8abd9cc3986b2aea227abd7ac6a61d00701f7))
+
 ## [0.16.2](https://github.com/propeller-heads/fynd/compare/0.16.1...0.16.2) (2026-03-17)
 
 
