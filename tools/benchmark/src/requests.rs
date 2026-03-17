@@ -65,33 +65,27 @@ const SENDER: &str = "0x0000000000000000000000000000000000000001";
 
 const PAIRS_JSON: &str = include_str!("pairs.json");
 
+/// Small embedded sample of real aggregator trades (50 trades).
+/// For the full 10k set, use `download-trades` to fetch from GitHub Releases.
+const TRADES_SAMPLE_JSON: &str = include_str!("trades_sample.json");
+
+/// URL of the full 10k aggregator trades dataset hosted on GitHub Releases.
+pub const TRADES_DOWNLOAD_URL: &str =
+    "https://github.com/propeller-heads/fynd/releases/download/benchmark-data-v1/aggregator_trades_10k.json";
+
 #[derive(Deserialize)]
 struct PairsFile {
     tokens: Vec<Token>,
-    pairs: Vec<Pair>,
 }
 
 #[derive(Deserialize)]
 struct Token {
     symbol: String,
     address: String,
-    decimals: u8,
-}
-
-#[derive(Deserialize)]
-struct Pair {
-    token_in: String,
-    token_out: String,
-    amounts: Vec<f64>,
 }
 
 fn load_pairs_file() -> PairsFile {
     serde_json::from_str(PAIRS_JSON).unwrap_or_else(|e| panic!("failed to parse pairs.json: {e}"))
-}
-
-fn human_to_raw(amount: f64, decimals: u8) -> String {
-    let raw = amount * 10f64.powi(i32::from(decimals));
-    format!("{:.0}", raw)
 }
 
 fn symbol_for_address(addr: &str, tokens: &[Token]) -> String {
@@ -100,37 +94,6 @@ fn symbol_for_address(addr: &str, tokens: &[Token]) -> String {
         .find(|t| t.address.eq_ignore_ascii_case(addr))
         .map(|t| t.symbol.clone())
         .unwrap_or_else(|| addr[..10.min(addr.len())].to_string())
-}
-
-/// Build `n` random requests by sampling pairs and amounts from `pairs.json`.
-pub fn generate_requests(n: usize, timeout_ms: u64) -> Vec<SwapRequest> {
-    let file = load_pairs_file();
-    (0..n)
-        .map(|_| {
-            let pair = &file.pairs[fastrand::usize(..file.pairs.len())];
-            let amount = pair.amounts[fastrand::usize(..pair.amounts.len())];
-            let token_in = file
-                .tokens
-                .iter()
-                .find(|t| t.symbol == pair.token_in)
-                .unwrap_or_else(|| panic!("unknown token: {}", pair.token_in));
-            let token_out = file
-                .tokens
-                .iter()
-                .find(|t| t.symbol == pair.token_out)
-                .unwrap_or_else(|| panic!("unknown token: {}", pair.token_out));
-            let raw = human_to_raw(amount, token_in.decimals);
-
-            SwapRequest {
-                label: format!("{amount} {} -> {}", token_in.symbol, token_out.symbol),
-                token_in_addr: token_in.address.clone(),
-                token_out_addr: token_out.address.clone(),
-                raw_amount: raw,
-                sender_addr: SENDER.to_string(),
-                timeout_ms,
-            }
-        })
-        .collect()
 }
 
 #[derive(Deserialize)]
@@ -205,29 +168,72 @@ pub fn load_requests_from_file(
     Ok(requests)
 }
 
+/// Load the embedded 50-trade aggregator sample.
+pub fn load_embedded_trades(
+    n: usize,
+    timeout_ms: u64,
+) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
+    let templates: Vec<FileRequest> = serde_json::from_str(TRADES_SAMPLE_JSON)?;
+    let file = load_pairs_file();
+    let all: Vec<SwapRequest> = templates
+        .iter()
+        .enumerate()
+        .map(|(i, tmpl)| {
+            let order = tmpl
+                .orders
+                .first()
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("embedded trade at index {i} has no orders").into()
+                })?;
+            let in_sym = symbol_for_address(&order.token_in, &file.tokens);
+            let out_sym = symbol_for_address(&order.token_out, &file.tokens);
+            Ok::<_, Box<dyn std::error::Error>>(SwapRequest {
+                label: format!("{} {in_sym} -> {out_sym}", order.amount),
+                token_in_addr: order.token_in.clone(),
+                token_out_addr: order.token_out.clone(),
+                raw_amount: order.amount.clone(),
+                sender_addr: order
+                    .sender
+                    .clone(),
+                timeout_ms,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let requests = (0..n)
+        .map(|_| all[fastrand::usize(..all.len())].clone())
+        .collect();
+    Ok(requests)
+}
+
+/// Download the full 10k aggregator trade dataset from GitHub Releases.
+pub async fn download_trades(
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Downloading aggregator trades from {TRADES_DOWNLOAD_URL}...");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(TRADES_DOWNLOAD_URL)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "download failed: HTTP {} ({})",
+            resp.status(),
+            resp.status().canonical_reason().unwrap_or("unknown")
+        )
+        .into());
+    }
+    let bytes = resp.bytes().await?;
+    std::fs::write(output_path, &bytes)?;
+    println!("Saved {} bytes to {output_path}", bytes.len());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn human_to_raw_one_eth() {
-        assert_eq!(human_to_raw(1.0, 18), "1000000000000000000");
-    }
-
-    #[test]
-    fn human_to_raw_half_usdc() {
-        assert_eq!(human_to_raw(0.5, 6), "500000");
-    }
-
-    #[test]
-    fn human_to_raw_zero() {
-        assert_eq!(human_to_raw(0.0, 18), "0");
-    }
-
-    #[test]
-    fn human_to_raw_no_decimals() {
-        assert_eq!(human_to_raw(42.0, 0), "42");
-    }
 
     #[test]
     fn parse_address_with_prefix() {
@@ -266,7 +272,6 @@ mod tests {
         let tokens = vec![Token {
             symbol: "WETH".to_string(),
             address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
-            decimals: 18,
         }];
         assert_eq!(
             symbol_for_address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", &tokens),
@@ -286,7 +291,6 @@ mod tests {
         let tokens = vec![Token {
             symbol: "WETH".to_string(),
             address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
-            decimals: 18,
         }];
         assert_eq!(
             symbol_for_address("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", &tokens),
@@ -298,48 +302,30 @@ mod tests {
     fn load_pairs_file_parses() {
         let file = load_pairs_file();
         assert!(!file.tokens.is_empty());
-        assert!(!file.pairs.is_empty());
-        for pair in &file.pairs {
-            assert!(
-                file.tokens
-                    .iter()
-                    .any(|t| t.symbol == pair.token_in),
-                "token_in '{}' not found in tokens",
-                pair.token_in
-            );
-            assert!(
-                file.tokens
-                    .iter()
-                    .any(|t| t.symbol == pair.token_out),
-                "token_out '{}' not found in tokens",
-                pair.token_out
-            );
-        }
     }
 
     #[test]
-    fn generate_requests_returns_correct_count() {
-        let reqs = generate_requests(5, 1000);
-        assert_eq!(reqs.len(), 5);
+    fn load_embedded_trades_returns_correct_count() {
+        let reqs = load_embedded_trades(10, 5000).unwrap();
+        assert_eq!(reqs.len(), 10);
         for r in &reqs {
-            assert_eq!(r.timeout_ms, 1000);
+            assert_eq!(r.timeout_ms, 5000);
+            assert!(r.token_in_addr.starts_with("0x"));
+            assert!(r.token_out_addr.starts_with("0x"));
         }
     }
 
     #[test]
-    fn generate_requests_zero() {
-        assert!(generate_requests(0, 1000).is_empty());
-    }
-
-    #[test]
-    fn generate_requests_seeded_determinism() {
+    fn load_embedded_trades_seeded_determinism() {
         fastrand::seed(99);
-        let a: Vec<String> = generate_requests(5, 1000)
+        let a: Vec<String> = load_embedded_trades(5, 1000)
+            .unwrap()
             .iter()
             .map(|r| r.label.clone())
             .collect();
         fastrand::seed(99);
-        let b: Vec<String> = generate_requests(5, 1000)
+        let b: Vec<String> = load_embedded_trades(5, 1000)
+            .unwrap()
             .iter()
             .map(|r| r.label.clone())
             .collect();

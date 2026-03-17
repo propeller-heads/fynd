@@ -132,8 +132,6 @@ cargo run -p fynd-benchmark --release -- compare \
 | `--output` | `comparison_results.json` | Path for full results JSON |
 | `--timeout-ms` | `15000` | Per-request timeout |
 | `--seed` | `42` | Random seed for reproducibility |
-| `--rpc-url` | (none) | Ethereum RPC URL for gas price (enables net-of-gas comparison) |
-
 ### Custom Requests
 
 You can supply your own requests via `--requests-file`. The file should be a JSON array of quote request bodies:
@@ -154,15 +152,7 @@ You can supply your own requests via `--requests-file`. The file should be a JSO
 
 ### Net-of-Gas Comparison
 
-Pass `--rpc-url` to enable net-of-gas output comparison. The tool fetches the current gas price and approximates gas cost in the output token for trades involving WETH. This is important when comparing algorithms with different route depths (e.g., a 3-hop route may have higher gross output but also higher gas).
-
-```bash
-cargo run -p fynd-benchmark --release -- compare \
-  --rpc-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
-  -n 500
-```
-
-The net-of-gas estimate works for trades where token_in or token_out is WETH. For other pairs, the tool reports gross output and gas separately.
+The compare tool uses the server-computed `amount_out_net_gas` field for net-of-gas comparisons. This value is calculated by the solver and represents the output amount minus gas cost denominated in the output token. It works for all token pairs, not just WETH-paired trades.
 
 ### Output
 
@@ -179,34 +169,37 @@ Positive bps diffs mean solver B returned more output.
 
 ---
 
-## Request Templates
+## Request Data
 
-By default, the benchmark uses a single WETH->USDC swap and the compare tool generates random requests from a built-in set of token pairs. Both tools accept `--requests-file` to use custom request sets. See `requests_set.json` in this directory for the format.
+By default, the load test uses a single WETH->USDC swap and the compare tool samples from a built-in set of 50 real aggregator trades. Both commands accept `--requests-file` to supply custom requests. See `requests_set.json` in this directory for the format.
 
-### Using Real Trade Data
+### Using the Full 10k Trade Dataset
 
-For more representative coverage, use real on-chain trades. A 1k sample (`trades_1k_requests.json`) is included in this directory:
+A 50-trade sample is embedded in the binary for zero-config use. For broader coverage, download the full 10k aggregator trade dataset:
 
 ```bash
+# Download the dataset (~4.5 MB)
+cargo run -p fynd-benchmark --release -- download-trades
+
+# Use it with the compare tool
 cargo run -p fynd-benchmark --release -- compare \
-  --requests-file tools/benchmark/trades_1k_requests.json \
-  --rpc-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
+  --requests-file aggregator_trades_10k.json \
   -n 500
 ```
 
-You can generate larger datasets from Dune Analytics using the trade-sample tool. The requests file format is a JSON array where each entry has an `orders` array with `token_in`, `token_out`, `amount`, `side`, and `sender` fields.
+The dataset contains real aggregator trades pulled from Dune Analytics, covering ~2,500 unique token pairs.
 
 ## File Layout
 
 | File | Description |
 |------|-------------|
-| `src/main.rs` | CLI entry point with `load` and `compare` subcommands |
+| `src/main.rs` | CLI entry point with `load`, `compare`, and `download-trades` subcommands |
 | `src/benchmark.rs` | Load-test implementation |
 | `src/compare.rs` | Comparison tool implementation |
 | `src/config.rs` | Benchmark config, request templates, statistics types |
 | `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `src/exporter.rs` | Statistics calculation and JSON export |
-| `src/requests.rs` | Request generation and file loading |
-| `src/pairs.json` | Token and pair definitions for random request generation |
+| `src/requests.rs` | Request generation, embedded trades, and file loading |
+| `src/pairs.json` | Token definitions for symbol lookups in request labels |
+| `src/trades_sample.json` | 50 real aggregator trades embedded in the binary |
 | `requests_set.json` | Sample request templates |
-| `trades_1k_requests.json` | 1k real Dune trades for representative benchmarking |

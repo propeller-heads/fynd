@@ -2,7 +2,7 @@
 //!
 //! Sends identical quote requests to two solver instances in parallel and
 //! reports per-request diffs in amount out (bps), gas estimate, route
-//! selection, solve time, and optional net-of-gas output.
+//! selection, solve time, and net-of-gas output (server-side).
 
 use std::time::{Duration, Instant};
 
@@ -10,9 +10,7 @@ use clap::Parser;
 use fynd_client::{FyndClient, FyndClientBuilder, FyndError, Quote, QuoteStatus, RetryConfig};
 use serde::Serialize;
 
-use crate::requests::{generate_requests, load_requests_from_file, SwapRequest};
-
-const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+use crate::requests::{load_embedded_trades, load_requests_from_file, SwapRequest};
 
 /// Diff output quality between two running Fynd solvers.
 ///
@@ -64,10 +62,6 @@ pub struct Args {
     /// RNG seed for deterministic request generation
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
-
-    /// Ethereum RPC URL for gas price lookup (enables net-of-gas comparison)
-    #[arg(long, env = "RPC_URL")]
-    pub rpc_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +69,7 @@ struct Metrics {
     status: String,
     amount_in: String,
     amount_out: String,
+    amount_out_net_gas: String,
     gas_estimate: String,
     solve_time_ms: u64,
     round_trip_ms: u64,
@@ -117,7 +112,6 @@ struct OutputConfig {
     num_requests: usize,
     timeout_ms: u64,
     seed: u64,
-    gas_price_wei: Option<u128>,
 }
 
 fn build_client(url: &str, timeout_ms: u64) -> anyhow::Result<FyndClient> {
@@ -149,6 +143,7 @@ fn quote_metrics(quote: &Quote, round_trip_ms: u64) -> Metrics {
         status: status_str(quote.status()).to_string(),
         amount_in: quote.amount_in().to_string(),
         amount_out: quote.amount_out().to_string(),
+        amount_out_net_gas: quote.amount_out_net_gas().to_string(),
         gas_estimate: quote.gas_estimate().to_string(),
         solve_time_ms: quote.solve_time_ms(),
         round_trip_ms,
@@ -162,6 +157,7 @@ fn error_metrics(error: &FyndError, round_trip_ms: u64) -> Metrics {
         status: format!("error: {error}"),
         amount_in: "0".to_string(),
         amount_out: "0".to_string(),
+        amount_out_net_gas: "0".to_string(),
         gas_estimate: "0".to_string(),
         solve_time_ms: 0,
         round_trip_ms,
@@ -170,40 +166,8 @@ fn error_metrics(error: &FyndError, round_trip_ms: u64) -> Metrics {
     }
 }
 
-/// Estimate net-of-gas output using f64 arithmetic.
-///
-/// Returns `None` when the trade doesn't involve WETH (can't derive ETH/token price).
-fn estimate_net_output(
-    amount_out: u128,
-    amount_in: u128,
-    gas_estimate: u128,
-    gas_price: u128,
-    token_in: &str,
-    token_out: &str,
-) -> Option<f64> {
-    let gas_cost_wei = gas_estimate as f64 * gas_price as f64;
-    let out_f = amount_out as f64;
-
-    if token_out.eq_ignore_ascii_case(WETH) {
-        // amount_out is in WETH wei, gas_cost is in wei
-        Some(out_f - gas_cost_wei)
-    } else if token_in.eq_ignore_ascii_case(WETH) && amount_in > 0 {
-        // Derive token_out per wei from the quote's own implied rate
-        let rate = out_f / amount_in as f64;
-        Some(out_f - gas_cost_wei * rate)
-    } else {
-        None
-    }
-}
-
 /// Compute amount-out diff (bps), gas diff (%), net-of-gas diff, and route-match.
-fn compare_metrics(
-    a: &Metrics,
-    b: &Metrics,
-    gas_price: Option<u128>,
-    token_in: &str,
-    token_out: &str,
-) -> Comparison {
+fn compare_metrics(a: &Metrics, b: &Metrics) -> Comparison {
     let status_match = a.status == b.status;
 
     let amt_a: u128 = a.amount_out.parse().unwrap_or(0);
@@ -226,16 +190,15 @@ fn compare_metrics(
         None
     };
 
-    let net_amount_out_diff_bps = gas_price.and_then(|gp| {
-        let in_a: u128 = a.amount_in.parse().ok()?;
-        let net_a = estimate_net_output(amt_a, in_a, gas_a, gp, token_in, token_out)?;
-        let net_b = estimate_net_output(amt_b, in_a, gas_b, gp, token_in, token_out)?;
-        if net_a > 0.0 {
-            Some((net_b - net_a) * 10000.0 / net_a)
-        } else {
-            None
-        }
-    });
+    let net_a: u128 = a.amount_out_net_gas.parse().unwrap_or(0);
+    let net_b: u128 = b.amount_out_net_gas.parse().unwrap_or(0);
+    let net_amount_out_diff_bps = if net_a > 0 && net_b > 0 {
+        Some((net_b as f64 - net_a as f64) * 10000.0 / net_a as f64)
+    } else if net_a == 0 && net_b == 0 {
+        Some(0.0)
+    } else {
+        None
+    };
 
     let route_match = a.route_protocols == b.route_protocols;
 
@@ -255,27 +218,6 @@ async fn send_quote(client: &FyndClient, req: &SwapRequest) -> (Result<Quote, Fy
     (result, round_trip_ms)
 }
 
-async fn fetch_gas_price(rpc_url: &str) -> anyhow::Result<u128> {
-    let client = reqwest::Client::new();
-    let resp: serde_json::Value = client
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_gasPrice",
-            "params": [],
-            "id": 1,
-        }))
-        .send()
-        .await?
-        .json()
-        .await?;
-    let hex = resp["result"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing result in eth_gasPrice response"))?;
-    let hex = hex.strip_prefix("0x").unwrap_or(hex);
-    Ok(u128::from_str_radix(hex, 16)?)
-}
-
 fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -285,12 +227,7 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 }
 
 /// Print an aggregated comparison summary with coverage, win rates, timing, and outliers.
-fn print_summary(
-    results: &[RequestResult],
-    label_a: &str,
-    label_b: &str,
-    gas_price: Option<u128>,
-) {
+fn print_summary(results: &[RequestResult], label_a: &str, label_b: &str) {
     let total = results.len();
 
     let both_success = results
@@ -351,10 +288,11 @@ fn print_summary(
         println!("    Avg diff:    {avg:+.2} bps  (min {min:+.2}, max {max:+.2})");
     }
 
-    // -- Net-of-gas head-to-head --
+    // -- Net-of-gas head-to-head (server-side amount_out_net_gas) --
     let net_diffs: Vec<f64> = results
         .iter()
         .filter_map(|r| r.comparison.net_amount_out_diff_bps)
+        .filter(|d| d.is_finite())
         .collect();
 
     if !net_diffs.is_empty() {
@@ -364,10 +302,8 @@ fn print_summary(
         let net_total = net_b_wins + net_a_wins + net_ties;
 
         if net_total > 0 {
-            let gp_gwei = gas_price.unwrap_or(0) as f64 / 1e9;
             println!(
-                "\n  Head-to-head net of gas \
-                 ({net_total} WETH-paired trades, gas price ~{gp_gwei:.1} gwei):"
+                "\n  Head-to-head net of gas ({net_total} trades, server-side):"
             );
             println!(
                 "    {label_b} wins:  {net_b_wins:>6}  ({:.1}%)",
@@ -390,11 +326,6 @@ fn print_summary(
                  (min {net_min:+.2}, max {net_max:+.2})"
             );
         }
-    } else if gas_price.is_some() {
-        println!(
-            "\n  Net-of-gas: no WETH-paired trades found \
-             (need WETH as token_in or token_out)"
-        );
     }
 
     // -- Gas estimate --
@@ -564,20 +495,12 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         health_b.last_update_ms(),
     );
 
-    let gas_price = match &args.rpc_url {
-        Some(url) => {
-            let gp = fetch_gas_price(url).await?;
-            println!("  Gas price: {:.2} gwei", gp as f64 / 1e9);
-            Some(gp)
-        }
-        None => None,
-    };
-
     let requests: Vec<SwapRequest> = if let Some(ref path) = args.requests_file {
         load_requests_from_file(path, args.num_requests, args.timeout_ms)
             .map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
-        generate_requests(args.num_requests, args.timeout_ms)
+        load_embedded_trades(args.num_requests, args.timeout_ms)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
     };
 
     println!(
@@ -603,13 +526,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             Err(err) => error_metrics(err, rt_b),
         };
 
-        let comparison = compare_metrics(
-            &metrics_a,
-            &metrics_b,
-            gas_price,
-            req.token_in_addr(),
-            req.token_out_addr(),
-        );
+        let comparison = compare_metrics(&metrics_a, &metrics_b);
 
         let diff_str = comparison
             .amount_out_diff_bps
@@ -643,7 +560,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         });
     }
 
-    print_summary(&results, &args.label_a, &args.label_b, gas_price);
+    print_summary(&results, &args.label_a, &args.label_b);
 
     let output = Output {
         config: OutputConfig {
@@ -654,7 +571,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             num_requests: args.num_requests,
             timeout_ms: args.timeout_ms,
             seed: args.seed,
-            gas_price_wei: gas_price,
         },
         results,
     };
@@ -673,6 +589,7 @@ mod tests {
     fn make_metrics(
         status: &str,
         amount_out: &str,
+        amount_out_net_gas: &str,
         gas_estimate: &str,
         protocols: Vec<&str>,
     ) -> Metrics {
@@ -680,6 +597,7 @@ mod tests {
             status: status.to_string(),
             amount_in: "1000000000000000000".to_string(),
             amount_out: amount_out.to_string(),
+            amount_out_net_gas: amount_out_net_gas.to_string(),
             gas_estimate: gas_estimate.to_string(),
             solve_time_ms: 0,
             round_trip_ms: 0,
@@ -690,77 +608,79 @@ mod tests {
 
     #[test]
     fn compare_identical() {
-        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let b = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec!["uniswap"]);
+        let b = make_metrics("success", "1000", "900", "100", vec!["uniswap"]);
+        let c = compare_metrics(&a, &b);
         assert!(c.status_match);
         assert!(c.route_match);
         assert_eq!(c.amount_out_diff_bps, Some(0.0));
         assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
+        assert_eq!(c.net_amount_out_diff_bps, Some(0.0));
     }
 
     #[test]
     fn compare_b_better() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "1010", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec![]);
+        let b = make_metrics("success", "1010", "910", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, Some(100.0));
     }
 
     #[test]
     fn compare_a_better() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "990", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec![]);
+        let b = make_metrics("success", "990", "890", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, Some(-100.0));
     }
 
     #[test]
     fn compare_a_zero() {
-        let a = make_metrics("success", "0", "100", vec![]);
-        let b = make_metrics("success", "1000", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "0", "0", "100", vec![]);
+        let b = make_metrics("success", "1000", "900", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, None);
     }
 
     #[test]
     fn compare_b_zero() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "0", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec![]);
+        let b = make_metrics("success", "0", "0", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, None);
     }
 
     #[test]
     fn compare_both_zero() {
-        let a = make_metrics("success", "0", "0", vec![]);
-        let b = make_metrics("success", "0", "0", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "0", "0", "0", vec![]);
+        let b = make_metrics("success", "0", "0", "0", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, Some(0.0));
         assert_eq!(c.gas_estimate_diff_pct, Some(0.0));
+        assert_eq!(c.net_amount_out_diff_bps, Some(0.0));
     }
 
     #[test]
     fn compare_different_gas() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "1000", "120", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec![]);
+        let b = make_metrics("success", "1000", "880", "120", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.gas_estimate_diff_pct, Some(20.0));
     }
 
     #[test]
     fn compare_different_routes() {
-        let a = make_metrics("success", "1000", "100", vec!["uniswap"]);
-        let b = make_metrics("success", "1000", "100", vec!["curve"]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec!["uniswap"]);
+        let b = make_metrics("success", "1000", "900", "100", vec!["curve"]);
+        let c = compare_metrics(&a, &b);
         assert!(!c.route_match);
     }
 
     #[test]
     fn compare_different_status() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("error", "1000", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, "", "");
+        let a = make_metrics("success", "1000", "900", "100", vec![]);
+        let b = make_metrics("error", "1000", "900", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert!(!c.status_match);
     }
 
@@ -777,54 +697,23 @@ mod tests {
     }
 
     #[test]
-    fn net_output_weth_out() {
-        // token_out is WETH: gas cost subtracted directly
-        let net = estimate_net_output(1_000_000, 500, 100, 10, "0xtoken", WETH);
-        // gas_cost_wei = 100 * 10 = 1000
-        assert_eq!(net, Some(1_000_000.0 - 1000.0));
-    }
-
-    #[test]
-    fn net_output_weth_in() {
-        // token_in is WETH: gas cost converted via implied rate
-        let net = estimate_net_output(2_000_000, 1_000_000, 100, 10, WETH, "0xtoken");
-        // rate = 2_000_000 / 1_000_000 = 2.0
-        // gas_cost_wei = 100 * 10 = 1000
-        // gas_cost_token_out = 1000 * 2.0 = 2000
-        assert_eq!(net, Some(2_000_000.0 - 2000.0));
-    }
-
-    #[test]
-    fn net_output_no_weth() {
-        let net = estimate_net_output(1_000_000, 500_000, 100, 10, "0xA", "0xB");
-        assert_eq!(net, None);
-    }
-
-    #[test]
-    fn net_output_zero_amount_in() {
-        let net = estimate_net_output(1_000_000, 0, 100, 10, WETH, "0xtoken");
-        assert_eq!(net, None);
-    }
-
-    #[test]
-    fn compare_with_gas_price_weth_out() {
-        let mut a = make_metrics("success", "1000000", "100", vec![]);
-        a.amount_in = "500000".to_string();
-        let mut b = make_metrics("success", "1000000", "200", vec![]);
-        b.amount_in = "500000".to_string();
-        let c = compare_metrics(&a, &b, Some(10), "0xtoken", WETH);
-        // Gross: equal (0 bps)
+    fn compare_net_gas_b_wins() {
+        // Same gross amount, but B has better net-of-gas
+        let a = make_metrics("success", "1000000", "990000", "100", vec![]);
+        let b = make_metrics("success", "1000000", "995000", "100", vec![]);
+        let c = compare_metrics(&a, &b);
         assert_eq!(c.amount_out_diff_bps, Some(0.0));
-        // Net: B uses more gas, so net should be negative
-        assert!(c.net_amount_out_diff_bps.unwrap() < 0.0);
+        assert!(c.net_amount_out_diff_bps.unwrap() > 0.0);
     }
 
     #[test]
-    fn compare_without_gas_price_no_net() {
-        let a = make_metrics("success", "1000", "100", vec![]);
-        let b = make_metrics("success", "1010", "100", vec![]);
-        let c = compare_metrics(&a, &b, None, WETH, "0xtoken");
-        assert_eq!(c.net_amount_out_diff_bps, None);
+    fn compare_net_gas_a_wins() {
+        // Same gross amount, but A has better net-of-gas
+        let a = make_metrics("success", "1000000", "995000", "100", vec![]);
+        let b = make_metrics("success", "1000000", "990000", "100", vec![]);
+        let c = compare_metrics(&a, &b);
+        assert_eq!(c.amount_out_diff_bps, Some(0.0));
+        assert!(c.net_amount_out_diff_bps.unwrap() < 0.0);
     }
 
     #[test]

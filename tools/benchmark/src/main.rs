@@ -31,6 +31,16 @@ enum Command {
     Load(benchmark::Args),
     /// Diff output quality (amount out, gas, routes) between two solvers
     Compare(compare::Args),
+    /// Download the full 10k aggregator trade dataset from GitHub Releases
+    DownloadTrades(DownloadTradesArgs),
+}
+
+/// Download the full 10k aggregator trade dataset for benchmarking.
+#[derive(clap::Parser, Debug)]
+pub struct DownloadTradesArgs {
+    /// Output file path
+    #[arg(short, long, default_value = "aggregator_trades_10k.json")]
+    pub output: String,
 }
 
 #[tokio::main]
@@ -44,6 +54,11 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Load(args) => benchmark::run(args).await,
         Command::Compare(args) => compare::run(args).await,
+        Command::DownloadTrades(args) => {
+            requests::download_trades(&args.output)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
     }
 }
 
@@ -127,8 +142,6 @@ mod tests {
             "99",
             "--output",
             "out.json",
-            "--rpc-url",
-            "https://eth.example.com",
         ])
         .unwrap();
         let Command::Compare(args) = cli.command else {
@@ -142,7 +155,6 @@ mod tests {
         assert_eq!(args.timeout_ms, 5000);
         assert_eq!(args.seed, 99);
         assert_eq!(args.output, "out.json");
-        assert_eq!(args.rpc_url.as_deref(), Some("https://eth.example.com"));
     }
 
     #[test]

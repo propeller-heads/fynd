@@ -196,6 +196,7 @@ pub(crate) fn dto_to_quote(
         ds.amount_in().clone(),
         ds.amount_out().clone(),
         ds.gas_estimate().clone(),
+        ds.amount_out_net_gas().clone(),
         ds.price_impact_bps(),
         block,
         token_out,
@@ -453,7 +454,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn quote_try_from_dto_drops_amount_out_net_gas_and_defaults_to_fynd() {
+    fn quote_try_from_dto_preserves_amount_out_net_gas_and_defaults_to_fynd() {
         let ds = sample_dto_order_quote();
         let quote = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(quote.order_id(), "test-order-id");
@@ -462,6 +463,7 @@ mod tests {
         assert_eq!(quote.amount_in(), &BigUint::from(1_000u32));
         assert_eq!(quote.amount_out(), &BigUint::from(999u32));
         assert_eq!(quote.gas_estimate(), &BigUint::from(100_000u32));
+        assert_eq!(quote.amount_out_net_gas(), &BigUint::from(998u32));
         assert_eq!(quote.price_impact_bps(), Some(5));
         // token_out and receiver are left empty until populated by quote()
         assert!(quote.token_out().is_empty());
