@@ -17,6 +17,7 @@
 //! - **derived**: Derived data computations (spot prices, pool depths, gas prices)
 //! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderQuote`)
 //! - **feed**: Market data structures and event handling
+//! - **encoding**: Encodes solved routes into on-chain transactions via Tycho's router contracts
 //! - **worker_pool**: Multi-threaded solver pool management with algorithm registry
 //! - **worker_pool_router**: Request orchestration across multiple solver pools
 

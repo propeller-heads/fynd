@@ -34,7 +34,8 @@ Fynd puts you in control:
 1. **Real-time market state** via Tycho Stream, covering all [Tycho-supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)
 2. **50ms solution times:** You choose the balance between routing quality and latency.
 3. **Custom algorithms:** Plug in your own algorithm or customize the pre-built one. Fynd runs multiple algorithms in parallel and picks the best result.
-4. **Vertical scaling:** Scale up to meet your speed requirements.
+4. **Execution on your terms:** Encode and execute swaps on-chain with full control over fees, slippage, and token transfer method.
+5. **Vertical scaling:** Scale up to meet your speed requirements.
 
 ### Key Design Principles
 
@@ -62,7 +63,7 @@ Fynd works with any protocol Tycho supports. See the [list of supported protocol
 2. **SharedMarketData** stores all component states, tokens, and gas prices in a single shared structure.
 3. When a **quote request** arrives via HTTP, the **WorkerPoolRouter** fans it out to all worker pools in parallel.
 4. Each **Worker Pool** runs a specific algorithm. Workers compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
-5. The **WorkerPoolRouter** collects results, picks the best solution by `amount_out_net_gas`, and returns it.
+5. The **WorkerPoolRouter** collects results, picks the best solution by `amount_out_net_gas`, optionally encodes it into an on-chain transaction, and returns it.
 
 ## Try it out
 

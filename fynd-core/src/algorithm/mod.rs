@@ -8,9 +8,15 @@
 //!
 //! # Adding a New Algorithm
 //!
+//! **External:** Implement the `Algorithm` trait in your own crate and plug it
+//! into a [`WorkerPoolBuilder`](crate::worker_pool::pool::WorkerPoolBuilder) via
+//! [`with_algorithm`](crate::worker_pool::pool::WorkerPoolBuilder::with_algorithm). No changes
+//! to fynd-core required. See the `custom_algorithm` example.
+//!
+//! **Built-in:** To add an algorithm to the built-in registry:
 //! 1. Create a new module with your algorithm implementation
 //! 2. Implement the `Algorithm` trait
-//! 3. Register the algorithm in `registry.rs`
+//! 3. Register it in `registry.rs`
 
 pub mod most_liquid;
 
