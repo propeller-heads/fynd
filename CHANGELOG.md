@@ -1,3 +1,14 @@
+## [0.16.2](https://github.com/propeller-heads/fynd/compare/0.16.1...0.16.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([296d5e9](https://github.com/propeller-heads/fynd/commit/296d5e9c74de55a2f97ee930559c3c086fbefd0d))
+* **benchmark:** clean up unused deps, naming, and API surface ([071b6bf](https://github.com/propeller-heads/fynd/commit/071b6bfcc1a3cbc42319fdfd032ff26c0f33a070))
+* restore fynd-client dev-dep removed by benchmark cleanup ([72fc0fe](https://github.com/propeller-heads/fynd/commit/72fc0fedb13e272c53576af2831fd539783c80a0))
+* update Cargo.lock after restoring fynd-client dev-dep ([e558e31](https://github.com/propeller-heads/fynd/commit/e558e31a50a9fd949b1fd3c1ede1f5f1d8c3dc25))
+* update Cargo.lock to reflect workspace version 0.16.0 ([e8a967f](https://github.com/propeller-heads/fynd/commit/e8a967f8e33c5674f2abf0e3b0dcabd3a1d88ec3))
+
 ## [0.16.1](https://github.com/propeller-heads/fynd/compare/0.16.0...0.16.1) (2026-03-17)
 
 
