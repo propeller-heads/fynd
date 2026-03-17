@@ -1,6 +1,6 @@
 //! Solve a swap order using fynd-core
 //!
-//! Demonstrates setting up market data feeds, worker pools, and OrderManager
+//! Demonstrates setting up market data feeds, worker pools, and WorkerPoolRouter
 //! to solve a swap order. Connects to Tycho's live feed for real market data.
 //!
 //! # Prerequisites
@@ -26,7 +26,8 @@ use fynd_core::{
         gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
     },
     types::{constants::native_token, Order, OrderSide},
-    OrderManager, OrderManagerConfig, QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
+    EncodingOptions, QuoteOptions, QuoteRequest, SolverPoolHandle, WorkerPoolBuilder,
+    WorkerPoolRouter, WorkerPoolRouterConfig,
 };
 use num_bigint::BigUint;
 use tokio::sync::RwLock;
@@ -102,14 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             derived_event_tx.subscribe(),
         )?;
 
-    // 7. OrderManager to coordinate solving
+    // 7. WorkerPoolRouter to coordinate solving
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(None)
         .expect("Failed to create default swap encoder registry");
     let encoder = Encoder::new(chain, swap_encoder_registry).expect("Failed to create encoder");
-    let order_manager = OrderManager::new(
+    let worker_router = WorkerPoolRouter::new(
         vec![SolverPoolHandle::new("solver", task_handle)],
-        OrderManagerConfig::default().with_timeout(Duration::from_secs(10)),
+        WorkerPoolRouterConfig::default().with_timeout(Duration::from_secs(10)),
         encoder,
     );
 
@@ -184,8 +185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("Solving: 1000 USDC → WBTC...");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let request = QuoteRequest::new(vec![order], Default::default());
-    let solution = order_manager.quote(request).await?;
+    let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+    let request = QuoteRequest::new(vec![order], options);
+    let solution = worker_router.quote(request).await?;
 
     println!(" done ({}ms)\n", solution.solve_time_ms());
 
@@ -240,6 +242,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 token_out.symbol,
                 swap.protocol()
             );
+        }
+        if let Some(tx) = order_quote.transaction() {
+            let calldata: String = tx
+                .data()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            println!("\nEncoded tx: to={}, calldata=0x{}", tx.to(), calldata);
         }
     } else {
         println!("No route found (status: {:?})", order_quote.status());

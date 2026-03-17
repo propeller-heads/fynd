@@ -1,0 +1,296 @@
+name: API Semver Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  semver-check:
+    name: API Breaking Change Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check PR title for breaking change intent
+        id: pr-title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          MAJOR=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\([0-9]*\)\.[0-9]*\.[0-9]*".*/\1/')
+          if [ "$MAJOR" = "0" ]; then
+            # 0.x.x: breaking changes bump the minor version, declared with feat:
+            echo "pre_v1=true" >> "$GITHUB_OUTPUT"
+            if echo "$TITLE" | grep -qE '^feat(\(.+\))?:'; then
+              echo "declared=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "declared=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # v1+: breaking changes bump the major version, declared with breaking: type
+            echo "pre_v1=false" >> "$GITHUB_OUTPUT"
+            if echo "$TITLE" | grep -qE '^breaking(\(.+\))?:'; then
+              echo "declared=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "declared=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@71b48393496777ee11188c07a34d48b048a985cd  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Build baseline rustdoc from full workspace
+        # cargo semver-checks --baseline-rev builds each package in an isolated placeholder
+        # project without the workspace Cargo.lock, causing broken transitive dep resolution
+        # (e.g. tycho-simulation@old + tycho-common@new = incompatible). Instead, build
+        # baseline rustdoc directly from origin/main's full workspace so its lockfile is used.
+        env:
+          CARGO_TERM_COLOR: never
+          RUSTC_BOOTSTRAP: "1"
+          RUSTDOCFLAGS: >-
+            -Z unstable-options
+            --document-private-items
+            --document-hidden-items
+            --output-format=json
+            --cap-lints=allow
+        run: |
+          git worktree add /tmp/baseline origin/main
+          cargo doc \
+            --manifest-path /tmp/baseline/Cargo.toml \
+            --workspace \
+            --no-deps
+
+      - name: Build current rustdoc from full workspace
+        # Pre-build current rustdoc using the same workspace+lockfile approach as the baseline.
+        # This ensures both sides use identical feature resolution (workspace default features,
+        # no --all-features), preventing false positives from feature-gated APIs such as the
+        # `experimental` feature in fynd-rpc. Passing --current-rustdoc to cargo-semver-checks
+        # below bypasses its internal build, which may use a different feature set.
+        env:
+          CARGO_TERM_COLOR: never
+          RUSTC_BOOTSTRAP: "1"
+          RUSTDOCFLAGS: >-
+            -Z unstable-options
+            --document-private-items
+            --document-hidden-items
+            --output-format=json
+            --cap-lints=allow
+        run: |
+          cargo doc \
+            --workspace \
+            --no-deps
+
+      - name: Check for breaking changes
+        id: check
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          METADATA=$(cargo metadata --no-deps --format-version 1)
+          WORKSPACE_ROOT=$(echo "${METADATA}" | jq -r '.workspace_root')
+          BREAKING=false
+          HAS_PACKAGES=false
+
+          while IFS=' ' read -r name manifest_path; do
+            rel_dir="${manifest_path#"${WORKSPACE_ROOT}"/}"
+            rel_dir="${rel_dir%/Cargo.toml}"
+            if ! git cat-file -e "origin/main:${rel_dir}/Cargo.toml" 2>/dev/null; then
+              echo "Skipping new crate '${name}' (not present in baseline)"
+              continue
+            fi
+
+            RUSTDOC_NAME="${name//-/_}"
+            BASELINE_JSON="/tmp/baseline/target/doc/${RUSTDOC_NAME}.json"
+            if [ ! -f "${BASELINE_JSON}" ]; then
+              echo "Warning: baseline rustdoc for '${name}' not found, skipping"
+              continue
+            fi
+
+            CURRENT_JSON="target/doc/${RUSTDOC_NAME}.json"
+            if [ ! -f "${CURRENT_JSON}" ]; then
+              echo "Warning: current rustdoc for '${name}' not found, skipping"
+              continue
+            fi
+
+            HAS_PACKAGES=true
+            if ! cargo semver-checks \
+              --package "${name}" \
+              --baseline-rustdoc "${BASELINE_JSON}" \
+              --current-rustdoc "${CURRENT_JSON}" \
+              >> semver-output.txt 2>&1; then
+              BREAKING=true
+            fi
+          done < <(echo "${METADATA}" | \
+            jq -r '.packages[] | select(any(.targets[]; .kind[] == "lib")) | "\(.name) \(.manifest_path)"')
+
+          if [ "${HAS_PACKAGES}" = "false" ]; then
+            echo "No pre-existing library crates to check against baseline."
+          fi
+
+          echo "breaking=${BREAKING}" >> "$GITHUB_OUTPUT"
+
+      - name: Post semver comment
+        if: >
+          steps.check.outputs.breaking == 'true' ||
+          steps.pr-title.outputs.declared == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          BREAKING: ${{ steps.check.outputs.breaking }}
+          DECLARED: ${{ steps.pr-title.outputs.declared }}
+          PRE_V1: ${{ steps.pr-title.outputs.pre_v1 }}
+        with:
+          script: |
+            const fs = require('fs');
+            const breaking = process.env.BREAKING === 'true';
+            const declared = process.env.DECLARED === 'true';
+            const preV1 = process.env.PRE_V1 === 'true';
+            const marker = '<!-- semver-check -->';
+
+            let body;
+            if (breaking && !declared) {
+              const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
+              const MAX_OUTPUT = 60_000;
+              const output = raw.length > MAX_OUTPUT
+                ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
+                : raw;
+              const hint = preV1
+                ? [
+                    'Either fix the breaking changes, or update the PR title to signal intent:',
+                    '- Use `feat: ...` to bump the minor version (breaking changes on 0.x.x)',
+                  ]
+                : [
+                    'Either fix the breaking changes, or update the PR title to signal intent:',
+                    '- Use `breaking: ...` to declare a major version bump',
+                  ];
+              body = [
+                marker,
+                '## Breaking API Changes Detected',
+                '',
+                'This PR introduces breaking API changes, but the PR title does not declare them.',
+                ...hint,
+                '',
+                '<details><summary>semver-checks output</summary>',
+                '',
+                '```',
+                output,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else if (breaking && declared) {
+              const raw = fs.readFileSync('semver-output.txt', 'utf8').trim();
+              const MAX_OUTPUT = 60_000;
+              const output = raw.length > MAX_OUTPUT
+                ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
+                : raw;
+              const versionNote = preV1
+                ? 'Ensure the minor version is bumped before merging (breaking changes on 0.x.x bump the minor).'
+                : 'Ensure the major version is bumped before merging.';
+              body = [
+                marker,
+                '## Breaking API Changes (Intentional)',
+                '',
+                'Breaking API changes detected and declared in the PR title.',
+                versionNote,
+                '',
+                '<details><summary>semver-checks output</summary>',
+                '',
+                '```',
+                output,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else {
+              // !breaking && declared
+              const titleHint = preV1
+                ? 'Otherwise, consider using `fix:` instead of `feat:` in the PR title.'
+                : 'Otherwise, consider removing the `breaking` type from the PR title.';
+              body = [
+                marker,
+                '## No API Breaking Changes Detected',
+                '',
+                'The PR title signals breaking changes, but `cargo-semver-checks` found none.',
+                'If the breaking change is behavioral, CLI, or config-level (not public Rust API), this is expected.',
+                titleHint,
+              ].join('\n');
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
+
+      - name: Delete stale semver comment
+        if: >
+          steps.check.outputs.breaking == 'false' &&
+          steps.pr-title.outputs.declared == 'false'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            const marker = '<!-- semver-check -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.deleteComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            }
+
+      - name: Fail on undeclared breaking changes
+        if: >
+          steps.check.outputs.breaking == 'true' &&
+          steps.pr-title.outputs.declared == 'false'
+        run: |
+          cat semver-output.txt
+          exit 1

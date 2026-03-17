@@ -23,7 +23,7 @@ This modular architecture allows users to:
   preferred graph representation
 - **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation
   uses `petgraph::StableDiGraph`
-- **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; OrderManager
+- **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; WorkerPoolRouter
   selects the best result
 - **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates) with optional encoded transaction
 - **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a
@@ -47,7 +47,7 @@ This modular architecture allows users to:
                                    │ QuoteRequest
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            OrderManager                                     │
+│                            WorkerPoolRouter                                 │
 │           Orchestrates multiple solver pools, selects best solution         │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │  • Fan-out: Send each order to ALL solver pools in parallel           │  │
@@ -138,7 +138,7 @@ This modular architecture allows users to:
 **Crate:** `fynd-rpc`
 **Location:** `fynd-rpc/src/api/`
 
-Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns JSON responses.
+Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, returns JSON responses.
 
 **Endpoints:**
 
@@ -148,10 +148,10 @@ Actix Web HTTP handlers. Validates requests, delegates to OrderManager, returns 
 
 ---
 
-### 2. OrderManager
+### 2. WorkerPoolRouter
 
 **Crate:** `fynd-core`
-**Location:** `fynd-core/src/order_manager/`
+**Location:** `fynd-core/src/worker_pool_router/`
 
 Orchestrates quote requests across multiple worker pools:
 
@@ -287,7 +287,7 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 **Crate:** `fynd-rpc`
 **Location:** `fynd-rpc/src/builder.rs`
 
-`FyndRpcBuilder` assembles the entire system: creates feed, worker pools, computation manager, order manager, and HTTP
+`FyndRpcBuilder` assembles the entire system: creates feed, worker pools, computation manager, worker pool router, and HTTP
 server. `Fynd` runs the system and handles graceful shutdown.
 
 ---
@@ -313,14 +313,14 @@ Client POST /v1/quote
 RouterApi (validate)
     │
     ▼
-OrderManager (fan-out to all pools)
+WorkerPoolRouter (fan-out to all pools)
     │
     ├──► Pool A Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool B Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
     │
     ▼
-OrderManager (select best by amount_out_net_gas)
+WorkerPoolRouter (select best by amount_out_net_gas)
     │
     ▼ (optional)
 Encoder (encode solution into on-chain transaction)
@@ -358,7 +358,7 @@ TychoFeed
 Actix/Tokio Runtime (async I/O)
 ├── HTTP Server handlers
 ├── TychoFeed (WebSocket client)
-├── OrderManager (async fan-out)
+├── WorkerPoolRouter (async fan-out)
 ├── Gas Price Fetcher
 └── Computation Manager
 
@@ -374,9 +374,9 @@ Worker Pool B (dedicated OS threads)
 
 **Communication channels:**
 
-- HTTP -> OrderManager: direct call (same async runtime)
-- OrderManager -> Workers: `async_channel` per pool (bounded, backpressure)
-- Workers -> OrderManager: `oneshot` channel (single response)
+- HTTP -> WorkerPoolRouter: direct call (same async runtime)
+- WorkerPoolRouter -> Workers: `async_channel` per pool (bounded, backpressure)
+- Workers -> WorkerPoolRouter: `oneshot` channel (single response)
 - TychoFeed -> Workers: `broadcast` channel (MarketEvent)
 - ComputationManager -> Workers: `broadcast` channel (DerivedDataEvent)
 - All -> SharedMarketData: `Arc<RwLock<>>` (read-heavy)

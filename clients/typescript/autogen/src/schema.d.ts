@@ -188,7 +188,7 @@ export interface components {
             amount_out: string;
             /**
              * @description Amount out minus gas cost in output token terms.
-             *     Used by OrderManager to compare solutions from different solvers.
+             *     Used by WorkerPoolRouter to compare solutions from different solvers.
              * @example 3498000000
              */
             amount_out_net_gas: string;

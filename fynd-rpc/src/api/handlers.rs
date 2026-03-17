@@ -70,14 +70,14 @@ pub async fn quote(
     }
 
     let core_quote = state
-        .order_manager
+        .worker_router
         .quote(core_request)
         .await?;
 
     info!(
         solve_time_ms = core_quote.solve_time_ms(),
         num_orders = core_quote.orders().len(),
-        num_pools = state.order_manager.num_pools(),
+        num_pools = state.worker_router.num_pools(),
         "quote completed"
     );
 
@@ -110,7 +110,7 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let status = dto::HealthStatus {
         healthy: is_healthy,
         last_update_ms: age_ms,
-        num_solver_pools: state.order_manager.num_pools(),
+        num_solver_pools: state.worker_router.num_pools(),
         derived_data_ready,
     };
 

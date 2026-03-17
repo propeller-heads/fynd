@@ -1,0 +1,4 @@
+packages:
+  - autogen
+  - client
+  - examples/tutorial

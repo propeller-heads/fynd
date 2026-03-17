@@ -8,7 +8,9 @@ description: >-
 
 ## Tutorial: Quote, Simulate & Execute Swaps
 
-[This example](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) shows how to get swap quotes from a running Fynd instance, simulate them, and optionally execute on-chain using [tycho-execution](https://docs.propellerheads.xyz/tycho/for-solvers/execution).
+[This example](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) shows how to get swap quotes from a running Fynd instance, simulate them, and optionally execute on-chain using standard ERC-20 approvals.
+
+A [Permit2 variant](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial_with_permit2) demonstrates the same flow using Permit2 token authorization instead of `approve` + `transferFrom`.
 
 ### Prerequisites
 
@@ -23,7 +25,7 @@ description: >-
 | --------------------- | ------------------------ | ------------------------------------------------------------- |
 | `TYCHO_URL`           | No                       | Tycho indexer URL (defaults to tycho-beta.propellerheads.xyz) |
 | `TYCHO_API_KEY`       | Yes                      | API key for Tycho indexer                                     |
-| `RPC_URL`             | For simulation/execution | Ethereum RPC endpoint                                         |
+| `RPC_URL`             | No                       | Ethereum RPC endpoint (defaults to `https://eth.llamarpc.com`) |
 | `PRIVATE_KEY`         | For execution            | Wallet private key (hex, **no 0x prefix**)                    |
 | `TENDERLY_ACCESS_KEY` | For Tenderly             | Tenderly API access key                                       |
 | `TENDERLY_ACCOUNT`    | For Tenderly             | Tenderly account slug                                         |

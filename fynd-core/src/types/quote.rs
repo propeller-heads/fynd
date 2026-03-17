@@ -14,7 +14,7 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
@@ -473,7 +473,7 @@ pub enum OrderValidationError {
 ///
 /// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Quote`]).
+/// not the total WorkerPoolRouter orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleOrderQuote {
     /// The solution for the order.
@@ -525,7 +525,7 @@ pub struct OrderQuote {
     #[serde(skip_serializing_if = "Option::is_none")]
     price_impact_bps: Option<i32>,
     /// Amount out minus gas cost in output token terms.
-    /// Used by OrderManager to compare solutions from different solvers.
+    /// Used by WorkerPoolRouter to compare solutions from different solvers.
     #[serde_as(as = "DisplayFromStr")]
     amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
@@ -875,6 +875,8 @@ impl Route {
     /// Returns an error if:
     /// - The route has no swaps
     /// - Consecutive swaps are not connected (output token != next input token)
+    /// - A token appears more than once in the path unless it is both the first and last token
+    ///   (Tycho execution only supports this type of cycle)
     pub fn validate(&self) -> Result<(), RouteValidationError> {
         if self.swaps.is_empty() {
             return Err(RouteValidationError::EmptyRoute);
@@ -889,6 +891,28 @@ impl Route {
             }
         }
 
+        // Collect every token in the path:
+        // A token may only repeat if it is both the first and last in the path.
+        let first_token = &self.swaps[0].token_in;
+        let last_token = &self.swaps[self.swaps.len() - 1].token_out;
+
+        let mut seen = HashSet::new();
+        seen.insert(first_token.clone());
+        let last_idx = self.swaps.len() - 1;
+        for (i, swap) in self.swaps.iter().enumerate() {
+            if !seen.insert(swap.token_out.clone()) {
+                // Duplicate token — only allowed if it's the last token
+                // matching the first (simple round-trip cycle).
+                if !(i == last_idx && swap.token_out == *first_token) {
+                    return Err(RouteValidationError::UnsupportedCycle {
+                        token: swap.token_out.clone(),
+                        first: first_token.clone(),
+                        last: last_token.clone(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -900,6 +924,11 @@ pub enum RouteValidationError {
     EmptyRoute,
     #[error("swaps are not connected: {first_out} != {second_in}")]
     DisconnectedSwaps { first_out: Address, second_in: Address },
+    #[error(
+        "unsupported cycle: token {token} appears more than once in route \
+         {first} -> ... -> {last} (only first == last cycles are supported)"
+    )]
+    UnsupportedCycle { token: Address, first: Address, last: Address },
 }
 
 /// A single swap within a route.
@@ -1230,8 +1259,19 @@ mod tests {
     #[rstest]
     #[case::valid_single(vec![(0x01, 0x02)], true, None)]
     #[case::valid_connected(vec![(0x01, 0x02), (0x02, 0x03)], true, None)]
+    #[case::valid_first_last_cycle(vec![(0x01, 0x02), (0x02, 0x01)], true, None)]
     #[case::empty(vec![], false, Some("EmptyRoute"))]
     #[case::disconnected(vec![(0x01, 0x02), (0x03, 0x04)], false, Some("DisconnectedSwaps"))]
+    #[case::unsupported_intermediate_cycle(
+        vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x02)],
+        false,
+        Some("UnsupportedCycle")
+    )]
+    #[case::unsupported_mid_path_cycle(
+        vec![(0x01, 0x02), (0x02, 0x01), (0x01, 0x03)],
+        false,
+        Some("UnsupportedCycle")
+    )]
     fn test_route_validation(
         #[case] swaps: Vec<(u8, u8)>,
         #[case] should_pass: bool,
@@ -1247,6 +1287,9 @@ mod tests {
                 "EmptyRoute" => assert!(matches!(err, RouteValidationError::EmptyRoute)),
                 "DisconnectedSwaps" => {
                     assert!(matches!(err, RouteValidationError::DisconnectedSwaps { .. }))
+                }
+                "UnsupportedCycle" => {
+                    assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }))
                 }
                 _ => panic!("Unknown error type"),
             }

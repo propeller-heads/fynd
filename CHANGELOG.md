@@ -1,3 +1,148 @@
+## [0.17.1](https://github.com/propeller-heads/fynd/compare/0.17.0...0.17.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** pre-build current rustdoc to avoid experimental feature false positives ([4d693b9](https://github.com/propeller-heads/fynd/commit/4d693b984e67ae444d68420f69361489a61b0c1c))
+
+## [0.17.0](https://github.com/propeller-heads/fynd/compare/0.16.2...0.17.0) (2026-03-17)
+
+
+### Features
+
+* add all_onchain keyword for combining on-chain and RFQ protocols ([5d440a6](https://github.com/propeller-heads/fynd/commit/5d440a6ab88e48fcefe988b463a730617d16651f))
+* default to all protocol systems when --protocols is omitted ([c0c8abd](https://github.com/propeller-heads/fynd/commit/c0c8abd9cc3986b2aea227abd7ac6a61d00701f7))
+
+## [0.16.2](https://github.com/propeller-heads/fynd/compare/0.16.1...0.16.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([296d5e9](https://github.com/propeller-heads/fynd/commit/296d5e9c74de55a2f97ee930559c3c086fbefd0d))
+* **benchmark:** clean up unused deps, naming, and API surface ([071b6bf](https://github.com/propeller-heads/fynd/commit/071b6bfcc1a3cbc42319fdfd032ff26c0f33a070))
+* restore fynd-client dev-dep removed by benchmark cleanup ([72fc0fe](https://github.com/propeller-heads/fynd/commit/72fc0fedb13e272c53576af2831fd539783c80a0))
+* update Cargo.lock after restoring fynd-client dev-dep ([e558e31](https://github.com/propeller-heads/fynd/commit/e558e31a50a9fd949b1fd3c1ede1f5f1d8c3dc25))
+* update Cargo.lock to reflect workspace version 0.16.0 ([e8a967f](https://github.com/propeller-heads/fynd/commit/e8a967f8e33c5674f2abf0e3b0dcabd3a1d88ec3))
+
+## [0.16.1](https://github.com/propeller-heads/fynd/compare/0.16.0...0.16.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** build baseline rustdoc from full workspace to fix dep resolution ([8711131](https://github.com/propeller-heads/fynd/commit/8711131281834763ca2ceb901b70b78aa3eda3dc))
+* **ci:** use --workspace to build baseline rustdoc for all member crates ([6cb6f67](https://github.com/propeller-heads/fynd/commit/6cb6f6780fff61750259a6bb25e6b4cae70bf570))
+* correct indentation of types trigger in semver-check workflow ([7b586cb](https://github.com/propeller-heads/fynd/commit/7b586cbad41da53cf00c39578f79b83510f07254))
+* **deps:** bump tycho minimum versions to match locked versions ([1da3534](https://github.com/propeller-heads/fynd/commit/1da3534a4641c37e3e4012e49b1ba6a8fb939bfc))
+
+## [0.16.0](https://github.com/propeller-heads/fynd/compare/0.15.0...0.16.0) (2026-03-16)
+
+
+### Features
+
+* **client:** expose Permit2 transfer support in FyndClient ([08373bf](https://github.com/propeller-heads/fynd/commit/08373bfc5e6cb7150ef041aef6bbc0b40bb7dcb3))
+* **client:** use server-supplied calldata from OrderQuote [ENG-5697] ([5e95a8a](https://github.com/propeller-heads/fynd/commit/5e95a8a65798d9d148d01fa6b34f8f12b78afbe7))
+* **example:** add permit2 example using Permit2 token authorization ([0bbd0e1](https://github.com/propeller-heads/fynd/commit/0bbd0e156273c75915531ef43e45a8c1a4f441d2))
+* **example:** check sell-token allowance before on-chain execution ([f4b6f0f](https://github.com/propeller-heads/fynd/commit/f4b6f0f28d62b213726cd49b03d408145a3b8cdd))
+* **example:** detect ERC-20 balance/allowance slots via eth_call probing ([123bd0a](https://github.com/propeller-heads/fynd/commit/123bd0a8dab41e677518c4b934aa8979c63c34ce))
+* **example:** rewrite tutorial using FyndClient, add --execute flag ([fb8a44b](https://github.com/propeller-heads/fynd/commit/fb8a44bb83f9d91f99d8d81321a4ebce07cddfde))
+
+
+### Bug Fixes
+
+* address PR [#90](https://github.com/propeller-heads/fynd/issues/90) review findings ([de2eee1](https://github.com/propeller-heads/fynd/commit/de2eee13f40d4701786add8ed9213ae33c8c686a))
+* **client:** address PR review findings on Permit2 types ([629e426](https://github.com/propeller-heads/fynd/commit/629e4266ef5c7cf2fbdd275eaca4c2fd6f308736))
+* **example:** approve exact sell amount instead of max uint256 ([2bdb963](https://github.com/propeller-heads/fynd/commit/2bdb9636bd3359e02fa0ed0fc5a2f3aa7290c0d9))
+
+## [0.15.0](https://github.com/propeller-heads/fynd/compare/0.14.1...0.15.0) (2026-03-16)
+
+
+### Features
+
+* **ts-client:** add permit2 module with signing hash and builder helpers ([7baa252](https://github.com/propeller-heads/fynd/commit/7baa252da7de632cd3dfc93d637cb8c10cc49cef))
+* **ts-client:** add Permit2, EncodingOptions, and Transaction domain types ([8efc71c](https://github.com/propeller-heads/fynd/commit/8efc71cc95d955e9f0fd37dc953455a2bbc3883c))
+* **ts-client:** add viemProvider adapter for FyndClient ([f0663ff](https://github.com/propeller-heads/fynd/commit/f0663fff0ab91872c0986ae69b4d87a6df84081a))
+* **ts-client:** export new Permit2 types and builder functions ([8640d56](https://github.com/propeller-heads/fynd/commit/8640d5602dea4fd7160dbb388aad515150846c15))
+* **ts-client:** remove routerAddress, read transaction from quote ([f2951a2](https://github.com/propeller-heads/fynd/commit/f2951a224cc20aedd5ed79e9ec885cb1e3a29327))
+* **ts-client:** update mapping layer for encoding options and transaction ([155a940](https://github.com/propeller-heads/fynd/commit/155a940e20c51f8f7efc2470a795a1b6db70b013))
+
+
+### Bug Fixes
+
+* **ts-client:** add timeout to settle() to prevent infinite polling ([8adcc28](https://github.com/propeller-heads/fynd/commit/8adcc2884d0b3fb1e1e59ca332f5780001bdc07d))
+* **ts-client:** fix slippage serialization, error parsing, and viem receipt polling ([90f2fcc](https://github.com/propeller-heads/fynd/commit/90f2fcc8539a91cb7c690100df0e639d5243f204))
+
+## [0.14.1](https://github.com/propeller-heads/fynd/compare/0.14.0...0.14.1) (2026-03-16)
+
+## [0.14.0](https://github.com/propeller-heads/fynd/compare/0.13.0...0.14.0) (2026-03-16)
+
+
+### Features
+
+* add quote example exercising health check and two quote requests ([a43ab65](https://github.com/propeller-heads/fynd/commit/a43ab65a40276caefa84396826de0b1a6d238d3e))
+
+
+### Bug Fixes
+
+* **ci:** point drift check errors to update-openapi.sh ([61e1a84](https://github.com/propeller-heads/fynd/commit/61e1a84dd4da1b68ec5c5e0d587960b13c1eb5d3))
+* strip spurious surrounding quotes from BlockInfo.hash on deserialize ([57c0f90](https://github.com/propeller-heads/fynd/commit/57c0f9075a98d4176250ee22625c5f50f9be52ce))
+* use Display instead of Debug when formatting block hash in worker ([fae8700](https://github.com/propeller-heads/fynd/commit/fae8700966ab46e021231b6b2132f549d5c28570))
+
+## [0.13.0](https://github.com/propeller-heads/fynd/compare/0.12.1...0.13.0) (2026-03-13)
+
+
+### Features
+
+* Comparison example ([d81668f](https://github.com/propeller-heads/fynd/commit/d81668f9f3f1f78cfafd19ba303ef7b4beb74680))
+
+
+### Bug Fixes
+
+* rename all refs of /v1/solve to /v1/quote ([0c4d661](https://github.com/propeller-heads/fynd/commit/0c4d6613a075a436ca1db039c4c95cbf9ccf6a26))
+
+
+### Reverts
+
+* Restore /v1/solve endpoint in FyndClient ([878fcb2](https://github.com/propeller-heads/fynd/commit/878fcb2a0aecb1f2fcd702b94e41eba41bd375c0))
+
+## [0.12.1](https://github.com/propeller-heads/fynd/compare/0.12.0...0.12.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* blacklist malfunctioning AMPL and Fluid Lite pools ([29e5114](https://github.com/propeller-heads/fynd/commit/29e5114c5825ebe492a6158e4ddf74a76d8f4814))
+
+## [0.12.0](https://github.com/propeller-heads/fynd/compare/0.11.0...0.12.0) (2026-03-13)
+
+
+### Features
+
+* Don't allow intermediate cyclical swaps ([eb515e2](https://github.com/propeller-heads/fynd/commit/eb515e2d202c9607b6497d567d99e1f7ef294657))
+
+## [0.11.0](https://github.com/propeller-heads/fynd/compare/0.10.0...0.11.0) (2026-03-12)
+
+
+### Features
+
+* Add encoding to fynd-core examples ([aea8a11](https://github.com/propeller-heads/fynd/commit/aea8a110412731f98d3718121b275238b9917057))
+
+## [0.10.0](https://github.com/propeller-heads/fynd/compare/0.9.0...0.10.0) (2026-03-12)
+
+
+### Features
+
+* add @fynd/client package scaffold ([5ae612e](https://github.com/propeller-heads/fynd/commit/5ae612e03fdcf42a19c2e40d872b7d1393f0899e))
+* add client types and FyndError ([ffcf3a7](https://github.com/propeller-heads/fynd/commit/ffcf3a71df885bad1a90c4e000f1730fb6846ded))
+* add FyndClient with quote, health, sign, and execute ([ae453b3](https://github.com/propeller-heads/fynd/commit/ae453b32625eed32513672d425a76d204386d05a))
+* add pnpm workspace and lockfile for TypeScript packages ([f60ef30](https://github.com/propeller-heads/fynd/commit/f60ef30d05e0ce43a91fbbd3cceefc0c70cf8f9c))
+* add signing primitives and wire mapping ([6c57b82](https://github.com/propeller-heads/fynd/commit/6c57b82d89a19aa5aa41298ae4b139cdd5d640bb))
+
+
+### Bug Fixes
+
+* remove dead eslint-disable comments and add missing edge-case tests ([58d861f](https://github.com/propeller-heads/fynd/commit/58d861f3919282dff0e93d29adda6892d08c6030))
+* update client to use /v1/quote endpoint (v0.7.0 API) ([c73f681](https://github.com/propeller-heads/fynd/commit/c73f68175054093fb6893a465ab877137aa62810))
+* validate yParity before casting in signature parsing ([837644d](https://github.com/propeller-heads/fynd/commit/837644dfe4a0a5ba840c52c27c07fac100537e95))
+
 ## [0.9.0](https://github.com/propeller-heads/fynd/compare/0.8.1...0.9.0) (2026-03-11)
 
 

@@ -209,7 +209,7 @@ pub enum OrderSide {
 ///
 /// This wraps [`OrderQuote`] with per-worker timing information.
 /// The `solve_time_ms` here is the time taken by an individual worker/algorithm,
-/// not the total OrderManager orchestration time (which is in [`Quote`]).
+/// not the total WorkerPoolRouter orchestration time (which is in [`Quote`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SingleOrderQuote {
@@ -254,7 +254,7 @@ pub struct OrderQuote {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_impact_bps: Option<i32>,
     /// Amount out minus gas cost in output token terms.
-    /// Used by OrderManager to compare solutions from different solvers.
+    /// Used by WorkerPoolRouter to compare solutions from different solvers.
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3498000000"))]
     pub amount_out_net_gas: BigUint,

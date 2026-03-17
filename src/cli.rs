@@ -53,7 +53,10 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub rpc_url: Option<String>,
 
-    /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3)
+    /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3).
+    /// If omitted, all on-chain protocols are fetched from Tycho RPC.
+    /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
+    /// e.g., --protocols all_onchain,rfq:bebop.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 
@@ -82,13 +85,13 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::RECONNECT_DELAY_SECS)]
     pub reconnect_delay_secs: u64,
 
-    /// Order manager timeout in milliseconds
-    #[arg(long, default_value_t = defaults::ORDER_MANAGER_TIMEOUT_MS)]
-    pub order_manager_timeout_ms: u64,
+    /// Worker router timeout in milliseconds
+    #[arg(long, default_value_t = defaults::WORKER_ROUTER_TIMEOUT_MS)]
+    pub worker_router_timeout_ms: u64,
 
     /// Minimum solver responses before early return (0 = wait for all)
-    #[arg(long, default_value_t = defaults::ORDER_MANAGER_MIN_RESPONSES)]
-    pub order_manager_min_responses: usize,
+    #[arg(long, default_value_t = defaults::WORKER_ROUTER_MIN_RESPONSES)]
+    pub worker_router_min_responses: usize,
 
     /// Path to worker pools TOML config file
     #[arg(short, long, env, default_value = "worker_pools.toml")]
@@ -147,8 +150,7 @@ mod cli_tests {
     fn test_arg_parsing_defaults() {
         // Clear ambient env var so the test is deterministic
         std::env::remove_var("RPC_URL");
-        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--protocols", "uniswap_v2"])
-            .expect("parse errored");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");
@@ -159,26 +161,19 @@ mod cli_tests {
         assert_eq!(args.tycho_api_key, None);
         assert_eq!(args.rpc_url, None);
         assert_eq!(args.tycho_url, "localhost:4242");
-        assert_eq!(args.protocols, vec!["uniswap_v2"]);
+        assert!(args.protocols.is_empty());
         assert_eq!(args.min_tvl, 10.0);
         assert_eq!(args.tvl_buffer_multiplier, 1.1);
         assert_eq!(args.gas_refresh_interval_secs, 30);
         assert_eq!(args.reconnect_delay_secs, 5);
-        assert_eq!(args.order_manager_timeout_ms, 100);
-        assert_eq!(args.order_manager_min_responses, 0);
+        assert_eq!(args.worker_router_timeout_ms, 100);
+        assert_eq!(args.worker_router_min_responses, 0);
     }
 
     #[test]
     fn test_arg_parsing_default_worker_pools() {
-        let cli = Cli::try_parse_from(vec![
-            "fynd",
-            "serve",
-            "--tycho-api-key",
-            "test-key",
-            "--protocols",
-            "uniswap_v2",
-        ])
-        .expect("parse errored");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--tycho-api-key", "test-key"])
+            .expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");

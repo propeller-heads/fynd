@@ -157,9 +157,9 @@ pub mod defaults {
     // Gas
     pub const GAS_REFRESH_INTERVAL_SECS: u64 = 30;
 
-    // Order manager
-    pub const ORDER_MANAGER_TIMEOUT_MS: u64 = 100;
-    pub const ORDER_MANAGER_MIN_RESPONSES: usize = 0;
+    // Worker router
+    pub const WORKER_ROUTER_TIMEOUT_MS: u64 = 100;
+    pub const WORKER_ROUTER_MIN_RESPONSES: usize = 0;
 
     // Derived data
     pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;

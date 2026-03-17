@@ -3246,7 +3246,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.9.0"
+version = "0.17.1"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3256,7 +3256,6 @@ dependencies = [
  "clap",
  "dialoguer 0.11.0",
  "dotenv",
- "fastrand",
  "fynd-client",
  "fynd-core",
  "fynd-rpc",
@@ -3282,12 +3281,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fynd-benchmark"
+version = "0.17.1"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bytes",
+ "clap",
+ "fastrand",
+ "fynd-client",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.22",
+ "wiremock",
+]
+
+[[package]]
 name = "fynd-client"
-version = "0.9.0"
+version = "0.17.1"
 dependencies = [
  "alloy",
  "bytes",
  "fynd-rpc-types",
+ "hex",
  "num-bigint",
  "num-traits",
  "reqwest",
@@ -3301,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.9.0"
+version = "0.17.1"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3331,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.9.0"
+version = "0.17.1"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3360,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.9.0"
+version = "0.17.1"
 dependencies = [
  "fynd-core",
  "hex",
