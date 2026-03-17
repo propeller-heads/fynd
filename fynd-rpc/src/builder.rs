@@ -111,13 +111,14 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the traded_n_days_ago filter (default: 3).
+    /// Sets the traded_n_days_ago used to filter tokens (default: 3).
     pub fn traded_n_days_ago(mut self, days: u64) -> Self {
         self.traded_n_days_ago = days;
         self
     }
 
-    /// Sets the TVL buffer ratio (default: 1.1).
+    /// Sets the ratio used to define the lower bound of the TVL filter for hysteresis (default:
+    /// 1.1).
     pub fn tvl_buffer_ratio(mut self, multiplier: f64) -> Self {
         self.tvl_buffer_ratio = multiplier;
         self
