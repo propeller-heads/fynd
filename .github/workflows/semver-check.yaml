@@ -85,8 +85,8 @@ jobs:
           git worktree add /tmp/baseline origin/main
           cargo doc \
             --manifest-path /tmp/baseline/Cargo.toml \
-            --lib \
-            --no-deps 2>&1 || true
+            --workspace \
+            --no-deps
 
       - name: Check for breaking changes
         id: check
