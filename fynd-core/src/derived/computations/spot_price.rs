@@ -103,10 +103,12 @@ impl DerivedComputation for SpotPriceComputation {
             let Some(sim_state) = market_guard.get_simulation_state(component_id) else {
                 warn!(component_id, "missing simulation state, skipping pool");
                 spot_prices.retain(|key, _| &key.0 != component_id);
-                failed_items.push(FailedItem {
-                    key: component_id.to_string(),
-                    error: "missing simulation state".to_string(),
-                });
+                for perm in token_addresses.iter().permutations(2) {
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        error: "missing simulation state".to_string(),
+                    });
+                }
                 continue;
             };
 
@@ -117,10 +119,12 @@ impl DerivedComputation for SpotPriceComputation {
             let Ok(pool_tokens) = pool_tokens else {
                 warn!(component_id, "missing token metadata, skipping pool");
                 spot_prices.retain(|key, _| &key.0 != component_id);
-                failed_items.push(FailedItem {
-                    key: component_id.to_string(),
-                    error: "missing token metadata".to_string(),
-                });
+                for perm in token_addresses.iter().permutations(2) {
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        error: "missing token metadata".to_string(),
+                    });
+                }
                 continue;
             };
 
@@ -242,12 +246,15 @@ mod tests {
         assert!(output.data.contains_key(&key_eth_usdc), "ETH→USDC price should be present");
         assert!(output.data.contains_key(&key_usdc_eth), "USDC→ETH price should be present");
 
+        // Component-level failures are expanded to pair-level keys
+        let key_eth_dai = format!("pool2/{}/{}", eth.address, dai.address);
+        let key_dai_eth = format!("pool2/{}/{}", dai.address, eth.address);
         assert!(
             output
                 .failed_items
                 .iter()
-                .any(|item| item.key == "pool2"),
-            "pool2 should appear in failed_items"
+                .any(|item| item.key == key_eth_dai || item.key == key_dai_eth),
+            "pool2 pair keys should appear in failed_items"
         );
     }
 

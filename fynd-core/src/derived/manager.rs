@@ -296,7 +296,7 @@ impl ComputationManager {
                 self.store
                     .write()
                     .await
-                    .set_spot_prices(output.data, block);
+                    .set_spot_prices(output.data, output.failed_items.clone(), block, changed.is_full_recompute);
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
@@ -358,7 +358,7 @@ impl ComputationManager {
                 } else {
                     info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
                 }
-                store_write.set_token_prices(output.data, block);
+                store_write.set_token_prices(output.data, output.failed_items.clone(), block, changed.is_full_recompute);
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
@@ -393,7 +393,7 @@ impl ComputationManager {
                 } else {
                     info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
                 }
-                store_write.set_pool_depths(output.data, block);
+                store_write.set_pool_depths(output.data, output.failed_items.clone(), block, changed.is_full_recompute);
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
@@ -732,5 +732,21 @@ mod tests {
                 "ComputationComplete should carry failed_items for pool2"
             );
         }
+
+        // The store should persist the failure reason for the failed pool.
+        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for pool2.
+        let eth = token(1, "ETH");
+        let dai = token(3, "DAI");
+        let store = manager.store();
+        let guard = store.read().await;
+        let key_eth_dai =
+            ("eth_dai".to_string(), eth.address.clone(), dai.address.clone());
+        let key_dai_eth =
+            ("eth_dai".to_string(), dai.address.clone(), eth.address.clone());
+        assert!(
+            guard.spot_price_failure(&key_eth_dai).is_some() ||
+                guard.spot_price_failure(&key_dai_eth).is_some(),
+            "store should persist failure reason for eth_dai (missing sim state)"
+        );
     }
 }

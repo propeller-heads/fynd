@@ -670,7 +670,7 @@ mod tests {
         wrapped_store
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_prices_output.data, 0);
+            .set_spot_prices(spot_prices_output.data, vec![], 0, true);
 
         (wrapped_market, wrapped_store)
     }
@@ -1288,7 +1288,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, 0);
+            .set_spot_prices(spot_output.data, vec![], 0, true);
 
         let computation = computation_for(&eth.address);
         let result = computation

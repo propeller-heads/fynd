@@ -154,10 +154,12 @@ impl DerivedComputation for PoolDepthComputation {
             let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
                 warn!(component_id, "missing simulation state, skipping pool");
                 pool_depths.retain(|key, _| &key.0 != component_id);
-                failed_items.push(FailedItem {
-                    key: component_id.to_string(),
-                    error: "missing simulation state".to_string(),
-                });
+                for perm in token_addresses.iter().permutations(2) {
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        error: "missing simulation state".to_string(),
+                    });
+                }
                 continue;
             };
 
@@ -168,10 +170,12 @@ impl DerivedComputation for PoolDepthComputation {
             let Ok(pool_tokens) = pool_tokens else {
                 warn!(component_id, "missing token metadata, skipping pool");
                 pool_depths.retain(|key, _| &key.0 != component_id);
-                failed_items.push(FailedItem {
-                    key: component_id.to_string(),
-                    error: "missing token metadata".to_string(),
-                });
+                for perm in token_addresses.iter().permutations(2) {
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        error: "missing token metadata".to_string(),
+                    });
+                }
                 continue;
             };
 
@@ -389,7 +393,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::new(), 0);
+            .set_spot_prices(SpotPrices::new(), vec![], 0, true);
         let changed = ChangedComponents::default();
 
         let output = PoolDepthComputation::default()
@@ -461,7 +465,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, 0);
+            .set_spot_prices(spot_output.data, vec![], 0, true);
 
         let pool_depths_output = PoolDepthComputation::default()
             .compute(&market, &derived, &changed)
@@ -740,7 +744,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(partial_spot, 0);
+            .set_spot_prices(partial_spot, vec![], 0, true);
 
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
