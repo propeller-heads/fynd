@@ -3256,7 +3256,6 @@ dependencies = [
  "clap",
  "dialoguer 0.11.0",
  "dotenv",
- "fastrand",
  "fynd-client",
  "fynd-core",
  "fynd-rpc",
@@ -3279,6 +3278,25 @@ dependencies = [
  "tycho-execution",
  "tycho-simulation",
  "utoipa 5.4.0",
+]
+
+[[package]]
+name = "fynd-benchmark"
+version = "0.16.1"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bytes",
+ "clap",
+ "fastrand",
+ "fynd-client",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.22",
+ "wiremock",
 ]
 
 [[package]]

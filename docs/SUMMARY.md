@@ -9,3 +9,4 @@
   * [API Specifications](get-started/overview/api-specifications.md)
 * [Quickstart](get-started/quickstart/README.md)
   * [Executing the solutions](get-started/quickstart/executing-the-solutions.md)
+* [Benchmarking](get-started/benchmarking.md)

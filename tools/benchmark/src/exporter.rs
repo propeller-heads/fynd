@@ -1,8 +1,10 @@
+//! Statistics calculation, console rendering, and JSON export.
+
 use crate::config::{BenchmarkResults, TimingStats};
 
 impl TimingStats {
-    /// Calculates comprehensive statistics from timing measurements.
-    /// Returns min, max, mean, median, p95, p99, and standard deviation.
+    /// Derive min/max/mean/median/p95/p99/stddev from raw measurements.
+    /// Warns when fewer than 50 samples are provided.
     pub fn from_measurements(times: &[u64]) -> Option<Self> {
         if times.is_empty() {
             return None;
@@ -40,7 +42,6 @@ impl TimingStats {
         Some(Self { min, max, mean, median, p95, p99, std_dev })
     }
 
-    /// Prints formatted statistics to the console with a given label.
     pub fn print(&self, label: &str) {
         println!("\n{}", label);
         println!("  Min:     {}ms", self.min);
@@ -53,16 +54,13 @@ impl TimingStats {
     }
 }
 
-/// Prints formatted statistics to the console with a given label.
 pub fn print_statistics(times: &[u64], label: &str) {
     if let Some(stats) = TimingStats::from_measurements(times) {
         stats.print(label);
     }
 }
 
-/// Prints an ASCII histogram with fixed-range buckets:
-/// 0-100ms in 10ms steps, 100ms+ in 50ms steps.
-/// Trims leading/trailing empty buckets but preserves interior gaps.
+/// Render an ASCII histogram (10ms buckets up to 100ms, then 50ms buckets).
 pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     if times.is_empty() {
         return;
@@ -126,8 +124,7 @@ pub fn print_histogram(times: &[u64], label: &str, width: usize) {
     }
 }
 
-/// Exports benchmark results to a JSON file with complete configuration and statistics.
-/// The output includes worker pool configuration content and all timing measurements.
+/// Serialize `BenchmarkResults` to a pretty-printed JSON file.
 pub fn export_results(
     results: BenchmarkResults,
     output_file: String,
@@ -137,4 +134,66 @@ pub fn export_results(
     tracing::info!("Results exported to: {}", output_file);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_returns_none() {
+        assert!(TimingStats::from_measurements(&[]).is_none());
+    }
+
+    #[test]
+    fn single_element() {
+        let stats = TimingStats::from_measurements(&[100]).unwrap();
+        assert_eq!(stats.min, 100);
+        assert_eq!(stats.max, 100);
+        assert_eq!(stats.mean, 100);
+        assert_eq!(stats.median, 100);
+        assert_eq!(stats.p95, 100);
+        assert_eq!(stats.p99, 100);
+        assert!((stats.std_dev - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn known_five_values() {
+        let stats = TimingStats::from_measurements(&[50, 10, 40, 20, 30]).unwrap();
+        assert_eq!(stats.min, 10);
+        assert_eq!(stats.max, 50);
+        assert_eq!(stats.mean, 30); // 150 / 5
+        assert_eq!(stats.median, 30); // sorted[2]
+        let expected_std = (200.0_f64).sqrt(); // ~14.14
+        assert!((stats.std_dev - expected_std).abs() < 0.01);
+    }
+
+    #[test]
+    fn all_same() {
+        let stats = TimingStats::from_measurements(&[42; 10]).unwrap();
+        assert_eq!(stats.min, 42);
+        assert_eq!(stats.max, 42);
+        assert_eq!(stats.mean, 42);
+        assert_eq!(stats.median, 42);
+        assert!((stats.std_dev - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn two_elements() {
+        let stats = TimingStats::from_measurements(&[10, 20]).unwrap();
+        assert_eq!(stats.min, 10);
+        assert_eq!(stats.max, 20);
+        assert_eq!(stats.mean, 15);
+        assert_eq!(stats.median, 20); // sorted[1] (upper-middle)
+    }
+
+    #[test]
+    fn large_dataset_percentiles() {
+        let data: Vec<u64> = (1..=100).collect();
+        let stats = TimingStats::from_measurements(&data).unwrap();
+        assert_eq!(stats.min, 1);
+        assert_eq!(stats.max, 100);
+        assert_eq!(stats.p95, 96);
+        assert_eq!(stats.p99, 100);
+    }
 }
