@@ -1,3 +1,18 @@
+## [0.18.0](https://github.com/propeller-heads/fynd/compare/0.17.2...0.18.0) (2026-03-17)
+
+
+### Features
+
+* add chain-specific defaults for tycho_url ([92cd81d](https://github.com/propeller-heads/fynd/commit/92cd81dee3ac92781aa4555e969d06a38f41750c)), closes [#88](https://github.com/propeller-heads/fynd/issues/88)
+* add traded_n_days_ago parameter ([e92946c](https://github.com/propeller-heads/fynd/commit/e92946c37104761b2c0d27657f90788a539b0037))
+
+
+### Bug Fixes
+
+* apply TVL buffer as lower bound for hysteresis ([d0cdf09](https://github.com/propeller-heads/fynd/commit/d0cdf099a321811b2cad80b9c7ac846b152a8f2e))
+* connect min_token_quality CLI arg to builder ([df7785b](https://github.com/propeller-heads/fynd/commit/df7785b47193917335a51829af563a8c2aab04af))
+* error on unknown chain in default_tycho_url ([23a5411](https://github.com/propeller-heads/fynd/commit/23a5411bcb13c89de890c26403b52a80d654aca3))
+
 ## [0.17.2](https://github.com/propeller-heads/fynd/compare/0.17.1...0.17.2) (2026-03-17)
 
 
