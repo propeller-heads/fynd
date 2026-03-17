@@ -254,7 +254,8 @@ Provides `extract_subset()` for creating filtered snapshots that algorithms can 
 **Location:** `fynd-core/src/feed/tycho_feed.rs`
 
 Background task that connects to Tycho's WebSocket API, processes component/state updates, updates SharedMarketData, and
-broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis, blacklisting, and token quality filtering.
+broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis (components are added at `min_tvl` and removed at
+`min_tvl / tvl_buffer_ratio`), token recency filtering (`traded_n_days_ago`), blacklisting, and token quality filtering.
 
 ---
 

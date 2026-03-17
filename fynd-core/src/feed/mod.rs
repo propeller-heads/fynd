@@ -29,19 +29,20 @@ pub struct TychoFeedConfig {
     pub(crate) min_tvl: f64,
     /// Minimum token quality filter.
     pub(crate) min_token_quality: i32,
-    /// Multiplier used to define the upper bound of the TVL filter.
-    /// The upper bound is calculated as `min_tvl * tvl_buffer_multiplier`.
-    /// Only components with TVL above this upper bound will be added to the market data.
-    /// This approach helps to reduce fluctuations caused by components hovering around a single
-    /// threshold.
+    /// Ratio used to define the lower bound of the TVL filter for hysteresis.
+    /// The lower bound is calculated as `min_tvl / tvl_buffer_ratio`.
+    /// Components are added when TVL >= `min_tvl` and removed when TVL drops below
+    /// `min_tvl / tvl_buffer_ratio`.
     /// Default is 1.1 (10% buffer).
-    pub(crate) tvl_buffer_multiplier: f64,
+    pub(crate) tvl_buffer_ratio: f64,
     /// Gas price refresh interval.
     /// Default is 30 seconds.
     pub(crate) gas_refresh_interval: Duration,
     /// Reconnect delay on connection failure.
     /// Default is 5 seconds.
     pub(crate) reconnect_delay: Duration,
+    /// Only include tokens traded within this many days.
+    pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from routing.
     pub(crate) blacklisted_components: HashSet<String>,
 }
@@ -63,15 +64,16 @@ impl TychoFeedConfig {
             protocols,
             min_tvl,
             min_token_quality: 100,
-            tvl_buffer_multiplier: 1.1,
+            traded_n_days_ago: None,
+            tvl_buffer_ratio: 1.1,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
             blacklisted_components: HashSet::new(),
         }
     }
 
-    pub fn tvl_buffer_multiplier(mut self, tvl_buffer_multiplier: f64) -> Self {
-        self.tvl_buffer_multiplier = tvl_buffer_multiplier;
+    pub fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
+        self.tvl_buffer_ratio = tvl_buffer_ratio;
         self
     }
 
@@ -87,6 +89,11 @@ impl TychoFeedConfig {
 
     pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
+        self
+    }
+
+    pub fn traded_n_days_ago(mut self, days: u64) -> Self {
+        self.traded_n_days_ago = Some(days);
         self
     }
 

@@ -151,7 +151,8 @@ pub mod defaults {
     // Tycho stream
     pub const MIN_TVL: f64 = 10.0;
     pub const MIN_TOKEN_QUALITY: i32 = 100;
-    pub const TVL_BUFFER_MULTIPLIER: f64 = 1.1;
+    pub const TRADED_N_DAYS_AGO: u64 = 3;
+    pub const TVL_BUFFER_RATIO: f64 = 1.1;
     pub const RECONNECT_DELAY_SECS: u64 = 5;
 
     // Gas
@@ -169,4 +170,19 @@ pub mod defaults {
     pub const POOL_MIN_HOPS: usize = 1;
     pub const POOL_MAX_HOPS: usize = 3;
     pub const POOL_TIMEOUT_MS: u64 = 100;
+
+    /// Returns the default Tycho Fynd endpoint URL for the given chain.
+    ///
+    /// Returns an error if the chain is not recognized.
+    pub fn default_tycho_url(chain: &str) -> Result<&str, String> {
+        match chain.to_lowercase().as_str() {
+            "ethereum" => Ok("tycho-fynd-ethereum.propellerheads.xyz"),
+            "base" => Ok("tycho-fynd-base.propellerheads.xyz"),
+            "unichain" => Ok("tycho-fynd-unichain.propellerheads.xyz"),
+            other => Err(format!(
+                "no default Tycho URL for chain '{}'. Please provide --tycho-url explicitly.",
+                other
+            )),
+        }
+    }
 }

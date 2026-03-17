@@ -37,9 +37,9 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::HTTP_PORT, env)]
     pub http_port: u16,
 
-    /// Tycho WebSocket URL (default: tycho-beta.propellerheads.xyz)
-    #[arg(long, default_value = "localhost:4242", env)]
-    pub tycho_url: String,
+    /// Tycho WebSocket URL. Defaults to the Fynd endpoint for the selected chain.
+    #[arg(long, env)]
+    pub tycho_url: Option<String>,
 
     /// Tycho API key
     #[arg(long, env)]
@@ -65,17 +65,20 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::MIN_TVL)]
     pub min_tvl: f64,
 
-    /// TVL buffer multiplier.
+    /// TVL buffer ratio.
     /// Used to avoid fluctuations caused by components hovering around a single threshold.
-    /// Default is 1.1 (10% buffer). For example, if the minimum TVL is 10 ETH, then components
-    /// that drop below 10 ETH will be removed from the market data and components that exceed 11
-    /// ETH will be added.
-    #[arg(long, default_value_t = defaults::TVL_BUFFER_MULTIPLIER)]
-    pub tvl_buffer_multiplier: f64,
+    /// Default is 1.1 (10% buffer). For example, if the minimum TVL is 10 ETH, components are
+    /// added when TVL >= 10 ETH and removed when TVL drops below 10 / 1.1 ≈ 9.09 ETH.
+    #[arg(long, default_value_t = defaults::TVL_BUFFER_RATIO)]
+    pub tvl_buffer_ratio: f64,
 
     /// Minimum token quality filter.
     #[arg(long, default_value_t = defaults::MIN_TOKEN_QUALITY)]
     pub min_token_quality: i32,
+
+    /// Only include tokens traded within this many days.
+    #[arg(long, default_value_t = defaults::TRADED_N_DAYS_AGO)]
+    pub traded_n_days_ago: u64,
 
     /// Gas price refresh interval in seconds
     #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL_SECS)]
@@ -140,7 +143,7 @@ mod cli_tests {
         assert_eq!(args.http_port, 8080);
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
         assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
-        assert_eq!(args.tycho_url, "wss://custom.tycho.url");
+        assert_eq!(args.tycho_url, Some("wss://custom.tycho.url".to_string()));
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, 20.0);
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
@@ -160,10 +163,10 @@ mod cli_tests {
         assert_eq!(args.http_port, 3000);
         assert_eq!(args.tycho_api_key, None);
         assert_eq!(args.rpc_url, None);
-        assert_eq!(args.tycho_url, "localhost:4242");
+        assert_eq!(args.tycho_url, None);
         assert!(args.protocols.is_empty());
         assert_eq!(args.min_tvl, 10.0);
-        assert_eq!(args.tvl_buffer_multiplier, 1.1);
+        assert_eq!(args.tvl_buffer_ratio, 1.1);
         assert_eq!(args.gas_refresh_interval_secs, 30);
         assert_eq!(args.reconnect_delay_secs, 5);
         assert_eq!(args.worker_router_timeout_ms, 100);
