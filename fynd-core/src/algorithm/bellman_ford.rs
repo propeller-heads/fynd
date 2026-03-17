@@ -29,7 +29,7 @@ use tycho_simulation::{
 use super::{Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
 use crate::{
     derived::{computation::ComputationRequirements, types::{SpotPrices, TokenGasPrices}, SharedDerivedDataRef},
-    feed::market_data::{SharedMarketData, SharedMarketDataRef},
+    feed::market_data::SharedMarketDataRef,
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
