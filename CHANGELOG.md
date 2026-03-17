@@ -1,3 +1,16 @@
+## [0.19.0](https://github.com/propeller-heads/fynd/compare/0.18.0...0.19.0) (2026-03-17)
+
+
+### Features
+
+* add gas_price_age_ms to health response ([7832b9a](https://github.com/propeller-heads/fynd/commit/7832b9a0f93d0f7a60f65527254e0208e4edadbe))
+* optionally return 503 on stale gas price ([85103dd](https://github.com/propeller-heads/fynd/commit/85103ddd77643f74015ddeadaa43710364d6141a))
+
+
+### Bug Fixes
+
+* handle gas price RPC errors instead of panicking ([e544b97](https://github.com/propeller-heads/fynd/commit/e544b97e3f3a614517c847d8e8ccc1e0ffb550d7))
+
 ## [0.18.0](https://github.com/propeller-heads/fynd/compare/0.17.2...0.18.0) (2026-03-17)
 
 
