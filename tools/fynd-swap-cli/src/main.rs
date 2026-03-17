@@ -18,15 +18,9 @@ use actix_web::dev::ServerHandle;
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{keccak256, map::B256HashMap, Address, Bytes as AlloyBytes, TxKind, B256, U256},
+    primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::{
-        state::{AccountOverride, StateOverride},
-        TransactionRequest,
-    },
     signers::{local::PrivateKeySigner, Signer},
-    sol,
-    sol_types::SolCall,
 };
 use anyhow::{bail, Context};
 use bytes::Bytes;
@@ -39,170 +33,25 @@ use fynd_client::{
 use fynd_rpc::{
     builder::{parse_chain, FyndBuilder},
     config::WorkerPoolsConfig,
+    protocols::fetch_protocol_systems,
 };
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_common::models::Chain;
 
+mod erc20;
 mod permit2;
-
-// ─── ERC-20 helpers ──────────────────────────────────────────────────────────
-
-sol! {
-    interface IERC20 {
-        function balanceOf(address account) external view returns (uint256);
-        function allowance(address owner, address spender) external view returns (uint256);
-    }
-}
-
-const MAX_PROBE_SLOT: u64 = 20;
-
-fn balance_slot_at(holder: Address, position: u64) -> B256 {
-    let mut buf = [0u8; 64];
-    buf[12..32].copy_from_slice(holder.as_slice());
-    buf[56..64].copy_from_slice(&position.to_be_bytes());
-    keccak256(buf)
-}
-
-fn allowance_slot_at(owner: Address, spender: Address, position: u64) -> B256 {
-    let inner = balance_slot_at(owner, position);
-    let mut buf = [0u8; 64];
-    buf[12..32].copy_from_slice(spender.as_slice());
-    buf[32..64].copy_from_slice(inner.as_slice());
-    keccak256(buf)
-}
-
-fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOverride {
-    let mut state_diff = B256HashMap::default();
-    state_diff.insert(slot, value);
-    let mut overrides = StateOverride::default();
-    overrides
-        .insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
-    overrides
-}
-
-async fn find_balance_slot(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    holder: Address,
-) -> anyhow::Result<u64> {
-    let calldata = IERC20::balanceOfCall { account: holder }.abi_encode();
-    let target = B256::from(U256::MAX);
-    for position in 0..=MAX_PROBE_SLOT {
-        let slot = balance_slot_at(holder, position);
-        let result = provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(token)),
-                input: AlloyBytes::from(calldata.clone()).into(),
-                ..Default::default()
-            })
-            .overrides(state_override_single(token, slot, target))
-            .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
-            return Ok(position);
-        }
-    }
-    bail!(
-        "could not detect balance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
-         the token may use a non-standard storage layout"
-    )
-}
-
-async fn find_allowance_slot(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> anyhow::Result<u64> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let target = B256::from(U256::MAX);
-    for position in 0..=MAX_PROBE_SLOT {
-        let slot = allowance_slot_at(owner, spender, position);
-        let result = provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(token)),
-                input: AlloyBytes::from(calldata.clone()).into(),
-                ..Default::default()
-            })
-            .overrides(state_override_single(token, slot, target))
-            .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
-            return Ok(position);
-        }
-    }
-    bail!(
-        "could not detect allowance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
-         the token may use a non-standard storage layout"
-    )
-}
-
-async fn read_erc20_allowance(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> anyhow::Result<BigUint> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let result = provider
-        .call(TransactionRequest {
-            to: Some(TxKind::Call(token)),
-            input: AlloyBytes::from(calldata).into(),
-            ..Default::default()
-        })
-        .await?;
-    if result.len() < 32 {
-        bail!("allowance() returned {} bytes, expected 32", result.len());
-    }
-    Ok(BigUint::from_bytes_be(&result[..32]))
-}
-
-// ─── Protocol fetching (for embedded solver) ─────────────────────────────────
-
-async fn fetch_protocol_systems(
-    tycho_url: &str,
-    auth_key: Option<&str>,
-    use_tls: bool,
-    chain: Chain,
-) -> anyhow::Result<Vec<String>> {
-    use tycho_simulation::{
-        tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
-        tycho_common::dto::{PaginationParams, ProtocolSystemsRequestBody},
-    };
-
-    info!("Fetching available protocol systems from Tycho RPC...");
-    let rpc_url =
-        if use_tls { format!("https://{tycho_url}") } else { format!("http://{tycho_url}") };
-    let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
-    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
-
-    const PAGE_SIZE: i64 = 100;
-    let mut all_protocols = Vec::new();
-    let mut page = 0;
-    loop {
-        let request = ProtocolSystemsRequestBody {
-            chain: chain.into(),
-            pagination: PaginationParams { page, page_size: PAGE_SIZE },
-        };
-        let response = rpc_client
-            .get_protocol_systems(&request)
-            .await?;
-        let count = response.protocol_systems.len();
-        all_protocols.extend(response.protocol_systems);
-        if (count as i64) < PAGE_SIZE {
-            break;
-        }
-        page += 1;
-    }
-    Ok(all_protocols)
-}
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+/// Token transfer flow — mirrors `UserTransferType` from `fynd-rpc-types`.
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 enum TransferType {
-    Erc20,
-    Permit2,
+    /// Standard ERC-20 approval + transferFrom.
+    TransferFrom,
+    /// Permit2 off-chain signature flow.
+    TransferFromPermit2,
 }
 
 /// fynd-swap-cli — quote and execute token swaps via the Fynd solver.
@@ -231,7 +80,7 @@ struct Cli {
     fynd_url: String,
 
     /// Token transfer flow
-    #[arg(long, default_value = "erc20")]
+    #[arg(long, default_value = "transfer-from")]
     transfer_type: TransferType,
 
     /// Submit the swap on-chain instead of dry-running it.
@@ -239,7 +88,7 @@ struct Cli {
     #[arg(long)]
     execute: bool,
 
-    /// Tycho Router address (required for permit2 flow)
+    /// Tycho Router address (required for transfer-from-permit2 flow)
     #[arg(long)]
     router: Option<String>,
 
@@ -301,8 +150,8 @@ async fn build_dry_run_overrides(
 ) -> anyhow::Result<StorageOverrides> {
     info!("Detecting storage slots for {sell_token:#x}...");
     let (balance_res, allowance_res) = tokio::join!(
-        find_balance_slot(provider, sell_token, sender),
-        find_allowance_slot(provider, sell_token, sender, spender),
+        erc20::find_balance_slot(provider, sell_token, sender),
+        erc20::find_allowance_slot(provider, sell_token, sender, spender),
     );
     let balance_pos = balance_res?;
     let allowance_pos = allowance_res?;
@@ -313,12 +162,12 @@ async fn build_dry_run_overrides(
     let mut overrides = StorageOverrides::default();
     overrides.insert(
         token_key.clone(),
-        Bytes::copy_from_slice(&balance_slot_at(sender, balance_pos).0),
+        Bytes::copy_from_slice(&erc20::balance_slot_at(sender, balance_pos).0),
         max_val.clone(),
     );
     overrides.insert(
         token_key,
-        Bytes::copy_from_slice(&allowance_slot_at(sender, spender, allowance_pos).0),
+        Bytes::copy_from_slice(&erc20::allowance_slot_at(sender, spender, allowance_pos).0),
         max_val,
     );
     Ok(overrides)
@@ -500,17 +349,18 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Permit2 pre-flight ────────────────────────────────────────────────────
     let encoding_options = match cli.transfer_type {
-        TransferType::Erc20 => EncodingOptions::new(slippage),
-        TransferType::Permit2 => {
+        TransferType::TransferFrom => EncodingOptions::new(slippage),
+        TransferType::TransferFromPermit2 => {
             let router_str = cli.router.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("--router is required for --transfer-type permit2")
+                anyhow::anyhow!("--router is required for --transfer-type transfer-from-permit2")
             })?;
             let router_addr = Address::from_str(router_str)
                 .with_context(|| format!("invalid router address: {router_str}"))?;
 
             let (nonce, expiration, sig_deadline) = if cli.execute {
                 let allowance =
-                    read_erc20_allowance(&provider, sell_token, sender, permit2_addr).await?;
+                    erc20::read_erc20_allowance(&provider, sell_token, sender, permit2_addr)
+                        .await?;
                 if allowance < amount {
                     eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
                     eprintln!("  Token:     {sell_token:#x}");
@@ -615,9 +465,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── ERC-20 execute: verify allowance before signing ───────────────────────
     if cli.execute {
-        if let TransferType::Erc20 = cli.transfer_type {
+        if let TransferType::TransferFrom = cli.transfer_type {
             let allowance =
-                read_erc20_allowance(&provider, sell_token, sender, router_from_quote).await?;
+                erc20::read_erc20_allowance(&provider, sell_token, sender, router_from_quote)
+                    .await?;
             if allowance < amount {
                 eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
                 eprintln!("  Token:     {sell_token:#x}");
@@ -651,11 +502,11 @@ async fn main() -> anyhow::Result<()> {
         ExecutionOptions::default()
     } else {
         // Dry-run: the spender for the allowance slot depends on the flow.
-        // ERC-20: spender is the Fynd router (from quote).
-        // Permit2: spender is the Permit2 contract (the router is authorised via EIP-712).
+        // TransferFrom: spender is the Fynd router (from quote).
+        // TransferFromPermit2: spender is the Permit2 contract (router authorised via EIP-712).
         let spender = match cli.transfer_type {
-            TransferType::Erc20 => router_from_quote,
-            TransferType::Permit2 => permit2_addr,
+            TransferType::TransferFrom => router_from_quote,
+            TransferType::TransferFromPermit2 => permit2_addr,
         };
         let overrides = build_dry_run_overrides(&provider, sell_token, sender, spender).await?;
         info!("Submitting dry-run execution...");
@@ -696,78 +547,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use alloy::hex;
-
     use super::*;
-
-    // ── slot computation ──────────────────────────────────────────────────────
-
-    #[test]
-    fn balance_slot_zero_address_position_zero() {
-        let slot = balance_slot_at(Address::ZERO, 0);
-        // keccak256(0x00…00 ++ 0x00…00) — well-known value used in Solidity mapping proofs
-        let expected = hex!("ad3228b676f7d3cd4284a5443f17f1962b36e491b30a40b2405849e597ba5fb5");
-        assert_eq!(slot.0, expected);
-    }
-
-    #[test]
-    fn balance_slot_usdc_position_zero() {
-        // USDC mainnet: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
-        let usdc: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-            .parse()
-            .unwrap();
-        let slot = balance_slot_at(usdc, 0);
-        let expected = hex!("c6521c8ea4247e8beb499344e591b9401fb2807ff9997dd598fd9e56c73a264d");
-        assert_eq!(slot.0, expected);
-    }
-
-    #[test]
-    fn balance_slot_position_changes_output() {
-        let usdc: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-            .parse()
-            .unwrap();
-        let slot0 = balance_slot_at(usdc, 0);
-        let slot1 = balance_slot_at(usdc, 1);
-        let expected1 = hex!("84893e0f271e5f8233d24aa85ba38e0d2ed8f0fc8f608c286ccee51e6c35dd6e");
-        assert_ne!(slot0, slot1, "different positions must yield different slots");
-        assert_eq!(slot1.0, expected1);
-    }
-
-    #[test]
-    fn allowance_slot_usdc_weth_position_zero() {
-        let usdc: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-            .parse()
-            .unwrap();
-        let weth: Address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-            .parse()
-            .unwrap();
-        let slot = allowance_slot_at(usdc, weth, 0);
-        let expected = hex!("7b7d28f4178b11583278450af3b85d49a04fd0597c53f7ed3fbfac3750fde37d");
-        assert_eq!(slot.0, expected);
-    }
-
-    #[test]
-    fn allowance_slot_differs_from_balance_slot() {
-        let usdc: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-            .parse()
-            .unwrap();
-        let weth: Address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-            .parse()
-            .unwrap();
-        assert_ne!(balance_slot_at(usdc, 0), allowance_slot_at(usdc, weth, 0));
-    }
-
-    #[test]
-    fn allowance_slot_is_not_symmetric() {
-        let usdc: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-            .parse()
-            .unwrap();
-        let weth: Address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-            .parse()
-            .unwrap();
-        // allowance(owner, spender) != allowance(spender, owner)
-        assert_ne!(allowance_slot_at(usdc, weth, 0), allowance_slot_at(weth, usdc, 0));
-    }
 
     // ── max_uint160 ───────────────────────────────────────────────────────────
 
@@ -788,13 +568,15 @@ mod tests {
 
     #[test]
     fn cli_defaults() {
+        std::env::remove_var("TYCHO_API_KEY");
+        std::env::remove_var("RPC_URL");
         let cli = Cli::try_parse_from(["fynd-swap-cli"]).unwrap();
         assert_eq!(cli.sell_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         assert_eq!(cli.buy_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
         assert_eq!(cli.sell_amount, 1_000_000_000u128);
         assert_eq!(cli.slippage_bps, 50u32);
         assert_eq!(cli.fynd_url, "http://localhost:3000");
-        assert!(matches!(cli.transfer_type, TransferType::Erc20));
+        assert_eq!(cli.transfer_type, TransferType::TransferFrom);
         assert_eq!(cli.permit2, "0x000000000022D473030F116dDEE9F6B43aC78BA3");
         assert_eq!(cli.http_port, 3000u16);
         assert!(!cli.execute);
@@ -808,12 +590,12 @@ mod tests {
         let cli = Cli::try_parse_from([
             "fynd-swap-cli",
             "--transfer-type",
-            "permit2",
+            "transfer-from-permit2",
             "--router",
             "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         ])
         .unwrap();
-        assert!(matches!(cli.transfer_type, TransferType::Permit2));
+        assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
         assert_eq!(cli.router.as_deref(), Some("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"));
     }
 
@@ -834,15 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn transfer_type_erc20_parses() {
-        let cli = Cli::try_parse_from(["fynd-swap-cli", "--transfer-type", "erc20"]).unwrap();
-        assert!(matches!(cli.transfer_type, TransferType::Erc20));
+    fn transfer_type_transfer_from_parses() {
+        let cli =
+            Cli::try_parse_from(["fynd-swap-cli", "--transfer-type", "transfer-from"]).unwrap();
+        assert_eq!(cli.transfer_type, TransferType::TransferFrom);
     }
 
     #[test]
-    fn transfer_type_permit2_parses() {
-        let cli = Cli::try_parse_from(["fynd-swap-cli", "--transfer-type", "permit2"]).unwrap();
-        assert!(matches!(cli.transfer_type, TransferType::Permit2));
+    fn transfer_type_transfer_from_permit2_parses() {
+        let cli = Cli::try_parse_from([
+            "fynd-swap-cli",
+            "--transfer-type",
+            "transfer-from-permit2",
+        ])
+        .unwrap();
+        assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
     }
 
     #[test]
