@@ -25,7 +25,7 @@ This modular architecture allows users to:
   uses `petgraph::StableDiGraph`
 - **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; WorkerPoolRouter
   selects the best result
-- **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates)
+- **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates) with optional encoded transaction
 - **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a
   separate computation framework
 - **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
@@ -54,6 +54,7 @@ This modular architecture allows users to:
 │  │  • Timeout: Configurable deadline per request                         │  │
 │  │  • Early return: Optional min_responses for fast path                 │  │
 │  │  • Selection: Choose best solution by amount_out_net_gas              │  │
+│  │  • Encoding: Optionally encode solution into on-chain transaction     │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │
@@ -157,7 +158,8 @@ Orchestrates quote requests across multiple worker pools:
 1. Fans out each order to all pools in parallel
 2. Manages per-request timeouts with optional early return
 3. Selects the best solution by `amount_out_net_gas`
-4. Reports failures with error types and metrics
+4. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
+5. Reports failures with error types and metrics
 
 ---
 
@@ -172,8 +174,10 @@ Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 - A bounded `TaskQueue` (via `async_channel`)
 - N `SolverWorker` instances on separate threads
 
-Pools are configured via `worker_pools.toml`. Multiple pools can use the same algorithm with different parameters (e.g.,
-fast 2-hop vs deep 3-hop).
+Pools can use either a built-in algorithm by name (e.g., `"most_liquid"`) or a custom `Algorithm` implementation via
+`WorkerPoolBuilder::with_algorithm`. Pools are configured via `worker_pools.toml` for built-in algorithms, or
+programmatically via the builder for custom algorithms. Multiple pools can use the same algorithm with different
+parameters (e.g., fast 2-hop vs deep 3-hop).
 
 ---
 
@@ -207,7 +211,18 @@ gas-adjusted ranking.
 
 ---
 
-### 6. Graph Module
+### 6. Encoding
+
+**Crate:** `fynd-core`
+**Location:** `fynd-core/src/encoding/`
+
+Encodes solved routes into on-chain transactions. When `EncodingOptions` are provided, delegates to `TychoEncoder` to
+produce ABI-encoded calldata for the appropriate router function (`singleSwap`, `sequentialSwap`, or their Permit2
+variants).
+
+---
+
+### 7. Graph Module
 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/graph/`
@@ -221,7 +236,7 @@ Graph management infrastructure:
 
 ---
 
-### 7. SharedMarketData
+### 8. SharedMarketData
 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/feed/market_data.rs`
@@ -233,7 +248,7 @@ Provides `extract_subset()` for creating filtered snapshots that algorithms can 
 
 ---
 
-### 8. TychoFeed
+### 9. TychoFeed
 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/feed/tycho_feed.rs`
@@ -244,7 +259,7 @@ broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis (components are
 
 ---
 
-### 9. Derived Data System
+### 10. Derived Data System
 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/derived/`
@@ -259,7 +274,7 @@ Computations run in dependency order. Workers use `ReadinessTracker` to wait for
 
 ---
 
-### 10. Gas Price Fetcher
+### 11. Gas Price Fetcher
 
 **Crate:** `fynd-core`
 **Location:** `fynd-core/src/feed/gas.rs`
@@ -268,7 +283,7 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 
 ---
 
-### 11. Builder
+### 12. Builder
 
 **Crate:** `fynd-rpc`
 **Location:** `fynd-rpc/src/builder.rs`
@@ -278,7 +293,7 @@ server. `Fynd` runs the system and handles graceful shutdown.
 
 ---
 
-### 12. CLI Binary
+### 13. CLI Binary
 
 **Crate:** `fynd`
 **Location:** `src/main.rs` and `src/cli.rs`
@@ -307,6 +322,9 @@ WorkerPoolRouter (fan-out to all pools)
     │
     ▼
 WorkerPoolRouter (select best by amount_out_net_gas)
+    │
+    ▼ (optional)
+Encoder (encode solution into on-chain transaction)
     │
     ▼
 JSON Response to Client

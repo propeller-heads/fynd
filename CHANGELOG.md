@@ -1,3 +1,10 @@
+## [0.17.1](https://github.com/propeller-heads/fynd/compare/0.17.0...0.17.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** pre-build current rustdoc to avoid experimental feature false positives ([4d693b9](https://github.com/propeller-heads/fynd/commit/4d693b984e67ae444d68420f69361489a61b0c1c))
+
 ## [0.17.0](https://github.com/propeller-heads/fynd/compare/0.16.2...0.17.0) (2026-03-17)
 
 

@@ -115,17 +115,21 @@ Submit one or more swap orders and receive optimal routes.
 
 **Request:**
 
-| Field                   | Type    | Required | Description                            |
-|-------------------------|---------|----------|----------------------------------------|
-| `orders[].token_in`     | address | Yes      | Token to sell                          |
-| `orders[].token_out`    | address | Yes      | Token to buy                           |
-| `orders[].amount`       | string  | Yes      | Amount in token units (integer string) |
-| `orders[].side`         | string  | Yes      | `"sell"` (exact input)                 |
-| `orders[].sender`       | address | Yes      | Sender address                         |
-| `orders[].receiver`     | address | No       | Receiver (defaults to sender)          |
-| `options.timeout_ms`    | integer | No       | Solve timeout override                 |
-| `options.min_responses` | integer | No       | Early return threshold                 |
-| `options.max_gas`       | string  | No       | Max gas filter                         |
+| Field                   | Type    | Required | Description                                                                                                   |
+|-------------------------|---------|----------|---------------------------------------------------------------------------------------------------------------|
+| `orders[].token_in`     | address | Yes      | Token to sell                                                                                                 |
+| `orders[].token_out`    | address | Yes      | Token to buy                                                                                                  |
+| `orders[].amount`       | string  | Yes      | Amount in token units (integer string)                                                                        |
+| `orders[].side`         | string  | Yes      | `"sell"` (exact input)                                                                                        |
+| `orders[].sender`       | address | Yes      | Sender address                                                                                                |
+| `orders[].receiver`     | address | No       | Receiver (defaults to sender)                                                                                 |
+| `options.timeout_ms`    | integer | No       | Solve timeout in ms (default: 100)                                                                            |
+| `options.min_responses` | integer | No       | Early return threshold (default: 0, wait for all)                                                             |
+| `options.max_gas`       | string  | No       | Max gas filter (no limit if omitted)                                                                          |
+| `options.encoding_options.slippage` | float | No | Slippage tolerance for encoded transactions (e.g., `0.01` for 1%). No encoding if `encoding_options` is omitted |
+| `options.encoding_options.transfer_type` | string | No | Input token transfer method: `transfer_from` (default) or `transfer_from_permit2`                             |
+| `options.encoding_options.permit` | object | No | Permit2 single-token authorization. Required when using `transfer_from_permit2`                               |
+| `options.encoding_options.permit2_signature` | string | No | Permit2 signature (hex-encoded). Required when `permit` is set                                                |
 
 **Response:**
 
@@ -144,7 +148,8 @@ Submit one or more swap orders and receive optimal routes.
             "token_out": "0x...",
             "amount_in": "1000000000000000000",
             "amount_out": "3200000000",
-            "gas_estimate": "150000"
+            "gas_estimate": "150000",
+            "split": "0.5"
           }
         ]
       },
@@ -156,6 +161,11 @@ Submit one or more swap orders and receive optimal routes.
         "number": 19000000,
         "hash": "0x...",
         "timestamp": 1700000000
+      },
+      "transaction": {
+        "to": "0x...",
+        "value": "0",
+        "data": "0x..."
       }
     }
   ],
@@ -246,9 +256,19 @@ components = [
 
 ## Extensibility
 
-### Adding a New Algorithm
+### Using a Custom Algorithm
 
-1. Implement the `Algorithm` trait in `fynd-core` (choose your preferred graph type)
-2. Register it in `fynd-rpc/src/worker_pool/registry.rs`
-3. Add a pool entry in `worker_pools.toml`
+Implement the `Algorithm` trait and plug it into a `WorkerPoolBuilder` via `with_algorithm()` — no changes to
+fynd-core required:
+
+```rust
+let (pool, task_handle) = WorkerPoolBuilder::new()
+    .name("my-solver")
+    .with_algorithm("my_algo", |config| MyAlgorithm::new(config))
+    .algorithm_config(algorithm_config)
+    .num_workers(4)
+    .build(market_data, derived_data, event_rx, derived_event_rx)?;
+```
+
+See the [`custom_algorithm` example](fynd-core/examples/custom_algorithm.rs) for a full walkthrough.
 

@@ -88,6 +88,26 @@ jobs:
             --workspace \
             --no-deps
 
+      - name: Build current rustdoc from full workspace
+        # Pre-build current rustdoc using the same workspace+lockfile approach as the baseline.
+        # This ensures both sides use identical feature resolution (workspace default features,
+        # no --all-features), preventing false positives from feature-gated APIs such as the
+        # `experimental` feature in fynd-rpc. Passing --current-rustdoc to cargo-semver-checks
+        # below bypasses its internal build, which may use a different feature set.
+        env:
+          CARGO_TERM_COLOR: never
+          RUSTC_BOOTSTRAP: "1"
+          RUSTDOCFLAGS: >-
+            -Z unstable-options
+            --document-private-items
+            --document-hidden-items
+            --output-format=json
+            --cap-lints=allow
+        run: |
+          cargo doc \
+            --workspace \
+            --no-deps
+
       - name: Check for breaking changes
         id: check
         env:
@@ -113,10 +133,17 @@ jobs:
               continue
             fi
 
+            CURRENT_JSON="target/doc/${RUSTDOC_NAME}.json"
+            if [ ! -f "${CURRENT_JSON}" ]; then
+              echo "Warning: current rustdoc for '${name}' not found, skipping"
+              continue
+            fi
+
             HAS_PACKAGES=true
             if ! cargo semver-checks \
               --package "${name}" \
               --baseline-rustdoc "${BASELINE_JSON}" \
+              --current-rustdoc "${CURRENT_JSON}" \
               >> semver-output.txt 2>&1; then
               BREAKING=true
             fi
