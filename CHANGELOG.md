@@ -1,3 +1,10 @@
+## [0.17.2](https://github.com/propeller-heads/fynd/compare/0.17.1...0.17.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* rename all refs of /v1/solve to /v1/quote ([a8cedac](https://github.com/propeller-heads/fynd/commit/a8cedac01928a201dc1ce5a8ae85ec271cf9c347))
+
 ## [0.17.1](https://github.com/propeller-heads/fynd/compare/0.17.0...0.17.1) (2026-03-17)
 
 
