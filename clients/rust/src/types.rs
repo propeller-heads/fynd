@@ -717,6 +717,7 @@ pub struct HealthStatus {
     last_update_ms: u64,
     num_solver_pools: usize,
     derived_data_ready: bool,
+    gas_price_age_ms: Option<u64>,
 }
 
 impl HealthStatus {
@@ -744,13 +745,19 @@ impl HealthStatus {
         self.derived_data_ready
     }
 
+    /// Time since last gas price update in milliseconds, if available.
+    pub fn gas_price_age_ms(&self) -> Option<u64> {
+        self.gas_price_age_ms
+    }
+
     pub(crate) fn new(
         healthy: bool,
         last_update_ms: u64,
         num_solver_pools: usize,
         derived_data_ready: bool,
+        gas_price_age_ms: Option<u64>,
     ) -> Self {
-        Self { healthy, last_update_ms, num_solver_pools, derived_data_ready }
+        Self { healthy, last_update_ms, num_solver_pools, derived_data_ready, gas_price_age_ms }
     }
 }
 

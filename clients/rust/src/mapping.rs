@@ -265,7 +265,13 @@ impl From<dto::BlockInfo> for BlockInfo {
 
 impl From<dto::HealthStatus> for HealthStatus {
     fn from(dh: dto::HealthStatus) -> Self {
-        HealthStatus::new(dh.healthy, dh.last_update_ms, dh.num_solver_pools, dh.derived_data_ready)
+        HealthStatus::new(
+            dh.healthy,
+            dh.last_update_ms,
+            dh.num_solver_pools,
+            dh.derived_data_ready,
+            dh.gas_price_age_ms,
+        )
     }
 }
 

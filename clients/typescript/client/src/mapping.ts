@@ -161,5 +161,6 @@ export function fromWireHealth(wire: WireHealthStatus): HealthStatus {
     healthy:        wire.healthy,
     lastUpdateMs:   wire.last_update_ms,
     numSolverPools: wire.num_solver_pools,
+    gasPriceAgeMs:  wire.gas_price_age_ms ?? undefined,
   };
 }
