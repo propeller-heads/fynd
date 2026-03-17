@@ -12,6 +12,7 @@
 //! 2. Implement the `Algorithm` trait
 //! 3. Register the algorithm in `registry.rs`
 
+pub mod bellman_ford;
 pub mod most_liquid;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ pub mod test_utils;
 
 use std::time::Duration;
 
+pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
@@ -40,6 +42,9 @@ pub struct AlgorithmConfig {
     timeout: Duration,
     /// Maximum number of paths to simulate. `None` means no cap.
     pub max_routes: Option<usize>,
+    /// Enable gas-aware relaxation in Bellman-Ford (compares net amounts during relaxation).
+    /// Ignored by other algorithms. Defaults to true.
+    gas_aware_relaxation: bool,
 }
 
 impl AlgorithmConfig {
@@ -71,7 +76,7 @@ impl AlgorithmConfig {
                 reason: "max_routes must be at least 1".to_string(),
             });
         }
-        Ok(Self { min_hops, max_hops, timeout, max_routes })
+        Ok(Self { min_hops, max_hops, timeout, max_routes, gas_aware_relaxation: true })
     }
 
     /// Returns the minimum number of hops to search.
@@ -87,6 +92,17 @@ impl AlgorithmConfig {
     /// Returns the timeout for solving.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Returns whether gas-aware relaxation is enabled.
+    pub fn gas_aware_relaxation(&self) -> bool {
+        self.gas_aware_relaxation
+    }
+
+    /// Sets gas-aware relaxation.
+    pub fn with_gas_aware_relaxation(mut self, enabled: bool) -> Self {
+        self.gas_aware_relaxation = enabled;
+        self
     }
 }
 
