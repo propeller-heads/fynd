@@ -24,6 +24,7 @@ lazy_static.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
@@ -33,3 +34,4 @@ alloy = { workspace = true, features = ["sol-types"] }
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile = "3"
