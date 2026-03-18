@@ -13,7 +13,7 @@ pub mod tycho_feed;
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
 pub struct TychoFeedConfig {
-    /// Tycho WebSocket URL.
+    /// Tycho URL.
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
     pub(crate) chain: Chain,

@@ -37,7 +37,7 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::HTTP_PORT, env)]
     pub http_port: u16,
 
-    /// Tycho WebSocket URL. Defaults to the Fynd endpoint for the selected chain.
+    /// Tycho URL. Defaults to the Fynd endpoint for the selected chain.
     #[arg(long, env)]
     pub tycho_url: Option<String>,
 
@@ -45,7 +45,7 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_api_key: Option<String>,
 
-    /// Disable TLS for Tycho WebSocket connection
+    /// Disable TLS for Tycho connection
     #[arg(long)]
     pub disable_tls: bool,
 

@@ -6,13 +6,13 @@
 //!
 //! # Use Cases
 //!
-//! - **Turnkey HTTP server**: Use `FyndRpcBuilder` to quickly deploy a routing service
+//! - **Turnkey HTTP server**: Use `FyndBuilder` to quickly deploy a routing service
 //! - **Custom middleware**: Add authentication, rate limiting, or custom logic to the HTTP layer
 //! - **Microservices**: Integrate Fynd as an HTTP microservice in your infrastructure
 //!
 //! # Main Components
 //!
-//! - **builder**: `FyndRpcBuilder` for assembling and configuring the HTTP server
+//! - **builder**: `FyndBuilder` for assembling and configuring the HTTP server
 //! - **api**: HTTP endpoint handlers (`/v1/quote`, `/v1/health`) and OpenAPI documentation
 //! - **config**: Configuration types for pools, algorithms, and blacklists
 

@@ -288,7 +288,7 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 **Crate:** `fynd-rpc`
 **Location:** `fynd-rpc/src/builder.rs`
 
-`FyndRpcBuilder` assembles the entire system: creates feed, worker pools, computation manager, worker pool router, and HTTP
+`FyndBuilder` assembles the entire system: creates feed, worker pools, computation manager, worker pool router, and HTTP
 server. `Fynd` runs the system and handles graceful shutdown.
 
 ---
@@ -298,7 +298,7 @@ server. `Fynd` runs the system and handles graceful shutdown.
 **Crate:** `fynd`
 **Location:** `src/main.rs` and `src/cli.rs`
 
-Command-line application that parses CLI arguments, sets up observability (tracing, metrics), and uses `FyndRpcBuilder`
+Command-line application that parses CLI arguments, sets up observability (tracing, metrics), and uses `FyndBuilder`
 to run the complete routing service.
 
 ---

@@ -167,7 +167,7 @@ Tune Fynd with the following flags:
 
 #### Optional
 
-<table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--rpc-url</code></td><td><code>RPC_URL</code></td><td><code>https://eth.llamarpc.com</code></td><td>Ethereum RPC endpoint. Use a dedicated endpoint in production.</td></tr><tr><td><code>--tycho-url</code></td><td><code>TYCHO_URL</code></td><td><em>(chain-specific)</em></td><td>Tycho WebSocket URL. Defaults to the Fynd endpoint for the selected chain (e.g. <code>tycho-fynd-ethereum.propellerheads.xyz</code>).</td></tr><tr><td><code>--chain</code></td><td>--</td><td><code>Ethereum</code></td><td>Target chain</td></tr><tr><td><code>-p, --protocols</code></td><td>--</td><td><em>(all on-chain)</em></td><td>Protocols to index (comma-separated). If omitted, all on-chain protocols are fetched from Tycho RPC. Use <code>all_onchain</code> to combine auto-fetched protocols with explicit entries (e.g. <code>all_onchain,rfq:bebop</code>).</td></tr><tr><td><code>--http-port</code></td><td><code>HTTP_PORT</code></td><td><code>3000</code></td><td>API port</td></tr><tr><td><code>--min-tvl</code></td><td>--</td><td><code>10.0</code></td><td>Minimum pool TVL in native token (ETH)</td></tr><tr><td><code>--tvl-buffer-ratio</code></td><td>--</td><td><code>1.1</code></td><td>Hysteresis buffer for TVL filtering. Components are added when TVL >= <code>min_tvl</code> and removed when TVL drops below <code>min_tvl / tvl_buffer_ratio</code>.</td></tr><tr><td><code>--traded-n-days-ago</code></td><td>--</td><td><code>3</code></td><td>Only include tokens traded within this many days.</td></tr><tr><td><code>--order-manager-timeout-ms</code></td><td>--</td><td><code>100</code></td><td>Default solve timeout (ms)</td></tr><tr><td><code>--order-manager-min-responses</code></td><td>--</td><td><code>0</code></td><td>Early return threshold (0 = wait for all pools)</td></tr><tr><td><code>-w, --worker-pools-config</code></td><td><code>WORKER_POOLS_CONFIG</code></td><td><code>worker_pools.toml</code></td><td>Worker pools config file path</td></tr><tr><td><code>--blacklist-config</code></td><td><code>BLACKLIST_CONFIG</code></td><td><code>blacklist.toml</code></td><td>Blacklist config file path</td></tr><tr><td><code>--disable-tls</code></td><td>--</td><td><code>false</code></td><td>Disable TLS for Tycho connection</td></tr><tr><td><code>--min-token-quality</code></td><td>--</td><td><code>100</code></td><td>Minimum <a href="https://docs.propellerheads.xyz/tycho/overview/concepts#token">token quality</a> filter</td></tr><tr><td><code>--gas-refresh-interval-secs</code></td><td>--</td><td><code>30</code></td><td>Gas price refresh interval</td></tr><tr><td><code>--reconnect-delay-secs</code></td><td>--</td><td><code>5</code></td><td>Reconnect delay on connection failure</td></tr></tbody></table>
+<table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--rpc-url</code></td><td><code>RPC_URL</code></td><td><code>https://eth.llamarpc.com</code></td><td>Ethereum RPC endpoint. Use a dedicated endpoint in production.</td></tr><tr><td><code>--tycho-url</code></td><td><code>TYCHO_URL</code></td><td><em>(chain-specific)</em></td><td>Tycho URL. Defaults to the Fynd endpoint for the selected chain (e.g. <code>tycho-fynd-ethereum.propellerheads.xyz</code>).</td></tr><tr><td><code>--chain</code></td><td>--</td><td><code>Ethereum</code></td><td>Target chain</td></tr><tr><td><code>-p, --protocols</code></td><td>--</td><td><em>(all on-chain)</em></td><td>Protocols to index (comma-separated). If omitted, all on-chain protocols are fetched from Tycho RPC. Use <code>all_onchain</code> to combine auto-fetched protocols with explicit entries (e.g. <code>all_onchain,rfq:bebop</code>).</td></tr><tr><td><code>--http-host</code></td><td><code>HTTP_HOST</code></td><td><code>0.0.0.0</code></td><td>HTTP bind address</td></tr><tr><td><code>--http-port</code></td><td><code>HTTP_PORT</code></td><td><code>3000</code></td><td>API port</td></tr><tr><td><code>--min-tvl</code></td><td>--</td><td><code>10.0</code></td><td>Minimum pool TVL in native token (ETH)</td></tr><tr><td><code>--tvl-buffer-ratio</code></td><td>--</td><td><code>1.1</code></td><td>Hysteresis buffer for TVL filtering. Components are added when TVL >= <code>min_tvl</code> and removed when TVL drops below <code>min_tvl / tvl_buffer_ratio</code>.</td></tr><tr><td><code>--traded-n-days-ago</code></td><td>--</td><td><code>3</code></td><td>Only include tokens traded within this many days.</td></tr><tr><td><code>--worker-router-timeout-ms</code></td><td>--</td><td><code>100</code></td><td>Default solve timeout (ms)</td></tr><tr><td><code>--worker-router-min-responses</code></td><td>--</td><td><code>0</code></td><td>Early return threshold (0 = wait for all pools)</td></tr><tr><td><code>-w, --worker-pools-config</code></td><td><code>WORKER_POOLS_CONFIG</code></td><td><code>worker_pools.toml</code></td><td>Worker pools config file path</td></tr><tr><td><code>--blacklist-config</code></td><td><code>BLACKLIST_CONFIG</code></td><td><code>blacklist.toml</code></td><td>Blacklist config file path</td></tr><tr><td><code>--disable-tls</code></td><td>--</td><td><code>false</code></td><td>Disable TLS for Tycho connection</td></tr><tr><td><code>--min-token-quality</code></td><td>--</td><td><code>100</code></td><td>Minimum <a href="https://docs.propellerheads.xyz/tycho/overview/concepts#token">token quality</a> filter</td></tr><tr><td><code>--gas-refresh-interval-secs</code></td><td>--</td><td><code>30</code></td><td>Gas price refresh interval</td></tr><tr><td><code>--reconnect-delay-secs</code></td><td>--</td><td><code>5</code></td><td>Reconnect delay on connection failure</td></tr><tr><td><code>--gas-price-stale-threshold-secs</code></td><td>--</td><td><em>(disabled)</em></td><td>Health returns 503 when gas price exceeds this age. Disabled by default.</td></tr></tbody></table>
 
 Run `cargo run --release -- serve --help` for the full list.
 
@@ -205,6 +205,7 @@ Both pools solve every incoming order in parallel. Fynd picks the best result ac
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
 | `max_hops`            | `3`             | Maximum number of hops permitted for routing                           |
 | `timeout_ms`          | `100`           | Maximum time in milliseconds allowed per order processing in this pool |
+| `max_routes`          | *(no limit)*    | Maximum number of candidate routes to evaluate per order               |
 
 **Tuning tips:**
 
@@ -221,7 +222,7 @@ To use a custom config file:
 cargo run --release -- serve -w my_worker_pools.toml
 ```
 
-#### 5.1 Blacklist (`blacklist.toml`)
+#### 5.2 Blacklist (`blacklist.toml`)
 
 Exclude specific components from routing, useful for components with known simulation issues (
 e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)):
@@ -247,10 +248,10 @@ RUST_LOG=warn cargo run --release -- serve ...
 RUST_LOG=info cargo run --release -- serve ...
 
 # Debug solver internals
-RUST_LOG=info,tycho_solver=debug cargo run --release -- serve ...
+RUST_LOG=info,fynd_core=debug cargo run --release -- serve ...
 
 # Trace-level (very verbose, not recommended)
-RUST_LOG=info,tycho_solver=trace cargo run --release -- serve ...
+RUST_LOG=info,fynd_core=trace cargo run --release -- serve ...
 ```
 
 #### Prometheus Metrics

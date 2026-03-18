@@ -45,17 +45,12 @@ export TYCHO_API_KEY=your-api-key
 export RUST_LOG=info
 
 # Run
-cargo run --release serve -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3
+cargo run --release serve
 ```
 
 > **Note:** `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 > ```bash
-> cargo run --release -- \
->   --tycho-url tycho-beta.propellerheads.xyz \
->   --rpc-url https://your-rpc-provider.com/v1/your_key \
->   --protocols uniswap_v2,uniswap_v3
+> cargo run --release serve --rpc-url https://your-rpc-provider.com/v1/your_key
 > ```
 
 The solver starts on `http://localhost:3000` by default.
@@ -65,9 +60,8 @@ The solver starts on `http://localhost:3000` by default.
 You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
 
 ```bash
-cargo run --release serve -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3,rfq:bebop
+cargo run --release serve \
+  --protocols all_onchain,rfq:bebop
 ```
 
 **Limitations:**
@@ -79,6 +73,15 @@ cargo run --release serve -- \
 - RFQ protocols typically require API keys, which are passed via environment variables. Check
   the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the
   specific variables each protocol needs.
+
+### Run on a specific chain
+
+You can run on any chain supported by Tycho (see [Tycho Hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints))
+
+```bash
+export RPC_URL=<RPC_FOR_TARGET_CHAIN>
+cargo run --release serve --chain unichain
+```
 
 ## Request a Quote
 
@@ -157,6 +160,7 @@ Submit one or more swap orders and receive optimal routes.
       "amount_out": "3200000000",
       "gas_estimate": "150000",
       "amount_out_net_gas": "3199500000",
+      "gas_price": "25000000000",
       "block": {
         "number": 19000000,
         "hash": "0x...",
@@ -178,10 +182,11 @@ Submit one or more swap orders and receive optimal routes.
 
 Returns service health status. HTTP 200 if healthy, 503 if unhealthy.
 
-The service is healthy when market data is fresh (< 60s old) **and** derived data has 
-been computed at least once. The `derived_data_ready` field indicates overall readiness, 
-not per-block freshness — algorithms that require fresh derived data will wait for 
-recomputation before solving.
+The service is healthy when market data is fresh (< 60s old), derived data has been
+computed at least once, **and** gas price is not stale (when `--gas-price-stale-threshold-secs`
+is configured). The `derived_data_ready` field indicates overall readiness, not per-block
+freshness — algorithms that require fresh derived data will wait for recomputation before
+solving.
 
 ## Configuration
 
@@ -190,15 +195,17 @@ recomputation before solving.
 | Flag                         | Env Var               | Default             | Description                                |
 |------------------------------|-----------------------|---------------------|--------------------------------------------|
 | `--rpc-url`                  | `RPC_URL`             | `https://eth.llamarpc.com` | Ethereum RPC endpoint for the target chain |
-| `--tycho-url`                | `TYCHO_URL`           | `localhost:4242`    | Tycho WebSocket URL                        |
+| `--tycho-url`                | `TYCHO_URL`           | *(chain-specific)*  | Tycho URL (e.g. `tycho-fynd-ethereum.propellerheads.xyz`) |
 | `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                              |
 | `--chain`                    | -                     | `Ethereum`          | Target chain                               |
-| `-p, --protocols`            | -                     | -                   | Protocols to index (comma-separated)       |
+| `-p, --protocols`            | -                     | *(all available)*   | Protocols to index (comma-separated). Auto-fetched from Tycho RPC if omitted. |
+| `--http-host`                | `HTTP_HOST`           | `0.0.0.0`           | HTTP bind address                          |
 | `--http-port`                | `HTTP_PORT`           | `3000`              | API port                                   |
 | `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token           |
-| `--order-manager-timeout-ms` | -                     | `100`               | Default solve timeout                      |
+| `--worker-router-timeout-ms` | -                     | `100`               | Default solve timeout                      |
 | `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
 | `--blacklist-config`         | `BLACKLIST_CONFIG`    | `blacklist.toml`    | Blacklist config                           |
+| `--gas-price-stale-threshold-secs` | -               | *(disabled)*        | Health returns 503 when gas price exceeds this age |
 
 See `--help` for the full list.
 
