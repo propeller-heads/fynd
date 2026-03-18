@@ -535,9 +535,7 @@ where
         if let Ok(dto_err) = serde_json::from_str::<fynd_rpc_types::ErrorResponse>(&body) {
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
-        Err(FyndError::Protocol(format!(
-            "unexpected health response ({status}): {body}"
-        )))
+        Err(FyndError::Protocol(format!("unexpected health response ({status}): {body}")))
     }
 
     /// Build a signable payload for a given order quote.
