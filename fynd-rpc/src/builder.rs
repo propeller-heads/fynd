@@ -2,21 +2,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
-use fynd_core::{
-    algorithm::AlgorithmConfig,
-    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
-    encoding::encoder::Encoder,
-    feed::{
-        gas::GasPriceFetcher, market_data::SharedMarketData, tycho_feed::TychoFeed, TychoFeedConfig,
-    },
-    types::constants::native_token,
-    worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
-    worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter},
-};
-use tokio::{sync::RwLock, task::JoinHandle};
+use fynd_core::{encoding::encoder::Encoder, worker_pool::pool::WorkerPool, SolverBuilder};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
-use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
+use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
@@ -189,137 +178,61 @@ impl FyndBuilder {
             "starting fynd"
         );
 
-        // Shared state
-        let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
-
-        // Tycho feed
-        let tycho_feed_config = TychoFeedConfig::new(
-            self.tycho_url.clone(),
+        let mut solver_builder = SolverBuilder::new(
             self.chain,
-            self.tycho_api_key.clone(),
-            self.tycho_use_tls,
-            self.protocols.clone(),
+            self.tycho_url,
+            self.rpc_url,
+            self.protocols,
             self.min_tvl,
         )
+        .tycho_api_key_opt(self.tycho_api_key)
+        .tycho_use_tls(self.tycho_use_tls)
+        .min_token_quality(self.min_token_quality)
+        .traded_n_days_ago(self.traded_n_days_ago)
         .tvl_buffer_ratio(self.tvl_buffer_ratio)
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago)
-        .blacklisted_components(self.blacklist.components);
+        .blacklisted_components(self.blacklist.components)
+        .worker_router_timeout(self.worker_router_timeout)
+        .worker_router_min_responses(self.worker_router_min_responses);
 
-        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
-            .map_err(|e| anyhow::anyhow!("failed to create ethereum client: {}", e))?;
-
-        let (mut gas_price_fetcher, gas_price_worker_signal_tx) =
-            GasPriceFetcher::new(ethereum_client, Arc::clone(&market_data));
-
-        let mut tycho_feed = TychoFeed::new(tycho_feed_config, Arc::clone(&market_data));
-
-        tycho_feed = tycho_feed.with_gas_price_worker_signal_tx(gas_price_worker_signal_tx);
-
-        // Computation manager for derived data (token prices, pool depths)
-        let gas_token = native_token(&self.chain).context("gas token not configured for chain")?;
-        let computation_config = ComputationManagerConfig::new()
-            .with_gas_token(gas_token.clone())
-            .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
-        let (computation_manager, _derived_event_rx) =
-            ComputationManager::new(computation_config, Arc::clone(&market_data))
-                .map_err(|e| anyhow::anyhow!("failed to create computation manager: {}", e))?;
-        let derived_data: SharedDerivedDataRef = computation_manager.store();
-        let health_tracker =
-            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data))
-                .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
-        let computation_event_rx = tycho_feed.subscribe();
-        let (computation_shutdown_tx, computation_shutdown_rx) = tokio::sync::broadcast::channel(1);
-
-        // Worker pools (one task queue per pool)
-        let mut solver_pool_handles = Vec::new();
-        let mut worker_pools = Vec::new();
-
-        // Get the derived event sender for workers to subscribe
-        let derived_event_tx = computation_manager.event_sender();
-
-        for (pool_name, pool_cfg) in self.pools.iter() {
-            // Each pool gets its own subscription to feed events
-            let pool_event_rx = tycho_feed.subscribe();
-
-            // Convert pool's config to AlgorithmConfig
-            let algorithm_config = AlgorithmConfig::new(
-                pool_cfg.min_hops,
-                pool_cfg.max_hops,
-                Duration::from_millis(pool_cfg.timeout_ms),
-                pool_cfg.max_routes,
-            )
-            .context(format!("invalid algorithm configuration for pool '{}'", pool_name))?;
-
-            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
-                .name(pool_name.clone())
-                .algorithm(pool_cfg.algorithm.clone())
-                .algorithm_config(algorithm_config)
-                .num_workers(pool_cfg.num_workers)
-                .task_queue_capacity(pool_cfg.task_queue_capacity)
-                .build(
-                    Arc::clone(&market_data),
-                    Arc::clone(&derived_data),
-                    pool_event_rx,
-                    derived_event_tx.subscribe(),
-                )
-                .context("failed to create worker pool")?;
-
-            info!(
-                name = %worker_pool.name(),
-                algorithm = %worker_pool.algorithm(),
-                num_workers = worker_pool.num_workers(),
-                "worker pool started"
-            );
-
-            solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
-            worker_pools.push(worker_pool);
+        if let Some(encoder) = self.encoder {
+            solver_builder = solver_builder.encoder(encoder);
         }
 
-        // Spawn feed after all subscriptions are created
-        let feed_handle = tokio::spawn(async move {
-            if let Err(e) = tycho_feed.run().await {
-                error!(error = %e, "tycho feed error");
-            }
-        });
+        for (name, pool_cfg) in &self.pools {
+            solver_builder = solver_builder.add_pool(name, pool_cfg);
+        }
 
-        // Start gas price fetcher in background
-        let gas_price_worker_handle = tokio::spawn(async move {
-            if let Err(e) = gas_price_fetcher.run().await {
-                tracing::error!(error = %e, "gas price fetcher error");
-            }
-        });
+        let parts = solver_builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .into_parts();
 
-        // Start computation manager in background
-        let computation_manager_handle = tokio::spawn(async move {
-            computation_manager
-                .run(computation_event_rx, computation_shutdown_rx)
-                .await;
-        });
+        for pool in &parts.worker_pools {
+            info!(
+                name = %pool.name(),
+                algorithm = %pool.algorithm(),
+                num_workers = pool.num_workers(),
+                "worker pool started"
+            );
+        }
 
-        let encoder = match self.encoder {
-            Some(encoder) => encoder,
-            None => {
-                let swap_encoder_registry =
-                    SwapEncoderRegistry::new(self.chain).add_default_encoders(None)?;
-                Encoder::new(self.chain, swap_encoder_registry)
-                    .map_err(|e| anyhow::anyhow!("failed to create encoder: {}", e))?
-            }
+        let health_tracker =
+            HealthTracker::new(Arc::clone(&parts.market_data), Arc::clone(&parts.derived_data))
+                .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
+
+        #[cfg(feature = "experimental")]
+        let gas_token = {
+            use fynd_core::types::constants::native_token;
+            native_token(&self.chain).context("gas token not configured for chain")?
         };
 
-        let worker_router_config = WorkerPoolRouterConfig::default()
-            .with_timeout(self.worker_router_timeout)
-            .with_min_responses(self.worker_router_min_responses);
-        let worker_router =
-            WorkerPoolRouter::new(solver_pool_handles, worker_router_config, encoder);
-
         let app_state = AppState::new(
-            worker_router,
+            parts.router,
             health_tracker,
             #[cfg(feature = "experimental")]
-            Arc::clone(&derived_data),
+            Arc::clone(&parts.derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
         );
@@ -343,11 +256,11 @@ impl FyndBuilder {
         Ok(Fynd {
             server_handle,
             server_task,
-            worker_pools,
-            feed_handle,
-            gas_price_worker_handle,
-            computation_manager_handle,
-            computation_shutdown_tx,
+            worker_pools: parts.worker_pools,
+            feed_handle: parts.feed_handle,
+            gas_price_worker_handle: parts.gas_price_handle,
+            computation_manager_handle: parts.computation_handle,
+            computation_shutdown_tx: parts.computation_shutdown_tx,
         })
     }
 }

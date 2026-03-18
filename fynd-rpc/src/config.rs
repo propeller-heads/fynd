@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use num_cpus;
+pub use fynd_core::PoolConfig;
 use serde::{Deserialize, Serialize};
 
 /// Worker pools configuration loaded from TOML file.
@@ -13,31 +13,6 @@ use serde::{Deserialize, Serialize};
 pub struct WorkerPoolsConfig {
     /// Pool configurations (at least one pool must be specified)
     pub pools: HashMap<String, PoolConfig>,
-}
-
-/// Per-pool configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolConfig {
-    /// Algorithm name for this pool (e.g., "most_liquid", "dijkstra")
-    pub algorithm: String,
-    /// Number of worker threads for this pool
-    #[serde(default = "num_cpus::get")]
-    pub num_workers: usize,
-    /// Task queue capacity for this pool
-    #[serde(default = "usize_val::<{ defaults::POOL_TASK_QUEUE_CAPACITY }>")]
-    pub task_queue_capacity: usize,
-    /// Minimum hops to search (must be >= 1)
-    #[serde(default = "usize_val::<{ defaults::POOL_MIN_HOPS }>")]
-    pub min_hops: usize,
-    /// Maximum hops to search
-    #[serde(default = "usize_val::<{ defaults::POOL_MAX_HOPS }>")]
-    pub max_hops: usize,
-    /// Timeout for solving in milliseconds
-    #[serde(default = "u64_val::<{ defaults::POOL_TIMEOUT_MS }>")]
-    pub timeout_ms: u64,
-    /// Maximum number of paths to simulate per solve. Omit to simulate all scored paths.
-    #[serde(default)]
-    pub max_routes: Option<usize>,
 }
 
 impl WorkerPoolsConfig {
@@ -83,16 +58,6 @@ impl BlacklistConfig {
             .with_context(|| format!("failed to parse blacklist config {}", path.display()))?;
         Ok(wrapper.blacklist)
     }
-}
-
-// Worker defaults
-
-fn usize_val<const V: usize>() -> usize {
-    V
-}
-
-fn u64_val<const V: u64>() -> u64 {
-    V
 }
 
 #[cfg(test)]

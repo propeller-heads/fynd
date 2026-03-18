@@ -27,6 +27,7 @@ pub mod derived;
 pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
+pub mod solver;
 pub mod types;
 pub mod worker_pool;
 pub mod worker_pool_router;
@@ -35,6 +36,9 @@ pub mod worker_pool_router;
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
+pub use solver::{
+    PoolConfig, Solver, SolverBuildError, SolverBuilder, SolverParts, WaitReadyError,
+};
 pub use types::{
     BlockInfo, ComponentId, EncodingOptions, Order, OrderQuote, OrderSide, OrderValidationError,
     PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
