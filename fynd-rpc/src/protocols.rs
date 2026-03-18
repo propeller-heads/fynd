@@ -1,7 +1,7 @@
 //! Tycho protocol system discovery.
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::info;
 use tycho_simulation::{
     tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
     tycho_common::{
@@ -39,6 +39,6 @@ pub async fn fetch_protocol_systems(
         }
         page += 1;
     }
-    debug!("Fetched {} protocol system(s) from Tycho RPC", all_protocols.len());
+    info!("Fetched {} protocol system(s) from Tycho RPC", all_protocols.len());
     Ok(all_protocols)
 }
