@@ -296,8 +296,14 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
 
     let _metrics_task = create_metrics_exporter();
 
-    // Setup solver (handles setup errors)
-    let solver = setup_solver(&args).await?;
+    // Setup solver, but allow SIGINT to cancel it for fast exit during startup
+    let solver = tokio::select! {
+        result = setup_solver(&args) => result?,
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT received during setup. Exiting.");
+            return Ok(());
+        }
+    };
 
     // Run with graceful shutdown
     // The shutdown signal stops the server, which causes solver.run() to complete
