@@ -3397,7 +3397,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.17.1"
+version = "0.20.0"
 dependencies = [
  "actix-web",
  "alloy",
