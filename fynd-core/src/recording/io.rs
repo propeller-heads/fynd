@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::recording::types::MarketRecording;
 
+/// Serializes a [`MarketRecording`] to a zstd-compressed JSON file.
 pub fn write_recording(recording: &MarketRecording, path: &Path) -> anyhow::Result<()> {
     let json = serde_json::to_vec(recording)?;
     let compressed = zstd::encode_all(json.as_slice(), 3)?;
@@ -9,6 +10,7 @@ pub fn write_recording(recording: &MarketRecording, path: &Path) -> anyhow::Resu
     Ok(())
 }
 
+/// Reads a [`MarketRecording`] from a zstd-compressed JSON file.
 pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
     let compressed = std::fs::read(path)?;
     let decompressed = zstd::decode_all(compressed.as_slice())?;

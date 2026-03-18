@@ -34,4 +34,4 @@ alloy = { workspace = true, features = ["sol-types"] }
 
 [dev-dependencies]
 rstest.workspace = true
-tempfile = "3"
+tempfile.workspace = true
