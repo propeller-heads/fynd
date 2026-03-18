@@ -624,12 +624,9 @@ mod tests {
 
     #[test]
     fn transfer_type_transfer_from_permit2_parses() {
-        let cli = Cli::try_parse_from([
-            "fynd-swap-cli",
-            "--transfer-type",
-            "transfer-from-permit2",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["fynd-swap-cli", "--transfer-type", "transfer-from-permit2"])
+                .unwrap();
         assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
     }
 

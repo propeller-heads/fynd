@@ -27,7 +27,7 @@ const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const SELL_AMOUNT: u128 = 1_000_000_000; // 1000 USDC (6 decimals)
 const SLIPPAGE: f64 = 0.005; // 0.5%
-// USDC storage layout (FiatTokenV2.1): balances at slot 9, allowances at slot 10.
+                             // USDC storage layout (FiatTokenV2.1): balances at slot 9, allowances at slot 10.
 const USDC_BALANCE_SLOT: u64 = 9;
 const USDC_ALLOWANCE_SLOT: u64 = 10;
 
@@ -64,12 +64,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("amount_in:  {}", quote.amount_in());
     println!("amount_out: {}", quote.amount_out());
 
-    let tx = quote.transaction().ok_or("no calldata in quote")?;
+    let tx = quote
+        .transaction()
+        .ok_or("no calldata in quote")?;
     let router = Address::from_slice(tx.to().as_ref());
 
     // Sign the order.
-    let payload = client.signable_payload(quote, &SigningHints::default()).await?;
-    let sig = signer.sign_hash(&payload.signing_hash()).await?;
+    let payload = client
+        .signable_payload(quote, &SigningHints::default())
+        .await?;
+    let sig = signer
+        .sign_hash(&payload.signing_hash())
+        .await?;
     let signed = SignedOrder::assemble(payload, sig);
 
     // Dry-run: inject a synthetic ERC-20 balance and router allowance via state overrides.

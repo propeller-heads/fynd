@@ -31,7 +31,9 @@ pub async fn fetch_protocol_systems(
             chain: chain.into(),
             pagination: PaginationParams { page, page_size: PAGE_SIZE },
         };
-        let response = rpc_client.get_protocol_systems(&request).await?;
+        let response = rpc_client
+            .get_protocol_systems(&request)
+            .await?;
         let count = response.protocol_systems.len();
         all_protocols.extend(response.protocol_systems);
         if (count as i64) < PAGE_SIZE {

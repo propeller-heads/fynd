@@ -11,8 +11,9 @@
 //! ```
 
 use alloy::{
+    network::Ethereum,
     primitives::{keccak256, Address, B256, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
 use bytes::Bytes;
@@ -31,7 +32,7 @@ const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const SELL_AMOUNT: u128 = 1_000_000_000; // 1000 USDC (6 decimals)
 const SLIPPAGE: f64 = 0.005; // 0.5%
-// USDC storage layout (FiatTokenV2.1): balances at slot 9, allowances at slot 10.
+                             // USDC storage layout (FiatTokenV2.1): balances at slot 9, allowances at slot 10.
 const USDC_BALANCE_SLOT: u64 = 9;
 const USDC_ALLOWANCE_SLOT: u64 = 10;
 
@@ -41,7 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signer = PrivateKeySigner::random();
     let sender = signer.address();
 
-    let provider = ProviderBuilder::default().connect_http(RPC_URL.parse::<reqwest::Url>()?);
+    let provider: RootProvider<Ethereum> =
+        ProviderBuilder::default().connect_http(RPC_URL.parse::<reqwest::Url>()?);
     let sell_token: Address = USDC.parse()?;
     let buy_token: Address = WETH.parse()?;
     let permit2_addr: Address = PERMIT2.parse()?;
@@ -68,7 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
             ))
             .await?;
-        Address::from_slice(q.transaction().ok_or("no calldata in quote")?.to().as_ref())
+        Address::from_slice(
+            q.transaction()
+                .ok_or("no calldata in quote")?
+                .to()
+                .as_ref(),
+        )
     };
 
     // Build and sign the Permit2 EIP-712 message off-chain.
@@ -76,17 +83,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let permit = FyndPermitSingle::new(
         FyndPermitDetails::new(
             Bytes::copy_from_slice(sell_token.as_slice()),
-            BigUint::from_bytes_be(&[0xFF; 20]),   // uint160::MAX — unlimited allowance
+            BigUint::from_bytes_be(&[0xFF; 20]), // uint160::MAX — unlimited allowance
             BigUint::from(281_474_976_710_655u64), // uint48::MAX — expiration
-            BigUint::from(0u8),                    // nonce 0
+            BigUint::from(0u8),                  // nonce 0
         ),
         Bytes::copy_from_slice(router.as_slice()),
         BigUint::from(281_474_976_710_655u64), // sig_deadline
     );
     let chain_id = provider.get_chain_id().await?;
-    let permit_hash = permit.eip712_signing_hash(chain_id, &Bytes::copy_from_slice(permit2_addr.as_slice()))?;
+    let permit_hash =
+        permit.eip712_signing_hash(chain_id, &Bytes::copy_from_slice(permit2_addr.as_slice()))?;
     let permit_sig = Bytes::copy_from_slice(
-        &signer.sign_hash(&B256::from(permit_hash)).await?.as_bytes(),
+        &signer
+            .sign_hash(&B256::from(permit_hash))
+            .await?
+            .as_bytes(),
     );
 
     // Request a quote with Permit2 encoding.
@@ -102,7 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             QuoteOptions::default()
                 .with_timeout_ms(5_000)
-                .with_encoding_options(EncodingOptions::new(SLIPPAGE).with_permit2(permit, permit_sig)?),
+                .with_encoding_options(
+                    EncodingOptions::new(SLIPPAGE).with_permit2(permit, permit_sig)?,
+                ),
         ))
         .await?;
 
@@ -110,8 +123,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("amount_out: {}", quote.amount_out());
 
     // Sign the order.
-    let payload = client.signable_payload(quote, &SigningHints::default()).await?;
-    let sig = signer.sign_hash(&payload.signing_hash()).await?;
+    let payload = client
+        .signable_payload(quote, &SigningHints::default())
+        .await?;
+    let sig = signer
+        .sign_hash(&payload.signing_hash())
+        .await?;
     let signed = SignedOrder::assemble(payload, sig);
 
     // Dry-run: inject synthetic ERC-20 balance and allowance to the Permit2 contract.

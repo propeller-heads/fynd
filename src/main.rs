@@ -350,4 +350,3 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     }
     Ok(())
 }
-
