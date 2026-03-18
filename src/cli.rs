@@ -81,11 +81,11 @@ pub struct ServeArgs {
     pub traded_n_days_ago: u64,
 
     /// Gas price refresh interval in seconds
-    #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL_SECS)]
+    #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL.as_secs())]
     pub gas_refresh_interval_secs: u64,
 
     /// Reconnect delay on connection failure in seconds
-    #[arg(long, default_value_t = defaults::RECONNECT_DELAY_SECS)]
+    #[arg(long, default_value_t = defaults::RECONNECT_DELAY.as_secs())]
     pub reconnect_delay_secs: u64,
 
     /// Worker router timeout in milliseconds
@@ -93,7 +93,7 @@ pub struct ServeArgs {
     pub worker_router_timeout_ms: u64,
 
     /// Minimum solver responses before early return (0 = wait for all)
-    #[arg(long, default_value_t = defaults::WORKER_ROUTER_MIN_RESPONSES)]
+    #[arg(long, default_value_t = defaults::ROUTER_MIN_RESPONSES)]
     pub worker_router_min_responses: usize,
 
     /// Path to worker pools TOML config file

@@ -36,10 +36,15 @@ impl FyndBuilder {
         rpc_url: String,
         protocols: Vec<String>,
     ) -> Self {
-        let solver_builder = pools.iter().fold(
-            SolverBuilder::new(chain, tycho_url, rpc_url, protocols, defaults::MIN_TVL),
-            |sb, (name, cfg)| sb.add_pool(name, cfg),
-        );
+        // Override SolverBuilder's generous 10 s standalone router timeout with the tighter
+        // HTTP service default; callers can still override via worker_router_timeout().
+        let solver_builder = pools
+            .iter()
+            .fold(
+                SolverBuilder::new(chain, tycho_url, rpc_url, protocols, defaults::MIN_TVL),
+                |sb, (name, cfg)| sb.add_pool(name, cfg),
+            )
+            .worker_router_timeout(Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS));
         Self {
             solver_builder,
             chain,

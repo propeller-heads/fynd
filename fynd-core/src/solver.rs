@@ -39,38 +39,49 @@ use crate::{
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
-// Shared defaults used by both SolverBuilder and PoolConfig serde deserialization.
-// Keeping them in one place prevents the two API paths from silently diverging.
+/// Default values for [`SolverBuilder`] configuration and [`PoolConfig`] deserialization.
+///
+/// These are the single source of truth for all tunable defaults. Downstream
+/// crates (e.g. `fynd-rpc`) should re-export or reference these rather than
+/// redeclaring their own copies.
+pub mod defaults {
+    use std::time::Duration;
+
+    pub const MIN_TOKEN_QUALITY: i32 = 100;
+    pub const TRADED_N_DAYS_AGO: u64 = 3;
+    pub const TVL_BUFFER_RATIO: f64 = 1.1;
+    pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+    pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    pub const ROUTER_MIN_RESPONSES: usize = 0;
+    pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
+    pub const POOL_MIN_HOPS: usize = 1;
+    pub const POOL_MAX_HOPS: usize = 3;
+    pub const POOL_TIMEOUT_MS: u64 = 100;
+}
+
+// Internal-only defaults not shared with downstream crates.
 const DEFAULT_TYCHO_USE_TLS: bool = true;
-const DEFAULT_MIN_TOKEN_QUALITY: i32 = 100;
-const DEFAULT_TRADED_N_DAYS_AGO: u64 = 3;
-const DEFAULT_TVL_BUFFER_RATIO: f64 = 1.1;
-const DEFAULT_GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
-const DEFAULT_TASK_QUEUE_CAPACITY: usize = 1000;
+/// Generous router timeout for standalone (non-server) use. HTTP services should
+/// override this to a tighter value appropriate for their SLA.
 const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_ROUTER_MIN_RESPONSES: usize = 0;
-const DEFAULT_MIN_HOPS: usize = 1;
-const DEFAULT_MAX_HOPS: usize = 3;
-const DEFAULT_ALGO_TIMEOUT_MS: u64 = 100;
 
 // serde requires free functions for `#[serde(default = "...")]` — these delegate to the
-// constants above so both deserialization and the builder stay in sync.
+// defaults module so both deserialization and the builder stay in sync.
 fn default_task_queue_capacity() -> usize {
-    DEFAULT_TASK_QUEUE_CAPACITY
+    defaults::POOL_TASK_QUEUE_CAPACITY
 }
 
 fn default_min_hops() -> usize {
-    DEFAULT_MIN_HOPS
+    defaults::POOL_MIN_HOPS
 }
 
 fn default_max_hops() -> usize {
-    DEFAULT_MAX_HOPS
+    defaults::POOL_MAX_HOPS
 }
 
 fn default_algo_timeout_ms() -> u64 {
-    DEFAULT_ALGO_TIMEOUT_MS
+    defaults::POOL_TIMEOUT_MS
 }
 
 /// Per-pool configuration for [`SolverBuilder::add_pool`].
@@ -200,14 +211,14 @@ impl SolverBuilder {
             min_tvl,
             tycho_api_key: None,
             tycho_use_tls: DEFAULT_TYCHO_USE_TLS,
-            min_token_quality: DEFAULT_MIN_TOKEN_QUALITY,
-            traded_n_days_ago: DEFAULT_TRADED_N_DAYS_AGO,
-            tvl_buffer_ratio: DEFAULT_TVL_BUFFER_RATIO,
-            gas_refresh_interval: DEFAULT_GAS_REFRESH_INTERVAL,
-            reconnect_delay: DEFAULT_RECONNECT_DELAY,
+            min_token_quality: defaults::MIN_TOKEN_QUALITY,
+            traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
+            tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
+            gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
+            reconnect_delay: defaults::RECONNECT_DELAY,
             blacklisted_components: HashSet::new(),
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
-            router_min_responses: DEFAULT_ROUTER_MIN_RESPONSES,
+            router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
             pools: Vec::new(),
         }
@@ -292,10 +303,10 @@ impl SolverBuilder {
             name: "default".to_string(),
             algorithm: algorithm.into(),
             num_workers: num_cpus::get(),
-            task_queue_capacity: DEFAULT_TASK_QUEUE_CAPACITY,
-            min_hops: DEFAULT_MIN_HOPS,
-            max_hops: DEFAULT_MAX_HOPS,
-            timeout_ms: DEFAULT_ALGO_TIMEOUT_MS,
+            task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
+            min_hops: defaults::POOL_MIN_HOPS,
+            max_hops: defaults::POOL_MAX_HOPS,
+            timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
         });
         self
@@ -318,10 +329,10 @@ impl SolverBuilder {
             .push(PoolEntry::Custom(CustomPoolEntry {
                 name,
                 num_workers: num_cpus::get(),
-                task_queue_capacity: DEFAULT_TASK_QUEUE_CAPACITY,
-                min_hops: DEFAULT_MIN_HOPS,
-                max_hops: DEFAULT_MAX_HOPS,
-                timeout_ms: DEFAULT_ALGO_TIMEOUT_MS,
+                task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
+                min_hops: defaults::POOL_MIN_HOPS,
+                max_hops: defaults::POOL_MAX_HOPS,
+                timeout_ms: defaults::POOL_TIMEOUT_MS,
                 max_routes: None,
                 configure,
             }));
