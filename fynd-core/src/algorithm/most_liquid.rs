@@ -825,7 +825,6 @@ mod tests {
         assert_eq!(val.depth, 0.0);
     }
 
-
     #[test]
     fn test_from_sim_and_derived_both_failed_returns_zero_weight() {
         let key = pair_key("pool1", 0x01, 0x02);
