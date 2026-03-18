@@ -195,7 +195,7 @@ solving.
 | Flag                         | Env Var               | Default             | Description                                |
 |------------------------------|-----------------------|---------------------|--------------------------------------------|
 | `--rpc-url`                  | `RPC_URL`             | `https://eth.llamarpc.com` | Ethereum RPC endpoint for the target chain |
-| `--tycho-url`                | `TYCHO_URL`           | *(chain-specific)*  | Tycho WebSocket URL (e.g. `tycho-fynd-ethereum.propellerheads.xyz`) |
+| `--tycho-url`                | `TYCHO_URL`           | *(chain-specific)*  | Tycho URL (e.g. `tycho-fynd-ethereum.propellerheads.xyz`) |
 | `--tycho-api-key`            | `TYCHO_API_KEY`       | -                   | Tycho API key                              |
 | `--chain`                    | -                     | `Ethereum`          | Target chain                               |
 | `-p, --protocols`            | -                     | *(all available)*   | Protocols to index (comma-separated). Auto-fetched from Tycho RPC if omitted. |
