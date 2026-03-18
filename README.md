@@ -45,17 +45,12 @@ export TYCHO_API_KEY=your-api-key
 export RUST_LOG=info
 
 # Run
-cargo run --release serve -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3
+cargo run --release serve
 ```
 
 > **Note:** `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 > ```bash
-> cargo run --release -- \
->   --tycho-url tycho-beta.propellerheads.xyz \
->   --rpc-url https://your-rpc-provider.com/v1/your_key \
->   --protocols uniswap_v2,uniswap_v3
+> cargo run --release serve --rpc-url https://your-rpc-provider.com/v1/your_key
 > ```
 
 The solver starts on `http://localhost:3000` by default.
@@ -65,9 +60,8 @@ The solver starts on `http://localhost:3000` by default.
 You can include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
 
 ```bash
-cargo run --release serve -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3,rfq:bebop
+cargo run --release serve \
+  --protocols all_onchain,rfq:bebop
 ```
 
 **Limitations:**
@@ -79,6 +73,15 @@ cargo run --release serve -- \
 - RFQ protocols typically require API keys, which are passed via environment variables. Check
   the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the
   specific variables each protocol needs.
+
+### Run on a specific chain
+
+You can run on any chain supported by Tycho (see [Tycho Hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints))
+
+```bash
+export RPC_URL=<RPC_FOR_TARGET_CHAIN>
+cargo run --release serve --chain unichain
+```
 
 ## Request a Quote
 
