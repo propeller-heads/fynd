@@ -3399,6 +3399,7 @@ dependencies = [
  "tycho-simulation",
  "typetag",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

@@ -117,6 +117,9 @@ tycho-simulation = ">=0.250.0"
 tycho-execution = { version = ">=0.165.0", features = ["evm"] }
 typetag = "0.2"
 
+# Compression
+zstd = "0.13"
+
 # Graph algorithms
 petgraph = "0.6"
 
