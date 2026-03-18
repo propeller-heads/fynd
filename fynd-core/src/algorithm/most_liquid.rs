@@ -94,39 +94,27 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
     ) -> Option<Self> {
         let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
-        // Use pre-computed spot price; fall back to zero-weight for explicit failures.
+        // Use pre-computed spot price; fall back to zero-weight on failure.
         let spot_price = match derived
             .spot_prices()
             .and_then(|p| p.get(&key).copied())
         {
             Some(p) => p,
             None => {
-                if derived
-                    .spot_price_failure(&key)
-                    .is_some()
-                {
-                    trace!(component_id = %component_id, "spot price failed, using zero weight");
-                    return Some(Self { spot_price: 0.0, depth: 0.0 });
-                }
-                return None; // never computed
+                trace!(component_id = %component_id, "spot price failed, using zero weight");
+                return Some(Self { spot_price: 0.0, depth: 0.0 });
             }
         };
 
-        // Look up pre-computed depth; fall back to zero-weight for explicit failures.
+        // Look up pre-computed depth; fall back to zero-weight on failure.
         let depth = match derived
             .pool_depths()
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64()?,
             None => {
-                if derived
-                    .pool_depth_failure(&key)
-                    .is_some()
-                {
-                    trace!(component_id = %component_id, "pool depth failed, using zero weight");
-                    return Some(Self { spot_price: 0.0, depth: 0.0 });
-                }
-                return None; // never computed
+                trace!(component_id = %component_id, "pool depth failed, using zero weight");
+                return Some(Self { spot_price: 0.0, depth: 0.0 });
             }
         };
 
@@ -837,25 +825,6 @@ mod tests {
         assert_eq!(val.depth, 0.0);
     }
 
-    #[test]
-    fn test_from_sim_and_derived_never_computed_returns_none() {
-        let key = pair_key("pool1", 0x01, 0x02);
-        let tok_in = token(0x01, "A");
-        let tok_out = token(0x02, "B");
-
-        let mut derived = DerivedData::new();
-        // both maps are empty (no successes, no failures)
-        derived.set_spot_prices(Default::default(), vec![], 10, true);
-        derived.set_pool_depths(Default::default(), vec![], 10, true);
-
-        let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
-
-        assert!(result.is_none());
-    }
 
     #[test]
     fn test_from_sim_and_derived_both_failed_returns_zero_weight() {
