@@ -219,9 +219,9 @@ impl SolverBuilder {
         self
     }
 
-    /// Sets the Tycho API key as an `Option`, replacing any previous value.
-    pub fn tycho_api_key_opt(mut self, key: Option<String>) -> Self {
-        self.tycho_api_key = key;
+    /// Overrides the minimum TVL filter set in [`SolverBuilder::new`].
+    pub fn min_tvl(mut self, min_tvl: f64) -> Self {
+        self.min_tvl = min_tvl;
         self
     }
 

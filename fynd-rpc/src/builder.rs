@@ -11,43 +11,24 @@ use crate::{
     api::{configure_app, AppState, HealthTracker},
     config::{defaults, BlacklistConfig, PoolConfig},
 };
+
 /// Builder that assembles Fynd and returns a running server handle.
 ///
-/// The builder does the following:
-/// - Creates a new Tycho feed
-/// - Creates worker pools (one task queue per pool)
-/// - Creates a new WorkerPoolRouter
-/// - Creates a new HTTP server
-/// - Returns a running server handle
+/// Wraps [`SolverBuilder`] for all solver configuration and adds HTTP server concerns on top.
 pub struct FyndBuilder {
+    solver_builder: SolverBuilder,
     chain: Chain,
     http_host: String,
     http_port: u16,
-    pools: HashMap<String, PoolConfig>,
-    tycho_url: String,
-    tycho_api_key: Option<String>,
-    /// Use TLS for Tycho WebSocket connection.
-    tycho_use_tls: bool,
-    rpc_url: String,
-    protocols: Vec<String>,
-    min_tvl: f64,
-    min_token_quality: i32,
-    traded_n_days_ago: u64,
-    tvl_buffer_ratio: f64,
-    gas_refresh_interval: Duration,
-    reconnect_delay: Duration,
-    worker_router_timeout: Duration,
-    worker_router_min_responses: usize,
-    /// Blacklist configuration for filtering components and protocols.
-    blacklist: BlacklistConfig,
-    /// Custom encoder override. If `None`, a default encoder is created during build.
-    encoder: Option<Encoder>,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
 }
 
 impl FyndBuilder {
     /// Creates a new builder with required fields.
+    ///
+    /// All solver configuration options have sensible defaults and can be overridden via the
+    /// setter methods below.
     pub fn new(
         chain: Chain,
         pools: HashMap<String, PoolConfig>,
@@ -55,26 +36,15 @@ impl FyndBuilder {
         rpc_url: String,
         protocols: Vec<String>,
     ) -> Self {
+        let solver_builder = pools.iter().fold(
+            SolverBuilder::new(chain, tycho_url, rpc_url, protocols, defaults::MIN_TVL),
+            |sb, (name, cfg)| sb.add_pool(name, cfg),
+        );
         Self {
+            solver_builder,
             chain,
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
-            pools,
-            tycho_url,
-            tycho_api_key: None,
-            tycho_use_tls: true, // Default to TLS enabled for Tycho WebSocket connection
-            rpc_url,
-            protocols,
-            min_tvl: defaults::MIN_TVL,
-            min_token_quality: defaults::MIN_TOKEN_QUALITY,
-            traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
-            tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
-            gas_refresh_interval: Duration::from_secs(defaults::GAS_REFRESH_INTERVAL_SECS),
-            reconnect_delay: Duration::from_secs(defaults::RECONNECT_DELAY_SECS),
-            worker_router_timeout: Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS),
-            worker_router_min_responses: defaults::WORKER_ROUTER_MIN_RESPONSES,
-            blacklist: BlacklistConfig::default(),
-            encoder: None,
             gas_price_stale_threshold: None,
         }
     }
@@ -93,74 +63,90 @@ impl FyndBuilder {
 
     /// Sets the minimum TVL filter (default: 10.0).
     pub fn min_tvl(mut self, min_tvl: f64) -> Self {
-        self.min_tvl = min_tvl;
+        self.solver_builder = self.solver_builder.min_tvl(min_tvl);
         self
     }
 
-    /// Sets the minimum token quality filter.
-    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
-        self.min_token_quality = min_token_quality;
+    /// Sets the minimum token quality filter (default: 100).
+    pub fn min_token_quality(mut self, quality: i32) -> Self {
+        self.solver_builder = self
+            .solver_builder
+            .min_token_quality(quality);
         self
     }
 
     /// Sets the traded_n_days_ago used to filter tokens (default: 3).
     pub fn traded_n_days_ago(mut self, days: u64) -> Self {
-        self.traded_n_days_ago = days;
+        self.solver_builder = self
+            .solver_builder
+            .traded_n_days_ago(days);
         self
     }
 
     /// Sets the ratio used to define the lower bound of the TVL filter for hysteresis (default:
     /// 1.1).
-    pub fn tvl_buffer_ratio(mut self, multiplier: f64) -> Self {
-        self.tvl_buffer_ratio = multiplier;
+    pub fn tvl_buffer_ratio(mut self, ratio: f64) -> Self {
+        self.solver_builder = self
+            .solver_builder
+            .tvl_buffer_ratio(ratio);
         self
     }
 
     /// Sets the gas price refresh interval (default: 30 seconds).
     pub fn gas_refresh_interval(mut self, interval: Duration) -> Self {
-        self.gas_refresh_interval = interval;
+        self.solver_builder = self
+            .solver_builder
+            .gas_refresh_interval(interval);
         self
     }
 
     /// Sets the reconnect delay on connection failure (default: 5 seconds).
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
-        self.reconnect_delay = delay;
+        self.solver_builder = self
+            .solver_builder
+            .reconnect_delay(delay);
         self
     }
 
     /// Sets the worker router timeout (default: 100ms).
     pub fn worker_router_timeout(mut self, timeout: Duration) -> Self {
-        self.worker_router_timeout = timeout;
+        self.solver_builder = self
+            .solver_builder
+            .worker_router_timeout(timeout);
         self
     }
 
     /// Sets the minimum number of solver responses before early return (default: 0, wait for all).
     pub fn worker_router_min_responses(mut self, min: usize) -> Self {
-        self.worker_router_min_responses = min;
+        self.solver_builder = self
+            .solver_builder
+            .worker_router_min_responses(min);
         self
     }
 
-    /// Sets the Tycho API key
-    pub fn tycho_api_key(mut self, tycho_api_key: String) -> Self {
-        self.tycho_api_key = Some(tycho_api_key);
+    /// Sets the Tycho API key.
+    pub fn tycho_api_key(mut self, key: String) -> Self {
+        self.solver_builder = self.solver_builder.tycho_api_key(key);
         self
     }
 
-    /// Disables TLS for Tycho WebSocket connection (TLS is enabled by default).
+    /// Disables TLS for the Tycho WebSocket connection (TLS is enabled by default).
     pub fn disable_tls(mut self) -> Self {
-        self.tycho_use_tls = false;
+        self.solver_builder = self.solver_builder.tycho_use_tls(false);
         self
     }
 
     /// Sets the blacklist configuration for filtering components.
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
-        self.blacklist = blacklist;
+        self.solver_builder = self
+            .solver_builder
+            .blacklisted_components(blacklist.components);
         self
     }
 
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
-        self.encoder = Some(encoder);
+        self.solver_builder = self.solver_builder.encoder(encoder);
         self
     }
 
@@ -174,37 +160,11 @@ impl FyndBuilder {
         info!(
             host = %self.http_host,
             port = self.http_port,
-            pools = self.pools.len(),
             "starting fynd"
         );
 
-        let mut solver_builder = SolverBuilder::new(
-            self.chain,
-            self.tycho_url,
-            self.rpc_url,
-            self.protocols,
-            self.min_tvl,
-        )
-        .tycho_api_key_opt(self.tycho_api_key)
-        .tycho_use_tls(self.tycho_use_tls)
-        .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago)
-        .tvl_buffer_ratio(self.tvl_buffer_ratio)
-        .gas_refresh_interval(self.gas_refresh_interval)
-        .reconnect_delay(self.reconnect_delay)
-        .blacklisted_components(self.blacklist.components)
-        .worker_router_timeout(self.worker_router_timeout)
-        .worker_router_min_responses(self.worker_router_min_responses);
-
-        if let Some(encoder) = self.encoder {
-            solver_builder = solver_builder.encoder(encoder);
-        }
-
-        for (name, pool_cfg) in &self.pools {
-            solver_builder = solver_builder.add_pool(name, pool_cfg);
-        }
-
-        let parts = solver_builder
+        let parts = self
+            .solver_builder
             .build()
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .into_parts();
