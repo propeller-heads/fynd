@@ -6,6 +6,7 @@ pub use fynd_rpc_types::ErrorResponse;
 use tracing::warn;
 
 /// API error type that converts to HTTP responses.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// Invalid request format or parameters.
@@ -26,6 +27,7 @@ pub enum ApiError {
 
     /// Market data is stale.
     #[error("market data stale: last update {age_ms}ms ago")]
+    #[non_exhaustive]
     StaleData { age_ms: u64 },
 }
 

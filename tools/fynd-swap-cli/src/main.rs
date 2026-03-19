@@ -215,7 +215,7 @@ max_hops = 3
 
     let mut builder = FyndRPCBuilder::new(
         cfg.chain,
-        pools_config.pools,
+        pools_config.into_pools(),
         cfg.tycho_url.to_string(),
         cfg.rpc_url.to_string(),
         resolved_protocols,

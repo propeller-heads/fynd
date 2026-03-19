@@ -15,6 +15,7 @@ use crate::{
 /// Builder that assembles Fynd and returns a running server handle.
 ///
 /// Wraps [`FyndBuilder`] for all solver configuration and adds HTTP server concerns on top.
+#[must_use]
 pub struct FyndRPCBuilder {
     fynd_builder: FyndBuilder,
     http_host: String,
@@ -141,7 +142,7 @@ impl FyndRPCBuilder {
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blacklisted_components(blacklist.components);
+            .blacklisted_components(blacklist.into_components());
         self
     }
 
@@ -241,6 +242,7 @@ impl FyndRPCBuilder {
 }
 
 /// Running Fynd. Call `run` to block until shutdown and perform cleanup.
+#[must_use]
 pub struct Fynd {
     server_handle: ServerHandle,
     server_task: JoinHandle<()>,

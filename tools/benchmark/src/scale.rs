@@ -147,14 +147,14 @@ fn parse_worker_counts(s: &str) -> Result<Vec<usize>> {
 }
 
 fn validate_single_pool(config: &WorkerPoolsConfig) -> Result<(String, PoolConfig)> {
-    if config.pools.is_empty() {
+    if config.pools().is_empty() {
         bail!("base config has no pools; exactly one pool is required");
     }
-    if config.pools.len() > 1 {
-        bail!("base config has {} pools; exactly one pool is required", config.pools.len());
+    if config.pools().len() > 1 {
+        bail!("base config has {} pools; exactly one pool is required", config.pools().len());
     }
     let (name, pool) = config
-        .pools
+        .pools()
         .iter()
         .next()
         .expect("checked non-empty");
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn validate_single_pool_empty() {
-        let config = WorkerPoolsConfig { pools: HashMap::new() };
+        let config = WorkerPoolsConfig::new(HashMap::new());
         let err = validate_single_pool(&config).unwrap_err();
         assert!(err.to_string().contains("no pools"));
     }
@@ -449,7 +449,7 @@ mod tests {
                 .with_max_hops(3)
                 .with_timeout_ms(100),
         );
-        let config = WorkerPoolsConfig { pools };
+        let config = WorkerPoolsConfig::new(pools);
         let (name, pool) = validate_single_pool(&config).unwrap();
         assert_eq!(name, "test_pool");
         assert_eq!(pool.algorithm(), "most_liquid");
@@ -478,7 +478,7 @@ mod tests {
                 .with_timeout_ms(200)
                 .with_max_routes(Some(10)),
         );
-        let config = WorkerPoolsConfig { pools };
+        let config = WorkerPoolsConfig::new(pools);
         let err = validate_single_pool(&config).unwrap_err();
         assert!(err.to_string().contains("2 pools"));
     }

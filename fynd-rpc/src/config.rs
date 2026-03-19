@@ -12,10 +12,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPoolsConfig {
     /// Pool configurations (at least one pool must be specified)
-    pub pools: HashMap<String, PoolConfig>,
+    pools: HashMap<String, PoolConfig>,
 }
 
 impl WorkerPoolsConfig {
+    /// Creates a new config from a pools map.
+    pub fn new(pools: HashMap<String, PoolConfig>) -> Self {
+        Self { pools }
+    }
+
+    /// Returns the pool configurations.
+    pub fn pools(&self) -> &HashMap<String, PoolConfig> {
+        &self.pools
+    }
+
+    /// Consumes the config and returns the pools map.
+    pub fn into_pools(self) -> HashMap<String, PoolConfig> {
+        self.pools
+    }
+
     /// Load worker pools configuration from a TOML file.
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -33,7 +48,7 @@ impl WorkerPoolsConfig {
 pub struct BlacklistConfig {
     /// Component IDs to exclude (e.g., pool addresses with simulation issues).
     #[serde(default)]
-    pub components: HashSet<String>,
+    components: HashSet<String>,
 }
 
 impl BlacklistConfig {
@@ -58,6 +73,10 @@ impl BlacklistConfig {
             .with_context(|| format!("failed to parse blacklist config {}", path.display()))?;
         Ok(wrapper.blacklist)
     }
+
+    pub(crate) fn into_components(self) -> HashSet<String> {
+        self.components
+    }
 }
 
 #[cfg(test)]
@@ -71,7 +90,7 @@ mod tests {
             algorithm = "most_liquid"
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
-        let pool = &config.pools["basic"];
+        let pool = &config.pools()["basic"];
         assert_eq!(pool.algorithm(), "most_liquid");
         assert_eq!(pool.num_workers(), num_cpus::get());
         assert_eq!(pool.task_queue_capacity(), defaults::POOL_TASK_QUEUE_CAPACITY);
@@ -94,7 +113,7 @@ mod tests {
             max_routes = 50
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
-        let pool = &config.pools["custom"];
+        let pool = &config.pools()["custom"];
         assert_eq!(pool.algorithm(), "most_liquid");
         assert_eq!(pool.num_workers(), 8);
         assert_eq!(pool.task_queue_capacity(), 500);
