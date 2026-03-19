@@ -17,7 +17,6 @@ use crate::{
 /// Wraps [`SolverBuilder`] for all solver configuration and adds HTTP server concerns on top.
 pub struct FyndBuilder {
     solver_builder: SolverBuilder,
-    chain: Chain,
     http_host: String,
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
@@ -47,7 +46,6 @@ impl FyndBuilder {
             .worker_router_timeout(Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS));
         Self {
             solver_builder,
-            chain,
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
@@ -168,6 +166,9 @@ impl FyndBuilder {
             "starting fynd"
         );
 
+        #[cfg(feature = "experimental")]
+        let chain = self.solver_builder.chain();
+
         let parts = self
             .solver_builder
             .build()
@@ -190,7 +191,7 @@ impl FyndBuilder {
         #[cfg(feature = "experimental")]
         let gas_token = {
             use fynd_core::types::constants::native_token;
-            native_token(&self.chain).context("gas token not configured for chain")?
+            native_token(&chain).context("gas token not configured for chain")?
         };
 
         let app_state = AppState::new(

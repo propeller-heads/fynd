@@ -224,6 +224,10 @@ impl SolverBuilder {
         }
     }
 
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
     /// Sets the Tycho API key.
     pub fn tycho_api_key(mut self, key: impl Into<String>) -> Self {
         self.tycho_api_key = Some(key.into());
