@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fynd_core::{
+    algorithm::AlgorithmConfig,
     derived::{ComputationManager, ComputationManagerConfig},
     encoding::encoder::Encoder,
     feed::{
@@ -19,7 +20,10 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use tokio::sync::{broadcast, RwLock};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
-use tycho_simulation::tycho_common::models::{Address, Chain};
+use tycho_simulation::{
+    tycho_common::models::{Address, Chain},
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
+};
 
 #[derive(Serialize)]
 pub struct GoldenFile {
@@ -88,7 +92,23 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         })?;
     }
 
-    // 2. Compute derived data
+    // 2. Inject a synthetic gas price so token_prices can compute.
+    // In replay mode there's no RPC to fetch live gas prices. We use a
+    // realistic value (10 gwei) which is close enough for golden baseline
+    // generation — the exact gas price only affects gas cost deductions.
+    {
+        let mut market = market_data.write().await;
+        market.update_gas_price(BlockGasPrice {
+            block_number: 0,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy {
+                gas_price: BigUint::from(10_000_000_000u64), // 10 gwei
+            },
+        });
+    }
+
+    // 3. Compute derived data
     let gas_token = find_weth_address(&market_data).await;
     let config = ComputationManagerConfig::default().with_gas_token(gas_token);
     let (computation_manager, derived_events_rx) =
@@ -99,6 +119,26 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
     let _cm_handle = tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
+    // 3. Build worker pool + router BEFORE sending MarketUpdated, so workers
+    // are subscribed to derived_events_rx and receive DerivedDataEvent broadcasts.
+    let market_event_rx = market_tx.subscribe();
+    let algo_config = AlgorithmConfig::new(1, 3, Duration::from_millis(2000), None)
+        .expect("valid algorithm config");
+    let (_worker_pool, task_handle) = WorkerPoolBuilder::new()
+        .algorithm("most_liquid")
+        .algorithm_config(algo_config)
+        .num_workers(4)
+        .build(market_data.clone(), derived_data.clone(), market_event_rx, derived_events_rx)?;
+    let pool_handle = SolverPoolHandle::new("golden_pool", task_handle);
+
+    let router_config = WorkerPoolRouterConfig::default()
+        .with_timeout(Duration::from_millis(5000));
+    let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+        .add_default_encoders(None)?;
+    let encoder = Encoder::new(Chain::Ethereum, registry)?;
+    let router = WorkerPoolRouter::new(vec![pool_handle], router_config, encoder);
+
+    // 4. Now trigger derived data computation by sending MarketUpdated
     let market_read = market_data.read().await;
     let added = market_read.component_topology();
     let num_pools = added.len();
@@ -111,9 +151,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         updated_components: vec![],
     })?;
 
-    // Wait for derived data (spot prices + pool depths).
-    // Token prices require a live gas_price feed, which isn't available in replay mode,
-    // so we only wait for spot_prices and pool_depths.
+    // Wait for all derived data (spot prices, pool depths, token prices)
     let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(timeout);
     loop {
@@ -123,7 +161,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 let d = derived_data.read().await;
-                if d.spot_prices().is_some() && d.pool_depths().is_some() {
+                if d.spot_prices().is_some() && d.token_prices().is_some() {
                     break;
                 }
             }
@@ -132,22 +170,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
 
     tracing::info!(num_pools, num_tokens, "pipeline ready, running scenarios...");
 
-    // 3. Build worker pool + router
-    let market_event_rx = market_tx.subscribe();
-    let (_worker_pool, task_handle) = WorkerPoolBuilder::new()
-        .algorithm("most_liquid")
-        .num_workers(2)
-        .build(market_data.clone(), derived_data.clone(), market_event_rx, derived_events_rx)?;
-    let pool_handle = SolverPoolHandle::new("golden_pool", task_handle);
-
-    let router_config = WorkerPoolRouterConfig::default()
-        .with_timeout(Duration::from_millis(5000));
-    let registry = SwapEncoderRegistry::new(Chain::Ethereum)
-        .add_default_encoders(None)?;
-    let encoder = Encoder::new(Chain::Ethereum, registry)?;
-    let router = WorkerPoolRouter::new(vec![pool_handle], router_config, encoder);
-
-    // 4. Load scenarios from pairs.json and run them
+    // 5. Load scenarios from pairs.json and run them
     let scenarios = load_scenarios();
     let mut golden_scenarios = Vec::new();
 

@@ -15,8 +15,12 @@ use fynd_core::{
     worker_pool_router::{SolverPoolHandle, WorkerPoolRouter},
     SolveError, WorkerPoolRouterConfig,
 };
+use num_bigint::BigUint;
 use tokio::sync::{broadcast, RwLock};
-use tycho_simulation::tycho_common::models::Chain;
+use tycho_simulation::{
+    tycho_common::models::Chain,
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
+};
 
 /// The fully constructed test pipeline, ready to receive quote requests.
 pub struct TestHarness {
@@ -65,7 +69,21 @@ impl TestHarness {
                 .expect("replay of recorded update failed");
         }
 
-        // 3. Create ComputationManager and compute derived data
+        // 3. Inject a synthetic gas price so token_prices can compute.
+        // In replay mode there's no RPC to fetch live gas prices.
+        {
+            let mut market = market_data.write().await;
+            market.update_gas_price(BlockGasPrice {
+                block_number: 0,
+                block_hash: Default::default(),
+                block_timestamp: 0,
+                pricing: GasPrice::Legacy {
+                    gas_price: BigUint::from(10_000_000_000u64), // 10 gwei
+                },
+            });
+        }
+
+        // 4. Create ComputationManager and compute derived data
         let gas_token = find_weth_address(&market_data).await;
         let config =
             ComputationManagerConfig::default().with_gas_token(gas_token);
@@ -74,46 +92,16 @@ impl TestHarness {
                 .expect("failed to create computation manager");
         let derived_data = computation_manager.store();
 
-        // 4. Run ComputationManager: send a synthetic MarketUpdated event
+        // 5. Run ComputationManager
         let (market_tx, market_rx) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let cm_handle =
             tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
-        // Build the "all components added" event from current market state
-        let market_read = market_data.read().await;
-        let added = market_read.component_topology();
-        drop(market_read);
-
-        market_tx
-            .send(MarketEvent::MarketUpdated {
-                added_components: added,
-                removed_components: vec![],
-                updated_components: vec![],
-            })
-            .expect("failed to send market event");
-
-        // 5. Wait for derived data to be computed.
-        // Token prices require a live gas_price feed unavailable in replay mode,
-        // so we only wait for spot_prices and pool_depths.
-        let timeout = tokio::time::sleep(Duration::from_secs(120));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                _ = &mut timeout => {
-                    panic!("derived data computation timed out after 120s");
-                }
-                _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                    let d = derived_data.read().await;
-                    if d.spot_prices().is_some() && d.pool_depths().is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // 6. Build worker pool + router
+        // 6. Build worker pool + router BEFORE sending MarketUpdated, so
+        // workers are subscribed to derived_events_rx and receive
+        // DerivedDataEvent broadcasts (avoids race condition).
         let market_event_rx = market_tx.subscribe();
         let (pool_handle, worker_pool) = build_test_worker_pool(
             market_data.clone(),
@@ -129,6 +117,36 @@ impl TestHarness {
             router_config,
             default_test_encoder(),
         );
+
+        // 7. Now trigger derived data computation by sending MarketUpdated
+        let market_read = market_data.read().await;
+        let added = market_read.component_topology();
+        drop(market_read);
+
+        market_tx
+            .send(MarketEvent::MarketUpdated {
+                added_components: added,
+                removed_components: vec![],
+                updated_components: vec![],
+            })
+            .expect("failed to send market event");
+
+        // 8. Wait for all derived data to be computed
+        let timeout = tokio::time::sleep(Duration::from_secs(120));
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    panic!("derived data computation timed out after 120s");
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                    let d = derived_data.read().await;
+                    if d.spot_prices().is_some() && d.token_prices().is_some() {
+                        break;
+                    }
+                }
+            }
+        }
 
         Self {
             market_data,

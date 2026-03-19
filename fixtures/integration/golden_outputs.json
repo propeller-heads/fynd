@@ -1,0 +1,626 @@
+{
+  "metadata": {
+    "block_number": 0,
+    "num_pools": 2452,
+    "num_tokens": 1766,
+    "fynd_version": "0.19.0"
+  },
+  "scenarios": [
+    {
+      "name": "WETH_to_USDC_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "1055827104877",
+        "gas_estimate": "430000",
+        "num_swaps": 3,
+        "solve_time_ms": 842
+      }
+    },
+    {
+      "name": "USDC_to_WETH_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "460091933465359034160",
+        "gas_estimate": "424000",
+        "num_swaps": 3,
+        "solve_time_ms": 870
+      }
+    },
+    {
+      "name": "WETH_to_DAI_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "856149178415353424054121",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 438
+      }
+    },
+    {
+      "name": "DAI_to_WETH_1000000",
+      "token_in": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "999999999999999983222784",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "376714100083626517423",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 292
+      }
+    },
+    {
+      "name": "USDC_to_DAI_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "793984021392980468277950",
+        "gas_estimate": "404000",
+        "num_swaps": 3,
+        "solve_time_ms": 819
+      }
+    },
+    {
+      "name": "DAI_to_USDC_1000000",
+      "token_in": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "amount": "999999999999999983222784",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "793832866986",
+        "gas_estimate": "404000",
+        "num_swaps": 3,
+        "solve_time_ms": 430
+      }
+    },
+    {
+      "name": "WETH_to_USDT_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "1055843088003",
+        "gas_estimate": "296000",
+        "num_swaps": 2,
+        "solve_time_ms": 891
+      }
+    },
+    {
+      "name": "USDT_to_WETH_1000000",
+      "token_in": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "460188791435283807142",
+        "gas_estimate": "292000",
+        "num_swaps": 2,
+        "solve_time_ms": 947
+      }
+    },
+    {
+      "name": "WETH_to_WBTC_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "1520769384",
+        "gas_estimate": "146000",
+        "num_swaps": 1,
+        "solve_time_ms": 784
+      }
+    },
+    {
+      "name": "WBTC_to_WETH_15",
+      "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "1500000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "489323371341922770120",
+        "gas_estimate": "142000",
+        "num_swaps": 1,
+        "solve_time_ms": 656
+      }
+    },
+    {
+      "name": "USDC_to_USDT_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "999786862700",
+        "gas_estimate": "132000",
+        "num_swaps": 1,
+        "solve_time_ms": 1886
+      }
+    },
+    {
+      "name": "USDT_to_USDC_1000000",
+      "token_in": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "999985762868",
+        "gas_estimate": "134000",
+        "num_swaps": 1,
+        "solve_time_ms": 1636
+      }
+    },
+    {
+      "name": "WETH_to_PEPE_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "288965506224158494532745310834",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 167
+      }
+    },
+    {
+      "name": "PEPE_to_WETH_125000000000",
+      "token_in": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "125000000000000002485578104832",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "191171702235795895768",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 22
+      }
+    },
+    {
+      "name": "WETH_to_LINK_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "57423424169351386338377",
+        "gas_estimate": "690000",
+        "num_swaps": 3,
+        "solve_time_ms": 447
+      }
+    },
+    {
+      "name": "LINK_to_WETH_70000",
+      "token_in": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "70000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "139783984965302818798",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 229
+      }
+    },
+    {
+      "name": "WETH_to_SHIB_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "38461895176875811672629863451",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 178
+      }
+    },
+    {
+      "name": "SHIB_to_WETH_100000000000",
+      "token_in": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "99999999999999991433150857216",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "87158190178925427781",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 28
+      }
+    },
+    {
+      "name": "WETH_to_UNI_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "162905952294087815241269",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 532
+      }
+    },
+    {
+      "name": "UNI_to_WETH_150000",
+      "token_in": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "150000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "230651243303701751071",
+        "gas_estimate": "286000",
+        "num_swaps": 2,
+        "solve_time_ms": 228
+      }
+    },
+    {
+      "name": "WETH_to_AAVE_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "2256472650028989009439",
+        "gas_estimate": "398000",
+        "num_swaps": 2,
+        "solve_time_ms": 430
+      }
+    },
+    {
+      "name": "AAVE_to_WETH_5000",
+      "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "5000000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "33841967793340246619",
+        "gas_estimate": "442000",
+        "num_swaps": 3,
+        "solve_time_ms": 188
+      }
+    },
+    {
+      "name": "WETH_to_GNO_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "237573231585217913382",
+        "gas_estimate": "356000",
+        "num_swaps": 2,
+        "solve_time_ms": 273
+      }
+    },
+    {
+      "name": "GNO_to_WETH_3500",
+      "token_in": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "3500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "13267000257519351671",
+        "gas_estimate": "120000",
+        "num_swaps": 1,
+        "solve_time_ms": 53
+      }
+    },
+    {
+      "name": "WETH_to_BNB_500",
+      "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "token_out": "0xb8c77482e45f1f44de1745f52c74426c631bdd52",
+      "amount": "500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "NoRouteFound",
+        "amount_out_net_gas": "0",
+        "gas_estimate": "0",
+        "num_swaps": 0,
+        "solve_time_ms": 162
+      }
+    },
+    {
+      "name": "BNB_to_WETH_1700",
+      "token_in": "0xb8c77482e45f1f44de1745f52c74426c631bdd52",
+      "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "amount": "1700000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "NoRouteFound",
+        "amount_out_net_gas": "0",
+        "gas_estimate": "0",
+        "num_swaps": 0,
+        "solve_time_ms": 18
+      }
+    },
+    {
+      "name": "USDC_to_LINK_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "56700191843406038901154",
+        "gas_estimate": "394000",
+        "num_swaps": 1,
+        "solve_time_ms": 764
+      }
+    },
+    {
+      "name": "USDC_to_UNI_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "154662096173628399795135",
+        "gas_estimate": "404000",
+        "num_swaps": 3,
+        "solve_time_ms": 908
+      }
+    },
+    {
+      "name": "USDC_to_AAVE_1000000",
+      "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "amount": "1000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "2256496298441690627308",
+        "gas_estimate": "278000",
+        "num_swaps": 1,
+        "solve_time_ms": 759
+      }
+    },
+    {
+      "name": "LINK_to_USDC_70000",
+      "token_in": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "amount": "70000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "297379904318",
+        "gas_estimate": "390000",
+        "num_swaps": 3,
+        "solve_time_ms": 205
+      }
+    },
+    {
+      "name": "PEPE_to_USDC_125000000000",
+      "token_in": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "amount": "125000000000000002485578104832",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "405885207862",
+        "gas_estimate": "394000",
+        "num_swaps": 3,
+        "solve_time_ms": 128
+      }
+    },
+    {
+      "name": "LINK_to_UNI_70000",
+      "token_in": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "token_out": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "amount": "70000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "80109295061026895024998",
+        "gas_estimate": "402000",
+        "num_swaps": 3,
+        "solve_time_ms": 163
+      }
+    },
+    {
+      "name": "UNI_to_LINK_150000",
+      "token_in": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "token_out": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "amount": "150000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "38128894974980998335939",
+        "gas_estimate": "534000",
+        "num_swaps": 3,
+        "solve_time_ms": 199
+      }
+    },
+    {
+      "name": "AAVE_to_GNO_5000",
+      "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "token_out": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "amount": "5000000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "247276260524591462907",
+        "gas_estimate": "378000",
+        "num_swaps": 3,
+        "solve_time_ms": 129
+      }
+    },
+    {
+      "name": "GNO_to_AAVE_3500",
+      "token_in": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "amount": "3500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "249893360692996790722",
+        "gas_estimate": "372000",
+        "num_swaps": 3,
+        "solve_time_ms": 50
+      }
+    },
+    {
+      "name": "PEPE_to_SHIB_125000000000",
+      "token_in": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "token_out": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "amount": "125000000000000002485578104832",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "28849613734134091975930067291",
+        "gas_estimate": "240000",
+        "num_swaps": 2,
+        "solve_time_ms": 21
+      }
+    },
+    {
+      "name": "SHIB_to_PEPE_100000000000",
+      "token_in": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "token_out": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "amount": "99999999999999991433150857216",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "53937262272365210275803618153",
+        "gas_estimate": "240000",
+        "num_swaps": 2,
+        "solve_time_ms": 26
+      }
+    },
+    {
+      "name": "LINK_to_AAVE_70000",
+      "token_in": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "amount": "70000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "1627031294024066082075",
+        "gas_estimate": "448000",
+        "num_swaps": 3,
+        "solve_time_ms": 148
+      }
+    },
+    {
+      "name": "AAVE_to_LINK_5000",
+      "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "token_out": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "amount": "5000000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "7553316254177709547907",
+        "gas_estimate": "334000",
+        "num_swaps": 2,
+        "solve_time_ms": 149
+      }
+    },
+    {
+      "name": "UNI_to_GNO_150000",
+      "token_in": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "token_out": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "amount": "150000000000000004194304",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "237552838185203215732",
+        "gas_estimate": "476000",
+        "num_swaps": 3,
+        "solve_time_ms": 159
+      }
+    },
+    {
+      "name": "GNO_to_UNI_3500",
+      "token_in": "0x6810e776880c02933d47db1b9fc05908e5386b96",
+      "token_out": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "amount": "3500000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "7886276551721620587195",
+        "gas_estimate": "386000",
+        "num_swaps": 3,
+        "solve_time_ms": 53
+      }
+    },
+    {
+      "name": "PEPE_to_LINK_125000000000",
+      "token_in": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "token_out": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "amount": "125000000000000002485578104832",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "31929180997253304932590",
+        "gas_estimate": "478000",
+        "num_swaps": 3,
+        "solve_time_ms": 48
+      }
+    },
+    {
+      "name": "BNB_to_AAVE_1700",
+      "token_in": "0xb8c77482e45f1f44de1745f52c74426c631bdd52",
+      "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "amount": "1700000000000000000000",
+      "side": "Sell",
+      "expected": {
+        "status": "NoRouteFound",
+        "amount_out_net_gas": "0",
+        "gas_estimate": "0",
+        "num_swaps": 0,
+        "solve_time_ms": 18
+      }
+    },
+    {
+      "name": "SHIB_to_UNI_100000000000",
+      "token_in": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "token_out": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "amount": "99999999999999991433150857216",
+      "side": "Sell",
+      "expected": {
+        "status": "Success",
+        "amount_out_net_gas": "50697026205443205904051",
+        "gas_estimate": "396000",
+        "num_swaps": 3,
+        "solve_time_ms": 54
+      }
+    }
+  ]
+}

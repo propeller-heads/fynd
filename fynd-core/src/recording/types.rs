@@ -23,10 +23,27 @@ pub struct RecordedUpdate {
 
 impl From<Update> for RecordedUpdate {
     fn from(update: Update) -> Self {
+        // Filter out states that can't be serialized (e.g., VM-backed
+        // protocol states like UniswapV4 which depend on EVM engine state).
+        let states = update
+            .states
+            .into_iter()
+            .filter(|(id, state)| {
+                let ok = serde_json::to_value(state.as_ref()).is_ok();
+                if !ok {
+                    tracing::debug!(
+                        pool_id = %id,
+                        "dropping non-serializable state from recording"
+                    );
+                }
+                ok
+            })
+            .collect();
+
         Self {
             block_number_or_timestamp: update.block_number_or_timestamp,
             sync_states: update.sync_states,
-            states: update.states,
+            states,
             new_pairs: update.new_pairs,
             removed_pairs: update.removed_pairs,
         }
