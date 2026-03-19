@@ -194,7 +194,7 @@ Run with: `cargo run --example quote`
 
 ## Next steps
 
-* [Swap CLI](../../guides/swap-cli.md)
 * [Server configuration](../../guides/server-configuration.md)
-* [Benchmarking](../../guides/benchmarking.md)
 * [Custom algorithm](../../guides/custom-algorithm.md)
+* [Benchmarking](../../guides/benchmarking.md)
+* [Swap CLI](../../guides/swap-cli.md)
