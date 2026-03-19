@@ -1,0 +1,43 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTDOCFLAGS: "-D warnings"
+
+jobs:
+  docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+        with:
+          cache-on-failure: true
+
+      # Build docs for all publishable crates, matching what docs.rs
+      # will generate. --no-deps avoids building docs for all
+      # transitive dependencies. --document-private-items is omitted
+      # to match docs.rs defaults.
+      - name: Build docs
+        run: |
+          cargo doc --no-deps --locked \
+            --package fynd-core \
+            --package fynd-rpc-types \
+            --package fynd-rpc \
+            --package fynd-client
