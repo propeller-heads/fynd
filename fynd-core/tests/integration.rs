@@ -4,8 +4,8 @@ mod harness;
 mod scenarios;
 
 // Test modules — uncomment as they are implemented in Tasks 5-8:
-// #[path = "integration/solution_tests.rs"]
-// mod solution_tests;
+#[path = "integration/solution_tests.rs"]
+mod solution_tests;
 // #[path = "integration/timing_tests.rs"]
 // mod timing_tests;
 // #[path = "integration/derived_data_tests.rs"]
