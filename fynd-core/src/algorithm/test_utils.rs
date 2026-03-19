@@ -219,7 +219,7 @@ impl ProtocolSim for MockProtocolSim {
         _delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
-    ) -> Result<(), TransitionError<String>> {
+    ) -> Result<(), TransitionError> {
         unimplemented!("delta_transition not implemented in MockProtocolSim")
     }
 
