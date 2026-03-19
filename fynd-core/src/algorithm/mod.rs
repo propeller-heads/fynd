@@ -45,7 +45,7 @@ pub struct AlgorithmConfig {
     /// Timeout for solving.
     timeout: Duration,
     /// Maximum number of paths to simulate. `None` means no cap.
-    pub max_routes: Option<usize>,
+    max_routes: Option<usize>,
 }
 
 impl AlgorithmConfig {
@@ -56,6 +56,7 @@ impl AlgorithmConfig {
     /// Returns `InvalidConfiguration` if:
     /// - `min_hops == 0` (at least one hop is required)
     /// - `min_hops > max_hops`
+    /// - `max_routes` is `Some(0)`
     pub fn new(
         min_hops: usize,
         max_hops: usize,
@@ -93,6 +94,11 @@ impl AlgorithmConfig {
     /// Returns the timeout for solving.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Returns the maximum number of routes to simulate.
+    pub fn max_routes(&self) -> Option<usize> {
+        self.max_routes
     }
 }
 
