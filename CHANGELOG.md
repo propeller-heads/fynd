@@ -1,3 +1,16 @@
+## [0.22.0](https://github.com/propeller-heads/fynd/compare/0.21.1...0.22.0) (2026-03-19)
+
+
+### Features
+
+* **fynd-core:** add SolverBuilder and Solver for simplified setup ([60bfc2f](https://github.com/propeller-heads/fynd/commit/60bfc2f4f21102af1d34e23620571c590035e72d))
+
+
+### Bug Fixes
+
+* **fynd-core:** remove generic param from TransitionError after tycho-common 0.151.0 update ([137a8cb](https://github.com/propeller-heads/fynd/commit/137a8cbe261023ac71e810484938ecead6b8583e))
+* **fynd-rpc:** remove redundant chain field from FyndBuilder ([acde0b7](https://github.com/propeller-heads/fynd/commit/acde0b7a5bf93cb41fc28c62e1e6271ef406f376))
+
 ## [0.21.1](https://github.com/propeller-heads/fynd/compare/0.21.0...0.21.1) (2026-03-19)
 
 
