@@ -3396,6 +3396,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fynd-swap-cli"
+version = "0.20.1"
+dependencies = [
+ "actix-web",
+ "alloy",
+ "anyhow",
+ "bytes",
+ "clap",
+ "fynd-client",
+ "fynd-rpc",
+ "num-bigint",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.22",
+ "tycho-simulation",
+]
+
+[[package]]
 name = "gcloud-sdk"
 version = "0.27.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

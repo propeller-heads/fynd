@@ -50,7 +50,10 @@ cargo run --release serve
 
 > **Note:** `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 > ```bash
-> cargo run --release serve --rpc-url https://your-rpc-provider.com/v1/your_key
+> cargo run --release serve -- \
+>   --tycho-url tycho-beta.propellerheads.xyz \
+>   --rpc-url https://your-rpc-provider.com/v1/your_key \
+>   --protocols uniswap_v2,uniswap_v3
 > ```
 
 The solver starts on `http://localhost:3000` by default.

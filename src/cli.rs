@@ -156,8 +156,12 @@ mod cli_tests {
 
     #[test]
     fn test_arg_parsing_defaults() {
-        // Clear ambient env var so the test is deterministic
+        // Clear ambient env vars so the test is deterministic regardless of the shell environment.
         std::env::remove_var("RPC_URL");
+        std::env::remove_var("TYCHO_API_KEY");
+        std::env::remove_var("TYCHO_URL");
+        std::env::remove_var("HTTP_HOST");
+        std::env::remove_var("HTTP_PORT");
         let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {

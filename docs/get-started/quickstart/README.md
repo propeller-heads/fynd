@@ -261,7 +261,7 @@ compatible tool. Available metrics: solve duration, response counts, failure typ
 
 ### 7. Validating and Executing the Solutions
 
-The repository includes an end-to-end example
-at [`examples/tutorial/`](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) that demonstrates
-quoting, simulating, and executing swaps against a running solver.
+With Fynd running, you can validate and execute swaps using `fynd-swap-cli` — a CLI binary included in the repository
+at `tools/fynd-swap-cli/`. It supports dry-run simulation (no funds or private key required) and on-chain execution.
+
 See [executing-the-solutions.md](executing-the-solutions.md "mention") for the full walkthrough.

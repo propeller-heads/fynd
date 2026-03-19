@@ -2,15 +2,12 @@
 
 use alloy::{
     network::Ethereum,
-    primitives::{address, Address, Bytes as AlloyBytes, TxKind},
+    primitives::{Address, Bytes as AlloyBytes, TxKind},
     providers::{Provider, RootProvider},
     rpc::types::TransactionRequest,
     sol,
     sol_types::SolCall,
 };
-
-/// Canonical Permit2 deployment address (same on all EVM chains).
-pub const PERMIT2_ADDRESS: Address = address!("000000000022D473030F116dDEE9F6B43aC78BA3");
 
 sol! {
     interface IPermit2 {
@@ -30,7 +27,7 @@ pub async fn read_nonce(
     owner: Address,
     token: Address,
     spender: Address,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> anyhow::Result<u64> {
     let calldata = IPermit2::allowanceCall { owner, token, spender }.abi_encode();
     let result = provider
         .call(TransactionRequest {
