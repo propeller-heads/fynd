@@ -31,19 +31,19 @@ pub struct DerivedData {
     /// Failure map for token_prices: key → (block_when_failed, error_reason).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    token_prices_failed: Option<HashMap<TokenGasPriceKey, (u64, String)>>,
+    token_prices_failed: HashMap<TokenGasPriceKey, (u64, String)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
     pool_depths: Option<ComputedValue<PoolDepths>>,
     /// Failure map for pool_depths: key → (block_when_failed, error_reason).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    pool_depths_failed: Option<HashMap<PoolDepthKey, (u64, String)>>,
+    pool_depths_failed: HashMap<PoolDepthKey, (u64, String)>,
     spot_prices: Option<ComputedValue<SpotPrices>>,
     /// Failure map for spot_prices: key → (block_when_failed, error_reason).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    spot_prices_failed: Option<HashMap<SpotPriceKey, (u64, String)>>,
+    spot_prices_failed: HashMap<SpotPriceKey, (u64, String)>,
 }
 
 /// Parses `"component_id/token_in/token_out"` into a typed `(ComponentId, Address, Address)` key.
@@ -116,27 +116,22 @@ impl DerivedData {
             })
             .collect();
 
-        let merged = if is_full_recompute {
-            new_failures
+        if is_full_recompute {
+            self.token_prices_failed = new_failures;
         } else {
-            let mut existing = self
-                .token_prices_failed
-                .take()
-                .unwrap_or_default();
-            existing.retain(|k, _| !prices.contains_key(k));
-            existing.extend(new_failures);
-            existing
-        };
+            self.token_prices_failed
+                .retain(|k, _| !prices.contains_key(k));
+            self.token_prices_failed
+                .extend(new_failures);
+        }
 
         self.token_prices = Some(ComputedValue { data: prices, block });
-        self.token_prices_failed = Some(merged);
     }
 
     /// Returns `(block, error_reason)` for this token address if it failed in a past
     /// computation, or `None` if it succeeded or was not attempted.
     pub fn token_price_failure(&self, key: &TokenGasPriceKey) -> Option<(u64, &str)> {
         self.token_prices_failed
-            .as_ref()?
             .get(key)
             .map(|(block, error)| (*block, error.as_str()))
     }
@@ -144,7 +139,7 @@ impl DerivedData {
     /// Clears token prices and their failure map.
     pub fn clear_token_prices(&mut self) {
         self.token_prices = None;
-        self.token_prices_failed = None;
+        self.token_prices_failed.clear();
     }
 
     // -------------------------------------------------------------------------
@@ -210,20 +205,16 @@ impl DerivedData {
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
 
-        let merged = if is_full_recompute {
-            new_failures
+        if is_full_recompute {
+            self.pool_depths_failed = new_failures;
         } else {
-            let mut existing = self
-                .pool_depths_failed
-                .take()
-                .unwrap_or_default();
-            existing.retain(|k, _| !depths.contains_key(k));
-            existing.extend(new_failures);
-            existing
-        };
+            self.pool_depths_failed
+                .retain(|k, _| !depths.contains_key(k));
+            self.pool_depths_failed
+                .extend(new_failures);
+        }
 
         self.pool_depths = Some(ComputedValue { data: depths, block });
-        self.pool_depths_failed = Some(merged);
     }
 
     /// Returns `(block, error_reason)` for this key if it failed in a past pool depth
@@ -232,7 +223,6 @@ impl DerivedData {
     /// Key format: `(component_id, token_in, token_out)`
     pub fn pool_depth_failure(&self, key: &PoolDepthKey) -> Option<(u64, &str)> {
         self.pool_depths_failed
-            .as_ref()?
             .get(key)
             .map(|(block, error)| (*block, error.as_str()))
     }
@@ -240,7 +230,7 @@ impl DerivedData {
     /// Clears pool depths and their failure map.
     pub fn clear_pool_depths(&mut self) {
         self.pool_depths = None;
-        self.pool_depths_failed = None;
+        self.pool_depths_failed.clear();
     }
 
     // -------------------------------------------------------------------------
@@ -278,20 +268,16 @@ impl DerivedData {
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
 
-        let merged = if is_full_recompute {
-            new_failures
+        if is_full_recompute {
+            self.spot_prices_failed = new_failures;
         } else {
-            let mut existing = self
-                .spot_prices_failed
-                .take()
-                .unwrap_or_default();
-            existing.retain(|k, _| !prices.contains_key(k));
-            existing.extend(new_failures);
-            existing
-        };
+            self.spot_prices_failed
+                .retain(|k, _| !prices.contains_key(k));
+            self.spot_prices_failed
+                .extend(new_failures);
+        }
 
         self.spot_prices = Some(ComputedValue { data: prices, block });
-        self.spot_prices_failed = Some(merged);
     }
 
     /// Returns `(block, error_reason)` for this key if it failed in a past spot price
@@ -300,7 +286,6 @@ impl DerivedData {
     /// Key format: `(component_id, token_in, token_out)`
     pub fn spot_price_failure(&self, key: &SpotPriceKey) -> Option<(u64, &str)> {
         self.spot_prices_failed
-            .as_ref()?
             .get(key)
             .map(|(block, error)| (*block, error.as_str()))
     }
@@ -308,7 +293,7 @@ impl DerivedData {
     /// Clears spot prices and their failure map.
     pub fn clear_spot_prices(&mut self) {
         self.spot_prices = None;
-        self.spot_prices_failed = None;
+        self.spot_prices_failed.clear();
     }
 
     // -------------------------------------------------------------------------
@@ -318,12 +303,12 @@ impl DerivedData {
     /// Clears all stored data, including all failure maps.
     pub fn clear_all(&mut self) {
         self.token_prices = None;
-        self.token_prices_failed = None;
+        self.token_prices_failed.clear();
         self.token_prices_deps = None;
         self.pool_depths = None;
-        self.pool_depths_failed = None;
+        self.pool_depths_failed.clear();
         self.spot_prices = None;
-        self.spot_prices_failed = None;
+        self.spot_prices_failed.clear();
     }
 }
 

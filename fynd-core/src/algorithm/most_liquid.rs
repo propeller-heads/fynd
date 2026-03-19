@@ -650,7 +650,7 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
-        derived::{types::TokenGasPrices, DerivedData},
+        derived::{computation::FailedItem, types::TokenGasPrices, DerivedData},
         graph::GraphManager,
         types::OrderSide,
     };
@@ -771,10 +771,7 @@ mod tests {
         // spot price fails, pool depth not computed
         derived.set_spot_prices(
             Default::default(),
-            vec![crate::derived::computation::FailedItem {
-                key: key_str,
-                error: "sim error".to_string(),
-            }],
+            vec![FailedItem { key: key_str, error: "sim error".to_string() }],
             10,
             true,
         );
@@ -806,10 +803,7 @@ mod tests {
         // pool depth fails
         derived.set_pool_depths(
             Default::default(),
-            vec![crate::derived::computation::FailedItem {
-                key: key_str,
-                error: "depth error".to_string(),
-            }],
+            vec![FailedItem { key: key_str, error: "depth error".to_string() }],
             10,
             true,
         );
@@ -835,19 +829,13 @@ mod tests {
         let mut derived = DerivedData::new();
         derived.set_spot_prices(
             Default::default(),
-            vec![crate::derived::computation::FailedItem {
-                key: key_str.clone(),
-                error: "spot error".to_string(),
-            }],
+            vec![FailedItem { key: key_str.clone(), error: "spot error".to_string() }],
             10,
             true,
         );
         derived.set_pool_depths(
             Default::default(),
-            vec![crate::derived::computation::FailedItem {
-                key: key_str,
-                error: "depth error".to_string(),
-            }],
+            vec![FailedItem { key: key_str, error: "depth error".to_string() }],
             10,
             true,
         );
