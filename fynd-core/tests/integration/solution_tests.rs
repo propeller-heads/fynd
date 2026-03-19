@@ -137,6 +137,66 @@ async fn test_quality_within_golden_baseline() {
     );
 }
 
+/// When BLESS_GOLDEN=1 is set, regenerate golden_outputs.json from the
+/// current recording. This test always "passes" — its purpose is the
+/// side effect of writing the golden file.
+#[tokio::test]
+async fn test_bless_golden_outputs() {
+    if !crate::scenarios::should_bless() {
+        return;
+    }
+
+    let harness = TestHarness::from_fixture().await;
+    let scenarios = crate::scenarios::load_test_scenarios();
+
+    let mut blessed_scenarios = Vec::new();
+    for scenario in &scenarios {
+        let order = scenario.to_order();
+        let result = harness.quote(vec![order]).await;
+
+        let expected = match result {
+            Ok(quote) => {
+                let oq = &quote.orders()[0];
+                crate::scenarios::GoldenOutput {
+                    status: oq.status(),
+                    amount_out_net_gas: oq.amount_out_net_gas().clone(),
+                    gas_estimate: oq.gas_estimate().clone(),
+                    num_swaps: oq
+                        .route()
+                        .map(|r| r.hop_count())
+                        .unwrap_or(0),
+                    solve_time_ms: quote.solve_time_ms(),
+                }
+            }
+            Err(_e) => crate::scenarios::GoldenOutput {
+                status: QuoteStatus::NoRouteFound,
+                amount_out_net_gas: num_bigint::BigUint::ZERO,
+                gas_estimate: num_bigint::BigUint::ZERO,
+                num_swaps: 0,
+                solve_time_ms: 0,
+            },
+        };
+
+        blessed_scenarios.push(crate::scenarios::GoldenScenario {
+            scenario: scenario.clone(),
+            expected,
+        });
+    }
+
+    let market = harness.market_data.read().await;
+    let blessed_file = crate::scenarios::GoldenFile {
+        metadata: crate::scenarios::GoldenMetadata {
+            block_number: 0, // TODO: extract from market data
+            num_pools: market.component_topology().len(),
+            num_tokens: market.token_registry_ref().len(),
+            fynd_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        scenarios: blessed_scenarios,
+    };
+
+    crate::scenarios::write_golden_file(&blessed_file);
+}
+
 /// Quality invariant: all successful quotes should have positive net output.
 #[tokio::test]
 async fn test_quality_invariants() {
