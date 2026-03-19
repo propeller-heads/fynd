@@ -21,7 +21,7 @@ layout:
 
 # Benchmark Results
 
-This page documents Fynd solver performance benchmarks across different configurations. All benchmarks use the `fynd-benchmark scale` subcommand, which builds a solver in-process for each worker count, runs a sustained load test, and reports throughput and latency statistics. See [benchmarking.md](benchmarking.md "mention") for how to run these yourself.
+This page documents Fynd solver performance benchmarks across different configurations. All benchmarks use the `fynd-benchmark scale` subcommand, which builds a solver in-process for each worker count, runs a sustained load test, and reports throughput and latency statistics. See [benchmarking.md](guides/benchmarking.md "mention") for how to run these yourself.
 
 All results below were produced using `scripts/bench-remote.sh`, which provisions an EC2 instance, builds the solver from source, and runs the full scaling sweep automatically. To reproduce:
 

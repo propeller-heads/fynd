@@ -12,7 +12,11 @@
 ## Guides
 
 * [Server Configuration](guides/server-configuration.md)
-* [Executing the Solutions](guides/executing-the-solutions.md)
+* [Swap CLI](guides/swap-cli.md)
 * [Benchmarking](guides/benchmarking.md)
-* [Benchmark Results](guides/benchmark-results.md)
 * [Custom Algorithm](guides/custom-algorithm.md)
+
+## Reference
+
+* [Architecture](ARCHITECTURE.md)
+* [Benchmark Results](benchmark-results.md)

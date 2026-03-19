@@ -111,3 +111,50 @@ cargo run --package fynd-core --example custom_algorithm
 The example connects to Tycho, loads market data, and solves a 1000 USDC → WBTC order using `MyAlgorithm`.
 
 For the complete runnable example, see [`fynd-core/examples/custom_algorithm.rs`](https://github.com/propeller-heads/fynd/blob/main/fynd-core/examples/custom_algorithm.rs).
+
+## Wiring with fynd-rpc
+
+If you want to expose your custom algorithm over HTTP (the same `/v1/quote` and `/v1/health` endpoints that `fynd serve` provides), use `fynd-rpc`.
+
+### Why not use `FyndBuilder`?
+
+`FyndBuilder` reads pool configuration from a TOML file and resolves algorithms by name (e.g. `"most_liquid"`). It has no hook for a factory closure, so custom algorithm types can't be injected through it.
+
+### Assembling the stack manually
+
+`fynd-rpc` exposes all of its internal components publicly, so you can construct the same stack that `FyndBuilder` builds, substituting `.with_algorithm()` for the string-based `.algorithm()` call:
+
+```rust
+// Build worker pools with your custom algorithm factory
+let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+    .name("my-pool".to_string())
+    .with_algorithm("my_custom_algo", MyAlgorithm::new)
+    .algorithm_config(algorithm_config)
+    .num_workers(4)
+    .task_queue_capacity(1000)
+    .build(
+        Arc::clone(&market_data),
+        Arc::clone(&derived_data),
+        pool_event_rx,
+        derived_event_tx.subscribe(),
+    )?;
+
+let worker_router = WorkerPoolRouter::new(
+    vec![SolverPoolHandle::new("my-pool", task_handle)],
+    WorkerPoolRouterConfig::default().with_timeout(Duration::from_millis(200)),
+    encoder,
+);
+
+// Wire to fynd-rpc's HTTP layer
+let health_tracker = HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
+let app_state = AppState::new(worker_router, health_tracker);
+
+HttpServer::new(move || {
+    App::new().configure(|cfg| configure_app(cfg, app_state.clone()))
+})
+.bind(("0.0.0.0", 3000))?
+.run()
+.await?;
+```
+
+The surrounding setup — Tycho feed, gas price fetcher, computation manager, event subscriptions — is identical to what `FyndBuilder::build()` does. Use [`fynd-rpc/src/builder.rs`](https://github.com/propeller-heads/fynd/blob/main/fynd-rpc/src/builder.rs) as the blueprint for the full wiring.

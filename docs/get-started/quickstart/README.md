@@ -34,17 +34,16 @@ export TYCHO_API_KEY=your-api-key
 cargo run --release -- serve
 ```
 
-Wait until [`/v1/health`](../overview/api-specifications.md#get-v1-health) returns `"healthy": true` before sending requests.
-
-```bash
-curl http://localhost:3000/v1/health
-```
-
 ## Step 2 — Request a quote
 
 {% tabs %}
 {% tab title="curl" %}
 ```bash
+# Wait until healthy
+curl http://localhost:3000/v1/health
+# → {"healthy":true,...}
+
+# Request a quote — 1000 USDC → WETH
 curl -X POST http://localhost:3000/v1/quote \
   -H "Content-Type: application/json" \
   -d '{
@@ -65,60 +64,6 @@ curl -X POST http://localhost:3000/v1/quote \
 ```
 
 This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
-{% endtab %}
-
-{% tab title="Rust" %}
-From [`clients/rust/examples/quote.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/quote.rs):
-
-```rust
-    let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
-        .build_quote_only()
-        .expect("valid URL");
-
-    // -----------------------------------------------------------------------
-    // Health check
-    // -----------------------------------------------------------------------
-    let health = client.health().await?;
-    println!("=== Health ===");
-    println!("  healthy:            {}", health.healthy());
-    println!("  last_update_ms:     {}", health.last_update_ms());
-    println!("  num_solver_pools:   {}", health.num_solver_pools());
-    println!("  derived_data_ready: {}", health.derived_data_ready());
-    println!();
-
-    // -----------------------------------------------------------------------
-    // Quote 1: sell 1 WETH for USDC
-    // -----------------------------------------------------------------------
-    let quote = client
-        .quote(QuoteParams::new(
-            Order::new(addr(WETH), addr(USDC), one_ether(), OrderSide::Sell, addr(VITALIK), None),
-            QuoteOptions::default(),
-        ))
-        .await?;
-
-    println!("=== Quote: 1 WETH → USDC ===");
-    println!("  order_id:      {}", quote.order_id());
-    println!("  status:        {:?}", quote.status());
-    println!("  amount_in:     {}", quote.amount_in());
-    println!("  amount_out:    {}", quote.amount_out());
-    println!("  gas_estimate:  {}", quote.gas_estimate());
-    println!("  solve_time_ms: {}", quote.solve_time_ms());
-    println!("  block:         #{} ({})", quote.block().number(), quote.block().hash());
-    if let Some(route) = quote.route() {
-        for (i, swap) in route.swaps().iter().enumerate() {
-            println!(
-                "  swap[{i}]: {} {} → {} (pool {})",
-                swap.protocol(),
-                swap.amount_in(),
-                swap.amount_out(),
-                swap.component_id(),
-            );
-        }
-    }
-    println!();
-```
-
-Run with: `cargo run --example quote`
 {% endtab %}
 
 {% tab title="TypeScript" %}
@@ -191,11 +136,65 @@ From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propell
 
 The full tutorial (signing + on-chain execution) is at `clients/typescript/examples/tutorial/main.ts`.
 {% endtab %}
+
+{% tab title="Rust" %}
+From [`clients/rust/examples/quote.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/quote.rs):
+
+```rust
+    let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
+        .build_quote_only()
+        .expect("valid URL");
+
+    // -----------------------------------------------------------------------
+    // Health check
+    // -----------------------------------------------------------------------
+    let health = client.health().await?;
+    println!("=== Health ===");
+    println!("  healthy:            {}", health.healthy());
+    println!("  last_update_ms:     {}", health.last_update_ms());
+    println!("  num_solver_pools:   {}", health.num_solver_pools());
+    println!("  derived_data_ready: {}", health.derived_data_ready());
+    println!();
+
+    // -----------------------------------------------------------------------
+    // Quote 1: sell 1 WETH for USDC
+    // -----------------------------------------------------------------------
+    let quote = client
+        .quote(QuoteParams::new(
+            Order::new(addr(WETH), addr(USDC), one_ether(), OrderSide::Sell, addr(VITALIK), None),
+            QuoteOptions::default(),
+        ))
+        .await?;
+
+    println!("=== Quote: 1 WETH → USDC ===");
+    println!("  order_id:      {}", quote.order_id());
+    println!("  status:        {:?}", quote.status());
+    println!("  amount_in:     {}", quote.amount_in());
+    println!("  amount_out:    {}", quote.amount_out());
+    println!("  gas_estimate:  {}", quote.gas_estimate());
+    println!("  solve_time_ms: {}", quote.solve_time_ms());
+    println!("  block:         #{} ({})", quote.block().number(), quote.block().hash());
+    if let Some(route) = quote.route() {
+        for (i, swap) in route.swaps().iter().enumerate() {
+            println!(
+                "  swap[{i}]: {} {} → {} (pool {})",
+                swap.protocol(),
+                swap.amount_in(),
+                swap.amount_out(),
+                swap.component_id(),
+            );
+        }
+    }
+    println!();
+```
+
+Run with: `cargo run --example quote`
+{% endtab %}
 {% endtabs %}
 
 ## Next steps
 
-* [Execute a swap](../../guides/executing-the-solutions.md)
+* [Swap CLI](../../guides/swap-cli.md)
 * [Server configuration](../../guides/server-configuration.md)
 * [Benchmarking](../../guides/benchmarking.md)
 * [Custom algorithm](../../guides/custom-algorithm.md)
