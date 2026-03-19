@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_client::FyndClientBuilder;
 use fynd_rpc::{
-    builder::{parse_chain, Fynd, FyndRPCBuilder},
+    builder::{parse_chain, FyndRPC, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
 };
 use serde::Serialize;
@@ -166,7 +166,7 @@ fn build_solver(
     pool_name: &str,
     pool_config: &PoolConfig,
     workers: usize,
-) -> Result<Fynd> {
+) -> Result<FyndRPC> {
     let chain = parse_chain(&args.chain)?;
     let protocols: Vec<String> = args
         .protocols

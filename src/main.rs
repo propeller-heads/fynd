@@ -178,7 +178,7 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, SolverError> {
+async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
     // Load worker pools config
     let pools_config =
         WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
