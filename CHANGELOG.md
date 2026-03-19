@@ -1,3 +1,10 @@
+## [0.20.0](https://github.com/propeller-heads/fynd/compare/0.19.1...0.20.0) (2026-03-19)
+
+
+### Features
+
+* **benchmark:** add `scale` subcommand for CPU scaling benchmarks ([7bcfe99](https://github.com/propeller-heads/fynd/commit/7bcfe994e5670ce6f0f92cfae931dad07fde175f))
+
 ## [0.19.1](https://github.com/propeller-heads/fynd/compare/0.19.0...0.19.1) (2026-03-18)
 
 ## [0.19.0](https://github.com/propeller-heads/fynd/compare/0.18.0...0.19.0) (2026-03-17)
