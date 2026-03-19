@@ -56,6 +56,25 @@ Console output shows real-time progress, summary statistics, and ASCII histogram
 
 ---
 
+## Scale
+
+Measures how solver throughput scales with worker thread count. Builds a solver in-process for each worker count, runs a load test, shuts down, and repeats.
+
+```bash
+cargo run -p fynd-benchmark --release -- scale \
+  --base-config single_pool.toml \
+  --worker-counts 1,2,4,8,16 \
+  --protocols uniswap_v2,uniswap_v3 \
+  --tycho-url wss://tycho.example.com \
+  --tycho-api-key $TYCHO_API_KEY \
+  -n 200 \
+  -m fixed:8
+```
+
+Requires a `worker_pools.toml` with exactly one pool defined. Run `--help` for all options.
+
+---
+
 ## Compare
 
 Sends identical quote requests to two running Fynd instances and compares output quality (amount out, gas, routes).
@@ -165,9 +184,10 @@ By default, the benchmark uses a single WETH->USDC swap and the compare tool gen
 
 | File | Description |
 |------|-------------|
-| `src/main.rs` | CLI entry point with `load` and `compare` subcommands |
+| `src/main.rs` | CLI entry point with `load`, `compare`, and `scale` subcommands |
 | `src/benchmark.rs` | Load-test implementation |
 | `src/compare.rs` | Comparison tool implementation |
+| `src/scale.rs` | CPU scaling benchmark implementation |
 | `src/config.rs` | Benchmark config, request templates, statistics types |
 | `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `src/exporter.rs` | Statistics calculation and JSON export |

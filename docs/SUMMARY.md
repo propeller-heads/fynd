@@ -10,3 +10,4 @@
 * [Quickstart](get-started/quickstart/README.md)
   * [Executing the solutions](get-started/quickstart/executing-the-solutions.md)
 * [Benchmarking](get-started/benchmarking.md)
+* [Benchmark Results](get-started/benchmark-results.md)

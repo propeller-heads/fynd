@@ -9,6 +9,7 @@ mod config;
 mod exporter;
 mod requests;
 mod runner;
+mod scale;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -31,6 +32,8 @@ enum Command {
     Load(benchmark::Args),
     /// Diff output quality (amount out, gas, routes) between two solvers
     Compare(compare::Args),
+    /// Measure throughput scaling across different worker counts
+    Scale(scale::Args),
 }
 
 #[tokio::main]
@@ -44,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Load(args) => benchmark::run(args).await,
         Command::Compare(args) => compare::run(args).await,
+        Command::Scale(args) => scale::run(args).await,
     }
 }
 
