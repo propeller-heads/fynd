@@ -3,6 +3,7 @@ use std::{collections::HashSet, time::Duration};
 use tycho_simulation::tycho_common::models::Chain;
 
 pub(crate) mod events;
+pub use events::MarketEvent;
 pub mod gas;
 pub mod market_data;
 

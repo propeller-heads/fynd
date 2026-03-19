@@ -254,7 +254,7 @@ impl TychoFeed {
 
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
-    async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
+    pub async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
         // Collect variables for market shared data update
         let Update {
             new_pairs: added_components,
