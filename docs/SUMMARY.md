@@ -8,7 +8,11 @@
 * [Overview](README.md)
   * [API Specifications](get-started/overview/api-specifications.md)
 * [Quickstart](get-started/quickstart/README.md)
-  * [Executing the solutions](get-started/quickstart/executing-the-solutions.md)
-* [Benchmarking](get-started/benchmarking.md)
-* [Benchmark Results](get-started/benchmark-results.md)
-* [Media Kit](https://drive.google.com/uc?export=download\&id=1-tOeEWlyyLJkEYYeVCr9xmGm_EpjQt-8)
+
+## Guides
+
+* [Server Configuration](guides/server-configuration.md)
+* [Executing the Solutions](guides/executing-the-solutions.md)
+* [Benchmarking](guides/benchmarking.md)
+* [Benchmark Results](guides/benchmark-results.md)
+* [Custom Algorithm](guides/custom-algorithm.md)

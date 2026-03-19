@@ -24,7 +24,7 @@ layout:
 Fynd ships with a benchmark tool (`fynd-benchmark`) for load-testing a solver and comparing output quality between two solver instances. Both features live in `tools/benchmark/` and run against live solver instances.
 
 {% hint style="info" %}
-**Prerequisite:** You need a running solver before using any benchmark command. See [quickstart](quickstart/ "mention") for setup instructions.
+**Prerequisite:** You need a running solver before using any benchmark command. See [quickstart](../get-started/quickstart/README.md "mention") for setup instructions.
 {% endhint %}
 
 ## Load Testing

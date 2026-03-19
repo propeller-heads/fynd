@@ -8,7 +8,7 @@ description: >-
 
 ## Prerequisites
 
-1. **Running Fynd server**: Start `fynd serve` first. If you haven't, see [.](./ "mention")
+1. **Running Fynd server**: Start `fynd serve` first. If you haven't, see [quickstart](../get-started/quickstart/README.md "mention")
 2. **RPC URL**: Required for simulation and on-chain execution
 
 ## 1. Get a quote with curl

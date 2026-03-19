@@ -31,6 +31,7 @@ use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
 // Custom algorithm implementation
 // =============================================================================
 
+// [doc:start custom-algo-impl]
 /// A custom algorithm that wraps [`MostLiquidAlgorithm`].
 ///
 /// Replace the delegation in [`Algorithm::find_best_route`] with your own routing
@@ -78,6 +79,7 @@ impl Algorithm for MyAlgorithm {
         self.inner.timeout()
     }
 }
+// [doc:end custom-algo-impl]
 
 // =============================================================================
 // Main

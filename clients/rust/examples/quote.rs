@@ -37,6 +37,7 @@ fn one_usdc() -> BigUint {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // [doc:start quote-rust]
     let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
         .build_quote_only()
         .expect("valid URL");
@@ -82,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!();
+    // [doc:end quote-rust]
 
     assert_eq!(quote.status(), QuoteStatus::Success, "expected a successful WETH→USDC quote");
     assert!(quote.amount_out() > &BigUint::from(0u32), "amount_out must be non-zero");
