@@ -13,7 +13,7 @@ use fynd_core::{
     },
     recording::MarketRecording,
     types::{Order, Quote, QuoteOptions, QuoteRequest},
-    worker_pool::pool::WorkerPoolBuilder,
+    worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
     worker_pool_router::{SolverPoolHandle, WorkerPoolRouter},
     SolveError, WorkerPoolRouterConfig,
 };
@@ -26,6 +26,8 @@ pub struct TestHarness {
     pub derived_data: SharedDerivedDataRef,
     router: WorkerPoolRouter,
     _shutdown_tx: broadcast::Sender<()>,
+    _worker_pool: WorkerPool,
+    _cm_handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestHarness {
@@ -76,7 +78,7 @@ impl TestHarness {
         let (market_tx, market_rx) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
-        let _cm_handle =
+        let cm_handle =
             tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
         // Build the "all components added" event from current market state
@@ -111,7 +113,7 @@ impl TestHarness {
 
         // 6. Build worker pool + router
         let market_event_rx = market_tx.subscribe();
-        let pool_handle = build_test_worker_pool(
+        let (pool_handle, worker_pool) = build_test_worker_pool(
             market_data.clone(),
             derived_data.clone(),
             market_event_rx,
@@ -131,6 +133,8 @@ impl TestHarness {
             derived_data,
             router,
             _shutdown_tx: shutdown_tx,
+            _worker_pool: worker_pool,
+            _cm_handle: cm_handle,
         }
     }
 
@@ -145,11 +149,11 @@ impl TestHarness {
 async fn find_weth_address(
     market_data: &SharedMarketDataRef,
 ) -> tycho_simulation::tycho_common::models::Address {
-    let market = market_data.read().await;
     let weth: tycho_simulation::tycho_common::models::Address =
         "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
             .parse()
             .expect("invalid WETH address");
+    let market = market_data.read().await;
     if market.token_registry_ref().contains_key(&weth) {
         return weth;
     }
@@ -162,14 +166,14 @@ fn build_test_worker_pool(
     derived_data: SharedDerivedDataRef,
     market_event_rx: broadcast::Receiver<MarketEvent>,
     derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
-) -> SolverPoolHandle {
-    let (_worker_pool, task_handle) = WorkerPoolBuilder::new()
+) -> (SolverPoolHandle, WorkerPool) {
+    let (worker_pool, task_handle) = WorkerPoolBuilder::new()
         .algorithm("most_liquid")
         .num_workers(2)
         .build(market_data, derived_data, market_event_rx, derived_event_rx)
         .expect("failed to build test worker pool");
 
-    SolverPoolHandle::new("test_pool", task_handle)
+    (SolverPoolHandle::new("test_pool", task_handle), worker_pool)
 }
 
 /// Create an Encoder for the router.

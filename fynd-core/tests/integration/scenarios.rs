@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use fynd_core::types::{Order, OrderSide};
+use fynd_core::types::{Order, OrderSide, QuoteStatus};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::models::Address;
@@ -19,7 +19,7 @@ pub struct TestScenario {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenOutput {
-    pub status: String,
+    pub status: QuoteStatus,
     pub amount_out_net_gas: BigUint,
     pub gas_estimate: BigUint,
     pub num_swaps: usize,
@@ -79,15 +79,6 @@ pub fn load_golden_file() -> Option<GoldenFile> {
 /// Scenarios are defined independently of golden outputs so that BLESS_GOLDEN
 /// can generate golden_outputs.json from scratch without circular dependency.
 pub fn load_test_scenarios() -> Vec<TestScenario> {
-    let content = include_str!("../../../tools/benchmark/src/pairs.json");
-    let _pairs: serde_json::Value =
-        serde_json::from_str(content).expect("failed to parse pairs.json");
-
-    // Parse pairs into TestScenario structs.
-    // pairs.json structure: array of objects with token_in, token_out, amounts.
-    // Select a representative subset (~20-30 scenarios) covering 1-hop,
-    // 2-hop, and 3-hop routes. Implementation: iterate pairs, take first
-    // amount per pair for the initial set.
     todo!("Parse pairs.json into TestScenario vec — exact format TBD during impl")
 }
 
