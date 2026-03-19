@@ -8,7 +8,7 @@
 //! ```bash
 //! export TYCHO_API_KEY="your-api-key"  # Get from https://tycho.propellerheads.xyz
 //! export RPC_URL="https://eth.llamarpc.com"
-//! export TYCHO_URL="tycho-beta.propellerheads.xyz"  # Optional, defaults to tycho-beta
+//! export TYCHO_URL="tycho-fynd-ethereum.propellerheads.xyz"  # Optional, defaults to tycho-beta
 //! cargo run --package fynd-core --example solve_order
 //! ```
 use std::{env, str::FromStr, time::Duration};
@@ -21,8 +21,8 @@ use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tycho_url =
-        env::var("TYCHO_URL").unwrap_or_else(|_| "tycho-beta.propellerheads.xyz".to_string());
+    let tycho_url = env::var("TYCHO_URL")
+        .unwrap_or_else(|_| "tycho-fynd-ethereum.propellerheads.xyz".to_string());
     let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY env var not set");
     let rpc_url = env::var("RPC_URL").expect("RPC_URL env var not set");
 

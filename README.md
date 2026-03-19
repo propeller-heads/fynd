@@ -51,7 +51,7 @@ cargo run --release serve
 > **Note:** `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 > ```bash
 > cargo run --release serve -- \
->   --tycho-url tycho-beta.propellerheads.xyz \
+>   --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 >   --rpc-url https://your-rpc-provider.com/v1/your_key \
 >   --protocols uniswap_v2,uniswap_v3
 > ```

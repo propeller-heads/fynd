@@ -8,21 +8,21 @@
 //!
 //! ```bash
 //! # All on-chain protocols are fetched from Tycho RPC by default:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz
 //!
 //! # Combine all on-chain protocols with specific RFQ protocols:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols all_onchain,rfq:bebop
 //!
 //! # Or specify protocols explicitly:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
 //! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 //!
 //! ```bash
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --rpc-url https://your-rpc-provider.com/v1/your_key
 //! ```
 //!
