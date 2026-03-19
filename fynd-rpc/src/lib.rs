@@ -24,3 +24,6 @@ pub mod protocols;
 
 // Re-export key RPC types
 pub use api::{ApiError, AppState, HealthStatus};
+// Re-export price guard types so users can implement custom providers
+// without depending on fynd-core directly.
+pub use fynd_core::price_guard::provider::{ExternalPrice, PriceProvider, PriceProviderError};
