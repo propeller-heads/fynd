@@ -42,9 +42,9 @@ pub struct AlgorithmConfig {
     timeout: Duration,
     /// Maximum number of paths to simulate. `None` means no cap.
     pub max_routes: Option<usize>,
-    /// Enable gas-aware relaxation in Bellman-Ford (compares net amounts during relaxation).
-    /// Ignored by other algorithms. Defaults to true.
-    gas_aware_relaxation: bool,
+    /// Enable gas-aware comparison (compares net amounts instead of gross during path selection).
+    /// Currently used by Bellman-Ford; ignored by other algorithms. Defaults to true.
+    gas_aware: bool,
 }
 
 impl AlgorithmConfig {
@@ -76,7 +76,7 @@ impl AlgorithmConfig {
                 reason: "max_routes must be at least 1".to_string(),
             });
         }
-        Ok(Self { min_hops, max_hops, timeout, max_routes, gas_aware_relaxation: true })
+        Ok(Self { min_hops, max_hops, timeout, max_routes, gas_aware: true })
     }
 
     /// Returns the minimum number of hops to search.
@@ -94,14 +94,14 @@ impl AlgorithmConfig {
         self.timeout
     }
 
-    /// Returns whether gas-aware relaxation is enabled.
-    pub fn gas_aware_relaxation(&self) -> bool {
-        self.gas_aware_relaxation
+    /// Returns whether gas-aware comparison is enabled.
+    pub fn gas_aware(&self) -> bool {
+        self.gas_aware
     }
 
-    /// Sets gas-aware relaxation.
-    pub fn with_gas_aware_relaxation(mut self, enabled: bool) -> Self {
-        self.gas_aware_relaxation = enabled;
+    /// Sets gas-aware comparison.
+    pub fn with_gas_aware(mut self, enabled: bool) -> Self {
+        self.gas_aware = enabled;
         self
     }
 }

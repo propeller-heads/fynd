@@ -97,7 +97,7 @@ if net_candidate > net_existing: update
 
 `token_price[v]` converts gas cost (in wei) to the token at node v. The algorithm resolves this from derived data when available, or falls back to a cumulative spot price product along the path (multiplying the spot prices of each pool traversed). If neither gas price nor token prices are available, it falls back to gross comparison automatically.
 
-This is configurable via `gas_aware_relaxation` in the worker pool config (defaults to true).
+This is configurable via the `gas_aware` setting in the algorithm config (defaults to true).
 
 ---
 
@@ -126,7 +126,7 @@ Building a route that depends on an arbitrage opportunity is building on sand.
 Before each relaxation, we walk the predecessor chain backward from the current node to the source and check two things:
 
 1. **Token check**: does the destination token already appear in the path? If yes, skip this edge.
-2. **Pool check**: has this pool already been used in the path? If yes, skip.
+2. **Pool check**: has this pool already been used in the path? If yes, skip. For two-token pools this is redundant with the token check, but multi-token pools (e.g., Balancer weighted pools or Curve tri-pools) connect more than two tokens. Without the pool check, the algorithm could route through the same pool twice on different token pairs, which would produce incorrect results because the pool state changes after the first swap.
 
 ```
 for each edge (u, v) through pool P:
@@ -145,7 +145,7 @@ With these constraints, every path the algorithm considers visits each token at 
 
 Before relaxation even starts, we prune the graph.
 
-The full token graph has ~2,400 tokens and ~10,000 directed edges. For a trade from ETH to USDC with a 3-hop budget, most of these are irrelevant. Tokens that are 4 hops away from ETH can't appear in any 3-hop route.
+On Ethereum, the full token graph has ~2,400 tokens and ~10,000 directed edges. For a trade from ETH to USDC with a 3-hop budget, most of these are irrelevant. Tokens that are 4 hops away from ETH can't appear in any 3-hop route.
 
 **BFS from the source**: starting from `token_in`, we run breadth-first search following outgoing edges, stopping at depth `max_hops`. Only edges encountered during this BFS are kept. Everything else is discarded.
 
@@ -169,7 +169,7 @@ BFS from the source token up to `max_hops` depth. Collect all reachable edges. B
 
 ### Step 3: Initialize
 
-Set `distance[source] = order_amount`. Build an adjacency list from the subgraph edges. Seed the active set with the source node.
+Set `amount[source] = order_amount`. Build an adjacency list from the subgraph edges. Seed the active set with the source node.
 
 ### Step 4: Relaxation
 
@@ -309,15 +309,15 @@ Note that the algorithm also explored A -> B -> D (6,000) and A -> C -> B -> D (
 
 ### Simulation during relaxation vs. precomputed weights
 
-The existing MostLiquid algorithm precomputes heuristic edge weights (spot prices and pool depths) and uses them to score paths. This is faster per edge but can fail: if the heuristic can't compute a weight for a pool (e.g., unusual token decimals, exotic pool types), that edge is invisible. The route that would have used it is never found.
+The existing MostLiquid algorithm precomputes heuristic edge weights (spot prices and pool depths) and uses them to score paths. This is faster per edge but can fail: if the heuristic can't compute a weight for a pool (typically because the pool has very low liquidity, or has a simulation bug), that edge is invisible. The route that would have used it is never found.
 
-Bellman-Ford simulates during relaxation. Every pool that supports `get_amount_out()` is usable, regardless of whether a heuristic can summarize it as a single number. This is why BF finds routes that MostLiquid misses.
+Bellman-Ford simulates during relaxation. Every pool that supports `get_amount_out()` is usable, regardless of whether a heuristic can summarize it as a single number. For pools where the weight calculation fails due to low liquidity, BF's simulation will also produce poor results (high slippage), but BF can still evaluate these edges and decide whether the route is worth taking. This is why BF finds routes that MostLiquid misses.
 
 The tradeoff is cost per edge: simulation is more expensive than a precomputed lookup. The active set and subgraph extraction keep this affordable.
 
 ### Gas-aware vs. gross relaxation
 
-With `gas_aware_relaxation` enabled (the default), the algorithm compares net amounts during relaxation, steering path selection toward routes with better value after gas deduction. This requires token prices and a gas price from derived data; when either is missing, it falls back to gross comparison transparently.
+With `gas_aware` enabled (the default), the algorithm compares net amounts during relaxation, steering path selection toward routes with better value after gas deduction. This requires token prices and a gas price from derived data; when either is missing, it falls back to gross comparison transparently.
 
 The gas cost conversion uses two strategies: a direct lookup in the derived token-gas-price table (primary), or a cumulative spot price product along the path (fallback for tokens not in the price table). The fallback multiplies spot prices hop by hop, so it degrades in accuracy for long paths, but it extends coverage to tokens that lack a direct WETH price.
 
