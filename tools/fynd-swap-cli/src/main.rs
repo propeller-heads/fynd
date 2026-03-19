@@ -26,8 +26,8 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
-    PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
+    EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus, Order,
+    OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
 };
 use fynd_rpc::{
@@ -237,6 +237,128 @@ max_hops = 3
     Ok(handle)
 }
 
+/// Poll the solver health endpoint until healthy or deadline expires.
+///
+/// For embedded solvers, retries for up to 60 seconds. For external solvers,
+/// checks once and fails immediately if not healthy.
+async fn wait_for_health(
+    client: &FyndClient,
+    fynd_url: &str,
+    is_embedded: bool,
+) -> anyhow::Result<HealthStatus> {
+    info!("Checking solver health at {fynd_url}...");
+    let health_deadline = tokio::time::Instant::now()
+        + if is_embedded { Duration::from_secs(60) } else { Duration::ZERO };
+
+    loop {
+        match client.health().await {
+            Ok(h) if h.healthy() => break Ok(h),
+            other => {
+                if is_embedded && tokio::time::Instant::now() < health_deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                match other {
+                    Ok(h) => bail!(
+                        "solver at {fynd_url} is not healthy \
+                         (last update: {}ms ago, {} pools); \
+                         wait for market data to load",
+                        h.last_update_ms(),
+                        h.num_solver_pools()
+                    ),
+                    Err(e) if is_embedded => {
+                        bail!("embedded solver did not become healthy within 60s: {e}")
+                    }
+                    Err(e) => bail!("health check failed: {e}"),
+                }
+            }
+        }
+    }
+}
+
+struct Permit2Args<'a> {
+    sell_token: Address,
+    sender: Address,
+    permit2_addr: Address,
+    router_str: &'a str,
+    amount: &'a BigUint,
+    slippage: f64,
+    execute: bool,
+}
+
+/// Build Permit2 `EncodingOptions`: validate allowance, read nonce, sign EIP-712 hash.
+async fn create_permit2_encoding(
+    provider: &RootProvider<Ethereum>,
+    signer: &PrivateKeySigner,
+    args: Permit2Args<'_>,
+) -> anyhow::Result<EncodingOptions> {
+    let router_addr = Address::from_str(args.router_str)
+        .with_context(|| format!("invalid router address: {}", args.router_str))?;
+
+    let (nonce, expiration, sig_deadline) = if args.execute {
+        let allowance =
+            erc20::read_erc20_allowance(provider, args.sell_token, args.sender, args.permit2_addr)
+                .await?;
+        if allowance < *args.amount {
+            eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
+            eprintln!("  Token:     {:#x}", args.sell_token);
+            eprintln!("  Permit2:   {:#x}", args.permit2_addr);
+            eprintln!("  Allowance: {allowance}");
+            eprintln!("  Required:  {}", args.amount);
+            eprintln!("\nApprove Permit2 with:");
+            eprintln!(
+                "  cast send {:#x} \"approve(address,uint256)\" \
+                 {:#x} {} \\\n    \
+                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
+                args.sell_token,
+                args.permit2_addr,
+                u128::MAX
+            );
+            bail!("insufficient allowance to Permit2");
+        }
+
+        let nonce = permit2::read_nonce(
+            provider,
+            args.permit2_addr,
+            args.sender,
+            args.sell_token,
+            router_addr,
+        )
+        .await?;
+        info!("Permit2 nonce for sender: {nonce}");
+
+        let block = provider
+            .get_block_by_number(Default::default())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("could not fetch latest block"))?;
+        let now = block.header.timestamp;
+        (nonce, now + 3_600, now + 1_800) // expiration: +1h, sig_deadline: +30m
+    } else {
+        // Dry-run: ephemeral key, nonce is 0, use max uint48 deadlines.
+        (0u64, 281_474_976_710_655u64, 281_474_976_710_655u64)
+    };
+
+    let fynd_permit = FyndPermitSingle::new(
+        FyndPermitDetails::new(
+            Bytes::copy_from_slice(args.sell_token.as_slice()),
+            max_uint160(),
+            BigUint::from(expiration),
+            BigUint::from(nonce),
+        ),
+        Bytes::copy_from_slice(router_addr.as_slice()),
+        BigUint::from(sig_deadline),
+    );
+
+    let chain_id = provider.get_chain_id().await?;
+    info!("Signing Permit2 EIP-712 hash (chain_id={chain_id}, nonce={nonce})...");
+    let permit2_bytes = Bytes::copy_from_slice(args.permit2_addr.as_slice());
+    let signing_hash = fynd_permit.eip712_signing_hash(chain_id, &permit2_bytes)?;
+    let sig = signer.sign_hash(&B256::from(signing_hash)).await?;
+    let signature = Bytes::copy_from_slice(&sig.as_bytes());
+
+    Ok(EncodingOptions::new(args.slippage).with_permit2(fynd_permit, signature)?)
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -304,35 +426,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // ── Health check (polls for embedded solver; checks once for external) ────
-    info!("Checking solver health at {fynd_url}...");
     let is_embedded = server_handle.is_some();
-    let health_deadline = tokio::time::Instant::now() +
-        if is_embedded { Duration::from_secs(60) } else { Duration::ZERO };
-
-    let health = loop {
-        match client.health().await {
-            Ok(h) if h.healthy() => break h,
-            other => {
-                if is_embedded && tokio::time::Instant::now() < health_deadline {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-                match other {
-                    Ok(h) => bail!(
-                        "solver at {fynd_url} is not healthy \
-                         (last update: {}ms ago, {} pools); \
-                         wait for market data to load",
-                        h.last_update_ms(),
-                        h.num_solver_pools()
-                    ),
-                    Err(e) if is_embedded => {
-                        bail!("embedded solver did not become healthy within 60s: {e}")
-                    }
-                    Err(e) => bail!("health check failed: {e}"),
-                }
-            }
-        }
-    };
+    let health = wait_for_health(&client, &fynd_url, is_embedded).await?;
     info!(
         "Solver healthy: {}, last update: {}ms ago, {} solver pools",
         health.healthy(),
@@ -354,66 +449,16 @@ async fn main() -> anyhow::Result<()> {
             let router_str = cli.router.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("--router is required for --transfer-type transfer-from-permit2")
             })?;
-            let router_addr = Address::from_str(router_str)
-                .with_context(|| format!("invalid router address: {router_str}"))?;
-
-            let (nonce, expiration, sig_deadline) = if cli.execute {
-                let allowance =
-                    erc20::read_erc20_allowance(&provider, sell_token, sender, permit2_addr)
-                        .await?;
-                if allowance < amount {
-                    eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
-                    eprintln!("  Token:     {sell_token:#x}");
-                    eprintln!("  Permit2:   {permit2_addr:#x}");
-                    eprintln!("  Allowance: {allowance}");
-                    eprintln!("  Required:  {amount}");
-                    eprintln!("\nApprove Permit2 with:");
-                    eprintln!(
-                        "  cast send {sell_token:#x} \"approve(address,uint256)\" \
-                         {permit2_addr:#x} {} \\\n    \
-                         --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                        u128::MAX
-                    );
-                    bail!("insufficient allowance to Permit2");
-                }
-
-                let nonce =
-                    permit2::read_nonce(&provider, permit2_addr, sender, sell_token, router_addr)
-                        .await?;
-                info!("Permit2 nonce for sender: {nonce}");
-
-                let block = provider
-                    .get_block_by_number(Default::default())
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("could not fetch latest block"))?;
-                let now = block.header.timestamp;
-                (nonce, now + 3_600, now + 1_800) // expiration: +1h, sig_deadline: +30m
-            } else {
-                // Dry-run: ephemeral key, nonce is 0, use max uint48 deadlines.
-                (0u64, 281_474_976_710_655u64, 281_474_976_710_655u64)
-            };
-
-            let fynd_permit = FyndPermitSingle::new(
-                FyndPermitDetails::new(
-                    Bytes::copy_from_slice(sell_token.as_slice()),
-                    max_uint160(),
-                    BigUint::from(expiration),
-                    BigUint::from(nonce),
-                ),
-                Bytes::copy_from_slice(router_addr.as_slice()),
-                BigUint::from(sig_deadline),
-            );
-
-            let chain_id = provider.get_chain_id().await?;
-            info!("Signing Permit2 EIP-712 hash (chain_id={chain_id}, nonce={nonce})...");
-            let permit2_bytes = Bytes::copy_from_slice(permit2_addr.as_slice());
-            let signing_hash = fynd_permit.eip712_signing_hash(chain_id, &permit2_bytes)?;
-            let sig = signer
-                .sign_hash(&B256::from(signing_hash))
-                .await?;
-            let signature = Bytes::copy_from_slice(&sig.as_bytes());
-
-            EncodingOptions::new(slippage).with_permit2(fynd_permit, signature)?
+            create_permit2_encoding(&provider, &signer, Permit2Args {
+                sell_token,
+                sender,
+                permit2_addr,
+                router_str,
+                amount: &amount,
+                slippage,
+                execute: cli.execute,
+            })
+            .await?
         }
     };
 
