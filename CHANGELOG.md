@@ -1,3 +1,15 @@
+## [0.21.0](https://github.com/propeller-heads/fynd/compare/0.20.1...0.21.0) (2026-03-19)
+
+
+### Features
+
+* **tools:** add fynd-swap-cli binary ([7a39785](https://github.com/propeller-heads/fynd/commit/7a39785f5c78f37d90ceea40b64f8cd07813d26d))
+
+
+### Bug Fixes
+
+* **protocols:** replace debug! with info! in fetch_protocol_systems ([e22aa82](https://github.com/propeller-heads/fynd/commit/e22aa82526f3ab9f5fd77f054b68ca41bff6a11d))
+
 ## [0.20.1](https://github.com/propeller-heads/fynd/compare/0.20.0...0.20.1) (2026-03-19)
 
 ## [0.20.0](https://github.com/propeller-heads/fynd/compare/0.19.1...0.20.0) (2026-03-19)
