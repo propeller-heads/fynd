@@ -63,7 +63,7 @@ bytes = { workspace = true }
 fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
+members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli", "tools/record-market"]
 resolver = "2"
 
 [workspace.dependencies]

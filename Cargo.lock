@@ -5561,6 +5561,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "record-market"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fynd-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.22",
+ "tycho-simulation",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
