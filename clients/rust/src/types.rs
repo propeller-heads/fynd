@@ -406,7 +406,7 @@ impl QuoteParams {
 // RESPONSE TYPES
 // ============================================================================
 
-/// Which backend solver produced a given [`OrderQuote`].
+/// Which backend solver produced a given order quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     /// The native Fynd solver.
