@@ -247,8 +247,8 @@ async fn wait_for_health(
     is_embedded: bool,
 ) -> anyhow::Result<HealthStatus> {
     info!("Checking solver health at {fynd_url}...");
-    let health_deadline = tokio::time::Instant::now()
-        + if is_embedded { Duration::from_secs(60) } else { Duration::ZERO };
+    let health_deadline = tokio::time::Instant::now() +
+        if is_embedded { Duration::from_secs(60) } else { Duration::ZERO };
 
     loop {
         match client.health().await {
@@ -353,7 +353,9 @@ async fn create_permit2_encoding(
     info!("Signing Permit2 EIP-712 hash (chain_id={chain_id}, nonce={nonce})...");
     let permit2_bytes = Bytes::copy_from_slice(args.permit2_addr.as_slice());
     let signing_hash = fynd_permit.eip712_signing_hash(chain_id, &permit2_bytes)?;
-    let sig = signer.sign_hash(&B256::from(signing_hash)).await?;
+    let sig = signer
+        .sign_hash(&B256::from(signing_hash))
+        .await?;
     let signature = Bytes::copy_from_slice(&sig.as_bytes());
 
     Ok(EncodingOptions::new(args.slippage).with_permit2(fynd_permit, signature)?)
@@ -449,15 +451,19 @@ async fn main() -> anyhow::Result<()> {
             let router_str = cli.router.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("--router is required for --transfer-type transfer-from-permit2")
             })?;
-            create_permit2_encoding(&provider, &signer, Permit2Args {
-                sell_token,
-                sender,
-                permit2_addr,
-                router_str,
-                amount: &amount,
-                slippage,
-                execute: cli.execute,
-            })
+            create_permit2_encoding(
+                &provider,
+                &signer,
+                Permit2Args {
+                    sell_token,
+                    sender,
+                    permit2_addr,
+                    router_str,
+                    amount: &amount,
+                    slippage,
+                    execute: cli.execute,
+                },
+            )
             .await?
         }
     };
