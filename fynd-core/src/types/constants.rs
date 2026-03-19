@@ -8,7 +8,7 @@ lazy_static! {
     ///
     /// These are the ERC-20 wrapped versions of each chain's native gas token
     /// (e.g., WETH on Ethereum, WBNB on BSC).
-    pub static ref NATIVE_TOKEN: HashMap<Chain, Address> = {
+    pub(crate) static ref NATIVE_TOKEN: HashMap<Chain, Address> = {
         let mut map = HashMap::new();
 
         // Ethereum Mainnet - WETH (0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2)
@@ -37,7 +37,14 @@ lazy_static! {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("native token not configured for chain: {chain:?}")]
 pub struct UnsupportedChainError {
-    pub chain: Chain,
+    pub(crate) chain: Chain,
+}
+
+impl UnsupportedChainError {
+    /// Returns the unsupported chain.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
 }
 
 /// Returns the wrapped native token address for the given chain.

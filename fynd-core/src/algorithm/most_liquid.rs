@@ -119,10 +119,10 @@ impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with custom settings.
     pub fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
         Ok(Self {
-            min_hops: config.min_hops,
-            max_hops: config.max_hops,
-            timeout: config.timeout,
-            max_routes: config.max_routes,
+            min_hops: config.min_hops(),
+            max_hops: config.max_hops(),
+            timeout: config.timeout(),
+            max_routes: config.max_routes(),
         })
     }
 

@@ -173,7 +173,7 @@ impl FyndRPCBuilder {
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .into_parts();
 
-        for pool in &parts.worker_pools {
+        for pool in parts.worker_pools() {
             info!(
                 name = %pool.name(),
                 algorithm = %pool.algorithm(),
@@ -183,7 +183,7 @@ impl FyndRPCBuilder {
         }
 
         let health_tracker =
-            HealthTracker::new(Arc::clone(&parts.market_data), Arc::clone(&parts.derived_data))
+            HealthTracker::new(Arc::clone(parts.market_data()), Arc::clone(parts.derived_data()))
                 .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
 
         #[cfg(feature = "experimental")]
@@ -192,11 +192,22 @@ impl FyndRPCBuilder {
             native_token(&chain).context("gas token not configured for chain")?
         };
 
+        let (
+            router,
+            worker_pools,
+            _market_data,
+            _derived_data,
+            feed_handle,
+            gas_price_handle,
+            computation_handle,
+            computation_shutdown_tx,
+        ) = parts.into_components();
+
         let app_state = AppState::new(
-            parts.router,
+            router,
             health_tracker,
             #[cfg(feature = "experimental")]
-            Arc::clone(&parts.derived_data),
+            Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
         );
@@ -220,11 +231,11 @@ impl FyndRPCBuilder {
         Ok(Fynd {
             server_handle,
             server_task,
-            worker_pools: parts.worker_pools,
-            feed_handle: parts.feed_handle,
-            gas_price_worker_handle: parts.gas_price_handle,
-            computation_manager_handle: parts.computation_handle,
-            computation_shutdown_tx: parts.computation_shutdown_tx,
+            worker_pools,
+            feed_handle,
+            gas_price_worker_handle: gas_price_handle,
+            computation_manager_handle: computation_handle,
+            computation_shutdown_tx,
         })
     }
 }

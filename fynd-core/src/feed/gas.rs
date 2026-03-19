@@ -9,14 +9,14 @@ use crate::feed::{market_data::SharedMarketDataRef, DataFeedError};
 // TODO: Refactor gas price fetching into a `DerivedComputation`.
 pub const GAS_PRICE_DEPENDENCY_ID: &str = "gas_price";
 
-pub struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
+pub(crate) struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     signal_rx: mpsc::Receiver<oneshot::Sender<()>>,
     shared_market_data: SharedMarketDataRef,
 }
 
 impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
-    pub fn new(
+    pub(crate) fn new(
         client: C,
         shared_market_data: SharedMarketDataRef,
     ) -> (Self, mpsc::Sender<oneshot::Sender<()>>) {
@@ -24,7 +24,7 @@ impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
         (Self { client, signal_rx, shared_market_data }, signal_tx)
     }
 
-    pub async fn run(&mut self) -> Result<(), DataFeedError> {
+    pub(crate) async fn run(&mut self) -> Result<(), DataFeedError> {
         loop {
             let update_tx = self
                 .signal_rx
