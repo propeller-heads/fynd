@@ -27,11 +27,15 @@ mod tests {
     fn make_empty_recording() -> MarketRecording {
         MarketRecording {
             metadata: RecordingMetadata {
-                chain_id: 1,
+                chain: "ethereum".to_string(),
                 recorded_at_unix_s: 1710000000,
                 fynd_version: "0.19.0".to_string(),
                 recording_duration_s: 600,
                 num_updates: 1,
+                protocols: vec!["uniswap_v2".to_string()],
+                min_tvl: 10.0,
+                min_token_quality: 100,
+                traded_n_days_ago: Some(3),
             },
             updates: vec![RecordedUpdate {
                 block_number_or_timestamp: 12345,
@@ -52,8 +56,9 @@ mod tests {
         write_recording(&recording, &path).unwrap();
         let loaded = read_recording(&path).unwrap();
 
-        assert_eq!(loaded.metadata.chain_id, 1);
+        assert_eq!(loaded.metadata.chain, "ethereum");
         assert_eq!(loaded.metadata.num_updates, 1);
+        assert_eq!(loaded.metadata.protocols, vec!["uniswap_v2"]);
         assert_eq!(loaded.updates.len(), 1);
         assert_eq!(loaded.updates[0].block_number_or_timestamp, 12345);
     }
@@ -68,11 +73,15 @@ mod tests {
 
         let recording = MarketRecording {
             metadata: RecordingMetadata {
-                chain_id: 1,
+                chain: "ethereum".to_string(),
                 recorded_at_unix_s: 1710000000,
                 fynd_version: "0.19.0".to_string(),
                 recording_duration_s: 600,
                 num_updates: 1,
+                protocols: vec![],
+                min_tvl: 0.0,
+                min_token_quality: 100,
+                traded_n_days_ago: None,
             },
             updates: vec![RecordedUpdate {
                 block_number_or_timestamp: 12345,

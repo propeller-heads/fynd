@@ -12,47 +12,66 @@ use tycho_simulation::{
     utils::load_all_tokens,
 };
 
-/// Connect to Tycho, capture raw Update messages for `duration_secs`,
-/// and return a MarketRecording.
-pub async fn record_market(
-    tycho_url: &str,
-    _rpc_url: &str,
-    tycho_api_key: &str,
-    chain: &str,
-    duration_secs: u64,
-) -> anyhow::Result<MarketRecording> {
-    let chain = parse_chain(chain)?;
+pub struct RecordingOptions {
+    pub tycho_url: String,
+    pub tycho_api_key: String,
+    pub chain: String,
+    pub duration_secs: u64,
+    pub protocols: Option<Vec<String>>,
+    pub min_tvl: f64,
+    pub min_token_quality: i32,
+    pub traded_n_days_ago: u64,
+}
 
-    // 1. Fetch available protocol systems from Tycho RPC
-    let protocols = fetch_protocol_systems(tycho_url, Some(tycho_api_key), chain).await?;
-    tracing::info!(count = protocols.len(), ?protocols, "discovered protocols");
+/// Connect to Tycho, capture raw Update messages for the configured
+/// duration, and return a MarketRecording.
+pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketRecording> {
+    let chain = parse_chain(&opts.chain)?;
 
-    // 2. Load all tokens from Tycho
+    // 1. Resolve protocol list: use explicit list or discover from Tycho RPC
+    let protocols = match &opts.protocols {
+        Some(p) if !p.is_empty() => {
+            tracing::info!(protocols = ?p, "using explicit protocol list");
+            p.clone()
+        }
+        _ => {
+            let discovered =
+                fetch_protocol_systems(&opts.tycho_url, Some(&opts.tycho_api_key), chain).await?;
+            tracing::info!(
+                count = discovered.len(),
+                ?discovered,
+                "discovered protocols from Tycho RPC"
+            );
+            discovered
+        }
+    };
+
+    // 2. Load tokens from Tycho (TLS enabled for production Tycho)
     let all_tokens = load_all_tokens(
-        tycho_url,
-        true, // no TLS for local/dev
-        Some(tycho_api_key),
+        &opts.tycho_url,
+        false, // use TLS
+        Some(&opts.tycho_api_key),
         true,
         chain,
-        Some(100), // min_token_quality
-        None,       // traded_n_days_ago
+        Some(opts.min_token_quality),
+        Some(opts.traded_n_days_ago),
     )
     .await?;
     tracing::info!(count = all_tokens.len(), "loaded tokens");
 
-    // 3. Build the protocol stream with all discovered protocols
-    let builder = ProtocolStreamBuilder::new(tycho_url, chain)
+    // 3. Build the protocol stream with TVL filtering
+    // with_tvl_range(lower_bound, upper_bound): components are added when TVL >= upper
+    // and removed when TVL < lower. Use same value for both (no hysteresis in recording).
+    let tvl_filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
+    let builder = ProtocolStreamBuilder::new(&opts.tycho_url, chain)
         .skip_state_decode_failures(true);
 
-    let builder = fynd_core::feed::protocol_registry::register_exchanges(
-        builder,
-        ComponentFilter::with_tvl_range(0.0, 0.0), // no TVL filter — capture everything
-        &protocols,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to register exchanges: {e}"))?;
+    let builder =
+        fynd_core::feed::protocol_registry::register_exchanges(builder, tvl_filter, &protocols)
+            .map_err(|e| anyhow::anyhow!("failed to register exchanges: {e}"))?;
 
     let mut stream = builder
-        .auth_key(Some(tycho_api_key.to_string()))
+        .auth_key(Some(opts.tycho_api_key.clone()))
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens)
         .await
@@ -62,9 +81,9 @@ pub async fn record_market(
     // 4. Receive Update messages until duration expires
     let mut updates = Vec::new();
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(duration_secs);
+    let deadline = start + Duration::from_secs(opts.duration_secs);
 
-    tracing::info!(duration_secs, "recording stream updates...");
+    tracing::info!(duration_secs = opts.duration_secs, "recording stream updates...");
 
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -97,7 +116,7 @@ pub async fn record_market(
 
     Ok(MarketRecording {
         metadata: RecordingMetadata {
-            chain_id: chain_id(chain),
+            chain: opts.chain.clone(),
             recorded_at_unix_s: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time went backwards")
@@ -105,6 +124,10 @@ pub async fn record_market(
             fynd_version: env!("CARGO_PKG_VERSION").to_string(),
             recording_duration_s: actual_duration,
             num_updates: updates.len(),
+            protocols: protocols.clone(),
+            min_tvl: opts.min_tvl,
+            min_token_quality: opts.min_token_quality,
+            traded_n_days_ago: Some(opts.traded_n_days_ago),
         },
         updates,
     })
@@ -120,23 +143,14 @@ fn parse_chain(chain: &str) -> anyhow::Result<tycho_simulation::tycho_common::mo
     }
 }
 
-fn chain_id(chain: tycho_simulation::tycho_common::models::Chain) -> u64 {
-    use tycho_simulation::tycho_common::models::Chain;
-    match chain {
-        Chain::Ethereum => 1,
-        Chain::Base => 8453,
-        Chain::Arbitrum => 42161,
-        _ => 0,
-    }
-}
-
 async fn fetch_protocol_systems(
     tycho_url: &str,
     auth_key: Option<&str>,
     chain: tycho_simulation::tycho_common::models::Chain,
 ) -> anyhow::Result<Vec<String>> {
-    let rpc_url = format!("http://{tycho_url}");
-    let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
+    let rpc_url = format!("https://{tycho_url}");
+    let rpc_options =
+        HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
     let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
 
     const PAGE_SIZE: i64 = 100;
@@ -146,7 +160,10 @@ async fn fetch_protocol_systems(
     loop {
         let request = ProtocolSystemsRequestBody {
             chain: chain.into(),
-            pagination: PaginationParams { page, page_size: PAGE_SIZE },
+            pagination: PaginationParams {
+                page,
+                page_size: PAGE_SIZE,
+            },
         };
         let response = rpc_client.get_protocol_systems(&request).await?;
         let count = response.protocol_systems.len();

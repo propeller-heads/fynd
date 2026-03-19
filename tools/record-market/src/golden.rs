@@ -74,6 +74,8 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         0.0,
     );
     let feed = TychoFeed::new(feed_config, market_data.clone());
+    // Keep a receiver alive so handle_tycho_message's broadcast doesn't fail
+    let _feed_rx = feed.subscribe();
 
     let num_updates = recording.updates.len();
     for (i, recorded_update) in recording.updates.into_iter().enumerate() {
@@ -109,17 +111,19 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         updated_components: vec![],
     })?;
 
-    // Wait for derived data
-    let timeout = tokio::time::sleep(Duration::from_secs(60));
+    // Wait for derived data (spot prices + pool depths).
+    // Token prices require a live gas_price feed, which isn't available in replay mode,
+    // so we only wait for spot_prices and pool_depths.
+    let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(timeout);
     loop {
         tokio::select! {
             _ = &mut timeout => {
-                anyhow::bail!("derived data computation timed out after 60s");
+                anyhow::bail!("derived data computation timed out after 120s");
             }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 let d = derived_data.read().await;
-                if d.spot_prices().is_some() && d.token_prices().is_some() {
+                if d.spot_prices().is_some() && d.pool_depths().is_some() {
                     break;
                 }
             }

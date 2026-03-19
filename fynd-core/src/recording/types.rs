@@ -48,11 +48,15 @@ impl From<RecordedUpdate> for Update {
 /// Metadata about the recording session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingMetadata {
-    pub chain_id: u64,
+    pub chain: String,
     pub recorded_at_unix_s: u64,
     pub fynd_version: String,
     pub recording_duration_s: u64,
     pub num_updates: usize,
+    pub protocols: Vec<String>,
+    pub min_tvl: f64,
+    pub min_token_quality: i32,
+    pub traded_n_days_ago: Option<u64>,
 }
 
 /// A complete market recording: metadata + ordered sequence of `Update` messages.

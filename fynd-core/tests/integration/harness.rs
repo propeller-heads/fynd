@@ -54,6 +54,8 @@ impl TestHarness {
             0.0,    // no TVL filter — replay all
         );
         let feed = TychoFeed::new(feed_config, market_data.clone());
+        // Keep a receiver alive so handle_tycho_message's broadcast doesn't fail
+        let _feed_rx = feed.subscribe();
 
         // 2. Replay each recorded Update through handle_tycho_message
         for recorded_update in recording.updates {
@@ -92,17 +94,19 @@ impl TestHarness {
             })
             .expect("failed to send market event");
 
-        // 5. Wait for derived data to be computed
-        let timeout = tokio::time::sleep(Duration::from_secs(30));
+        // 5. Wait for derived data to be computed.
+        // Token prices require a live gas_price feed unavailable in replay mode,
+        // so we only wait for spot_prices and pool_depths.
+        let timeout = tokio::time::sleep(Duration::from_secs(120));
         tokio::pin!(timeout);
         loop {
             tokio::select! {
                 _ = &mut timeout => {
-                    panic!("derived data computation timed out after 30s");
+                    panic!("derived data computation timed out after 120s");
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {
                     let d = derived_data.read().await;
-                    if d.spot_prices().is_some() && d.token_prices().is_some() {
+                    if d.spot_prices().is_some() && d.pool_depths().is_some() {
                         break;
                     }
                 }

@@ -6,15 +6,14 @@ mod golden;
 mod recorder;
 
 #[derive(Parser)]
-#[command(name = "record-market", about = "Capture Tycho market state for integration testing")]
+#[command(
+    name = "record-market",
+    about = "Capture Tycho market state for integration testing"
+)]
 struct Cli {
     /// Tycho WebSocket URL
     #[arg(long, env = "TYCHO_URL")]
     tycho_url: String,
-
-    /// Ethereum RPC URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
 
     /// Tycho API key
     #[arg(long, env = "TYCHO_API_KEY")]
@@ -28,9 +27,27 @@ struct Cli {
     #[arg(long, default_value = "fixtures/integration")]
     output_dir: PathBuf,
 
-    /// Chain (ethereum, base, etc.)
+    /// Chain (ethereum, base, arbitrum)
     #[arg(long, default_value = "ethereum")]
     chain: String,
+
+    /// Protocol systems to record (e.g. uniswap_v2, uniswap_v3).
+    /// If omitted, all protocols discovered from Tycho are used.
+    #[arg(long, value_delimiter = ',')]
+    protocols: Option<Vec<String>>,
+
+    /// Minimum TVL in native token (ETH) for component filtering.
+    #[arg(long, default_value = "10.0")]
+    min_tvl: f64,
+
+    /// Minimum token quality score.
+    #[arg(long, default_value = "100")]
+    min_token_quality: i32,
+
+    /// Only include tokens traded within this many days.
+    /// Defaults to 3 (same as production).
+    #[arg(long, default_value = "3")]
+    traded_n_days_ago: u64,
 }
 
 #[tokio::main]
@@ -43,15 +60,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("connecting to Tycho at {}", cli.tycho_url);
 
+    let recording_opts = recorder::RecordingOptions {
+        tycho_url: cli.tycho_url,
+        tycho_api_key: cli.tycho_api_key,
+        chain: cli.chain,
+        duration_secs: cli.duration_secs,
+        protocols: cli.protocols,
+        min_tvl: cli.min_tvl,
+        min_token_quality: cli.min_token_quality,
+        traded_n_days_ago: cli.traded_n_days_ago,
+    };
+
     // 1. Record Update messages from live Tycho stream
-    let recording = recorder::record_market(
-        &cli.tycho_url,
-        &cli.rpc_url,
-        &cli.tycho_api_key,
-        &cli.chain,
-        cli.duration_secs,
-    )
-    .await?;
+    let recording = recorder::record_market(&recording_opts).await?;
 
     tracing::info!(
         updates = recording.updates.len(),
