@@ -1,7 +1,7 @@
 //! Custom algorithm example for fynd-core
 //!
 //! Demonstrates how to implement the [`Algorithm`] trait for a custom type and plug it
-//! into [`SolverBuilder`] via [`SolverBuilder::with_algorithm`], without modifying
+//! into [`FyndBuilder`] via [`FyndBuilder::with_algorithm`], without modifying
 //! fynd-core itself.
 //!
 //! [`MyAlgorithm`] here is a thin wrapper around [`MostLiquidAlgorithm`]. In a real
@@ -22,7 +22,7 @@ use std::{env, str::FromStr, time::Duration};
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::SharedMarketDataRef, types::RouteResult,
     Algorithm, AlgorithmConfig, AlgorithmError, ComputationRequirements, EncodingOptions,
-    MostLiquidAlgorithm, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, SolverBuilder,
+    FyndBuilder, MostLiquidAlgorithm, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
 };
 use num_bigint::BigUint;
 use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY env var not set");
     let rpc_url = env::var("RPC_URL").expect("RPC_URL env var not set");
 
-    let solver = SolverBuilder::new(
+    let solver = FyndBuilder::new(
         Chain::Ethereum,
         tycho_url,
         rpc_url,

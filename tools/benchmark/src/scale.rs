@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_client::FyndClientBuilder;
 use fynd_rpc::{
-    builder::{parse_chain, Fynd, FyndBuilder},
+    builder::{parse_chain, Fynd, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
 };
 use serde::Serialize;
@@ -183,7 +183,7 @@ fn build_solver(
 
     let pools = HashMap::from([(pool_name.to_string(), pool)]);
 
-    let mut builder = FyndBuilder::new(chain, pools, args.tycho_url.clone(), rpc_url, protocols)
+    let mut builder = FyndRPCBuilder::new(chain, pools, args.tycho_url.clone(), rpc_url, protocols)
         .http_port(args.http_port);
 
     if let Some(ref key) = args.tycho_api_key {

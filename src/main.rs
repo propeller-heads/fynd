@@ -34,7 +34,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
-    builder::{parse_chain, FyndBuilder},
+    builder::{parse_chain, FyndRPCBuilder},
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };
@@ -248,7 +248,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     info!(?protocols, "starting with {} protocol(s)", protocols.len());
 
     // Build solver with all fields from CLI
-    let mut builder = FyndBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
+    let mut builder = FyndRPCBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .min_tvl(args.min_tvl)

@@ -10,7 +10,7 @@ Three subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`compare`** — Compare output quality between two solver instances. Sends identical quote requests to both and reports differences in amount out (bps), gas estimates, route selection, and status. Requires two solvers running on different ports (use git worktrees to run different branches simultaneously).
 
-- **`scale`** — Measure throughput scaling across different worker counts. Builds a solver in-process for each worker count via `FyndBuilder`, runs a load test, shuts down, and repeats. Requires a single-pool `worker_pools.toml`.
+- **`scale`** — Measure throughput scaling across different worker counts. Builds a solver in-process for each worker count via `FyndRPCBuilder`, runs a load test, shuts down, and repeats. Requires a single-pool `worker_pools.toml`.
 
 Run `--help` on any subcommand for detailed options.
 
@@ -21,7 +21,7 @@ Run `--help` on any subcommand for detailed options.
 | `main.rs` | CLI entry point. Parses `load` / `compare` / `scale` subcommands via clap and dispatches to the corresponding handler. |
 | `benchmark.rs` | `load` subcommand handler. Builds a `FyndClient`, checks solver health, loads request templates, runs the benchmark via `runner`, and prints results via `exporter`. |
 | `compare.rs` | `compare` subcommand handler. Builds two `FyndClient` instances, sends identical requests sequentially to both, computes per-request metrics (amount out diff in bps, gas diff, route match), prints a summary table, and exports full results to JSON. |
-| `scale.rs` | `scale` subcommand handler. Iterates over worker counts, builds a solver in-process via `FyndBuilder`, waits for health, runs a load test, collects timing stats, then shuts down. Prints a summary table and optionally exports JSON. |
+| `scale.rs` | `scale` subcommand handler. Iterates over worker counts, builds a solver in-process via `FyndRPCBuilder`, waits for health, runs a load test, collects timing stats, then shuts down. Prints a summary table and optionally exports JSON. |
 | `config.rs` | Shared types: `ParallelizationMode` enum (`Sequential`, `FixedConcurrency`, `RateBased`), `BenchmarkConfig`, `BenchmarkResults`, `TimingStats`. |
 | `runner.rs` | Benchmark execution engine. Implements three strategies: sequential (one-at-a-time), fixed concurrency (semaphore-bounded), and rate-based (fire at fixed intervals). Returns timing vectors and order counts. |
 | `exporter.rs` | Statistics calculation (`TimingStats::from_measurements` — min/max/mean/median/p95/p99/stddev), ASCII histogram rendering, and JSON export of `BenchmarkResults`. |

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
-use fynd_core::{encoding::encoder::Encoder, worker_pool::pool::WorkerPool, SolverBuilder};
+use fynd_core::{encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use tycho_simulation::tycho_common::models::Chain;
@@ -14,16 +14,16 @@ use crate::{
 
 /// Builder that assembles Fynd and returns a running server handle.
 ///
-/// Wraps [`SolverBuilder`] for all solver configuration and adds HTTP server concerns on top.
-pub struct FyndBuilder {
-    solver_builder: SolverBuilder,
+/// Wraps [`FyndBuilder`] for all solver configuration and adds HTTP server concerns on top.
+pub struct FyndRPCBuilder {
+    fynd_builder: FyndBuilder,
     http_host: String,
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
 }
 
-impl FyndBuilder {
+impl FyndRPCBuilder {
     /// Creates a new builder with required fields.
     ///
     /// All solver configuration options have sensible defaults and can be overridden via the
@@ -35,17 +35,17 @@ impl FyndBuilder {
         rpc_url: String,
         protocols: Vec<String>,
     ) -> Self {
-        // Override SolverBuilder's generous 10 s standalone router timeout with the tighter
+        // Override FyndBuilder's generous 10 s standalone router timeout with the tighter
         // HTTP service default; callers can still override via worker_router_timeout().
-        let solver_builder = pools
+        let fynd_builder = pools
             .iter()
             .fold(
-                SolverBuilder::new(chain, tycho_url, rpc_url, protocols, defaults::MIN_TVL),
+                FyndBuilder::new(chain, tycho_url, rpc_url, protocols, defaults::MIN_TVL),
                 |sb, (name, cfg)| sb.add_pool(name, cfg),
             )
             .worker_router_timeout(Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS));
         Self {
-            solver_builder,
+            fynd_builder,
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
@@ -66,22 +66,22 @@ impl FyndBuilder {
 
     /// Sets the minimum TVL filter (default: 10.0).
     pub fn min_tvl(mut self, min_tvl: f64) -> Self {
-        self.solver_builder = self.solver_builder.min_tvl(min_tvl);
+        self.fynd_builder = self.fynd_builder.min_tvl(min_tvl);
         self
     }
 
     /// Sets the minimum token quality filter (default: 100).
     pub fn min_token_quality(mut self, quality: i32) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .min_token_quality(quality);
         self
     }
 
     /// Sets the traded_n_days_ago used to filter tokens (default: 3).
     pub fn traded_n_days_ago(mut self, days: u64) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .traded_n_days_ago(days);
         self
     }
@@ -89,67 +89,65 @@ impl FyndBuilder {
     /// Sets the ratio used to define the lower bound of the TVL filter for hysteresis (default:
     /// 1.1).
     pub fn tvl_buffer_ratio(mut self, ratio: f64) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .tvl_buffer_ratio(ratio);
         self
     }
 
     /// Sets the gas price refresh interval (default: 30 seconds).
     pub fn gas_refresh_interval(mut self, interval: Duration) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .gas_refresh_interval(interval);
         self
     }
 
     /// Sets the reconnect delay on connection failure (default: 5 seconds).
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
-        self.solver_builder = self
-            .solver_builder
-            .reconnect_delay(delay);
+        self.fynd_builder = self.fynd_builder.reconnect_delay(delay);
         self
     }
 
     /// Sets the worker router timeout (default: 100ms).
     pub fn worker_router_timeout(mut self, timeout: Duration) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .worker_router_timeout(timeout);
         self
     }
 
     /// Sets the minimum number of solver responses before early return (default: 0, wait for all).
     pub fn worker_router_min_responses(mut self, min: usize) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .worker_router_min_responses(min);
         self
     }
 
     /// Sets the Tycho API key.
     pub fn tycho_api_key(mut self, key: String) -> Self {
-        self.solver_builder = self.solver_builder.tycho_api_key(key);
+        self.fynd_builder = self.fynd_builder.tycho_api_key(key);
         self
     }
 
     /// Disables TLS for the Tycho WebSocket connection (TLS is enabled by default).
     pub fn disable_tls(mut self) -> Self {
-        self.solver_builder = self.solver_builder.tycho_use_tls(false);
+        self.fynd_builder = self.fynd_builder.tycho_use_tls(false);
         self
     }
 
     /// Sets the blacklist configuration for filtering components.
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
-        self.solver_builder = self
-            .solver_builder
+        self.fynd_builder = self
+            .fynd_builder
             .blacklisted_components(blacklist.components);
         self
     }
 
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
-        self.solver_builder = self.solver_builder.encoder(encoder);
+        self.fynd_builder = self.fynd_builder.encoder(encoder);
         self
     }
 
@@ -167,10 +165,10 @@ impl FyndBuilder {
         );
 
         #[cfg(feature = "experimental")]
-        let chain = self.solver_builder.chain();
+        let chain = self.fynd_builder.chain();
 
         let parts = self
-            .solver_builder
+            .fynd_builder
             .build()
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .into_parts();

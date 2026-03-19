@@ -1,6 +1,6 @@
 //! Solve a swap order using fynd-core
 //!
-//! Demonstrates setting up the solver via [`SolverBuilder`] and solving a swap order.
+//! Demonstrates setting up the solver via [`FyndBuilder`] and solving a swap order.
 //! Connects to Tycho's live feed for real market data.
 //!
 //! # Prerequisites
@@ -14,7 +14,7 @@
 use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
-    EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, SolverBuilder,
+    EncodingOptions, FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
 };
 use num_bigint::BigUint;
 use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY env var not set");
     let rpc_url = env::var("RPC_URL").expect("RPC_URL env var not set");
 
-    let solver = SolverBuilder::new(
+    let solver = FyndBuilder::new(
         Chain::Ethereum,
         tycho_url,
         rpc_url,

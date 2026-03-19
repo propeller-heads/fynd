@@ -1,11 +1,11 @@
-//! High-level solver setup via [`SolverBuilder`].
+//! High-level solver setup via [`FyndBuilder`].
 //!
-//! [`SolverBuilder`] assembles the full Tycho feed + gas fetcher + computation
+//! [`FyndBuilder`] assembles the full Tycho feed + gas fetcher + computation
 //! manager + one or more worker pools + encoder + router pipeline with sensible
 //! defaults. For simple cases a single call chain is all that's needed:
 //!
 //! ```ignore
-//! let solver = SolverBuilder::new(chain, tycho_url, rpc_url, protocols, min_tvl)
+//! let solver = FyndBuilder::new(chain, tycho_url, rpc_url, protocols, min_tvl)
 //!     .tycho_api_key(key)
 //!     .algorithm("most_liquid")
 //!     .build()?;
@@ -39,7 +39,7 @@ use crate::{
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
-/// Default values for [`SolverBuilder`] configuration and [`PoolConfig`] deserialization.
+/// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
 ///
 /// These are the single source of truth for all tunable defaults. Downstream
 /// crates (e.g. `fynd-rpc`) should re-export or reference these rather than
@@ -84,7 +84,7 @@ fn default_algo_timeout_ms() -> u64 {
     defaults::POOL_TIMEOUT_MS
 }
 
-/// Per-pool configuration for [`SolverBuilder::add_pool`].
+/// Per-pool configuration for [`FyndBuilder::add_pool`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     /// Algorithm name for this pool (e.g., `"most_liquid"`).
@@ -116,7 +116,7 @@ pub struct WaitReadyError {
     timeout_ms: u64,
 }
 
-/// Error returned by [`SolverBuilder::build`].
+/// Error returned by [`FyndBuilder::build`].
 #[derive(Debug, thiserror::Error)]
 pub enum SolverBuildError {
     /// The Ethereum RPC client could not be created (e.g. malformed URL).
@@ -137,7 +137,7 @@ pub enum SolverBuildError {
     /// No native gas token is defined for the requested chain.
     #[error("gas token not configured for chain")]
     GasToken,
-    /// [`SolverBuilder::build`] was called without configuring any worker pools.
+    /// [`FyndBuilder::build`] was called without configuring any worker pools.
     #[error("no worker pools configured")]
     NoPools,
 }
@@ -174,7 +174,7 @@ struct CustomPoolEntry {
 ///
 /// Configures the Tycho market-data feed, gas price fetcher, derived-data
 /// computation manager, one or more worker pools, encoder, and router.
-pub struct SolverBuilder {
+pub struct FyndBuilder {
     chain: Chain,
     tycho_url: String,
     rpc_url: String,
@@ -194,7 +194,7 @@ pub struct SolverBuilder {
     pools: Vec<PoolEntry>,
 }
 
-impl SolverBuilder {
+impl FyndBuilder {
     /// Creates a new builder with the required parameters.
     pub fn new(
         chain: Chain,
@@ -234,7 +234,7 @@ impl SolverBuilder {
         self
     }
 
-    /// Overrides the minimum TVL filter set in [`SolverBuilder::new`].
+    /// Overrides the minimum TVL filter set in [`FyndBuilder::new`].
     pub fn min_tvl(mut self, min_tvl: f64) -> Self {
         self.min_tvl = min_tvl;
         self
@@ -521,7 +521,7 @@ impl SolverBuilder {
     }
 }
 
-/// A running solver assembled by [`SolverBuilder`].
+/// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
     router: WorkerPoolRouter,
     worker_pools: Vec<WorkerPool>,

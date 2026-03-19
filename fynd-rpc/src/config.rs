@@ -120,10 +120,10 @@ pub mod defaults {
     // RPC — fynd-rpc specific.
     pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 
-    // Minimum TVL passed to SolverBuilder::new — fynd-rpc's opinion of a sensible floor.
+    // Minimum TVL passed to FyndBuilder::new — fynd-rpc's opinion of a sensible floor.
     pub const MIN_TVL: f64 = 10.0;
 
-    // Router timeout — intentionally tighter than SolverBuilder's generous 10 s standalone
+    // Router timeout — intentionally tighter than FyndBuilder's generous 10 s standalone
     // default; an HTTP service must respond within its request deadline.
     pub const WORKER_ROUTER_TIMEOUT_MS: u64 = 100;
 
