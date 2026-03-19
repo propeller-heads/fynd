@@ -1,3 +1,10 @@
+## [0.21.1](https://github.com/propeller-heads/fynd/compare/0.21.0...0.21.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* **fynd-client:** remove broken intra-doc link to non-existent OrderQuote ([4a5144b](https://github.com/propeller-heads/fynd/commit/4a5144b9c98421126ebb877f44c5c232c4d97495))
+
 ## [0.21.0](https://github.com/propeller-heads/fynd/compare/0.20.1...0.21.0) (2026-03-19)
 
 
