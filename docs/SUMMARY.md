@@ -19,4 +19,4 @@
 ## Reference
 
 * [Architecture](ARCHITECTURE.md)
-* [Benchmark Results](benchmark-results.md)
+* [Performance](benchmark-results.md)
