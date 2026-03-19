@@ -31,7 +31,7 @@ use fynd_client::{
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
 };
 use fynd_rpc::{
-    builder::{parse_chain, FyndBuilder},
+    builder::{parse_chain, FyndRPCBuilder},
     config::WorkerPoolsConfig,
     protocols::fetch_protocol_systems,
 };
@@ -213,7 +213,7 @@ max_hops = 3
 
     info!("Starting embedded solver with {} protocol(s)", resolved_protocols.len());
 
-    let mut builder = FyndBuilder::new(
+    let mut builder = FyndRPCBuilder::new(
         cfg.chain,
         pools_config.pools,
         cfg.tycho_url.to_string(),

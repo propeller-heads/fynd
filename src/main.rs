@@ -8,21 +8,21 @@
 //!
 //! ```bash
 //! # All on-chain protocols are fetched from Tycho RPC by default:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz
 //!
 //! # Combine all on-chain protocols with specific RFQ protocols:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols all_onchain,rfq:bebop
 //!
 //! # Or specify protocols explicitly:
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
 //! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 //!
 //! ```bash
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --rpc-url https://your-rpc-provider.com/v1/your_key
 //! ```
 //!
@@ -34,7 +34,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
-    builder::{parse_chain, FyndBuilder},
+    builder::{parse_chain, FyndRPCBuilder},
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };
@@ -248,7 +248,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     info!(?protocols, "starting with {} protocol(s)", protocols.len());
 
     // Build solver with all fields from CLI
-    let mut builder = FyndBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
+    let mut builder = FyndRPCBuilder::new(chain, pools_config.pools, tycho_url, rpc_url, protocols)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .min_tvl(args.min_tvl)

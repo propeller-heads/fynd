@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use num_cpus;
+pub use fynd_core::PoolConfig;
 use serde::{Deserialize, Serialize};
 
 /// Worker pools configuration loaded from TOML file.
@@ -13,31 +13,6 @@ use serde::{Deserialize, Serialize};
 pub struct WorkerPoolsConfig {
     /// Pool configurations (at least one pool must be specified)
     pub pools: HashMap<String, PoolConfig>,
-}
-
-/// Per-pool configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolConfig {
-    /// Algorithm name for this pool (e.g., "most_liquid", "dijkstra")
-    pub algorithm: String,
-    /// Number of worker threads for this pool
-    #[serde(default = "num_cpus::get")]
-    pub num_workers: usize,
-    /// Task queue capacity for this pool
-    #[serde(default = "usize_val::<{ defaults::POOL_TASK_QUEUE_CAPACITY }>")]
-    pub task_queue_capacity: usize,
-    /// Minimum hops to search (must be >= 1)
-    #[serde(default = "usize_val::<{ defaults::POOL_MIN_HOPS }>")]
-    pub min_hops: usize,
-    /// Maximum hops to search
-    #[serde(default = "usize_val::<{ defaults::POOL_MAX_HOPS }>")]
-    pub max_hops: usize,
-    /// Timeout for solving in milliseconds
-    #[serde(default = "u64_val::<{ defaults::POOL_TIMEOUT_MS }>")]
-    pub timeout_ms: u64,
-    /// Maximum number of paths to simulate per solve. Omit to simulate all scored paths.
-    #[serde(default)]
-    pub max_routes: Option<usize>,
 }
 
 impl WorkerPoolsConfig {
@@ -83,16 +58,6 @@ impl BlacklistConfig {
             .with_context(|| format!("failed to parse blacklist config {}", path.display()))?;
         Ok(wrapper.blacklist)
     }
-}
-
-// Worker defaults
-
-fn usize_val<const V: usize>() -> usize {
-    V
-}
-
-fn u64_val<const V: u64>() -> u64 {
-    V
 }
 
 #[cfg(test)]
@@ -141,35 +106,26 @@ mod tests {
 }
 
 pub mod defaults {
-    // HTTP server
+    // Re-export shared defaults from fynd-core as the single source of truth.
+    pub use fynd_core::solver::defaults::{
+        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, POOL_MAX_HOPS, POOL_MIN_HOPS,
+        POOL_TASK_QUEUE_CAPACITY, POOL_TIMEOUT_MS, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
+        TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
+    };
+
+    // HTTP server — fynd-rpc specific.
     pub const HTTP_HOST: &str = "0.0.0.0";
     pub const HTTP_PORT: u16 = 3000;
 
-    // RPC
+    // RPC — fynd-rpc specific.
     pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 
-    // Tycho stream
+    // Minimum TVL passed to FyndBuilder::new — fynd-rpc's opinion of a sensible floor.
     pub const MIN_TVL: f64 = 10.0;
-    pub const MIN_TOKEN_QUALITY: i32 = 100;
-    pub const TRADED_N_DAYS_AGO: u64 = 3;
-    pub const TVL_BUFFER_RATIO: f64 = 1.1;
-    pub const RECONNECT_DELAY_SECS: u64 = 5;
 
-    // Gas
-    pub const GAS_REFRESH_INTERVAL_SECS: u64 = 30;
-
-    // Worker router
+    // Router timeout — intentionally tighter than FyndBuilder's generous 10 s standalone
+    // default; an HTTP service must respond within its request deadline.
     pub const WORKER_ROUTER_TIMEOUT_MS: u64 = 100;
-    pub const WORKER_ROUTER_MIN_RESPONSES: usize = 0;
-
-    // Derived data
-    pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
-
-    // Worker pool config
-    pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
-    pub const POOL_MIN_HOPS: usize = 1;
-    pub const POOL_MAX_HOPS: usize = 3;
-    pub const POOL_TIMEOUT_MS: u64 = 100;
 
     /// Returns the default Tycho Fynd endpoint URL for the given chain.
     ///

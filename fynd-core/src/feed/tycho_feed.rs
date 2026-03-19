@@ -511,7 +511,7 @@ mod tests {
             _delta: tycho_simulation::tycho_core::dto::ProtocolStateDelta,
             _tokens: &std::collections::HashMap<Bytes, Token>,
             _balances: &Balances,
-        ) -> Result<(), TransitionError<String>> {
+        ) -> Result<(), TransitionError> {
             Ok(())
         }
 

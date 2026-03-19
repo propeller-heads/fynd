@@ -114,7 +114,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.243.0"
+tycho-simulation = ">=0.250.0"
 tycho-execution = { version = ">=0.165.0", features = ["evm"] }
 typetag = "0.2"
 
