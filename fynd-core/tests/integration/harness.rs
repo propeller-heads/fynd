@@ -1,5 +1,3 @@
-// TODO(ENG-5578): remove when test modules (Tasks 5-8) are implemented and use this harness.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Duration;

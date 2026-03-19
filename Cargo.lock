@@ -5567,11 +5567,14 @@ dependencies = [
  "anyhow",
  "clap",
  "fynd-core",
+ "num-bigint",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber 0.3.22",
+ "tycho-execution",
  "tycho-simulation",
 ]
 

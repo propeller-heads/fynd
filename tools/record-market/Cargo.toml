@@ -7,6 +7,7 @@ description = "Capture Tycho market state for integration testing"
 [dependencies]
 fynd-core.workspace = true
 tycho-simulation.workspace = true
+tycho-execution.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
@@ -14,3 +15,5 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow.workspace = true
+tokio-stream.workspace = true
+num-bigint.workspace = true

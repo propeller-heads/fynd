@@ -1,5 +1,3 @@
-// TODO(ENG-5578): remove when test modules (Tasks 5-8) are implemented and use these types.
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -78,8 +76,51 @@ pub fn load_golden_file() -> Option<GoldenFile> {
 ///
 /// Scenarios are defined independently of golden outputs so that BLESS_GOLDEN
 /// can generate golden_outputs.json from scratch without circular dependency.
+///
+/// Takes the first amount per pair for a representative subset (~46 scenarios).
 pub fn load_test_scenarios() -> Vec<TestScenario> {
-    todo!("Parse pairs.json into TestScenario vec — exact format TBD during impl")
+    let content = include_str!("../../../tools/benchmark/src/pairs.json");
+    let raw: serde_json::Value = serde_json::from_str(content).expect("failed to parse pairs.json");
+
+    // Build token lookup: symbol -> (address, decimals)
+    let tokens: std::collections::HashMap<String, (Address, u32)> = raw["tokens"]
+        .as_array()
+        .expect("tokens should be an array")
+        .iter()
+        .map(|t| {
+            let symbol = t["symbol"].as_str().expect("symbol").to_string();
+            let address: Address = t["address"].as_str().expect("address").parse().expect("valid address");
+            let decimals = t["decimals"].as_u64().expect("decimals") as u32;
+            (symbol, (address, decimals))
+        })
+        .collect();
+
+    raw["pairs"]
+        .as_array()
+        .expect("pairs should be an array")
+        .iter()
+        .map(|pair| {
+            let token_in_sym = pair["token_in"].as_str().expect("token_in");
+            let token_out_sym = pair["token_out"].as_str().expect("token_out");
+            let (token_in, decimals_in) = tokens.get(token_in_sym)
+                .unwrap_or_else(|| panic!("unknown token: {token_in_sym}"));
+            let (token_out, _) = tokens.get(token_out_sym)
+                .unwrap_or_else(|| panic!("unknown token: {token_out_sym}"));
+
+            // Take the first amount (human-readable) and scale by decimals
+            let human_amount = pair["amounts"][0].as_f64().expect("amount");
+            let raw_amount = human_amount * 10_f64.powi(*decimals_in as i32);
+            let amount = BigUint::from(raw_amount as u128);
+
+            TestScenario {
+                name: format!("{token_in_sym}_to_{token_out_sym}_{human_amount}"),
+                token_in: token_in.clone(),
+                token_out: token_out.clone(),
+                amount,
+                side: OrderSide::Sell,
+            }
+        })
+        .collect()
 }
 
 pub fn should_bless() -> bool {
