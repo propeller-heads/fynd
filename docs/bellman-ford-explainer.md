@@ -307,14 +307,6 @@ Note that the algorithm also explored A -> B -> D (6,000) and A -> C -> B -> D (
 
 ## 6. Design Tradeoffs
 
-### Simulation during relaxation vs. precomputed weights
-
-The existing MostLiquid algorithm precomputes heuristic edge weights (spot prices and pool depths) and uses them to score paths. This is faster per edge but can fail: if the heuristic can't compute a weight for a pool (typically because the pool has very low liquidity, or has a simulation bug), that edge is invisible. The route that would have used it is never found.
-
-Bellman-Ford simulates during relaxation. Every pool that supports `get_amount_out()` is usable, regardless of whether a heuristic can summarize it as a single number. For pools where the weight calculation fails due to low liquidity, BF's simulation will also produce poor results (high slippage), but BF can still evaluate these edges and decide whether the route is worth taking. This is why BF finds routes that MostLiquid misses.
-
-The tradeoff is cost per edge: simulation is more expensive than a precomputed lookup. The active set and subgraph extraction keep this affordable.
-
 ### Gas-aware vs. gross relaxation
 
 With `gas_aware` enabled (the default), the algorithm compares net amounts during relaxation, steering path selection toward routes with better value after gas deduction. This requires token prices and a gas price from derived data; when either is missing, it falls back to gross comparison transparently.
