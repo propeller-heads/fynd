@@ -1,56 +1,27 @@
 ---
 description: >-
-  Once you have Fynd running, it's time to get some solutions, validate them,
-  and execute, if desired.
+  Use fynd-swap-cli to dry-run and execute swaps against a running Fynd server.
 ---
 
-# Executing the solutions
+# Swap CLI
+
+`fynd-swap-cli` is a CLI binary for quoting, simulating, and executing swaps. It's useful for quick testing from the terminal without writing any code.
 
 ## Prerequisites
 
-1. **Running Fynd server**: Start `fynd serve` first. If you haven't, see [.](./ "mention")
-2. **RPC URL**: Required for simulation and on-chain execution
+1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/README.md "mention") if you haven't.
+2. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
 
-## 1. Get a quote with curl
-
-The simplest way to verify your solver is working is a raw HTTP request — no binary needed.
-
-```bash
-curl -X POST http://localhost:3000/v1/quote \
-  -H "Content-Type: application/json" \
-  -d '{
-    "orders": [
-      {
-        "token_in":  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "token_out": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "amount":    "1000000000",
-        "side":      "sell",
-        "sender":    "0x0000000000000000000000000000000000000001"
-      }
-    ],
-    "options": {
-      "timeout_ms": 5000,
-      "min_responses": 1
-    }
-  }'
-```
-
-This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH. The response includes `amount_out`, a
-gas estimate, and the encoded calldata for the swap.
-
-## 2. Build fynd-swap-cli
-
-`fynd-swap-cli` is a CLI binary that handles quoting, dry-run simulation, and on-chain execution in one command.
+## Build
 
 ```bash
 cargo build --release -p fynd-swap-cli
 # binary: target/release/fynd-swap-cli
 ```
 
-## 3. Dry-run a swap (ERC-20 flow)
+## Dry-run a swap (ERC-20)
 
-By default, `fynd-swap-cli` runs a **dry-run**: it generates an ephemeral key and injects ERC-20 storage overrides
-so the simulation succeeds without any real funds or wallet approvals.
+By default, `fynd-swap-cli` runs a **dry-run**: it generates an ephemeral key and injects ERC-20 storage overrides so the simulation succeeds without any real funds or wallet approvals.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
@@ -64,14 +35,12 @@ export RPC_URL=https://your-rpc-provider.com/v1/your_key
 The output prints the quote (amount\_in, amount\_out, gas estimate, route) followed by the simulation result.
 
 {% hint style="info" %}
-`--sell-amount` is in raw atomic units. 1 000 000 000 = 1000 USDC (6 decimals). 1 000 000 000 000 000 000 = 1 WETH
-(18 decimals).
+`--sell-amount` is in raw atomic units. 1 000 000 000 = 1000 USDC (6 decimals). 1 000 000 000 000 000 000 = 1 WETH (18 decimals).
 {% endhint %}
 
-## 4. Dry-run a swap (Permit2 flow)
+## Dry-run a swap (Permit2)
 
-Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses
-nonce 0 and maximum deadlines — no chain reads for Permit2 state are needed.
+Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines — no chain reads for Permit2 state are needed.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
@@ -84,17 +53,14 @@ export RPC_URL=https://your-rpc-provider.com/v1/your_key
   --router        <TychoRouter address>
 ```
 
-Find the TychoRouter address for your chain at:
-[https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses)
+Find the TychoRouter address for your chain in the [Tycho contract addresses](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses).
 
-## 5. Execute on-chain (ERC-20)
+## Execute on-chain (ERC-20)
 
-Add `--execute` and set `PRIVATE_KEY`. The CLI will verify that the router has sufficient allowance before
-submitting and will print the required `cast send` approval command if it doesn't.
+Add `--execute` and set `PRIVATE_KEY`. The CLI will verify that the router has sufficient allowance before submitting and will print the required `cast send` approval command if it doesn't.
 
 {% hint style="warning" %}
-This sends a real transaction. Ensure your wallet has the sell token and has approved the TychoRouter to spend it
-before running with `--execute`.
+This sends a real transaction. Ensure your wallet has the sell token and has approved the TychoRouter to spend it before running with `--execute`.
 {% endhint %}
 
 ```bash
@@ -108,13 +74,11 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
   --execute
 ```
 
-## 6. Execute on-chain (Permit2)
+## Execute on-chain (Permit2)
 
-Add `--execute --transfer-type transfer-from-permit2 --router <addr>`. The CLI reads the current Permit2 nonce from
-the contract, builds the EIP-712 permit, signs it with your key, and submits the swap in one step.
+Add `--execute --transfer-type transfer-from-permit2 --router <addr>`. The CLI reads the current Permit2 nonce from the contract, builds the EIP-712 permit, signs it with your key, and submits the swap in one step.
 
-Your wallet must have already approved the Permit2 contract (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) to
-spend the sell token. The CLI prints the required `cast send` command if that approval is missing.
+Your wallet must have already approved the Permit2 contract (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) to spend the sell token. The CLI prints the required `cast send` command if that approval is missing.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
@@ -132,8 +96,7 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 ## Embedded server (no separate `fynd serve` needed)
 
 {% hint style="info" %}
-If you don't want to run `fynd serve` separately, pass `--tycho-url` and `fynd-swap-cli` will spawn its own
-embedded solver automatically.
+If you don't want to run `fynd serve` separately, pass `--tycho-url` and `fynd-swap-cli` will spawn its own embedded solver automatically.
 
 ```bash
 export TYCHO_API_KEY=your_api_key
@@ -144,8 +107,7 @@ export RPC_URL=https://your-rpc-provider.com/v1/your_key
   --sell-amount 1000000000
 ```
 
-This is convenient for a one-off swap but slow to initialize on every run (the solver must sync protocol state from
-Tycho before it can serve quotes). For repeated use, keep `fynd serve` running and omit `--tycho-url`.
+This is convenient for a one-off swap but slow to initialize on every run (the solver must sync protocol state from Tycho before it can serve quotes). For repeated use, keep `fynd serve` running and omit `--tycho-url`.
 {% endhint %}
 
 ## CLI Reference
@@ -172,30 +134,19 @@ Tycho before it can serve quotes). For repeated use, keep `fynd serve` running a
 
 ## Security Notes
 
-1. **Never expose your private key.** Use the `PRIVATE_KEY` environment variable, never a CLI argument.
-2. **Dry-run first.** The default mode (no `--execute`) simulates the full swap with storage overrides — no funds
-   needed. Confirm the output looks correct before adding `--execute`.
-3. **Slippage protection.** The default 0.5% slippage may not be sufficient for large trades or volatile markets.
-   Adjust `--slippage-bps` accordingly.
-4. **Mainnet warning.** `--execute` sends a real transaction. Start with small amounts. All routes execute through
-   the [Tycho Router](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses) contract.
-5. **Verify routes.** The CLI prints the full route before executing. Multi-hop routes through low-liquidity pools
-   can result in worse execution.
-6. **Prices are indicative.** Quotes reflect the best route at query time but are not guaranteed on-chain. Pool
-   states change every block, and the longer you wait to execute, the more the price may drift.
+1. **Never expose your private key.** Use the `PRIVATE_KEY` environment variable, never a CLI argument. Run `unset HISTFILE` before setting it to prevent it from being saved to your shell history.
+2. **Dry-run first.** The default mode (no `--execute`) simulates the full swap with storage overrides — no funds needed. Confirm the output looks correct before adding `--execute`.
+3. **Slippage protection.** The default 0.5% slippage may not be sufficient for large trades or volatile markets. Adjust `--slippage-bps` accordingly.
+4. **Mainnet warning.** `--execute` sends a real transaction. Start with small amounts. All routes execute through the [Tycho Router](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses) contract.
+5. **Verify routes.** The CLI prints the full route before executing. Multi-hop routes through low-liquidity pools can result in worse execution.
+6. **Prices are indicative.** Quotes reflect the best route at query time but are not guaranteed on-chain. Pool states change every block, and the longer you wait to execute, the more the price may drift.
 
 ## Troubleshooting
 
-**"Solver is not healthy"**: Wait for the solver to finish loading market data. Check the `fynd serve` terminal for
-progress, or poll `curl http://localhost:3000/v1/health`.
+**"Solver is not healthy"**: Wait for the solver to finish loading market data. Check the `fynd serve` terminal for progress, or poll `curl http://localhost:3000/v1/health`.
 
-**"Sell/buy token not found"**: Ensure the token address is correct and
-[the token exists on Tycho's indexer](https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-rpc#post-v1-tokens).
+**"Sell/buy token not found"**: Ensure the token address is correct and [the token exists on Tycho's indexer](https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-rpc#post-v1-tokens).
 
-**"No route found"**: Fynd couldn't find a path between your tokens. Check that both tokens have enough on-chain
-liquidity.
+**"No route found"**: Fynd couldn't find a path between your tokens. Check that both tokens have enough on-chain liquidity.
 
 **"Insufficient allowance"**: The CLI prints the exact `cast send` approval command needed. Run it, then retry.
-
-**"Swap encoder not found for protocol"**: The route uses a protocol not indexed by the running solver. Restart
-`fynd serve` with the required protocol included in `--protocols`.
