@@ -43,7 +43,9 @@ use tycho_simulation::{
 
 use crate::{
     derived::{
-        computation::{ComputationId, ComputationOutput, DerivedComputation, FailedItem},
+        computation::{
+            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+        },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
@@ -436,7 +438,17 @@ impl TokenGasPriceComputation {
             }
         }
 
-        Ok(best_prices)
+        // Tokens with discovered paths but no successful simulation
+        let failed_items: Vec<FailedItem> = paths_by_token
+            .keys()
+            .filter(|token| !best_prices.contains_key(*token))
+            .map(|token| FailedItem {
+                key: token.to_string(),
+                error: FailedItemError::AllSimulationPathsFailed,
+            })
+            .collect();
+
+        Ok((best_prices, failed_items))
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -533,7 +545,7 @@ impl TokenGasPriceComputation {
                 new_deps.remove(token);
                 failed_items.push(FailedItem {
                     key: token.to_string(),
-                    error: "all simulation paths failed".to_string(),
+                    error: FailedItemError::AllSimulationPathsFailed,
                 });
             }
         }

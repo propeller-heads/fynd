@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    computation::FailedItem,
+    computation::{FailedItem, FailedItemError},
     types::{
         PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
         TokenPricesWithDeps,
@@ -28,22 +28,22 @@ struct ComputedValue<T> {
 #[derive(Debug, Default)]
 pub struct DerivedData {
     token_prices: Option<ComputedValue<TokenGasPrices>>,
-    /// Failure map for token_prices: key → (block_when_failed, error_reason).
+    /// Failure map for token_prices: key → (block_when_failed, error).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    token_prices_failed: HashMap<TokenGasPriceKey, (u64, String)>,
+    token_prices_failed: HashMap<TokenGasPriceKey, (u64, FailedItemError)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
     pool_depths: Option<ComputedValue<PoolDepths>>,
-    /// Failure map for pool_depths: key → (block_when_failed, error_reason).
+    /// Failure map for pool_depths: key → (block_when_failed, error).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    pool_depths_failed: HashMap<PoolDepthKey, (u64, String)>,
+    pool_depths_failed: HashMap<PoolDepthKey, (u64, FailedItemError)>,
     spot_prices: Option<ComputedValue<SpotPrices>>,
-    /// Failure map for spot_prices: key → (block_when_failed, error_reason).
+    /// Failure map for spot_prices: key → (block_when_failed, error).
     /// Persists across incremental runs — entries survive until the key is re-attempted
     /// and succeeds. Full recomputes replace the map entirely.
-    spot_prices_failed: HashMap<SpotPriceKey, (u64, String)>,
+    spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError)>,
 }
 
 /// Parses `"component_id/token_in/token_out"` into a typed `(ComponentId, Address, Address)` key.
@@ -107,7 +107,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<TokenGasPriceKey, (u64, String)> = failed_items
+        let new_failures: HashMap<TokenGasPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| {
                 Address::from_str(&f.key)
@@ -128,12 +128,12 @@ impl DerivedData {
         self.token_prices = Some(ComputedValue { data: prices, block });
     }
 
-    /// Returns `(block, error_reason)` for this token address if it failed in a past
+    /// Returns `(block, error)` for this token address if it failed in a past
     /// computation, or `None` if it succeeded or was not attempted.
-    pub fn token_price_failure(&self, key: &TokenGasPriceKey) -> Option<(u64, &str)> {
+    pub fn token_price_failure(&self, key: &TokenGasPriceKey) -> Option<(u64, &FailedItemError)> {
         self.token_prices_failed
             .get(key)
-            .map(|(block, error)| (*block, error.as_str()))
+            .map(|(block, error)| (*block, error))
     }
 
     /// Clears token prices and their failure map.
@@ -200,7 +200,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<PoolDepthKey, (u64, String)> = failed_items
+        let new_failures: HashMap<PoolDepthKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
@@ -217,14 +217,14 @@ impl DerivedData {
         self.pool_depths = Some(ComputedValue { data: depths, block });
     }
 
-    /// Returns `(block, error_reason)` for this key if it failed in a past pool depth
+    /// Returns `(block, error)` for this key if it failed in a past pool depth
     /// computation, or `None` if it succeeded or was not attempted.
     ///
     /// Key format: `(component_id, token_in, token_out)`
-    pub fn pool_depth_failure(&self, key: &PoolDepthKey) -> Option<(u64, &str)> {
+    pub fn pool_depth_failure(&self, key: &PoolDepthKey) -> Option<(u64, &FailedItemError)> {
         self.pool_depths_failed
             .get(key)
-            .map(|(block, error)| (*block, error.as_str()))
+            .map(|(block, error)| (*block, error))
     }
 
     /// Clears pool depths and their failure map.
@@ -263,7 +263,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<SpotPriceKey, (u64, String)> = failed_items
+        let new_failures: HashMap<SpotPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
@@ -280,14 +280,14 @@ impl DerivedData {
         self.spot_prices = Some(ComputedValue { data: prices, block });
     }
 
-    /// Returns `(block, error_reason)` for this key if it failed in a past spot price
+    /// Returns `(block, error)` for this key if it failed in a past spot price
     /// computation, or `None` if it succeeded or was not attempted.
     ///
     /// Key format: `(component_id, token_in, token_out)`
-    pub fn spot_price_failure(&self, key: &SpotPriceKey) -> Option<(u64, &str)> {
+    pub fn spot_price_failure(&self, key: &SpotPriceKey) -> Option<(u64, &FailedItemError)> {
         self.spot_prices_failed
             .get(key)
-            .map(|(block, error)| (*block, error.as_str()))
+            .map(|(block, error)| (*block, error))
     }
 
     /// Clears spot prices and their failure map.
@@ -317,8 +317,8 @@ mod tests {
     use super::*;
     use crate::{algorithm::test_utils::addr, derived::types::SpotPrices};
 
-    fn failed(key: &str, error: &str) -> FailedItem {
-        FailedItem { key: key.to_string(), error: error.to_string() }
+    fn failed(key: &str, error: FailedItemError) -> FailedItem {
+        FailedItem { key: key.to_string(), error }
     }
 
     fn pair_key(comp: &str, b_in: u8, b_out: u8) -> SpotPriceKey {
@@ -392,8 +392,16 @@ mod tests {
         let token_addr = addr(0xab);
         let key_str = format!("{token_addr}");
         let mut store = DerivedData::new();
-        store.set_token_prices(Default::default(), vec![failed(&key_str, "sim error")], 42, true);
-        assert_eq!(store.token_price_failure(&token_addr), Some((42, "sim error")));
+        store.set_token_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::SpotPriceComputation("sim error".into()))],
+            42,
+            true,
+        );
+        assert_eq!(
+            store.token_price_failure(&token_addr),
+            Some((42, &FailedItemError::SpotPriceComputation("sim error".into())))
+        );
         assert_eq!(store.token_price_failure(&addr(0xcd)), None);
     }
 
@@ -402,8 +410,16 @@ mod tests {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
         let mut store = DerivedData::new();
-        store.set_spot_prices(Default::default(), vec![failed(&key_str, "sim error")], 10, true);
-        assert_eq!(store.spot_price_failure(&key), Some((10, "sim error")));
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::SpotPriceComputation("sim error".into()))],
+            10,
+            true,
+        );
+        assert_eq!(
+            store.spot_price_failure(&key),
+            Some((10, &FailedItemError::SpotPriceComputation("sim error".into())))
+        );
         assert_eq!(store.spot_price_failure(&pair_key("pool1", 0x01, 0x03)), None);
     }
 
@@ -412,8 +428,16 @@ mod tests {
         let key: PoolDepthKey = pair_key("pool1", 0x01, 0x02);
         let key_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
         let mut store = DerivedData::new();
-        store.set_pool_depths(Default::default(), vec![failed(&key_str, "depth error")], 7, true);
-        assert_eq!(store.pool_depth_failure(&key), Some((7, "depth error")));
+        store.set_pool_depths(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::PoolDepthComputation("depth error".into()))],
+            7,
+            true,
+        );
+        assert_eq!(
+            store.pool_depth_failure(&key),
+            Some((7, &FailedItemError::PoolDepthComputation("depth error".into())))
+        );
         assert_eq!(store.pool_depth_failure(&pair_key("pool2", 0x01, 0x02)), None);
     }
 
@@ -422,7 +446,12 @@ mod tests {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
         let mut store = DerivedData::new();
-        store.set_spot_prices(Default::default(), vec![failed(&key_str, "err")], 1, true);
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::MissingSimulationState)],
+            1,
+            true,
+        );
         assert!(store.spot_price_failure(&key).is_some());
 
         // Full re-run with no failures clears the map
@@ -435,7 +464,12 @@ mod tests {
         let token_addr = addr(0xab);
         let key_str = format!("{token_addr}");
         let mut store = DerivedData::new();
-        store.set_token_prices(Default::default(), vec![failed(&key_str, "err")], 1, true);
+        store.set_token_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::AllSimulationPathsFailed)],
+            1,
+            true,
+        );
         store.clear_token_prices();
         assert_eq!(store.token_price_failure(&token_addr), None);
     }
@@ -445,7 +479,12 @@ mod tests {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
         let mut store = DerivedData::new();
-        store.set_spot_prices(Default::default(), vec![failed(&key_str, "err")], 1, true);
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::MissingSimulationState)],
+            1,
+            true,
+        );
         store.clear_spot_prices();
         assert_eq!(store.spot_price_failure(&key), None);
     }
@@ -455,7 +494,12 @@ mod tests {
         let key: PoolDepthKey = pair_key("pool1", 0x01, 0x02);
         let key_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
         let mut store = DerivedData::new();
-        store.set_pool_depths(Default::default(), vec![failed(&key_str, "err")], 1, true);
+        store.set_pool_depths(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::MissingSpotPrice)],
+            1,
+            true,
+        );
         store.clear_pool_depths();
         assert_eq!(store.pool_depth_failure(&key), None);
     }
@@ -472,12 +516,21 @@ mod tests {
         // Full recompute at block 10: both keys fail
         store.set_spot_prices(
             Default::default(),
-            vec![failed(&key_a_str, "err_a"), failed(&key_b_str, "err_b")],
+            vec![
+                failed(&key_a_str, FailedItemError::MissingSimulationState),
+                failed(&key_b_str, FailedItemError::MissingTokenMetadata),
+            ],
             10,
             true,
         );
-        assert_eq!(store.spot_price_failure(&key_a), Some((10, "err_a")));
-        assert_eq!(store.spot_price_failure(&key_b), Some((10, "err_b")));
+        assert_eq!(
+            store.spot_price_failure(&key_a),
+            Some((10, &FailedItemError::MissingSimulationState))
+        );
+        assert_eq!(
+            store.spot_price_failure(&key_b),
+            Some((10, &FailedItemError::MissingTokenMetadata))
+        );
 
         // Incremental run at block 11: only pool_b is attempted and succeeds
         let mut prices = SpotPrices::default();
@@ -485,7 +538,10 @@ mod tests {
         store.set_spot_prices(prices, vec![], 11, false);
 
         // pool_a was not attempted — failure is preserved from block 10
-        assert_eq!(store.spot_price_failure(&key_a), Some((10, "err_a")));
+        assert_eq!(
+            store.spot_price_failure(&key_a),
+            Some((10, &FailedItemError::MissingSimulationState))
+        );
         // pool_b succeeded — failure is cleared
         assert_eq!(store.spot_price_failure(&key_b), None);
     }
@@ -497,12 +553,28 @@ mod tests {
 
         let mut store = DerivedData::new();
 
-        store.set_spot_prices(Default::default(), vec![failed(&key_str, "err")], 10, true);
-        assert_eq!(store.spot_price_failure(&key), Some((10, "err")));
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::MissingSimulationState)],
+            10,
+            true,
+        );
+        assert_eq!(
+            store.spot_price_failure(&key),
+            Some((10, &FailedItemError::MissingSimulationState))
+        );
 
         // Incremental run at block 11: pool_a fails again with a new error
-        store.set_spot_prices(Default::default(), vec![failed(&key_str, "new err")], 11, false);
-        assert_eq!(store.spot_price_failure(&key), Some((11, "new err")));
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&key_str, FailedItemError::MissingTokenMetadata)],
+            11,
+            false,
+        );
+        assert_eq!(
+            store.spot_price_failure(&key),
+            Some((11, &FailedItemError::MissingTokenMetadata))
+        );
     }
 
     #[test]
@@ -513,9 +585,24 @@ mod tests {
         let pair_str = format!("pool1/{}/{}", addr(0x01), addr(0x02));
 
         let mut store = DerivedData::new();
-        store.set_token_prices(Default::default(), vec![failed(&token_str, "err")], 1, true);
-        store.set_spot_prices(Default::default(), vec![failed(&pair_str, "err")], 1, true);
-        store.set_pool_depths(Default::default(), vec![failed(&pair_str, "err")], 1, true);
+        store.set_token_prices(
+            Default::default(),
+            vec![failed(&token_str, FailedItemError::AllSimulationPathsFailed)],
+            1,
+            true,
+        );
+        store.set_spot_prices(
+            Default::default(),
+            vec![failed(&pair_str, FailedItemError::MissingSimulationState)],
+            1,
+            true,
+        );
+        store.set_pool_depths(
+            Default::default(),
+            vec![failed(&pair_str, FailedItemError::MissingSpotPrice)],
+            1,
+            true,
+        );
 
         store.clear_all();
 

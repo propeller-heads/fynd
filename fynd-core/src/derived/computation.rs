@@ -116,6 +116,34 @@ impl ComputationRequirements {
     }
 }
 
+/// Typed error for a failed computation item.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum FailedItemError {
+    #[error("missing simulation state")]
+    MissingSimulationState,
+
+    #[error("missing token metadata")]
+    MissingTokenMetadata,
+
+    #[error("missing spot price")]
+    MissingSpotPrice,
+
+    #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
+    ExtremeDecimalMismatch { from: u32, to: u32 },
+
+    #[error("spot price too small: {0}")]
+    SpotPriceTooSmall(f64),
+
+    #[error("spot price computation failed: {0}")]
+    SpotPriceComputation(String),
+
+    #[error("pool depth computation failed: {0}")]
+    PoolDepthComputation(String),
+
+    #[error("all simulation paths failed")]
+    AllSimulationPathsFailed,
+}
+
 /// A single item that failed during a computation.
 #[derive(Debug, Clone)]
 pub struct FailedItem {
@@ -123,8 +151,8 @@ pub struct FailedItem {
     /// - spot_prices/pool_depths: "component_id/token_in/token_out"
     /// - token_prices: "token_address"
     pub key: String,
-    /// Display string of the error.
-    pub error: String,
+    /// Typed error describing the failure.
+    pub error: FailedItemError,
 }
 
 /// Computation result with optional partial failure details.

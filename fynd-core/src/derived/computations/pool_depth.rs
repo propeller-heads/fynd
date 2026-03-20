@@ -26,7 +26,9 @@ use tycho_simulation::{
 
 use crate::{
     derived::{
-        computation::{ComputationId, ComputationOutput, DerivedComputation, FailedItem},
+        computation::{
+            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+        },
         computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
@@ -157,7 +159,7 @@ impl DerivedComputation for PoolDepthComputation {
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: "missing simulation state".to_string(),
+                        error: FailedItemError::MissingSimulationState,
                     });
                 }
                 continue;
@@ -173,7 +175,7 @@ impl DerivedComputation for PoolDepthComputation {
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: "missing token metadata".to_string(),
+                        error: FailedItemError::MissingTokenMetadata,
                     });
                 }
                 continue;
@@ -195,7 +197,7 @@ impl DerivedComputation for PoolDepthComputation {
                     pool_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: "missing spot price".to_string(),
+                        error: FailedItemError::MissingSpotPrice,
                     });
                     continue;
                 };
@@ -220,10 +222,10 @@ impl DerivedComputation for PoolDepthComputation {
                     pool_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: format!(
-                            "extreme decimal mismatch ({}→{})",
-                            token_in.decimals, token_out.decimals
-                        ),
+                        error: FailedItemError::ExtremeDecimalMismatch {
+                            from: token_in.decimals,
+                            to: token_out.decimals,
+                        },
                     });
                     continue;
                 }
@@ -242,7 +244,7 @@ impl DerivedComputation for PoolDepthComputation {
                     pool_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: format!("spot price too small: {spot_price}"),
+                        error: FailedItemError::SpotPriceTooSmall(*spot_price),
                     });
                     continue;
                 }
@@ -314,7 +316,9 @@ impl DerivedComputation for PoolDepthComputation {
                                 "{}/{}/{}",
                                 component_id, token_in.address, token_out.address
                             ),
-                            error: format!("{e}: {probe_info}, {limits_info}"),
+                            error: FailedItemError::PoolDepthComputation(format!(
+                                "{e}: {probe_info}, {limits_info}"
+                            )),
                         });
                     }
                 }
@@ -344,6 +348,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{setup_market, token, token_with_decimals, MockProtocolSim},
         derived::{
+            computation::FailedItemError,
             store::DerivedData,
             types::{PoolDepthKey, SpotPrices},
         },
@@ -774,8 +779,7 @@ mod tests {
                 .failed_items
                 .iter()
                 .any(|item| item.key == usdc_eth_key &&
-                    item.error
-                        .contains("missing spot price")),
+                    matches!(item.error, FailedItemError::MissingSpotPrice)),
             "USDC→ETH should appear in failed_items with missing spot price error"
         );
     }

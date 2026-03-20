@@ -14,7 +14,9 @@ use tracing::{debug, instrument, warn, Span};
 
 use crate::{
     derived::{
-        computation::{ComputationId, ComputationOutput, DerivedComputation, FailedItem},
+        computation::{
+            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+        },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::SpotPrices,
@@ -106,7 +108,7 @@ impl DerivedComputation for SpotPriceComputation {
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: "missing simulation state".to_string(),
+                        error: FailedItemError::MissingSimulationState,
                     });
                 }
                 continue;
@@ -122,7 +124,7 @@ impl DerivedComputation for SpotPriceComputation {
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: "missing token metadata".to_string(),
+                        error: FailedItemError::MissingTokenMetadata,
                     });
                 }
                 continue;
@@ -152,7 +154,7 @@ impl DerivedComputation for SpotPriceComputation {
                                 "{}/{}/{}",
                                 component_id, token_in.address, token_out.address
                             ),
-                            error: e.to_string(),
+                            error: FailedItemError::SpotPriceComputation(e.to_string()),
                         });
                     }
                 }
