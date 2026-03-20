@@ -14,7 +14,7 @@ use crate::api::prices::{
 };
 
 /// Configures API routes under /v1 namespace.
-pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
     let scope = web::scope("/v1")
         .route("/quote", web::post().to(quote))
         .route("/health", web::get().to(health));
@@ -48,7 +48,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
-pub async fn quote(
+pub(crate) async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -70,14 +70,14 @@ pub async fn quote(
     }
 
     let core_quote = state
-        .worker_router
+        .worker_router()
         .quote(core_request)
         .await?;
 
     info!(
         solve_time_ms = core_quote.solve_time_ms(),
         num_orders = core_quote.orders().len(),
-        num_pools = state.worker_router.num_pools(),
+        num_pools = state.worker_router().num_pools(),
         "quote completed"
     );
 
@@ -98,19 +98,19 @@ pub async fn quote(
         (status = 503, description = "Data stale", body = dto::HealthStatus),
     )
 )]
-pub async fn health(state: web::Data<AppState>) -> HttpResponse {
-    let age_ms = state.health_tracker.age_ms().await;
+pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
+    let age_ms = state.health_tracker().age_ms().await;
     let data_fresh = age_ms < 60_000; // Healthy if data less than 60s old
     let derived_data_ready = state
-        .health_tracker
+        .health_tracker()
         .derived_data_ready()
         .await;
     let gas_price_age_ms = state
-        .health_tracker
+        .health_tracker()
         .gas_price_age_ms()
         .await;
     let gas_stale = state
-        .health_tracker
+        .health_tracker()
         .gas_price_stale()
         .await;
     let is_healthy = data_fresh && derived_data_ready && !gas_stale;
@@ -118,7 +118,7 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let status = dto::HealthStatus::new(
         is_healthy,
         age_ms,
-        state.worker_router.num_pools(),
+        state.worker_router().num_pools(),
         derived_data_ready,
         gas_price_age_ms,
     );

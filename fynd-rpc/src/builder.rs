@@ -15,6 +15,7 @@ use crate::{
 /// Builder that assembles Fynd and returns a running server handle.
 ///
 /// Wraps [`FyndBuilder`] for all solver configuration and adds HTTP server concerns on top.
+#[must_use]
 pub struct FyndRPCBuilder {
     fynd_builder: FyndBuilder,
     http_host: String,
@@ -141,7 +142,7 @@ impl FyndRPCBuilder {
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blacklisted_components(blacklist.components);
+            .blacklisted_components(blacklist.into_components());
         self
     }
 
@@ -157,7 +158,7 @@ impl FyndRPCBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Fynd> {
+    pub fn build(self) -> Result<FyndRPC> {
         info!(
             host = %self.http_host,
             port = self.http_port,
@@ -228,7 +229,7 @@ impl FyndRPCBuilder {
             }
         });
 
-        Ok(Fynd {
+        Ok(FyndRPC {
             server_handle,
             server_task,
             worker_pools,
@@ -240,8 +241,9 @@ impl FyndRPCBuilder {
     }
 }
 
-/// Running Fynd. Call `run` to block until shutdown and perform cleanup.
-pub struct Fynd {
+/// Running Fynd RPC server. Call `run` to block until shutdown and perform cleanup.
+#[must_use]
+pub struct FyndRPC {
     server_handle: ServerHandle,
     server_task: JoinHandle<()>,
     worker_pools: Vec<WorkerPool>,
@@ -251,7 +253,7 @@ pub struct Fynd {
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
-impl Fynd {
+impl FyndRPC {
     /// Returns a handle to the HTTP server for graceful shutdown.
     pub fn server_handle(&self) -> ServerHandle {
         self.server_handle.clone()
@@ -259,7 +261,7 @@ impl Fynd {
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
-        let Fynd {
+        let FyndRPC {
             server_handle,
             mut server_task,
             worker_pools,
