@@ -5,9 +5,9 @@
 //! given trade size.
 //!
 //! Key features:
-//! - **Gas-aware relaxation**: When token prices and gas price are available, relaxation
-//!   compares net amounts (gross output minus cumulative gas cost in token terms) instead
-//!   of gross output alone. Falls back to gross comparison when data is unavailable.
+//! - **Gas-aware relaxation**: When token prices and gas price are available, relaxation compares
+//!   net amounts (gross output minus cumulative gas cost in token terms) instead of gross output
+//!   alone. Falls back to gross comparison when data is unavailable.
 //! - **Subgraph extraction**: BFS prunes the graph to nodes reachable within `max_hops`
 //! - **SPFA (Shortest Path Faster Algorithm) queuing**: Only re-relaxes edges from nodes whose
 //!   amount improved
@@ -23,24 +23,25 @@ use num_traits::{ToPrimitive, Zero};
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
-    tycho_common::models::Address, tycho_core::models::token::Token,
-    tycho_core::simulation::protocol_sim::Price,
+    tycho_common::models::Address,
+    tycho_core::{models::token::Token, simulation::protocol_sim::Price},
 };
 
 use super::{Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
 use crate::{
-    derived::{computation::ComputationRequirements, types::{SpotPrices, TokenGasPrices}, SharedDerivedDataRef},
+    derived::{
+        computation::ComputationRequirements,
+        types::{SpotPrices, TokenGasPrices},
+        SharedDerivedDataRef,
+    },
     feed::market_data::SharedMarketDataRef,
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
 
 /// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph = (
-    HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
-    HashSet<NodeIndex>,
-    HashSet<ComponentId>,
-);
+type Subgraph =
+    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
 
 pub struct BellmanFordAlgorithm {
     max_hops: usize,
@@ -69,8 +70,7 @@ impl BellmanFordAlgorithm {
     ) -> BigInt {
         match token_price {
             Some(price) if !price.denominator.is_zero() => {
-                let gas_cost =
-                    cumul_gas * gas_price_wei * &price.numerator / &price.denominator;
+                let gas_cost = cumul_gas * gas_price_wei * &price.numerator / &price.denominator;
                 BigInt::from(gross.clone()) - BigInt::from(gas_cost)
             }
             _ => BigInt::from(gross.clone()),
@@ -104,8 +104,8 @@ impl BellmanFordAlgorithm {
     /// Resolves the gas-to-token conversion rate for gas cost calculation.
     ///
     /// 1. Primary: use `token_prices[v_addr]` from derived data (direct lookup).
-    /// 2. Fallback: if `token_prices[token_in]` exists and `spot_product > 0`, estimate
-    ///    the rate as `token_prices[token_in] * spot_product` (converted to a Price).
+    /// 2. Fallback: if `token_prices[token_in]` exists and `spot_product > 0`, estimate the rate as
+    ///    `token_prices[token_in] * spot_product` (converted to a Price).
     /// 3. Last resort: returns None (gas adjustment skipped for this comparison).
     fn resolve_token_price(
         v_addr: Option<&Address>,
@@ -124,8 +124,7 @@ impl BellmanFordAlgorithm {
         // Fallback: token_in price * cumulative spot product
         if spot_product > 0.0 {
             if let Some(in_price) = token_in_addr.and_then(|a| prices.get(a)) {
-                let in_rate_f64 =
-                    in_price.numerator.to_f64()? / in_price.denominator.to_f64()?;
+                let in_rate_f64 = in_price.numerator.to_f64()? / in_price.denominator.to_f64()?;
                 let estimated_rate = in_rate_f64 * spot_product;
                 let denom = BigUint::from(10u64).pow(18);
                 let numer_f64 = estimated_rate * 1e18;
@@ -179,13 +178,14 @@ impl BellmanFordAlgorithm {
 
         while current != token_in {
             if !visited.insert(current) {
-                return Err(AlgorithmError::Other(
-                    "cycle in predecessor chain".to_string(),
-                ));
+                return Err(AlgorithmError::Other("cycle in predecessor chain".to_string()));
             }
 
             let idx = current.index();
-            match &predecessor.get(idx).and_then(|p| p.as_ref()) {
+            match &predecessor
+                .get(idx)
+                .and_then(|p| p.as_ref())
+            {
                 Some((prev_node, component_id)) => {
                     path.push((*prev_node, current, component_id.clone()));
                     current = *prev_node;
@@ -212,8 +212,7 @@ impl BellmanFordAlgorithm {
         max_hops: usize,
         order: &Order,
     ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> =
-            HashMap::new();
+        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
         let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut component_ids: HashSet<ComponentId> = HashSet::new();
         let mut visited = HashSet::new();
@@ -231,7 +230,9 @@ impl BellmanFordAlgorithm {
                 let target = edge.target();
                 let cid = edge.weight().component_id.clone();
 
-                adj.entry(node).or_default().push((target, cid.clone()));
+                adj.entry(node)
+                    .or_default()
+                    .push((target, cid.clone()));
                 component_ids.insert(cid);
                 token_nodes.insert(target);
 
@@ -297,8 +298,7 @@ impl BellmanFordAlgorithm {
 
         match output_price {
             Some(price) if !price.denominator.is_zero() => {
-                let gas_cost =
-                    &gas_cost_wei * &price.numerator / &price.denominator;
+                let gas_cost = &gas_cost_wei * &price.numerator / &price.denominator;
                 BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
             }
             _ => {
@@ -366,7 +366,10 @@ impl Algorithm for BellmanFordAlgorithm {
             let token_map: HashMap<NodeIndex, Token> = token_nodes
                 .iter()
                 .filter_map(|&node| {
-                    market.get_token(&graph[node]).cloned().map(|t| (node, t))
+                    market
+                        .get_token(&graph[node])
+                        .cloned()
+                        .map(|t| (node, t))
                 })
                 .collect();
 
@@ -376,7 +379,10 @@ impl Algorithm for BellmanFordAlgorithm {
         };
 
         debug!(
-            edges = adj.values().map(Vec::len).sum::<usize>(),
+            edges = adj
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
             tokens = token_map.len(),
             "subgraph extracted"
         );
@@ -415,8 +421,7 @@ impl Algorithm for BellmanFordAlgorithm {
         let mut spot_product: Vec<f64> = vec![0.0; max_idx];
         spot_product[token_in_node.index()] = 1.0;
 
-        let gas_aware =
-            self.gas_aware && gas_price_wei.is_some() && token_prices.is_some();
+        let gas_aware = self.gas_aware && gas_price_wei.is_some() && token_prices.is_some();
         if !gas_aware && self.gas_aware {
             debug!("gas-aware comparison disabled (missing gas_price or token_prices)");
         } else if !self.gas_aware {
@@ -459,11 +464,7 @@ impl Algorithm for BellmanFordAlgorithm {
                         continue;
                     };
 
-                    let result = match sim.get_amount_out(
-                        amount[u_idx].clone(),
-                        token_u,
-                        token_v,
-                    ) {
+                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
                         Ok(r) => r,
                         Err(e) => {
                             trace!(
@@ -642,8 +643,8 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, order, token, MockProtocolSim},
-        feed::market_data::SharedMarketData,
         derived::{types::TokenGasPrices, DerivedData},
+        feed::market_data::SharedMarketData,
         graph::GraphManager,
         types::quote::OrderSide,
     };
@@ -1283,14 +1284,44 @@ mod tests {
         pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
 
         // Node conflicts: node 0 is in path, node 3 is not
-        assert!(BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(0), &"any".into(), &pred));
-        assert!(!BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"any".into(), &pred));
+        assert!(BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(0),
+            &"any".into(),
+            &pred
+        ));
+        assert!(!BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+            &"any".into(),
+            &pred
+        ));
         // Self-check: node 2 is itself in the "path from 2"
-        assert!(BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(2), &"any".into(), &pred));
+        assert!(BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(2),
+            &"any".into(),
+            &pred
+        ));
 
         // Pool conflicts: pool_a and pool_b are used, pool_c is not
-        assert!(BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_a".into(), &pred));
-        assert!(BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_b".into(), &pred));
-        assert!(!BellmanFordAlgorithm::path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_c".into(), &pred));
+        assert!(BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+            &"pool_a".into(),
+            &pred
+        ));
+        assert!(BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+            &"pool_b".into(),
+            &pred
+        ));
+        assert!(!BellmanFordAlgorithm::path_has_conflict(
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+            &"pool_c".into(),
+            &pred
+        ));
     }
 }
