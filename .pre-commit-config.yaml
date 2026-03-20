@@ -1,0 +1,22 @@
+# Run `prek install` once after cloning to wire this into .git/hooks/pre-commit.
+repos:
+  - repo: local
+    hooks:
+      - id: check-sh
+        name: check.sh
+        language: system
+        entry: >-
+          bash -c '
+            GIT_DIR=$(git rev-parse --git-dir);
+            if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ]; then
+              echo "Skipping check.sh during rebase.";
+              exit 0;
+            fi;
+            ROOT=$(git rev-parse --show-toplevel);
+            if [ -f "$ROOT/check.sh" ]; then
+              exec "$ROOT/check.sh";
+            else
+              echo "No check.sh found, skipping.";
+            fi'
+        pass_filenames: false
+        always_run: true
