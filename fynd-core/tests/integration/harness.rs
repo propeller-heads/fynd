@@ -1,21 +1,24 @@
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fynd_core::{
-    derived::{ComputationManager, ComputationManagerConfig, DerivedDataEvent, SharedDerivedDataRef},
+    algorithm::AlgorithmConfig,
+    derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         market_data::{SharedMarketData, SharedMarketDataRef},
         tycho_feed::TychoFeed,
         MarketEvent, TychoFeedConfig,
     },
     recording::MarketRecording,
-    types::{Order, Quote, QuoteOptions, QuoteRequest},
+    types::{constants::native_token, Order, Quote, QuoteOptions, QuoteRequest},
     worker_pool::pool::{WorkerPool, WorkerPoolBuilder},
     worker_pool_router::{SolverPoolHandle, WorkerPoolRouter},
     SolveError, WorkerPoolRouterConfig,
 };
 use num_bigint::BigUint;
+use serde::Deserialize;
 use tokio::sync::{broadcast, RwLock};
 use tycho_simulation::{
     tycho_common::models::Chain,
@@ -27,10 +30,37 @@ pub struct TestHarness {
     pub market_data: SharedMarketDataRef,
     pub derived_data: SharedDerivedDataRef,
     router: WorkerPoolRouter,
+    _market_tx: broadcast::Sender<MarketEvent>,
     _shutdown_tx: broadcast::Sender<()>,
-    _worker_pool: WorkerPool,
+    _worker_pools: Vec<WorkerPool>,
     _cm_handle: tokio::task::JoinHandle<()>,
 }
+
+/// Minimal struct for parsing pool config from worker_pools.toml.
+#[derive(Debug, Deserialize)]
+struct PoolsFile {
+    pools: HashMap<String, PoolEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoolEntry {
+    algorithm: String,
+    #[serde(default = "default_num_workers")]
+    num_workers: usize,
+    #[serde(default = "default_min_hops")]
+    min_hops: usize,
+    #[serde(default = "default_max_hops")]
+    max_hops: usize,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default)]
+    max_routes: Option<usize>,
+}
+
+fn default_num_workers() -> usize { num_cpus::get() }
+fn default_min_hops() -> usize { 1 }
+fn default_max_hops() -> usize { 3 }
+fn default_timeout_ms() -> u64 { 100 }
 
 impl TestHarness {
     /// Load recording from the fixtures directory and build the full pipeline.
@@ -46,22 +76,24 @@ impl TestHarness {
 
     /// Build the pipeline by replaying a recording through TychoFeed.
     pub async fn from_recording(recording: MarketRecording) -> Self {
-        // 1. Create empty SharedMarketData + TychoFeed for replay
+        let block_number = recording.last_block_number();
+        let gas_price_gwei = recording.metadata.gas_price_gwei.unwrap_or(10.0);
+        let gas_price_wei = (gas_price_gwei * 1e9) as u64;
+
+        // 1. Replay recording
         let market_data: SharedMarketDataRef =
             Arc::new(RwLock::new(SharedMarketData::new()));
         let feed_config = TychoFeedConfig::new(
-            "ws://replay".to_string(), // dummy URL — not connecting
+            "ws://replay".to_string(),
             Chain::Ethereum,
-            None,   // no API key needed for replay
-            false,  // no TLS
-            vec![], // no protocol filter — replay all
-            0.0,    // no TVL filter — replay all
+            None,
+            false,
+            vec![],
+            0.0,
         );
         let feed = TychoFeed::new(feed_config, market_data.clone());
-        // Keep a receiver alive so handle_tycho_message's broadcast doesn't fail
         let _feed_rx = feed.subscribe();
 
-        // 2. Replay each recorded Update through handle_tycho_message
         for recorded_update in recording.updates {
             let update = recorded_update.into();
             feed.handle_tycho_message(update)
@@ -69,22 +101,22 @@ impl TestHarness {
                 .expect("replay of recorded update failed");
         }
 
-        // 3. Inject a synthetic gas price so token_prices can compute.
-        // In replay mode there's no RPC to fetch live gas prices.
+        // 2. Inject gas price
         {
             let mut market = market_data.write().await;
             market.update_gas_price(BlockGasPrice {
-                block_number: 0,
+                block_number,
                 block_hash: Default::default(),
                 block_timestamp: 0,
                 pricing: GasPrice::Legacy {
-                    gas_price: BigUint::from(10_000_000_000u64), // 10 gwei
+                    gas_price: BigUint::from(gas_price_wei),
                 },
             });
         }
 
-        // 4. Create ComputationManager and compute derived data
-        let gas_token = find_weth_address(&market_data).await;
+        // 3. Create ComputationManager
+        let gas_token = native_token(&Chain::Ethereum)
+            .expect("ethereum native token must be configured");
         let config =
             ComputationManagerConfig::default().with_gas_token(gas_token);
         let (computation_manager, derived_events_rx) =
@@ -92,33 +124,72 @@ impl TestHarness {
                 .expect("failed to create computation manager");
         let derived_data = computation_manager.store();
 
-        // 5. Run ComputationManager
         let (market_tx, market_rx) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-
         let cm_handle =
             tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
-        // 6. Build worker pool + router BEFORE sending MarketUpdated, so
-        // workers are subscribed to derived_events_rx and receive
-        // DerivedDataEvent broadcasts (avoids race condition).
+        // 4. Build single worker pool from worker_pools.toml BEFORE sending
+        // MarketUpdated, so workers receive DerivedDataEvent broadcasts.
+        let pools_toml = include_str!("../../../worker_pools.toml");
+        let pools_config: PoolsFile =
+            toml::from_str(pools_toml).expect("failed to parse worker_pools.toml");
+
+        // Merge all pool configs: widest hop range, longest timeout
+        let mut min_hops = usize::MAX;
+        let mut max_hops = 0;
+        let mut timeout_ms = 0u64;
+        let mut max_routes: Option<usize> = None;
+        let mut total_workers = 0;
+        let mut algorithm = String::new();
+
+        for (_name, pool_entry) in &pools_config.pools {
+            min_hops = min_hops.min(pool_entry.min_hops);
+            max_hops = max_hops.max(pool_entry.max_hops);
+            timeout_ms = timeout_ms.max(pool_entry.timeout_ms);
+            if let Some(mr) = pool_entry.max_routes {
+                max_routes =
+                    Some(max_routes.map_or(mr, |existing: usize| existing.max(mr)));
+            }
+            total_workers += pool_entry.num_workers;
+            if algorithm.is_empty() {
+                algorithm = pool_entry.algorithm.clone();
+            }
+        }
+
+        let algo_config = AlgorithmConfig::new(
+            min_hops,
+            max_hops,
+            Duration::from_millis(timeout_ms),
+            max_routes,
+        )
+        .expect("invalid algorithm config from worker_pools.toml");
+
         let market_event_rx = market_tx.subscribe();
-        let (pool_handle, worker_pool) = build_test_worker_pool(
-            market_data.clone(),
-            derived_data.clone(),
-            market_event_rx,
-            derived_events_rx,
-        );
+        let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+            .algorithm(algorithm)
+            .algorithm_config(algo_config)
+            .num_workers(total_workers)
+            .build(
+                market_data.clone(),
+                derived_data.clone(),
+                market_event_rx,
+                derived_events_rx,
+            )
+            .expect("failed to build worker pool");
+        let solver_pool_handles =
+            vec![SolverPoolHandle::new("test_pool", task_handle)];
+        let worker_pools = vec![worker_pool];
 
         let router_config = WorkerPoolRouterConfig::default()
-            .with_timeout(Duration::from_millis(5000));
+            .with_timeout(Duration::from_millis(timeout_ms.max(5000)));
         let router = WorkerPoolRouter::new(
-            vec![pool_handle],
+            solver_pool_handles,
             router_config,
             default_test_encoder(),
         );
 
-        // 7. Now trigger derived data computation by sending MarketUpdated
+        // 5. Trigger derived data computation
         let market_read = market_data.read().await;
         let added = market_read.component_topology();
         drop(market_read);
@@ -131,7 +202,7 @@ impl TestHarness {
             })
             .expect("failed to send market event");
 
-        // 8. Wait for all derived data to be computed
+        // 6. Wait for all derived data
         let timeout = tokio::time::sleep(Duration::from_secs(120));
         tokio::pin!(timeout);
         loop {
@@ -141,19 +212,26 @@ impl TestHarness {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {
                     let d = derived_data.read().await;
-                    if d.spot_prices().is_some() && d.token_prices().is_some() {
+                    if d.spot_prices().is_some() && d.pool_depths().is_some() && d.token_prices().is_some() {
                         break;
                     }
                 }
             }
         }
 
+        // Give workers time to process the DerivedDataEvent broadcast.
+        // The wait loop above detects that derived data exists in the store,
+        // but workers receive the event via a broadcast channel and need a
+        // moment to update their internal readiness state.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         Self {
             market_data,
             derived_data,
             router,
+            _market_tx: market_tx,
             _shutdown_tx: shutdown_tx,
-            _worker_pool: worker_pool,
+            _worker_pools: worker_pools,
             _cm_handle: cm_handle,
         }
     }
@@ -163,37 +241,6 @@ impl TestHarness {
         let request = QuoteRequest::new(orders, QuoteOptions::default());
         self.router.quote(request).await
     }
-}
-
-/// Find the WETH address in the market data (used as gas token).
-async fn find_weth_address(
-    market_data: &SharedMarketDataRef,
-) -> tycho_simulation::tycho_common::models::Address {
-    let weth: tycho_simulation::tycho_common::models::Address =
-        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-            .parse()
-            .expect("invalid WETH address");
-    let market = market_data.read().await;
-    if market.token_registry_ref().contains_key(&weth) {
-        return weth;
-    }
-    tycho_simulation::tycho_common::models::Address::zero(20)
-}
-
-/// Build a single test worker pool with the MostLiquid algorithm.
-fn build_test_worker_pool(
-    market_data: SharedMarketDataRef,
-    derived_data: SharedDerivedDataRef,
-    market_event_rx: broadcast::Receiver<MarketEvent>,
-    derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
-) -> (SolverPoolHandle, WorkerPool) {
-    let (worker_pool, task_handle) = WorkerPoolBuilder::new()
-        .algorithm("most_liquid")
-        .num_workers(2)
-        .build(market_data, derived_data, market_event_rx, derived_event_rx)
-        .expect("failed to build test worker pool");
-
-    (SolverPoolHandle::new("test_pool", task_handle), worker_pool)
 }
 
 /// Create an Encoder for the router.

@@ -8,25 +8,30 @@ use tycho_simulation::{
         feed::component_tracker::ComponentFilter,
         rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
     },
-    tycho_common::dto::{PaginationParams, ProtocolSystemsRequestBody},
+    tycho_common::{
+        dto::{PaginationParams, ProtocolSystemsRequestBody},
+        models::Chain,
+    },
+    tycho_core::traits::FeePriceGetter,
+    tycho_ethereum::rpc::EthereumRpcClient,
     utils::load_all_tokens,
 };
 
 pub struct RecordingOptions {
     pub tycho_url: String,
     pub tycho_api_key: String,
-    pub chain: String,
     pub duration_secs: u64,
     pub protocols: Option<Vec<String>>,
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: u64,
+    pub rpc_url: Option<String>,
 }
 
 /// Connect to Tycho, capture raw Update messages for the configured
 /// duration, and return a MarketRecording.
 pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketRecording> {
-    let chain = parse_chain(&opts.chain)?;
+    let chain = Chain::Ethereum;
 
     // 1. Resolve protocol list: use explicit list or discover from Tycho RPC
     let protocols = match &opts.protocols {
@@ -59,7 +64,25 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
     .await?;
     tracing::info!(count = all_tokens.len(), "loaded tokens");
 
-    // 3. Build the protocol stream with TVL filtering
+    // 3. Fetch gas price from RPC (if URL provided)
+    let gas_price_gwei = match &opts.rpc_url {
+        Some(url) => match fetch_gas_price_gwei(url).await {
+            Ok(gwei) => {
+                tracing::info!(gas_price_gwei = gwei, "captured gas price from RPC");
+                Some(gwei)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to fetch gas price, using None");
+                None
+            }
+        },
+        None => {
+            tracing::info!("no --rpc-url provided, gas price will not be recorded");
+            None
+        }
+    };
+
+    // 4. Build the protocol stream with TVL filtering
     // with_tvl_range(lower_bound, upper_bound): components are added when TVL >= upper
     // and removed when TVL < lower. Use same value for both (no hysteresis in recording).
     let tvl_filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
@@ -78,7 +101,7 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
         .build()
         .await?;
 
-    // 4. Receive Update messages until duration expires
+    // 5. Receive Update messages until duration expires
     let mut updates = Vec::new();
     let start = Instant::now();
     let deadline = start + Duration::from_secs(opts.duration_secs);
@@ -116,7 +139,7 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
 
     Ok(MarketRecording {
         metadata: RecordingMetadata {
-            chain: opts.chain.clone(),
+            chain: "ethereum".to_string(),
             recorded_at_unix_s: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time went backwards")
@@ -128,25 +151,38 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
             min_tvl: opts.min_tvl,
             min_token_quality: opts.min_token_quality,
             traded_n_days_ago: Some(opts.traded_n_days_ago),
+            gas_price_gwei,
         },
         updates,
     })
 }
 
-fn parse_chain(chain: &str) -> anyhow::Result<tycho_simulation::tycho_common::models::Chain> {
-    use tycho_simulation::tycho_common::models::Chain;
-    match chain.to_lowercase().as_str() {
-        "ethereum" => Ok(Chain::Ethereum),
-        "base" => Ok(Chain::Base),
-        "arbitrum" => Ok(Chain::Arbitrum),
-        other => anyhow::bail!("unsupported chain: {other}"),
-    }
+async fn fetch_gas_price_gwei(rpc_url: &str) -> anyhow::Result<f64> {
+    use tycho_simulation::tycho_ethereum::gas::GasPrice;
+
+    let client = EthereumRpcClient::new(rpc_url)
+        .map_err(|e| anyhow::anyhow!("failed to create RPC client: {e}"))?;
+    let block_gas_price = client
+        .get_latest_fee_price()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to fetch gas price: {e}"))?;
+    let gas_price_wei = match &block_gas_price.pricing {
+        GasPrice::Legacy { gas_price } => gas_price.clone(),
+        // EIP-1559 gas prices: extract the base-fee-equivalent
+        other => {
+            tracing::debug!(?other, "non-legacy gas price, using gas_price field from legacy conversion");
+            // Fallback: just store a reasonable default
+            num_bigint::BigUint::from(10_000_000_000u64)
+        }
+    };
+    let gwei = gas_price_wei.to_string().parse::<f64>().unwrap_or(0.0) / 1e9;
+    Ok(gwei)
 }
 
 async fn fetch_protocol_systems(
     tycho_url: &str,
     auth_key: Option<&str>,
-    chain: tycho_simulation::tycho_common::models::Chain,
+    chain: Chain,
 ) -> anyhow::Result<Vec<String>> {
     let rpc_url = format!("https://{tycho_url}");
     let rpc_options =

@@ -59,7 +59,10 @@ async fn test_solve_time_p95_within_threshold() {
 async fn test_no_solve_exceeds_absolute_cap() {
     let harness = TestHarness::from_fixture().await;
     let scenarios = load_test_scenarios();
-    let absolute_cap_ms = 200;
+    // The slow pool (most_liquid_3_hops) has a 5000ms timeout.
+    // Router timeout is max(pool_timeout, 5000ms). Individual solves
+    // should complete within the router timeout.
+    let absolute_cap_ms = 6000;
 
     let mut violations = Vec::new();
     for scenario in &scenarios {

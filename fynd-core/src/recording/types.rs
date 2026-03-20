@@ -74,6 +74,10 @@ pub struct RecordingMetadata {
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: Option<u64>,
+    /// Gas price in gwei captured from RPC at recording time.
+    /// Used during replay to avoid needing a live RPC connection.
+    #[serde(default)]
+    pub gas_price_gwei: Option<f64>,
 }
 
 /// A complete market recording: metadata + ordered sequence of `Update` messages.
@@ -85,4 +89,14 @@ pub struct RecordingMetadata {
 pub struct MarketRecording {
     pub metadata: RecordingMetadata,
     pub updates: Vec<RecordedUpdate>,
+}
+
+impl MarketRecording {
+    /// Returns the block number from the last recorded update, or 0 if empty.
+    pub fn last_block_number(&self) -> u64 {
+        self.updates
+            .last()
+            .map(|u| u.block_number_or_timestamp)
+            .unwrap_or(0)
+    }
 }

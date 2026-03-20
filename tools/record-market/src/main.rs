@@ -19,6 +19,11 @@ struct Cli {
     #[arg(long, env = "TYCHO_API_KEY")]
     tycho_api_key: String,
 
+    /// Ethereum RPC URL for gas price capture.
+    /// If provided, the gas price is recorded and used during replay.
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Option<String>,
+
     /// Duration to record stream updates (seconds)
     #[arg(long, default_value = "600")]
     duration_secs: u64,
@@ -26,10 +31,6 @@ struct Cli {
     /// Output directory for fixtures
     #[arg(long, default_value = "fixtures/integration")]
     output_dir: PathBuf,
-
-    /// Chain (ethereum, base, arbitrum)
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
 
     /// Protocol systems to record (e.g. uniswap_v2, uniswap_v3).
     /// If omitted, all protocols discovered from Tycho are used.
@@ -63,12 +64,12 @@ async fn main() -> anyhow::Result<()> {
     let recording_opts = recorder::RecordingOptions {
         tycho_url: cli.tycho_url,
         tycho_api_key: cli.tycho_api_key,
-        chain: cli.chain,
         duration_secs: cli.duration_secs,
         protocols: cli.protocols,
         min_tvl: cli.min_tvl,
         min_token_quality: cli.min_token_quality,
         traded_n_days_ago: cli.traded_n_days_ago,
+        rpc_url: cli.rpc_url,
     };
 
     // 1. Record Update messages from live Tycho stream
