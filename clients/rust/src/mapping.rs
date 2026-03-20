@@ -124,18 +124,14 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
         use tycho_simulation::tycho_core::Bytes as TychoBytes;
         let mut dto_opts =
             dto::EncodingOptions::new(opts.slippage).with_transfer_type(opts.transfer_type.into());
-        if let Some(permit) = opts
-            .permit
-            .map(dto::PermitSingle::try_from)
-            .transpose()?
-        {
-            dto_opts = dto_opts.with_permit(permit);
-        }
-        if let Some(sig) = opts
-            .permit2_signature
-            .map(TychoBytes::from)
-        {
-            dto_opts = dto_opts.with_permit2_signature(sig);
+        if let (Some(permit), Some(sig)) = (
+            opts.permit
+                .map(dto::PermitSingle::try_from)
+                .transpose()?,
+            opts.permit2_signature
+                .map(TychoBytes::from),
+        ) {
+            dto_opts = dto_opts.with_permit2(permit, sig);
         }
         Ok(dto_opts)
     }

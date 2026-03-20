@@ -173,14 +173,9 @@ impl EncodingOptions {
         self
     }
 
-    /// Set the Permit2 single-token authorization.
-    pub fn with_permit(mut self, permit: PermitSingle) -> Self {
+    /// Set the Permit2 single-token authorization and its signature.
+    pub fn with_permit2(mut self, permit: PermitSingle, sig: Bytes) -> Self {
         self.permit = Some(permit);
-        self
-    }
-
-    /// Set the Permit2 signature.
-    pub fn with_permit2_signature(mut self, sig: Bytes) -> Self {
         self.permit2_signature = Some(sig);
         self
     }
@@ -1019,11 +1014,10 @@ mod conversions {
         fn into(self) -> fynd_core::EncodingOptions {
             let mut opts = fynd_core::EncodingOptions::new(self.slippage)
                 .with_transfer_type(self.transfer_type.into());
-            if let Some(permit) = self.permit {
-                opts = opts.with_permit(permit.into());
-            }
-            if let Some(sig) = self.permit2_signature {
-                opts = opts.with_signature(sig);
+            if let (Some(permit), Some(sig)) = (self.permit, self.permit2_signature) {
+                opts = opts
+                    .with_permit(permit.into())
+                    .with_signature(sig);
             }
             opts
         }
