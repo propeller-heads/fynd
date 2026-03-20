@@ -4,7 +4,7 @@ on:
   pull_request:
     branches:
       - main
-      types:
+    types:
       - opened
       - edited
       - synchronize
@@ -67,6 +67,47 @@ jobs:
         with:
           tool: cargo-semver-checks
 
+      - name: Build baseline rustdoc from full workspace
+        # cargo semver-checks --baseline-rev builds each package in an isolated placeholder
+        # project without the workspace Cargo.lock, causing broken transitive dep resolution
+        # (e.g. tycho-simulation@old + tycho-common@new = incompatible). Instead, build
+        # baseline rustdoc directly from origin/main's full workspace so its lockfile is used.
+        env:
+          CARGO_TERM_COLOR: never
+          RUSTC_BOOTSTRAP: "1"
+          RUSTDOCFLAGS: >-
+            -Z unstable-options
+            --document-private-items
+            --document-hidden-items
+            --output-format=json
+            --cap-lints=allow
+        run: |
+          git worktree add /tmp/baseline origin/main
+          cargo doc \
+            --manifest-path /tmp/baseline/Cargo.toml \
+            --workspace \
+            --no-deps
+
+      - name: Build current rustdoc from full workspace
+        # Pre-build current rustdoc using the same workspace+lockfile approach as the baseline.
+        # This ensures both sides use identical feature resolution (workspace default features,
+        # no --all-features), preventing false positives from feature-gated APIs such as the
+        # `experimental` feature in fynd-rpc. Passing --current-rustdoc to cargo-semver-checks
+        # below bypasses its internal build, which may use a different feature set.
+        env:
+          CARGO_TERM_COLOR: never
+          RUSTC_BOOTSTRAP: "1"
+          RUSTDOCFLAGS: >-
+            -Z unstable-options
+            --document-private-items
+            --document-hidden-items
+            --output-format=json
+            --cap-lints=allow
+        run: |
+          cargo doc \
+            --workspace \
+            --no-deps
+
       - name: Check for breaking changes
         id: check
         env:
@@ -74,30 +115,46 @@ jobs:
         run: |
           METADATA=$(cargo metadata --no-deps --format-version 1)
           WORKSPACE_ROOT=$(echo "${METADATA}" | jq -r '.workspace_root')
-          PACKAGES=""
+          BREAKING=false
+          HAS_PACKAGES=false
+
           while IFS=' ' read -r name manifest_path; do
             rel_dir="${manifest_path#"${WORKSPACE_ROOT}"/}"
             rel_dir="${rel_dir%/Cargo.toml}"
-            if git cat-file -e "origin/main:${rel_dir}/Cargo.toml" 2>/dev/null; then
-              PACKAGES="${PACKAGES} --package ${name}"
-            else
+            if ! git cat-file -e "origin/main:${rel_dir}/Cargo.toml" 2>/dev/null; then
               echo "Skipping new crate '${name}' (not present in baseline)"
+              continue
+            fi
+
+            RUSTDOC_NAME="${name//-/_}"
+            BASELINE_JSON="/tmp/baseline/target/doc/${RUSTDOC_NAME}.json"
+            if [ ! -f "${BASELINE_JSON}" ]; then
+              echo "Warning: baseline rustdoc for '${name}' not found, skipping"
+              continue
+            fi
+
+            CURRENT_JSON="target/doc/${RUSTDOC_NAME}.json"
+            if [ ! -f "${CURRENT_JSON}" ]; then
+              echo "Warning: current rustdoc for '${name}' not found, skipping"
+              continue
+            fi
+
+            HAS_PACKAGES=true
+            if ! cargo semver-checks \
+              --package "${name}" \
+              --baseline-rustdoc "${BASELINE_JSON}" \
+              --current-rustdoc "${CURRENT_JSON}" \
+              >> semver-output.txt 2>&1; then
+              BREAKING=true
             fi
           done < <(echo "${METADATA}" | \
             jq -r '.packages[] | select(any(.targets[]; .kind[] == "lib")) | "\(.name) \(.manifest_path)"')
 
-          if [ -z "${PACKAGES}" ]; then
+          if [ "${HAS_PACKAGES}" = "false" ]; then
             echo "No pre-existing library crates to check against baseline."
-            echo "breaking=false" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
 
-          # shellcheck disable=SC2086
-          if cargo semver-checks ${PACKAGES} --baseline-rev origin/main > semver-output.txt 2>&1; then
-            echo "breaking=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "breaking=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "breaking=${BREAKING}" >> "$GITHUB_OUTPUT"
 
       - name: Post semver comment
         if: >

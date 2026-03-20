@@ -49,21 +49,30 @@ export RUST_LOG=info
 
 ### 3. Run
 
+All on-chain protocols are fetched from Tycho RPC by default, so `--protocols` is optional. The `--tycho-url` also defaults to the Fynd endpoint for the selected chain.
+
 ```bash
-cargo run --release -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --protocols uniswap_v2,uniswap_v3,uniswap_v3,vm:curve \
-  --min-tvl 50
+cargo run --release -- serve
+```
+
+To run on a different chain, use `--chain`:
+
+```bash
+cargo run --release -- serve --chain base
 ```
 
 `--rpc-url` defaults to the public endpoint `https://eth.llamarpc.com`. For production, pass a dedicated endpoint:
 
 ```bash
-cargo run --release -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  --rpc-url https://your-rpc-provider.com/v1/your_key \
-  --protocols uniswap_v2,uniswap_v3,uniswap_v3,vm:curve \
-  --min-tvl 50
+cargo run --release -- serve \
+  --rpc-url https://your-rpc-provider.com/v1/your_key
+```
+
+You can also specify protocols explicitly:
+
+```bash
+cargo run --release -- serve \
+  --protocols uniswap_v2,uniswap_v3,vm:curve
 ```
 
 See the full [list of available protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
@@ -81,11 +90,17 @@ orders.
 
 #### 3.1 Including RFQ Protocols
 
-Include RFQ (Request-for-Quote) protocols alongside on-chain protocols:
+Include RFQ (Request-for-Quote) protocols alongside on-chain protocols. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific RFQ protocols:
 
 ```bash
-cargo run --release -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
+cargo run --release -- serve \
+  --protocols all_onchain,rfq:bebop
+```
+
+Or specify both on-chain and RFQ protocols explicitly:
+
+```bash
+cargo run --release -- serve \
   --protocols uniswap_v2,uniswap_v3,rfq:bebop
 ```
 
@@ -152,9 +167,9 @@ Tune Fynd with the following flags:
 
 #### Optional
 
-<table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--rpc-url</code></td><td><code>RPC_URL</code></td><td><code>https://eth.llamarpc.com</code></td><td>Ethereum RPC endpoint. Use a dedicated endpoint in production.</td></tr><tr><td><code>--tycho-url</code></td><td><code>TYCHO_URL</code></td><td><code>localhost:4242</code></td><td>Tycho WebSocket URL</td></tr><tr><td><code>--chain</code></td><td>--</td><td><code>Ethereum</code></td><td>Target chain</td></tr><tr><td><code>-p, --protocols</code></td><td>--</td><td><em>(all)</em></td><td>Protocols to index (comma-separated)</td></tr><tr><td><code>--http-port</code></td><td><code>HTTP_PORT</code></td><td><code>3000</code></td><td>API port</td></tr><tr><td><code>--min-tvl</code></td><td>--</td><td><code>10.0</code></td><td>Minimum pool TVL in native token (ETH)</td></tr><tr><td><code>--tvl-buffer-multiplier</code></td><td>--</td><td><code>1.1</code></td><td>Hysteresis buffer for TVL filtering</td></tr><tr><td><code>--order-manager-timeout-ms</code></td><td>--</td><td><code>100</code></td><td>Default solve timeout (ms)</td></tr><tr><td><code>--order-manager-min-responses</code></td><td>--</td><td><code>0</code></td><td>Early return threshold (0 = wait for all pools)</td></tr><tr><td><code>-w, --worker-pools-config</code></td><td><code>WORKER_POOLS_CONFIG</code></td><td><code>worker_pools.toml</code></td><td>Worker pools config file path</td></tr><tr><td><code>--blacklist-config</code></td><td><code>BLACKLIST_CONFIG</code></td><td><code>blacklist.toml</code></td><td>Blacklist config file path</td></tr><tr><td><code>--disable-tls</code></td><td>--</td><td><code>false</code></td><td>Disable TLS for Tycho connection</td></tr><tr><td><code>--min-token-quality</code></td><td>--</td><td><code>100</code></td><td>Minimum <a href="https://docs.propellerheads.xyz/tycho/overview/concepts#token">token quality</a> filter</td></tr><tr><td><code>--gas-refresh-interval-secs</code></td><td>--</td><td><code>30</code></td><td>Gas price refresh interval</td></tr><tr><td><code>--reconnect-delay-secs</code></td><td>--</td><td><code>5</code></td><td>Reconnect delay on connection failure</td></tr></tbody></table>
+<table><thead><tr><th width="246.9140625">Flag</th><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--rpc-url</code></td><td><code>RPC_URL</code></td><td><code>https://eth.llamarpc.com</code></td><td>Ethereum RPC endpoint. Use a dedicated endpoint in production.</td></tr><tr><td><code>--tycho-url</code></td><td><code>TYCHO_URL</code></td><td><em>(chain-specific)</em></td><td>Tycho URL. Defaults to the Fynd endpoint for the selected chain (e.g. <code>tycho-fynd-ethereum.propellerheads.xyz</code>).</td></tr><tr><td><code>--chain</code></td><td>--</td><td><code>Ethereum</code></td><td>Target chain</td></tr><tr><td><code>-p, --protocols</code></td><td>--</td><td><em>(all on-chain)</em></td><td>Protocols to index (comma-separated). If omitted, all on-chain protocols are fetched from Tycho RPC. Use <code>all_onchain</code> to combine auto-fetched protocols with explicit entries (e.g. <code>all_onchain,rfq:bebop</code>).</td></tr><tr><td><code>--http-host</code></td><td><code>HTTP_HOST</code></td><td><code>0.0.0.0</code></td><td>HTTP bind address</td></tr><tr><td><code>--http-port</code></td><td><code>HTTP_PORT</code></td><td><code>3000</code></td><td>API port</td></tr><tr><td><code>--min-tvl</code></td><td>--</td><td><code>10.0</code></td><td>Minimum pool TVL in native token (ETH)</td></tr><tr><td><code>--tvl-buffer-ratio</code></td><td>--</td><td><code>1.1</code></td><td>Hysteresis buffer for TVL filtering. Components are added when TVL >= <code>min_tvl</code> and removed when TVL drops below <code>min_tvl / tvl_buffer_ratio</code>.</td></tr><tr><td><code>--traded-n-days-ago</code></td><td>--</td><td><code>3</code></td><td>Only include tokens traded within this many days.</td></tr><tr><td><code>--worker-router-timeout-ms</code></td><td>--</td><td><code>100</code></td><td>Default solve timeout (ms)</td></tr><tr><td><code>--worker-router-min-responses</code></td><td>--</td><td><code>0</code></td><td>Early return threshold (0 = wait for all pools)</td></tr><tr><td><code>-w, --worker-pools-config</code></td><td><code>WORKER_POOLS_CONFIG</code></td><td><code>worker_pools.toml</code></td><td>Worker pools config file path</td></tr><tr><td><code>--blacklist-config</code></td><td><code>BLACKLIST_CONFIG</code></td><td><code>blacklist.toml</code></td><td>Blacklist config file path</td></tr><tr><td><code>--disable-tls</code></td><td>--</td><td><code>false</code></td><td>Disable TLS for Tycho connection</td></tr><tr><td><code>--min-token-quality</code></td><td>--</td><td><code>100</code></td><td>Minimum <a href="https://docs.propellerheads.xyz/tycho/overview/concepts#token">token quality</a> filter</td></tr><tr><td><code>--gas-refresh-interval-secs</code></td><td>--</td><td><code>30</code></td><td>Gas price refresh interval</td></tr><tr><td><code>--reconnect-delay-secs</code></td><td>--</td><td><code>5</code></td><td>Reconnect delay on connection failure</td></tr><tr><td><code>--gas-price-stale-threshold-secs</code></td><td>--</td><td><em>(disabled)</em></td><td>Health returns 503 when gas price exceeds this age. Disabled by default.</td></tr></tbody></table>
 
-Run `cargo run --release -- --help` for the full list.
+Run `cargo run --release -- serve --help` for the full list.
 
 #### 5.1 - Worker pools file (`worker_pools.toml`)
 
@@ -190,6 +205,7 @@ Both pools solve every incoming order in parallel. Fynd picks the best result ac
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
 | `max_hops`            | `3`             | Maximum number of hops permitted for routing                           |
 | `timeout_ms`          | `100`           | Maximum time in milliseconds allowed per order processing in this pool |
+| `max_routes`          | *(no limit)*    | Maximum number of candidate routes to evaluate per order               |
 
 **Tuning tips:**
 
@@ -203,12 +219,10 @@ Both pools solve every incoming order in parallel. Fynd picks the best result ac
 To use a custom config file:
 
 ```bash
-cargo run --release -- \
-  --tycho-url tycho-beta.propellerheads.xyz \
-  -w my_worker_pools.toml
+cargo run --release -- serve -w my_worker_pools.toml
 ```
 
-#### 5.1 Blacklist (`blacklist.toml`)
+#### 5.2 Blacklist (`blacklist.toml`)
 
 Exclude specific components from routing, useful for components with known simulation issues (
 e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)):
@@ -228,16 +242,16 @@ Control log verbosity with `RUST_LOG`:
 
 ```bash
 # Minimal output
-RUST_LOG=warn cargo run --release -- ...
+RUST_LOG=warn cargo run --release -- serve ...
 
 # Default (recommended)
-RUST_LOG=info cargo run --release -- ...
+RUST_LOG=info cargo run --release -- serve ...
 
 # Debug solver internals
-RUST_LOG=info,tycho_solver=debug cargo run --release -- ...
+RUST_LOG=info,fynd_core=debug cargo run --release -- serve ...
 
 # Trace-level (very verbose, not recommended)
-RUST_LOG=info,tycho_solver=trace cargo run --release -- ...
+RUST_LOG=info,fynd_core=trace cargo run --release -- serve ...
 ```
 
 #### Prometheus Metrics
@@ -247,7 +261,7 @@ compatible tool. Available metrics: solve duration, response counts, failure typ
 
 ### 7. Validating and Executing the Solutions
 
-The repository includes an end-to-end example
-at [`examples/tutorial/`](https://github.com/propeller-heads/fynd/tree/main/examples/tutorial) that demonstrates
-quoting, simulating, and executing swaps against a running solver.
+With Fynd running, you can validate and execute swaps using `fynd-swap-cli` — a CLI binary included in the repository
+at `tools/fynd-swap-cli/`. It supports dry-run simulation (no funds or private key required) and on-chain execution.
+
 See [executing-the-solutions.md](executing-the-solutions.md "mention") for the full walkthrough.

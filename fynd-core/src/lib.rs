@@ -17,6 +17,7 @@
 //! - **derived**: Derived data computations (spot prices, pool depths, gas prices)
 //! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderQuote`)
 //! - **feed**: Market data structures and event handling
+//! - **encoding**: Encodes solved routes into on-chain transactions via Tycho's router contracts
 //! - **worker_pool**: Multi-threaded solver pool management with algorithm registry
 //! - **worker_pool_router**: Request orchestration across multiple solver pools
 
@@ -26,6 +27,7 @@ pub mod derived;
 pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
+pub mod solver;
 pub mod types;
 pub mod worker_pool;
 pub mod worker_pool_router;
@@ -34,6 +36,7 @@ pub mod worker_pool_router;
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
+pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 pub use types::{
     BlockInfo, ComponentId, EncodingOptions, Order, OrderQuote, OrderSide, OrderValidationError,
     PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,

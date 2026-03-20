@@ -1,0 +1,120 @@
+//! Example: quote and dry-run a USDC → WETH swap using ERC-20 `transferFrom`.
+//!
+//! An ephemeral key is used and ERC-20 storage overrides inject a synthetic
+//! balance so no real funds are required.
+//!
+//! Run against a local Fynd instance:
+//!
+//! ```sh
+//! cargo run --example swap_erc20 -p fynd-client
+//! ```
+
+use alloy::{
+    primitives::{keccak256, Address, B256, U256},
+    signers::{local::PrivateKeySigner, Signer},
+};
+use bytes::Bytes;
+use fynd_client::{
+    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
+    QuoteParams, SignedOrder, SigningHints, StorageOverrides,
+};
+use num_bigint::BigUint;
+
+const FYND_URL: &str = "http://localhost:3000";
+const RPC_URL: &str = "https://eth.llamarpc.com";
+// 1000 USDC → WETH on Ethereum mainnet
+const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const SELL_AMOUNT: u128 = 1_000_000_000; // 1000 USDC (6 decimals)
+const SLIPPAGE: f64 = 0.005; // 0.5%
+                             // USDC storage layout (FiatTokenV2.1): balances at slot 9, allowances at slot 10.
+const USDC_BALANCE_SLOT: u64 = 9;
+const USDC_ALLOWANCE_SLOT: u64 = 10;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Ephemeral key — storage overrides inject a synthetic balance so no real funds are needed.
+    let signer = PrivateKeySigner::random();
+    let sender = signer.address();
+    let sell_token: Address = USDC.parse()?;
+    let buy_token: Address = WETH.parse()?;
+
+    let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
+        .with_sender(sender)
+        .build()
+        .await?;
+
+    // Request a quote with ERC-20 encoding.
+    let quote = client
+        .quote(QuoteParams::new(
+            Order::new(
+                Bytes::copy_from_slice(sell_token.as_slice()),
+                Bytes::copy_from_slice(buy_token.as_slice()),
+                BigUint::from(SELL_AMOUNT),
+                OrderSide::Sell,
+                Bytes::copy_from_slice(sender.as_slice()),
+                None,
+            ),
+            QuoteOptions::default()
+                .with_timeout_ms(5_000)
+                .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
+        ))
+        .await?;
+
+    println!("amount_in:  {}", quote.amount_in());
+    println!("amount_out: {}", quote.amount_out());
+
+    let tx = quote
+        .transaction()
+        .ok_or("no calldata in quote")?;
+    let router = Address::from_slice(tx.to().as_ref());
+
+    // Sign the order.
+    let payload = client
+        .signable_payload(quote, &SigningHints::default())
+        .await?;
+    let sig = signer
+        .sign_hash(&payload.signing_hash())
+        .await?;
+    let signed = SignedOrder::assemble(payload, sig);
+
+    // Dry-run: inject a synthetic ERC-20 balance and router allowance via state overrides.
+    let max = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
+    let token_key = Bytes::copy_from_slice(sell_token.as_slice());
+    let mut overrides = StorageOverrides::default();
+    overrides.insert(
+        token_key.clone(),
+        Bytes::copy_from_slice(&mapping_slot(sender, USDC_BALANCE_SLOT).0),
+        max.clone(),
+    );
+    overrides.insert(
+        token_key,
+        Bytes::copy_from_slice(&nested_mapping_slot(sender, router, USDC_ALLOWANCE_SLOT).0),
+        max,
+    );
+
+    let result = client
+        .execute(signed, &ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) })
+        .await?
+        .await?;
+
+    println!("gas: {}", result.gas_cost());
+    Ok(())
+}
+
+/// Solidity mapping slot: `keccak256(abi.encode(key, base_slot))`.
+fn mapping_slot(key: Address, base_slot: u64) -> B256 {
+    let mut buf = [0u8; 64];
+    buf[12..32].copy_from_slice(key.as_slice());
+    buf[56..64].copy_from_slice(&base_slot.to_be_bytes());
+    keccak256(buf)
+}
+
+/// Nested mapping slot: `keccak256(abi.encode(key2, mapping_slot(key1, base_slot)))`.
+fn nested_mapping_slot(key1: Address, key2: Address, base_slot: u64) -> B256 {
+    let inner = mapping_slot(key1, base_slot);
+    let mut buf = [0u8; 64];
+    buf[12..32].copy_from_slice(key2.as_slice());
+    buf[32..64].copy_from_slice(inner.as_slice());
+    keccak256(buf)
+}

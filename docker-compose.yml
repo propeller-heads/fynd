@@ -12,7 +12,7 @@ services:
     environment:
       - RPC_URL=${RPC_URL}
       - TYCHO_API_KEY=${TYCHO_API_KEY:-}
-      - TYCHO_URL=${TYCHO_URL:-tycho-beta.propellerheads.xyz}
+      - TYCHO_URL=${TYCHO_URL:-tycho-fynd-ethereum.propellerheads.xyz}
       - WORKER_POOLS_CONFIG=/etc/tycho-solver/worker_pools.toml
       - BLACKLIST_CONFIG=/etc/tycho-solver/blacklist.toml
       - RUST_LOG=info

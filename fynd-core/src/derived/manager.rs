@@ -86,11 +86,11 @@ pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
 #[derive(Debug, Clone)]
 pub struct ComputationManagerConfig {
     /// Gas token address (e.g., WETH) for token price computation.
-    pub gas_token: Address,
+    gas_token: Address,
     /// Max hop count for token gas price computation.
-    pub max_hop: usize,
+    max_hop: usize,
     /// Slippage threshold for pool depth computation (0.0 < threshold < 1.0).
-    pub depth_slippage_threshold: f64,
+    depth_slippage_threshold: f64,
 }
 
 impl ComputationManagerConfig {
@@ -115,6 +115,21 @@ impl ComputationManagerConfig {
     pub fn with_gas_token(mut self, gas_token: Address) -> Self {
         self.gas_token = gas_token;
         self
+    }
+
+    /// Returns the gas token address.
+    pub fn gas_token(&self) -> &Address {
+        &self.gas_token
+    }
+
+    /// Returns the max hop count.
+    pub fn max_hop(&self) -> usize {
+        self.max_hop
+    }
+
+    /// Returns the depth slippage threshold.
+    pub fn depth_slippage_threshold(&self) -> f64 {
+        self.depth_slippage_threshold
     }
 }
 

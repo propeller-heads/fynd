@@ -1,3 +1,128 @@
+## [0.23.1](https://github.com/propeller-heads/fynd/compare/0.23.0...0.23.1) (2026-03-20)
+
+## [0.23.0](https://github.com/propeller-heads/fynd/compare/0.22.1...0.23.0) (2026-03-20)
+
+
+### Features
+
+* **fynd-rpc-types:** harden public API surface ([b6b1539](https://github.com/propeller-heads/fynd/commit/b6b153956d429180bda5b819a6555dbfea75ba4a))
+
+## [0.22.1](https://github.com/propeller-heads/fynd/compare/0.22.0...0.22.1) (2026-03-20)
+
+## [0.22.0](https://github.com/propeller-heads/fynd/compare/0.21.1...0.22.0) (2026-03-19)
+
+
+### Features
+
+* **fynd-core:** add SolverBuilder and Solver for simplified setup ([60bfc2f](https://github.com/propeller-heads/fynd/commit/60bfc2f4f21102af1d34e23620571c590035e72d))
+
+
+### Bug Fixes
+
+* **fynd-core:** remove generic param from TransitionError after tycho-common 0.151.0 update ([137a8cb](https://github.com/propeller-heads/fynd/commit/137a8cbe261023ac71e810484938ecead6b8583e))
+* **fynd-rpc:** remove redundant chain field from FyndBuilder ([acde0b7](https://github.com/propeller-heads/fynd/commit/acde0b7a5bf93cb41fc28c62e1e6271ef406f376))
+
+## [0.21.1](https://github.com/propeller-heads/fynd/compare/0.21.0...0.21.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* **fynd-client:** remove broken intra-doc link to non-existent OrderQuote ([4a5144b](https://github.com/propeller-heads/fynd/commit/4a5144b9c98421126ebb877f44c5c232c4d97495))
+
+## [0.21.0](https://github.com/propeller-heads/fynd/compare/0.20.1...0.21.0) (2026-03-19)
+
+
+### Features
+
+* **tools:** add fynd-swap-cli binary ([7a39785](https://github.com/propeller-heads/fynd/commit/7a39785f5c78f37d90ceea40b64f8cd07813d26d))
+
+
+### Bug Fixes
+
+* **protocols:** replace debug! with info! in fetch_protocol_systems ([e22aa82](https://github.com/propeller-heads/fynd/commit/e22aa82526f3ab9f5fd77f054b68ca41bff6a11d))
+
+## [0.20.1](https://github.com/propeller-heads/fynd/compare/0.20.0...0.20.1) (2026-03-19)
+
+## [0.20.0](https://github.com/propeller-heads/fynd/compare/0.19.1...0.20.0) (2026-03-19)
+
+
+### Features
+
+* **benchmark:** add `scale` subcommand for CPU scaling benchmarks ([7bcfe99](https://github.com/propeller-heads/fynd/commit/7bcfe994e5670ce6f0f92cfae931dad07fde175f))
+
+## [0.19.1](https://github.com/propeller-heads/fynd/compare/0.19.0...0.19.1) (2026-03-18)
+
+## [0.19.0](https://github.com/propeller-heads/fynd/compare/0.18.0...0.19.0) (2026-03-17)
+
+
+### Features
+
+* add gas_price_age_ms to health response ([7832b9a](https://github.com/propeller-heads/fynd/commit/7832b9a0f93d0f7a60f65527254e0208e4edadbe))
+* optionally return 503 on stale gas price ([85103dd](https://github.com/propeller-heads/fynd/commit/85103ddd77643f74015ddeadaa43710364d6141a))
+
+
+### Bug Fixes
+
+* handle gas price RPC errors instead of panicking ([e544b97](https://github.com/propeller-heads/fynd/commit/e544b97e3f3a614517c847d8e8ccc1e0ffb550d7))
+
+## [0.18.0](https://github.com/propeller-heads/fynd/compare/0.17.2...0.18.0) (2026-03-17)
+
+
+### Features
+
+* add chain-specific defaults for tycho_url ([92cd81d](https://github.com/propeller-heads/fynd/commit/92cd81dee3ac92781aa4555e969d06a38f41750c)), closes [#88](https://github.com/propeller-heads/fynd/issues/88)
+* add traded_n_days_ago parameter ([e92946c](https://github.com/propeller-heads/fynd/commit/e92946c37104761b2c0d27657f90788a539b0037))
+
+
+### Bug Fixes
+
+* apply TVL buffer as lower bound for hysteresis ([d0cdf09](https://github.com/propeller-heads/fynd/commit/d0cdf099a321811b2cad80b9c7ac846b152a8f2e))
+* connect min_token_quality CLI arg to builder ([df7785b](https://github.com/propeller-heads/fynd/commit/df7785b47193917335a51829af563a8c2aab04af))
+* error on unknown chain in default_tycho_url ([23a5411](https://github.com/propeller-heads/fynd/commit/23a5411bcb13c89de890c26403b52a80d654aca3))
+
+## [0.17.2](https://github.com/propeller-heads/fynd/compare/0.17.1...0.17.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* rename all refs of /v1/solve to /v1/quote ([a8cedac](https://github.com/propeller-heads/fynd/commit/a8cedac01928a201dc1ce5a8ae85ec271cf9c347))
+
+## [0.17.1](https://github.com/propeller-heads/fynd/compare/0.17.0...0.17.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** pre-build current rustdoc to avoid experimental feature false positives ([4d693b9](https://github.com/propeller-heads/fynd/commit/4d693b984e67ae444d68420f69361489a61b0c1c))
+
+## [0.17.0](https://github.com/propeller-heads/fynd/compare/0.16.2...0.17.0) (2026-03-17)
+
+
+### Features
+
+* add all_onchain keyword for combining on-chain and RFQ protocols ([5d440a6](https://github.com/propeller-heads/fynd/commit/5d440a6ab88e48fcefe988b463a730617d16651f))
+* default to all protocol systems when --protocols is omitted ([c0c8abd](https://github.com/propeller-heads/fynd/commit/c0c8abd9cc3986b2aea227abd7ac6a61d00701f7))
+
+## [0.16.2](https://github.com/propeller-heads/fynd/compare/0.16.1...0.16.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([296d5e9](https://github.com/propeller-heads/fynd/commit/296d5e9c74de55a2f97ee930559c3c086fbefd0d))
+* **benchmark:** clean up unused deps, naming, and API surface ([071b6bf](https://github.com/propeller-heads/fynd/commit/071b6bfcc1a3cbc42319fdfd032ff26c0f33a070))
+* restore fynd-client dev-dep removed by benchmark cleanup ([72fc0fe](https://github.com/propeller-heads/fynd/commit/72fc0fedb13e272c53576af2831fd539783c80a0))
+* update Cargo.lock after restoring fynd-client dev-dep ([e558e31](https://github.com/propeller-heads/fynd/commit/e558e31a50a9fd949b1fd3c1ede1f5f1d8c3dc25))
+* update Cargo.lock to reflect workspace version 0.16.0 ([e8a967f](https://github.com/propeller-heads/fynd/commit/e8a967f8e33c5674f2abf0e3b0dcabd3a1d88ec3))
+
+## [0.16.1](https://github.com/propeller-heads/fynd/compare/0.16.0...0.16.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* **ci:** build baseline rustdoc from full workspace to fix dep resolution ([8711131](https://github.com/propeller-heads/fynd/commit/8711131281834763ca2ceb901b70b78aa3eda3dc))
+* **ci:** use --workspace to build baseline rustdoc for all member crates ([6cb6f67](https://github.com/propeller-heads/fynd/commit/6cb6f6780fff61750259a6bb25e6b4cae70bf570))
+* correct indentation of types trigger in semver-check workflow ([7b586cb](https://github.com/propeller-heads/fynd/commit/7b586cbad41da53cf00c39578f79b83510f07254))
+* **deps:** bump tycho minimum versions to match locked versions ([1da3534](https://github.com/propeller-heads/fynd/commit/1da3534a4641c37e3e4012e49b1ba6a8fb939bfc))
+
 ## [0.16.0](https://github.com/propeller-heads/fynd/compare/0.15.0...0.16.0) (2026-03-16)
 
 

@@ -6,6 +6,6 @@
 
 pub use fynd_rpc_types::{
     BlockInfo, EncodingOptions, ErrorResponse, HealthStatus, Order, OrderQuote, OrderSide,
-    PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
-    SingleOrderQuote, Swap, Transaction, UserTransferType,
+    PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, Swap,
+    Transaction, UserTransferType,
 };

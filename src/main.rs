@@ -7,16 +7,23 @@
 //! # Usage
 //!
 //! ```bash
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
+//! # All on-chain protocols are fetched from Tycho RPC by default:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz
+//!
+//! # Combine all on-chain protocols with specific RFQ protocols:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
+//!            --protocols all_onchain,rfq:bebop
+//!
+//! # Or specify protocols explicitly:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
 //! ```
 //!
 //! `--rpc-url` defaults to `https://eth.llamarpc.com`. For production, provide a dedicated endpoint:
 //!
 //! ```bash
-//! fynd serve --tycho-url tycho-beta.propellerheads.xyz \
-//!            --rpc-url https://your-rpc-provider.com/v1/your_key \
-//!            --protocols uniswap_v2,uniswap_v3
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
+//!            --rpc-url https://your-rpc-provider.com/v1/your_key
 //! ```
 //!
 //! See `fynd --help` for all available options.
@@ -27,10 +34,10 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
-    builder::{parse_chain, FyndBuilder},
+    builder::{parse_chain, FyndRPCBuilder},
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
+    protocols::fetch_protocol_systems,
 };
-
 mod cli;
 use cli::{Cli, Commands};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -171,7 +178,7 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, SolverError> {
+async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
     // Load worker pools config
     let pools_config =
         WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
@@ -181,6 +188,17 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
     // Parse chain
     let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
+
+    // Resolve Tycho URL, falling back to chain-specific Fynd endpoint
+    let tycho_url = match &args.tycho_url {
+        Some(url) => url.clone(),
+        None => {
+            let default =
+                defaults::default_tycho_url(&args.chain).map_err(SolverError::SetupError)?;
+            info!("No --tycho-url provided. Using default for {}: {}", args.chain, default);
+            default.to_string()
+        }
+    };
 
     // Resolve RPC URL, falling back to public endpoint with a warning
     let rpc_url = match &args.rpc_url {
@@ -195,22 +213,57 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::Fynd, 
         }
     };
 
+    // Resolve protocols: fetch from Tycho RPC if omitted or if "all_onchain" is used
+    let needs_fetch = args.protocols.is_empty() ||
+        args.protocols
+            .iter()
+            .any(|p| p == "all_onchain");
+    let protocols = if needs_fetch {
+        let mut fetched = fetch_protocol_systems(
+            &tycho_url,
+            args.tycho_api_key.as_deref(),
+            !args.disable_tls,
+            chain,
+        )
+        .await
+        .map_err(|e| SolverError::SetupError(format!("failed to fetch protocol systems: {}", e)))?;
+        // Append any explicit protocols (e.g. rfq:bebop) alongside all_onchain
+        for p in &args.protocols {
+            if p != "all_onchain" && !fetched.contains(p) {
+                fetched.push(p.clone());
+            }
+        }
+        fetched
+    } else {
+        args.protocols.clone()
+    };
+
+    if protocols.is_empty() {
+        return Err(SolverError::SetupError(
+            "no supported protocols found. Provide --protocols or check Tycho connectivity."
+                .to_string(),
+        ));
+    }
+
+    info!(?protocols, "starting with {} protocol(s)", protocols.len());
+
     // Build solver with all fields from CLI
-    let mut builder = FyndBuilder::new(
-        chain,
-        pools_config.pools,
-        args.tycho_url.clone(),
-        rpc_url,
-        args.protocols.clone(),
-    )
-    .http_host(args.http_host.clone())
-    .http_port(args.http_port)
-    .min_tvl(args.min_tvl)
-    .tvl_buffer_multiplier(args.tvl_buffer_multiplier)
-    .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
-    .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
-    .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
-    .worker_router_min_responses(args.worker_router_min_responses);
+    let mut builder =
+        FyndRPCBuilder::new(chain, pools_config.into_pools(), tycho_url, rpc_url, protocols)
+            .http_host(args.http_host.clone())
+            .http_port(args.http_port)
+            .min_tvl(args.min_tvl)
+            .min_token_quality(args.min_token_quality)
+            .traded_n_days_ago(args.traded_n_days_ago)
+            .tvl_buffer_ratio(args.tvl_buffer_ratio)
+            .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
+            .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
+            .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
+            .worker_router_min_responses(args.worker_router_min_responses)
+            .gas_price_stale_threshold(
+                args.gas_price_stale_threshold_secs
+                    .map(Duration::from_secs),
+            );
 
     if args.disable_tls {
         builder = builder.disable_tls();
@@ -240,8 +293,14 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
 
     let _metrics_task = create_metrics_exporter();
 
-    // Setup solver (handles setup errors)
-    let solver = setup_solver(&args).await?;
+    // Setup solver, but allow SIGINT to cancel it for fast exit during startup
+    let solver = tokio::select! {
+        result = setup_solver(&args) => result?,
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT received during setup. Exiting.");
+            return Ok(());
+        }
+    };
 
     // Run with graceful shutdown
     // The shutdown signal stops the server, which causes solver.run() to complete

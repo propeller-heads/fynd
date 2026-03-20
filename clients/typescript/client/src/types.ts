@@ -145,4 +145,5 @@ export interface HealthStatus {
   lastUpdateMs: number;
   /** Number of liquidity pools tracked by the solver. */
   numSolverPools: number;
+  gasPriceAgeMs?: number;
 }

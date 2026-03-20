@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.16.0"
+version = "0.23.1"
 
 [package]
 name = "fynd"
@@ -8,7 +8,6 @@ edition = "2021"
 
 [dependencies]
 fynd-rpc = { workspace = true }
-fynd-rpc-types = { workspace = true }
 fynd-core = { workspace = true }
 
 # CLI
@@ -55,7 +54,6 @@ alloy = { workspace = true, features = [
 alloy-chains = "0.2"
 dialoguer = "0.11"
 dotenv = "0.15"
-fastrand = "2.3.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 num-bigint = { workspace = true }
@@ -65,7 +63,7 @@ bytes = { workspace = true }
 fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust"]
+members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -115,8 +113,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.234.0"
-tycho-execution = { version = ">=0.164.0", features = ["evm"] }
+tycho-simulation = ">=0.250.0"
+tycho-execution = { version = ">=0.165.0", features = ["evm"] }
 typetag = "0.2"
 
 # Graph algorithms
@@ -144,18 +142,3 @@ fynd-client = { path = "clients/rust" }
 # Dev dependencies
 rstest = "0.18"
 
-[[example]]
-name = "tutorial"
-path = "examples/tutorial/main.rs"
-
-[[example]]
-name = "benchmark"
-path = "tools/benchmark/benchmark.rs"
-
-[[example]]
-name = "compare"
-path = "tools/benchmark/compare.rs"
-
-[[example]]
-name = "tutorial_with_permit2"
-path = "examples/tutorial_with_permit2/main.rs"

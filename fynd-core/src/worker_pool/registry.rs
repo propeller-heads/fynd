@@ -1,8 +1,9 @@
 //! Worker pool registry for spawning workers with different algorithms.
 //!
-//! This module provides a registry pattern for algorithms, allowing worker pools
-//! to be created by algorithm name (string), or with a custom algorithm factory
-//! via [`AlgorithmSpawner`].
+//! This module provides a registry pattern for built-in algorithms, allowing worker pools
+//! to be created by algorithm name (string). For custom algorithms, use
+//! [`WorkerPoolBuilder::with_algorithm`](super::pool::WorkerPoolBuilder::with_algorithm)
+//! which bypasses the registry entirely.
 //!
 //! # Adding a New Built-in Algorithm
 //!
@@ -59,7 +60,14 @@ pub(crate) struct SpawnWorkersParams {
 #[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
 pub struct UnknownAlgorithmError {
     /// The algorithm name that was not found.
-    pub name: String,
+    pub(crate) name: String,
+}
+
+impl UnknownAlgorithmError {
+    /// Returns the algorithm name that was not found.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Determines how a worker pool spawns its workers.

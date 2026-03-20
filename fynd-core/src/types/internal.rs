@@ -56,17 +56,21 @@ impl SolveTask {
 }
 
 /// Errors that can occur during solving.
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SolveError {
     /// No route found between the tokens.
+    #[non_exhaustive]
     #[error("no route found for order {order_id}")]
     NoRouteFound { order_id: String },
 
     /// Insufficient liquidity for the requested amount.
+    #[non_exhaustive]
     #[error("insufficient liquidity: need {required}, have {available}")]
     InsufficientLiquidity { required: BigUint, available: BigUint },
 
     /// Solving timed out.
+    #[non_exhaustive]
     #[error("solve timeout after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64 },
 
@@ -75,6 +79,7 @@ pub enum SolveError {
     AlgorithmError(String),
 
     /// Market data is too old.
+    #[non_exhaustive]
     #[error("market data stale: last update {age_ms}ms ago")]
     MarketDataStale { age_ms: u64 },
 
