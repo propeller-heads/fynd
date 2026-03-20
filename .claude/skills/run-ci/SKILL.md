@@ -55,7 +55,7 @@ If nextest is not installed, fall back to:
 cargo test --workspace --all-targets --all-features
 ```
 
-Report pass/fail with test count summary (passed, failed, ignored).
+Report pass/fail with test count summary (passed, failed, ignored/skipped). If any tests were skipped, explain why (e.g. missing tool, `#[ignore]` attribute, feature gate).
 
 #### OpenAPI drift check (parallel)
 
