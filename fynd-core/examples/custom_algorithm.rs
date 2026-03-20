@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tycho_api_key = env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY env var not set");
     let rpc_url = env::var("RPC_URL").expect("RPC_URL env var not set");
 
+    // [doc:start custom-algo-wire]
     let solver = FyndBuilder::new(
         Chain::Ethereum,
         tycho_url,
@@ -102,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .tycho_api_key(tycho_api_key)
     .with_algorithm("my_custom_algo", MyAlgorithm::new)
     .build()?;
+    // [doc:end custom-algo-wire]
 
     println!("Waiting for market data and derived computations...");
     solver
