@@ -46,6 +46,7 @@ async function main(): Promise<void> {
     transport: http(rpcUrl),
   });
 
+  // [doc:start quote-typescript]
   // FyndClient accepts a viemProvider adapter — no manual wrapping needed.
   const fyndClient = new FyndClient({
     baseUrl: solverUrl,
@@ -108,6 +109,7 @@ async function main(): Promise<void> {
   }
   console.log(`Amount out: ${quote.amountOut}`);
   console.log(`Gas estimate: ${quote.gasEstimate}`);
+  // [doc:end quote-typescript]
 
   if (quote.transaction === undefined) {
     throw new Error("No transaction data — ensure encodingOptions are set.");

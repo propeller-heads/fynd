@@ -119,6 +119,15 @@ jobs:
           npm ci
           npx tsc --noEmit
 
+  docs_snippet_drift:
+    name: Check doc snippet drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check doc snippets
+        run: bash scripts/check-doc-snippets.sh
+
   check_ts_client:
     name: TypeScript client typecheck + lint + test
     needs: typescript_autogen_drift
