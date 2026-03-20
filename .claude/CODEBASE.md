@@ -1,4 +1,4 @@
-<!-- docs-synced-at: d7e1c0dbdaf46879c27f85e0a91ecf50cd3cfb2d -->
+<!-- docs-synced-at: 9d0e3279fbb5e482a87e1d6d51ef86ea0a155286 -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -91,7 +91,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Variable | Purpose |
 |---|---|
-| `TYCHO_API_KEY` | Tycho API key (required) |
+| `TYCHO_API_KEY` | Tycho API key (optional) |
 | `RPC_URL` | Ethereum RPC endpoint (default: `https://eth.llamarpc.com`) |
 | `TYCHO_URL` | Tycho endpoint (chain-specific default) |
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
