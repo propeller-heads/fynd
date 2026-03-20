@@ -31,6 +31,7 @@ Get a quote from Fynd in three steps.
 
 ```bash
 export TYCHO_API_KEY=your-api-key
+export RUST_LOG=info
 cargo run --release -- serve
 ```
 

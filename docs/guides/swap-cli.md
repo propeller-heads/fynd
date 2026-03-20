@@ -10,7 +10,7 @@ description: >-
 ## Prerequisites
 
 1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/README.md "mention") if you haven't.
-2. **RPC URL** — required for simulation and on-chain execution.
+2. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
 
 ## Build
 
@@ -53,8 +53,7 @@ export RPC_URL=https://your-rpc-provider.com/v1/your_key
   --router        <TychoRouter address>
 ```
 
-Find the TychoRouter address for your chain at:
-[https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses)
+Find the TychoRouter address for your chain in the [Tycho contract addresses](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses).
 
 ## Execute on-chain (ERC-20)
 
@@ -135,7 +134,7 @@ This is convenient for a one-off swap but slow to initialize on every run (the s
 
 ## Security Notes
 
-1. **Never expose your private key.** Use the `PRIVATE_KEY` environment variable, never a CLI argument.
+1. **Never expose your private key.** Use the `PRIVATE_KEY` environment variable, never a CLI argument. Run `unset HISTFILE` before setting it to prevent it from being saved to your shell history.
 2. **Dry-run first.** The default mode (no `--execute`) simulates the full swap with storage overrides — no funds needed. Confirm the output looks correct before adding `--execute`.
 3. **Slippage protection.** The default 0.5% slippage may not be sufficient for large trades or volatile markets. Adjust `--slippage-bps` accordingly.
 4. **Mainnet warning.** `--execute` sends a real transaction. Start with small amounts. All routes execute through the [Tycho Router](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses) contract.
