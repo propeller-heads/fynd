@@ -1,3 +1,10 @@
+## [0.23.0](https://github.com/propeller-heads/fynd/compare/0.22.1...0.23.0) (2026-03-20)
+
+
+### Features
+
+* **fynd-rpc-types:** harden public API surface ([b6b1539](https://github.com/propeller-heads/fynd/commit/b6b153956d429180bda5b819a6555dbfea75ba4a))
+
 ## [0.22.1](https://github.com/propeller-heads/fynd/compare/0.22.0...0.22.1) (2026-03-20)
 
 ## [0.22.0](https://github.com/propeller-heads/fynd/compare/0.21.1...0.22.0) (2026-03-19)
