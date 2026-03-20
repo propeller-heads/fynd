@@ -482,7 +482,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/EncodingOptions"
+                "$ref": "#/components/schemas/EncodingOptions",
+                "description": "Options during encoding. If None, quote will be returned without calldata."
               }
             ]
           },

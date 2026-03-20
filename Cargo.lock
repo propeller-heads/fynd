@@ -3310,7 +3310,6 @@ dependencies = [
  "fynd-client",
  "fynd-core",
  "fynd-rpc",
- "fynd-rpc-types",
  "metrics-exporter-prometheus",
  "num-bigint",
  "num-traits",

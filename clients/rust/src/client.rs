@@ -509,7 +509,7 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_quote: fynd_rpc_types::Quote = response.json().await?;
-        let solve_time_ms = dto_quote.solve_time_ms;
+        let solve_time_ms = dto_quote.solve_time_ms();
         let batch_quote = dto_to_batch_quote(dto_quote, token_out, receiver)?;
 
         let mut quote = batch_quote

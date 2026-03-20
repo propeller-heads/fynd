@@ -47,7 +47,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 504, description = "Quote timeout", body = ErrorResponse),
     )
 )]
-#[instrument(skip(state, request), fields(num_orders = request.orders.len()))]
+#[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
 pub async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
@@ -55,7 +55,7 @@ pub async fn quote(
     let dto_request = request.into_inner();
 
     // Validate request
-    if dto_request.orders.is_empty() {
+    if dto_request.orders().is_empty() {
         return Err(ApiError::BadRequest("no orders provided".to_string()));
     }
 
@@ -115,13 +115,13 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
         .await;
     let is_healthy = data_fresh && derived_data_ready && !gas_stale;
 
-    let status = dto::HealthStatus {
-        healthy: is_healthy,
-        last_update_ms: age_ms,
-        num_solver_pools: state.worker_router.num_pools(),
+    let status = dto::HealthStatus::new(
+        is_healthy,
+        age_ms,
+        state.worker_router.num_pools(),
         derived_data_ready,
         gas_price_age_ms,
-    };
+    );
 
     if is_healthy {
         HttpResponse::Ok().json(status)
