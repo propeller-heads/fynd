@@ -783,4 +783,108 @@ mod tests {
             "USDC→ETH should appear in failed_items with missing spot price error"
         );
     }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_missing_simulation_state() {
+        let eth = token(0x01, "ETH");
+        let usdc = token(0x02, "USDC");
+
+        // Empty market — no simulation state
+        let market = SharedMarketData::new_shared();
+        let derived = DerivedData::new_shared();
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(SpotPrices::new(), vec![], 0, true);
+
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "phantom_pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: false,
+        };
+
+        let output = PoolDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("should succeed with partial results");
+
+        assert!(output.has_failures());
+
+        let eth_usdc_key = format!("phantom_pool/{}/{}", eth.address, usdc.address);
+        let usdc_eth_key = format!("phantom_pool/{}/{}", usdc.address, eth.address);
+        assert!(
+            output
+                .failed_items
+                .iter()
+                .any(|item| item.key == eth_usdc_key &&
+                    matches!(item.error, FailedItemError::MissingSimulationState)),
+            "ETH→USDC should fail with MissingSimulationState"
+        );
+        assert!(
+            output
+                .failed_items
+                .iter()
+                .any(|item| item.key == usdc_eth_key &&
+                    matches!(item.error, FailedItemError::MissingSimulationState)),
+            "USDC→ETH should fail with MissingSimulationState"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_pool_depth_computation() {
+        // Without .with_tokens(), get_limits doesn't scale by decimals,
+        // but get_amount_out does — causing a liquidity overflow on swap.
+        let token_in = token_with_decimals(0x01, "A", 6);
+        let token_out = token_with_decimals(0x02, "B", 18);
+
+        let (market, _) = setup_market(vec![(
+            "pool",
+            &token_in,
+            &token_out,
+            MockProtocolSim::new(1.0).with_liquidity(100),
+        )]);
+        let derived = DerivedData::new_shared();
+
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "pool".to_string(),
+                vec![token_in.address.clone(), token_out.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+
+        let spot_output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("spot price computation should succeed");
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_output.data, vec![], 0, true);
+
+        let output = PoolDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("should succeed with partial results");
+
+        assert!(
+            output.has_failures(),
+            "decimal mismatch between get_limits and get_amount_out should cause failures"
+        );
+        assert!(
+            output
+                .failed_items
+                .iter()
+                .any(|item| item.key.starts_with("pool/") &&
+                    matches!(&item.error, FailedItemError::PoolDepthComputation(_))),
+            "should have PoolDepthComputation failure, got: {:?}",
+            output.failed_items
+        );
+    }
 }

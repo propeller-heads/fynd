@@ -28,21 +28,15 @@ struct ComputedValue<T> {
 #[derive(Debug, Default)]
 pub struct DerivedData {
     token_prices: Option<ComputedValue<TokenGasPrices>>,
-    /// Failure map for token_prices: key → (block_when_failed, error).
-    /// Persists across incremental runs — entries survive until the key is re-attempted
-    /// and succeeds. Full recomputes replace the map entirely.
+    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     token_prices_failed: HashMap<TokenGasPriceKey, (u64, FailedItemError)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
     pool_depths: Option<ComputedValue<PoolDepths>>,
-    /// Failure map for pool_depths: key → (block_when_failed, error).
-    /// Persists across incremental runs — entries survive until the key is re-attempted
-    /// and succeeds. Full recomputes replace the map entirely.
+    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     pool_depths_failed: HashMap<PoolDepthKey, (u64, FailedItemError)>,
     spot_prices: Option<ComputedValue<SpotPrices>>,
-    /// Failure map for spot_prices: key → (block_when_failed, error).
-    /// Persists across incremental runs — entries survive until the key is re-attempted
-    /// and succeeds. Full recomputes replace the map entirely.
+    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError)>,
 }
 
