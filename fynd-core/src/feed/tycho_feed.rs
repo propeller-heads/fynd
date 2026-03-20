@@ -44,7 +44,7 @@ use crate::{
 /// - Update SharedMarketData (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
-pub struct TychoFeed {
+pub(crate) struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
@@ -62,20 +62,20 @@ impl TychoFeed {
     ///
     /// * `config` - Indexer configuration
     /// * `market_data` - Shared market data reference
-    pub fn new(config: TychoFeedConfig, market_data: SharedMarketDataRef) -> Self {
+    pub(crate) fn new(config: TychoFeedConfig, market_data: SharedMarketDataRef) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
 
         Self { config, market_data, event_tx, gas_price_worker_signal_tx: None }
     }
 
     /// Returns a new subscriber for market events.
-    pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
         self.event_tx.subscribe()
     }
 
     /// Sets the signal channel to notify the gas price worker to refresh gas price.
     /// If not set, gas price refresh will not be triggered by the TychoFeed.
-    pub fn with_gas_price_worker_signal_tx(
+    pub(crate) fn with_gas_price_worker_signal_tx(
         self,
         gas_price_worker_signal_tx: mpsc::Sender<oneshot::Sender<()>>,
     ) -> Self {
@@ -92,7 +92,7 @@ impl TychoFeed {
     ///
     /// This method runs indefinitely, reconnecting on failures.
     /// It is recommended to call this in a dedicated tokio task.
-    pub async fn run(self) -> Result<(), DataFeedError> {
+    pub(crate) async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
             protocols = ?self.config.protocols,

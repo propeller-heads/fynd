@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.13.0"
+    "version": "0.22.0"
   },
   "paths": {
     "/v1/health": {

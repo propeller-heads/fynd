@@ -286,6 +286,7 @@ impl PermitDetails {
 ///
 /// Contains a solution for each order in the request, along with aggregate
 /// gas estimates and timing information.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {
@@ -461,6 +462,7 @@ pub enum OrderSide {
 }
 
 /// Errors that can occur when validating an [`Order`].
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum OrderValidationError {
     #[error("token_in and token_out must be different")]
@@ -502,6 +504,7 @@ impl SingleOrderQuote {
 ///
 /// Contains the route to execute (if found), along with expected amounts,
 /// gas estimates, and status information.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderQuote {
@@ -537,11 +540,11 @@ pub struct OrderQuote {
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
-    pub transaction: Option<Transaction>,
+    pub(crate) transaction: Option<Transaction>,
     /// Address of the sender.
-    pub sender: Bytes,
+    pub(crate) sender: Bytes,
     /// Address of the receiver.
-    pub receiver: Bytes,
+    pub(crate) receiver: Bytes,
 }
 
 impl OrderQuote {
@@ -666,9 +669,20 @@ impl OrderQuote {
     pub fn transaction(&self) -> Option<&Transaction> {
         self.transaction.as_ref()
     }
+
+    /// Returns the sender address.
+    pub fn sender(&self) -> &Bytes {
+        &self.sender
+    }
+
+    /// Returns the receiver address.
+    pub fn receiver(&self) -> &Bytes {
+        &self.receiver
+    }
 }
 
 /// Status of an order solution.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuoteStatus {
@@ -743,6 +757,7 @@ impl BlockInfo {
 ///
 /// A route describes the path through liquidity pools to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     /// Ordered sequence of swaps to execute.
@@ -918,12 +933,15 @@ impl Route {
 }
 
 /// Errors that can occur when validating a [`Route`].
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RouteValidationError {
     #[error("route must contain at least one swap")]
     EmptyRoute,
+    #[non_exhaustive]
     #[error("swaps are not connected: {first_out} != {second_in}")]
     DisconnectedSwaps { first_out: Address, second_in: Address },
+    #[non_exhaustive]
     #[error(
         "unsupported cycle: token {token} appears more than once in route \
          {first} -> ... -> {last} (only first == last cycles are supported)"

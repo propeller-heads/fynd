@@ -91,14 +91,14 @@ impl AlgorithmConfig {
         self.max_hops
     }
 
+    /// Returns the maximum number of paths to simulate.
+    pub fn max_routes(&self) -> Option<usize> {
+        self.max_routes
+    }
+
     /// Returns the timeout for solving.
     pub fn timeout(&self) -> Duration {
         self.timeout
-    }
-
-    /// Returns the maximum number of routes to simulate.
-    pub fn max_routes(&self) -> Option<usize> {
-        self.max_routes
     }
 }
 
@@ -176,13 +176,16 @@ pub trait Algorithm: Send + Sync {
 }
 
 /// Errors that can occur during route finding.
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum AlgorithmError {
     /// Invalid algorithm configuration (programmer error).
+    #[non_exhaustive]
     #[error("invalid configuration: {reason}")]
     InvalidConfiguration { reason: String },
 
     /// No path exists between the tokens.
+    #[non_exhaustive]
     #[error("no path from {from:?} to {to:?}: {reason}")]
     NoPath { from: Address, to: Address, reason: NoPathReason },
 
@@ -191,6 +194,7 @@ pub enum AlgorithmError {
     InsufficientLiquidity,
 
     /// Route finding timed out.
+    #[non_exhaustive]
     #[error("timeout after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64 },
 
@@ -199,10 +203,12 @@ pub enum AlgorithmError {
     ExactOutNotSupported,
 
     /// Simulation failed for a specific component.
+    #[non_exhaustive]
     #[error("simulation failed for {component_id}: {error}")]
     SimulationFailed { component_id: String, error: String },
 
     /// Required data not found in market.
+    #[non_exhaustive]
     #[error("{kind} not found{}", id.as_ref().map(|i| format!(": {i}")).unwrap_or_default())]
     DataNotFound { kind: &'static str, id: Option<String> },
 

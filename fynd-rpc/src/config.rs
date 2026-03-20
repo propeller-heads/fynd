@@ -72,13 +72,13 @@ mod tests {
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
         let pool = &config.pools["basic"];
-        assert_eq!(pool.algorithm, "most_liquid");
-        assert_eq!(pool.num_workers, num_cpus::get());
-        assert_eq!(pool.task_queue_capacity, defaults::POOL_TASK_QUEUE_CAPACITY);
-        assert_eq!(pool.min_hops, defaults::POOL_MIN_HOPS);
-        assert_eq!(pool.max_hops, defaults::POOL_MAX_HOPS);
-        assert_eq!(pool.timeout_ms, defaults::POOL_TIMEOUT_MS);
-        assert_eq!(pool.max_routes, None);
+        assert_eq!(pool.algorithm(), "most_liquid");
+        assert_eq!(pool.num_workers(), num_cpus::get());
+        assert_eq!(pool.task_queue_capacity(), defaults::POOL_TASK_QUEUE_CAPACITY);
+        assert_eq!(pool.min_hops(), defaults::POOL_MIN_HOPS);
+        assert_eq!(pool.max_hops(), defaults::POOL_MAX_HOPS);
+        assert_eq!(pool.timeout_ms(), defaults::POOL_TIMEOUT_MS);
+        assert_eq!(pool.max_routes(), None);
     }
 
     #[test]
@@ -95,13 +95,13 @@ mod tests {
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
         let pool = &config.pools["custom"];
-        assert_eq!(pool.algorithm, "most_liquid");
-        assert_eq!(pool.num_workers, 8);
-        assert_eq!(pool.task_queue_capacity, 500);
-        assert_eq!(pool.min_hops, 2);
-        assert_eq!(pool.max_hops, 4);
-        assert_eq!(pool.timeout_ms, 200);
-        assert_eq!(pool.max_routes, Some(50));
+        assert_eq!(pool.algorithm(), "most_liquid");
+        assert_eq!(pool.num_workers(), 8);
+        assert_eq!(pool.task_queue_capacity(), 500);
+        assert_eq!(pool.min_hops(), 2);
+        assert_eq!(pool.max_hops(), 4);
+        assert_eq!(pool.timeout_ms(), 200);
+        assert_eq!(pool.max_routes(), Some(50));
     }
 }
 

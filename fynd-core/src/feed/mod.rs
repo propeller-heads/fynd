@@ -12,8 +12,8 @@ pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
-pub struct TychoFeedConfig {
-    /// Tycho URL.
+pub(crate) struct TychoFeedConfig {
+    /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
     pub(crate) chain: Chain,
@@ -48,7 +48,7 @@ pub struct TychoFeedConfig {
 }
 
 impl TychoFeedConfig {
-    pub fn new(
+    pub(crate) fn new(
         tycho_url: String,
         chain: Chain,
         tycho_api_key: Option<String>,
@@ -72,32 +72,32 @@ impl TychoFeedConfig {
         }
     }
 
-    pub fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
+    pub(crate) fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
         self.tvl_buffer_ratio = tvl_buffer_ratio;
         self
     }
 
-    pub fn gas_refresh_interval(mut self, gas_refresh_interval: Duration) -> Self {
+    pub(crate) fn gas_refresh_interval(mut self, gas_refresh_interval: Duration) -> Self {
         self.gas_refresh_interval = gas_refresh_interval;
         self
     }
 
-    pub fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
+    pub(crate) fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
         self.reconnect_delay = reconnect_delay;
         self
     }
 
-    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
+    pub(crate) fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
         self
     }
 
-    pub fn traded_n_days_ago(mut self, days: u64) -> Self {
+    pub(crate) fn traded_n_days_ago(mut self, days: u64) -> Self {
         self.traded_n_days_ago = Some(days);
         self
     }
 
-    pub fn blacklisted_components(mut self, components: HashSet<String>) -> Self {
+    pub(crate) fn blacklisted_components(mut self, components: HashSet<String>) -> Self {
         self.blacklisted_components = components;
         self
     }
@@ -105,7 +105,7 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub enum DataFeedError {
+pub(crate) enum DataFeedError {
     #[error("gas price fetcher error: {0}")]
     GasPriceFetcherError(String),
 

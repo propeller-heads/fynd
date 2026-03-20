@@ -635,6 +635,8 @@ mod conversions {
                 fynd_core::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
                 fynd_core::QuoteStatus::Timeout => Self::Timeout,
                 fynd_core::QuoteStatus::NotReady => Self::NotReady,
+                // Fallback for future variants added to fynd_core::QuoteStatus.
+                _ => Self::NotReady,
             }
         }
     }

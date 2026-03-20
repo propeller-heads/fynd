@@ -178,8 +178,9 @@ fn build_solver(
         .clone()
         .unwrap_or_else(|| fynd_rpc::config::defaults::DEFAULT_RPC_URL.to_string());
 
-    let mut pool = pool_config.clone();
-    pool.num_workers = workers;
+    let pool = pool_config
+        .clone()
+        .with_num_workers(workers);
 
     let pools = HashMap::from([(pool_name.to_string(), pool)]);
 
@@ -277,7 +278,7 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("failed to load base config: {}", args.base_config.display()))?;
     let (pool_name, pool_config) = validate_single_pool(&pools_config)?;
 
-    info!("Pool: {} (algorithm: {})", pool_name, pool_config.algorithm);
+    info!("Pool: {} (algorithm: {})", pool_name, pool_config.algorithm());
     info!("Worker counts: {:?}", worker_counts);
     info!("Requests per run: {}", args.num_requests);
 
@@ -322,7 +323,7 @@ pub async fn run(args: Args) -> Result<()> {
         bail!("all iterations failed; no results to report");
     }
 
-    print_summary(&pool_name, &pool_config.algorithm, &args, &points);
+    print_summary(&pool_name, pool_config.algorithm(), &args, &points);
 
     if let Some(ref path) = args.output_file {
         let results = ScaleResults {
@@ -333,7 +334,7 @@ pub async fn run(args: Args) -> Result<()> {
                 parallelization_mode: args.parallelization_mode.clone(),
                 warmup_secs: args.warmup_secs,
                 pool_name: pool_name.clone(),
-                algorithm: pool_config.algorithm.clone(),
+                algorithm: pool_config.algorithm().to_string(),
             },
             points,
         };
@@ -441,21 +442,18 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "test_pool".to_string(),
-            PoolConfig {
-                algorithm: "most_liquid".to_string(),
-                num_workers: 4,
-                task_queue_capacity: 1000,
-                min_hops: 1,
-                max_hops: 3,
-                timeout_ms: 100,
-                max_routes: None,
-            },
+            PoolConfig::new("most_liquid")
+                .with_num_workers(4)
+                .with_task_queue_capacity(1000)
+                .with_min_hops(1)
+                .with_max_hops(3)
+                .with_timeout_ms(100),
         );
         let config = WorkerPoolsConfig { pools };
         let (name, pool) = validate_single_pool(&config).unwrap();
         assert_eq!(name, "test_pool");
-        assert_eq!(pool.algorithm, "most_liquid");
-        assert_eq!(pool.num_workers, 4);
+        assert_eq!(pool.algorithm(), "most_liquid");
+        assert_eq!(pool.num_workers(), 4);
     }
 
     #[test]
@@ -463,27 +461,22 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "a".to_string(),
-            PoolConfig {
-                algorithm: "most_liquid".to_string(),
-                num_workers: 4,
-                task_queue_capacity: 1000,
-                min_hops: 1,
-                max_hops: 3,
-                timeout_ms: 100,
-                max_routes: None,
-            },
+            PoolConfig::new("most_liquid")
+                .with_num_workers(4)
+                .with_task_queue_capacity(1000)
+                .with_min_hops(1)
+                .with_max_hops(3)
+                .with_timeout_ms(100),
         );
         pools.insert(
             "b".to_string(),
-            PoolConfig {
-                algorithm: "dijkstra".to_string(),
-                num_workers: 2,
-                task_queue_capacity: 500,
-                min_hops: 1,
-                max_hops: 2,
-                timeout_ms: 200,
-                max_routes: Some(10),
-            },
+            PoolConfig::new("dijkstra")
+                .with_num_workers(2)
+                .with_task_queue_capacity(500)
+                .with_min_hops(1)
+                .with_max_hops(2)
+                .with_timeout_ms(200)
+                .with_max_routes(Some(10)),
         );
         let config = WorkerPoolsConfig { pools };
         let err = validate_single_pool(&config).unwrap_err();

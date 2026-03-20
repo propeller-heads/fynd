@@ -185,6 +185,7 @@ impl WorkerPool {
 /// Use [`with_algorithm`](Self::with_algorithm) to plug in any type implementing
 /// [`Algorithm`](crate::algorithm::Algorithm) via a factory closure, bypassing the built-in
 /// registry entirely. See the `custom_algorithm` example for a full walkthrough.
+#[must_use = "a builder does nothing until .build() is called"]
 pub struct WorkerPoolBuilder {
     config: WorkerPoolConfig,
 }

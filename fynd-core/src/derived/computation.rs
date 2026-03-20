@@ -20,7 +20,14 @@ pub type ComputationId = &'static str;
 #[error("conflicting requirement: '{id}' cannot be both fresh and stale")]
 pub struct RequirementConflict {
     /// The computation ID that was added with conflicting freshness.
-    pub id: ComputationId,
+    pub(crate) id: ComputationId,
+}
+
+impl RequirementConflict {
+    /// Returns the conflicting computation ID.
+    pub fn id(&self) -> ComputationId {
+        self.id
+    }
 }
 
 /// Requirements for derived data computations.
@@ -48,15 +55,25 @@ pub struct RequirementConflict {
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
     /// Computations that must be from the current block.
-    pub require_fresh: HashSet<ComputationId>,
+    pub(crate) require_fresh: HashSet<ComputationId>,
     /// Computations that can use data from any past block.
     ///
     /// TODO: Stale data can be dangerous if stale for too long. In the future, associate staleness
     /// to a block limit might be implemented.
-    pub allow_stale: HashSet<ComputationId>,
+    pub(crate) allow_stale: HashSet<ComputationId>,
 }
 
 impl ComputationRequirements {
+    /// Returns the set of computations that require fresh data.
+    pub fn fresh_requirements(&self) -> &HashSet<ComputationId> {
+        &self.require_fresh
+    }
+
+    /// Returns the set of computations that allow stale data.
+    pub fn stale_requirements(&self) -> &HashSet<ComputationId> {
+        &self.allow_stale
+    }
+
     /// Creates empty requirements (no derived data needed).
     pub fn none() -> Self {
         Self::default()

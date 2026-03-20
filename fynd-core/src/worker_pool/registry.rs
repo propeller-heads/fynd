@@ -60,7 +60,14 @@ pub(crate) struct SpawnWorkersParams {
 #[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
 pub struct UnknownAlgorithmError {
     /// The algorithm name that was not found.
-    pub name: String,
+    pub(crate) name: String,
+}
+
+impl UnknownAlgorithmError {
+    /// Returns the algorithm name that was not found.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Determines how a worker pool spawns its workers.
