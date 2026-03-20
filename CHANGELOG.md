@@ -1,3 +1,10 @@
+## [0.24.0](https://github.com/propeller-heads/fynd/compare/0.23.1...0.24.0) (2026-03-20)
+
+
+### Features
+
+* PriceProvider skeleton + helpers ([c8f1e1d](https://github.com/propeller-heads/fynd/commit/c8f1e1dd8189ee538389eb229f521062a1dac006))
+
 ## [0.23.1](https://github.com/propeller-heads/fynd/compare/0.23.0...0.23.1) (2026-03-20)
 
 ## [0.23.0](https://github.com/propeller-heads/fynd/compare/0.22.1...0.23.0) (2026-03-20)
