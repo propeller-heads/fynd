@@ -10,8 +10,7 @@ This document explains how Fynd's Bellman-Ford routing algorithm finds the best 
 4. [The Complete Algorithm](#4-the-complete-algorithm)
 5. [A Worked Example](#5-a-worked-example)
 6. [Design Tradeoffs](#6-design-tradeoffs)
-7. [Benchmarks](#7-benchmarks)
-8. [FAQ](#8-faq)
+7. [FAQ](#7-faq)
 
 ---
 
@@ -313,7 +312,7 @@ With `gas_aware` enabled (the default), the algorithm compares net amounts durin
 
 The gas cost conversion uses two strategies: a direct lookup in the derived token-gas-price table (primary), or a cumulative spot price product along the path (fallback for tokens not in the price table). The fallback multiplies spot prices hop by hop, so it degrades in accuracy for long paths, but it extends coverage to tokens that lack a direct WETH price.
 
-In head-to-head benchmarks, gas-aware relaxation wins 96% of contested trades against gross-only relaxation (see Benchmarks). The improvement is most visible on routes where a cheap 2-hop path beats an expensive 4-hop path with marginally higher gross output.
+The improvement is most visible on routes where a cheap 2-hop path beats an expensive 4-hop path with marginally higher gross output.
 
 ### Forward-only BFS vs. bidirectional
 
@@ -321,50 +320,7 @@ Subgraph extraction uses forward BFS from the source, not bidirectional BFS (for
 
 ---
 
-## 7. Benchmarks
-
-### BF 3-hop vs. MostLiquid 3-hop (equal depth, 7,580 contested trades)
-
-| | Count | % |
-|---|---:|---:|
-| BF wins | 5,386 | 71.1% |
-| ML wins | 74 | 1.0% |
-| Ties | 2,120 | 28.0% |
-
-### Solve times (isolated, p50/p95)
-
-| Algorithm | p50 | p95 |
-|---|---:|---:|
-| ML 2-hop | 1ms | 2ms |
-| BF 2-hop | 4ms | 7ms |
-| BF 3-hop | 6ms | 11ms |
-| BF 5-hop | 12ms | 22ms |
-| ML 3-hop | 43ms | 443ms |
-
-BF at 3 hops is 7x faster than ML at 3 hops, while winning 71% of contested trades.
-
-The speed advantage comes from the architecture: BF does one simulation per edge during relaxation. ML precomputes edge weights for the entire graph (expensive for 3+ hops) and then searches over precomputed data. BF's simulation cost is bounded by the active set and subgraph extraction; ML's precomputation cost grows with the number of edges considered.
-
-### Gas-aware vs. gross relaxation (1,000 trades, 6 protocols)
-
-Three-way comparison with gas-aware BF, gross-only BF, and MostLiquid:
-
-| | Count | % |
-|---|---:|---:|
-| BF gas-aware wins | 578 | 75.5% |
-| ML wins | 129 | 16.8% |
-| BF gross wins | 59 | 7.7% |
-
-### Gas-aware vs. gross BF head-to-head (1,000 trades, Uniswap V2+V3)
-
-| | Count | % |
-|---|---:|---:|
-| Gas-aware wins | 703 | 96.0% |
-| Gross wins | 29 | 4.0% |
-
----
-
-## 8. FAQ
+## 7. FAQ
 
 ### Why not Dijkstra or A*?
 
