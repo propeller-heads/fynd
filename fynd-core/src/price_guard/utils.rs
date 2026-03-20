@@ -11,22 +11,7 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Maximum age of price data before it is considered stale.
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
-/// Maps wrapped on-chain token symbols to their exchange equivalents.
-///
-/// For example, `WETH` becomes `ETH` so that price lookups against centralized exchange feeds
-/// work correctly.
-pub fn normalize_symbol(symbol: &str) -> &str {
-    match symbol.to_uppercase().as_str() {
-        "WETH" => "ETH",
-        "WBTC" => "BTC",
-        "WBNB" => "BNB",
-        "WMATIC" => "MATIC",
-        "WAVAX" => "AVAX",
-        _ => symbol,
-    }
-}
-
-/// Resolves an on-chain address to a (normalized_symbol, decimals) pair via the
+/// Resolves an on-chain address to a (symbol, decimals) pair via the
 /// [`SharedMarketData`](crate::feed::market_data::SharedMarketData) token registry.
 pub async fn resolve_token(
     market_data: &SharedMarketDataRef,
@@ -36,8 +21,7 @@ pub async fn resolve_token(
     let token = data
         .get_token(address)
         .ok_or_else(|| PriceProviderError::TokenNotFound { address: address.to_string() })?;
-    let symbol = normalize_symbol(&token.symbol).to_uppercase();
-    Ok((symbol, token.decimals))
+    Ok((token.symbol.clone(), token.decimals))
 }
 
 /// Returns `Err(StaleData)` if `ticker_ts` is older than [`STALENESS_THRESHOLD`].
