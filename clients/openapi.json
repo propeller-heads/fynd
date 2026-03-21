@@ -533,7 +533,8 @@
           "no_route_found",
           "insufficient_liquidity",
           "timeout",
-          "not_ready"
+          "not_ready",
+          "price_check_failed"
         ]
       },
       "Route": {
