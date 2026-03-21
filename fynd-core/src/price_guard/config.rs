@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// Configuration for the PriceGuard external price validation.
 ///
 /// Controls tolerance thresholds, fail-open behavior, and whether validation
 /// is enabled at all. All fields have sensible defaults via [`Default`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceGuardConfig {
     /// Maximum allowed deviation when `amount_out < expected`, in basis points.
     /// Solutions where the user gets less than expected by more than this are rejected.
@@ -15,7 +17,8 @@ pub struct PriceGuardConfig {
     /// Default: 10_000 (100%).
     upper_tolerance_bps: u32,
 
-    /// Controls behavior when all providers error (network issues, API down).
+    /// Controls behavior when all providers error for reasons unrelated to pricing
+    /// (network issues, API down).
     /// `false` (default): reject solutions when no provider can return a price.
     /// `true`: let solutions pass through when no provider can be reached.
     allow_on_provider_error: bool,

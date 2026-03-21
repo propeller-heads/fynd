@@ -808,6 +808,8 @@ pub enum QuoteStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 /// Block information at which a quote was computed.
@@ -1584,6 +1586,7 @@ mod conversions {
                 fynd_core::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
                 fynd_core::QuoteStatus::Timeout => Self::Timeout,
                 fynd_core::QuoteStatus::NotReady => Self::NotReady,
+                fynd_core::QuoteStatus::PriceCheckFailed => Self::PriceCheckFailed,
                 // Fallback for future variants added to fynd_core::QuoteStatus.
                 _ => Self::NotReady,
             }
