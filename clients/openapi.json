@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.24.2"
+    "version": "0.24.0"
   },
   "paths": {
     "/v1/health": {
@@ -48,7 +48,7 @@
           "solver"
         ],
         "summary": "POST /v1/quote - Request a quote.",
-        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 503 Service Unavailable: Queue full, service overloaded, or quote timeout",
+        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 504 Gateway Timeout: Quote timeout",
         "operationId": "quote",
         "requestBody": {
           "content": {
@@ -92,7 +92,17 @@
             }
           },
           "503": {
-            "description": "Queue full, overloaded, stale data, or timeout",
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Quote timeout",
             "content": {
               "application/json": {
                 "schema": {
