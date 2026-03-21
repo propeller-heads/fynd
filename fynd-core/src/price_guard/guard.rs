@@ -40,12 +40,12 @@ impl PriceGuard {
     ///
     /// For each successful quote with a route:
     /// 1. Checks that the quote has a well-formed route
-    /// 2. Queries all registered providers concurrently
+    /// 2. Queries all registered providers
     /// 3. Passes if at least one provider validates within BPS tolerance
     ///
     /// Failures are always per-quote: the quote's status is set to
     /// `PriceCheckFailed` and processing continues. Never aborts the batch.
-    pub async fn validate(
+    pub fn validate(
         &self,
         mut quotes: Vec<OrderQuote>,
         config: &PriceGuardConfig,
@@ -66,10 +66,7 @@ impl PriceGuard {
                 quote.set_status(QuoteStatus::PriceCheckFailed);
                 continue;
             };
-            if !self
-                .check_price(quote, &token_in, &token_out, config)
-                .await
-            {
+            if !self.check_price(quote, &token_in, &token_out, config) {
                 quote.set_status(QuoteStatus::PriceCheckFailed);
             }
         }
@@ -94,7 +91,7 @@ impl PriceGuard {
     }
 
     /// Queries all providers and returns `true` if at least one validates.
-    async fn check_price(
+    fn check_price(
         &self,
         quote: &OrderQuote,
         token_in: &Address,
@@ -103,8 +100,7 @@ impl PriceGuard {
     ) -> bool {
         let results = self
             .registry
-            .get_all_expected_out(&token_in, &token_out, quote.amount_in())
-            .await;
+            .get_all_expected_out(token_in, token_out, quote.amount_in());
 
         let mut any_validated = false;
         let mut all_errors = true;
@@ -184,7 +180,6 @@ impl PriceGuard {
 mod tests {
     use std::str::FromStr;
 
-    use async_trait::async_trait;
     use num_bigint::BigUint;
     use rstest::rstest;
     use tokio::task::JoinHandle;
@@ -211,13 +206,12 @@ mod tests {
         source: String,
     }
 
-    #[async_trait]
     impl PriceProvider for MockProvider {
         fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
-        async fn get_expected_out(
+        fn get_expected_out(
             &self,
             _token_in: &Address,
             _token_out: &Address,
@@ -229,13 +223,12 @@ mod tests {
 
     struct FailingProvider;
 
-    #[async_trait]
     impl PriceProvider for FailingProvider {
         fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
-        async fn get_expected_out(
+        fn get_expected_out(
             &self,
             _token_in: &Address,
             _token_out: &Address,
@@ -316,8 +309,8 @@ mod tests {
     #[case::within_upper(1000, 1500, 300, 10_000, true)]
     #[case::at_upper_boundary(1000, 2000, 300, 10_000, true)]
     #[case::beyond_upper(1000, 2500, 300, 10_000, false)]
-    #[tokio::test]
-    async fn test_deviation_bounds(
+    #[test]
+    fn test_deviation_bounds(
         #[case] provider_amount: u64,
         #[case] fynd_amount: u64,
         #[case] lower_bps: u32,
@@ -329,9 +322,7 @@ mod tests {
             .with_upper_tolerance_bps(upper_bps);
         let guard = price_guard(vec![mock_provider(provider_amount)]);
 
-        let result = guard
-            .validate(vec![make_quote(fynd_amount)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(fynd_amount)], &config);
 
         let expected_status =
             if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
@@ -341,37 +332,33 @@ mod tests {
     #[rstest]
     #[case::all_error_allow(true, true)]
     #[case::all_error_deny(false, false)]
-    #[tokio::test]
-    async fn test_all_providers_error(#[case] allow_on_error: bool, #[case] should_pass: bool) {
+    #[test]
+    fn test_all_providers_error(#[case] allow_on_error: bool, #[case] should_pass: bool) {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(allow_on_error);
         let guard = price_guard(vec![Box::new(FailingProvider), Box::new(FailingProvider)]);
 
-        let result = guard
-            .validate(vec![make_quote(500)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(500)], &config);
 
         let want = if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
         assert_eq!(result[0].status(), want);
     }
 
-    #[tokio::test]
-    async fn test_disabled_guard() {
+    #[test]
+    fn test_disabled_guard() {
         let config = PriceGuardConfig::default().with_enabled(false);
 
         // Guard is disabled via config. Expected amount out of the provider is irrelevant,
         // because the provider is never called.
         let guard = price_guard(vec![mock_provider(10_000)]);
 
-        let result = guard
-            .validate(vec![make_quote(50)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(50)], &config);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
 
-    #[tokio::test]
-    async fn test_one_pass_one_fail() {
+    #[test]
+    fn test_one_pass_one_fail() {
         // Test that the quote status is success even with one failing provider,
         // as long as the second provider passes.
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
@@ -380,27 +367,23 @@ mod tests {
         // but passes with the second.
         let guard = price_guard(vec![mock_provider(1000), mock_provider(970)]);
 
-        let result = guard
-            .validate(vec![make_quote(960)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(960)], &config);
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
 
-    #[tokio::test]
-    async fn test_one_provider_failure() {
+    #[test]
+    fn test_one_provider_failure() {
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![Box::new(FailingProvider), mock_provider(1000)]);
 
-        let result = guard
-            .validate(vec![make_quote(980)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(980)], &config);
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
 
-    #[tokio::test]
-    async fn test_failed_quote() {
+    #[test]
+    fn test_failed_quote() {
         // Test that the QuoteStatus::NoRouteFound remains unchanged
         let config = PriceGuardConfig::default();
         let guard = price_guard(vec![mock_provider(10_000_000)]);
@@ -408,23 +391,19 @@ mod tests {
         let mut quote = make_quote(1);
         quote.set_status(QuoteStatus::NoRouteFound);
 
-        let result = guard
-            .validate(vec![quote], &config)
-            .await;
+        let result = guard.validate(vec![quote], &config);
 
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
     }
 
-    #[tokio::test]
-    async fn test_multiple_quotes() {
+    #[test]
+    fn test_multiple_quotes() {
         // Test that multiple quotes get statuses independent of each other.
         // For example - one passes and one fails.
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![mock_provider(1000)]);
 
-        let result = guard
-            .validate(vec![make_quote(980), make_quote(500)], &config)
-            .await;
+        let result = guard.validate(vec![make_quote(980), make_quote(500)], &config);
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
         assert_eq!(result[1].status(), QuoteStatus::PriceCheckFailed);
