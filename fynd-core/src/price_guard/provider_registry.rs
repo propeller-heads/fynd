@@ -28,6 +28,11 @@ impl PriceProviderRegistry {
         self
     }
 
+    /// Returns `true` if no providers are registered.
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
     /// Queries all providers concurrently for the expected output amount.
     pub async fn get_all_expected_out(
         &self,

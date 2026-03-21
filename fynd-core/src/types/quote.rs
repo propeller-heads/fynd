@@ -32,7 +32,7 @@ use tycho_simulation::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
-use crate::AlgorithmError;
+use crate::{price_guard::config::PriceGuardConfig, AlgorithmError};
 
 // ============================================================================
 // REQUEST TYPES
@@ -85,6 +85,13 @@ pub struct QuoteOptions {
     /// Options for encoding the solution into an on-chain transaction.
     /// If `None`, the solution is returned without an encoded transaction.
     encoding_options: Option<EncodingOptions>,
+    /// TODO: Should we move to `Order` for per-order price guard control if needed?
+    /// One might want to turn off the price guard for a few orders of their list, but not all,
+    /// depending on tokens. At the same time - I kept it in here to be coherent with where we
+    /// are passing the encoding options. Please let me know if you disagree.
+    /// Per-request price guard overrides. If `None`, uses server defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    price_guard: Option<PriceGuardConfig>,
 }
 
 impl QuoteOptions {
@@ -130,6 +137,17 @@ impl QuoteOptions {
     /// Returns the encoding options.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// Sets per-request price guard config.
+    pub fn with_price_guard(mut self, config: PriceGuardConfig) -> Self {
+        self.price_guard = Some(config);
+        self
+    }
+
+    /// Returns the per-request price guard config.
+    pub fn price_guard(&self) -> Option<&PriceGuardConfig> {
+        self.price_guard.as_ref()
     }
 }
 
@@ -711,6 +729,11 @@ impl OrderQuote {
         }
     }
 
+    /// Sets the status of this quote.
+    pub(crate) fn set_status(&mut self, status: QuoteStatus) {
+        self.status = status;
+    }
+
     /// Sets the route for this solution.
     pub(crate) fn with_route(mut self, route: Route) -> Self {
         self.route = Some(route);
@@ -836,6 +859,8 @@ pub enum QuoteStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 impl From<AlgorithmError> for QuoteStatus {
