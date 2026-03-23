@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::web;
+use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
@@ -190,6 +190,20 @@ impl AppState {
     }
 }
 
+/// Registers JSON and query-string extractor error handlers so that malformed
+/// requests always receive a JSON `ErrorResponse` body instead of actix-web's
+/// default plain-text response.
+pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
+    cfg.app_data(web::JsonConfig::default().error_handler(|err, _req| {
+        let api_err = ApiError::BadRequest(format!("invalid JSON: {err}"));
+        actix_web::error::InternalError::from_response(err, api_err.error_response()).into()
+    }))
+    .app_data(web::QueryConfig::default().error_handler(|err, _req| {
+        let api_err = ApiError::BadRequest(format!("invalid query parameter: {err}"));
+        actix_web::error::InternalError::from_response(err, api_err.error_response()).into()
+    }));
+}
+
 /// Configures the Actix Web application with routes and state.
 pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
     #[allow(unused_mut)]
@@ -199,7 +213,12 @@ pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
         let experimental = ExperimentalApiDoc::openapi();
         openapi.merge(experimental);
     }
-    cfg.app_data(web::Data::new(state))
+    cfg.configure(configure_error_handlers)
+        .app_data(web::Data::new(state))
         .configure(configure_routes)
-        .service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi));
+        .service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi))
+        .default_service(web::to(|| async {
+            let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
+            HttpResponse::NotFound().json(body)
+        }));
 }

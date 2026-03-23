@@ -81,3 +81,81 @@ impl From<serde_json::Error> for ApiError {
         ApiError::BadRequest(format!("invalid JSON: {}", err))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{body::to_bytes, http::StatusCode, ResponseError};
+    use fynd_core::SolveError;
+    use num_bigint::BigUint;
+    use serde_json::Value;
+
+    use super::ApiError;
+
+    async fn json_body(err: ApiError) -> (StatusCode, Value) {
+        let status = err.status_code();
+        let resp = err.error_response();
+        let bytes = to_bytes(resp.into_body())
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+
+    #[actix_web::test]
+    async fn test_bad_request() {
+        let (status, body) = json_body(ApiError::BadRequest("missing field".into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "BAD_REQUEST");
+    }
+
+    #[actix_web::test]
+    async fn test_no_route_found() {
+        let (status, body) =
+            json_body(ApiError::SolveFailed(SolveError::no_route_found("order-1"))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "NO_ROUTE_FOUND");
+    }
+
+    #[actix_web::test]
+    async fn test_insufficient_liquidity() {
+        let err = SolveError::insufficient_liquidity(BigUint::from(100u64), BigUint::from(50u64));
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "INSUFFICIENT_LIQUIDITY");
+    }
+
+    #[actix_web::test]
+    async fn test_timeout() {
+        let (status, body) = json_body(ApiError::SolveFailed(SolveError::timeout(100))).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["code"], "TIMEOUT");
+    }
+
+    #[actix_web::test]
+    async fn test_queue_full() {
+        let (status, body) = json_body(ApiError::SolveFailed(SolveError::QueueFull)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "QUEUE_FULL");
+    }
+
+    #[actix_web::test]
+    async fn test_service_overloaded() {
+        let (status, body) = json_body(ApiError::ServiceOverloaded).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "SERVICE_OVERLOADED");
+    }
+
+    #[actix_web::test]
+    async fn test_internal_error() {
+        let (status, body) = json_body(ApiError::Internal("db down".into())).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "INTERNAL_ERROR");
+    }
+
+    #[actix_web::test]
+    async fn test_stale_data() {
+        let (status, body) = json_body(ApiError::StaleData { age_ms: 90_000 }).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "STALE_DATA");
+    }
+}
