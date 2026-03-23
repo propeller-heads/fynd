@@ -454,7 +454,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn quote_try_from_dto_preserves_amount_out_net_gas_and_defaults_to_fynd() {
+    fn quote_from_dto() {
         let ds = sample_dto_order_quote();
         let quote = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(quote.order_id(), "test-order-id");
