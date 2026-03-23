@@ -35,7 +35,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
     builder::{parse_chain, FyndRPCBuilder},
-    config::{defaults, BlacklistConfig, WorkerPoolsConfig},
+    config::{defaults, BlocklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };
 mod cli;
@@ -265,19 +265,18 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
                     .map(Duration::from_secs),
             );
 
+    if let Some(blocklist_path) = &args.blocklist {
+        let blocklist = BlocklistConfig::load_from_file(blocklist_path).map_err(|e| {
+            SolverError::SetupError(format!("failed to load blocklist config: {}", e))
+        })?;
+        builder = builder.blocklist(blocklist);
+    }
     if args.disable_tls {
         builder = builder.disable_tls();
     }
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
-    if let Some(blacklist_path) = &args.blacklist_config {
-        let blacklist = BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
-            SolverError::SetupError(format!("failed to load blacklist config: {}", e))
-        })?;
-        builder = builder.blacklist(blacklist);
-    }
-
     // Build and start solver
     let solver = builder
         .build()

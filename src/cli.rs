@@ -100,14 +100,15 @@ pub struct ServeArgs {
     #[arg(short, long, env, default_value = "worker_pools.toml")]
     pub worker_pools_config: PathBuf,
 
-    /// Path to blacklist TOML config file (optional)
-    #[arg(long, env, default_value = "blacklist.toml")]
-    pub blacklist_config: Option<PathBuf>,
-
     /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
     /// Disabled by default.
     #[arg(long)]
     pub gas_price_stale_threshold_secs: Option<u64>,
+
+    /// Path to blocklist TOML config file. Components listed here are excluded from the
+    /// Tycho stream.
+    #[arg(long, env)]
+    pub blocklist: Option<PathBuf>,
 }
 
 #[cfg(test)]

@@ -41,18 +41,16 @@ impl WorkerPoolsConfig {
     }
 }
 
-/// Blacklist configuration for filtering components.
-///
-/// Components in this config will be excluded from routing.
+/// Blocklist configuration for excluding components from the Tycho stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BlacklistConfig {
+pub struct BlocklistConfig {
     /// Component IDs to exclude (e.g., pool addresses with simulation issues).
     #[serde(default)]
     components: HashSet<String>,
 }
 
-impl BlacklistConfig {
-    /// Load blacklist configuration from a TOML file.
+impl BlocklistConfig {
+    /// Load blocklist configuration from a TOML file.
     ///
     /// The TOML file should have a `[blacklist]` section:
     /// ```toml
@@ -62,15 +60,15 @@ impl BlacklistConfig {
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)
-            .with_context(|| format!("failed to read blacklist config {}", path.display()))?;
+            .with_context(|| format!("failed to read blocklist config {}", path.display()))?;
 
         #[derive(Deserialize)]
         struct Wrapper {
-            blacklist: BlacklistConfig,
+            blacklist: BlocklistConfig,
         }
 
         let wrapper: Wrapper = toml::from_str(&contents)
-            .with_context(|| format!("failed to parse blacklist config {}", path.display()))?;
+            .with_context(|| format!("failed to parse blocklist config {}", path.display()))?;
         Ok(wrapper.blacklist)
     }
 

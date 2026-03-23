@@ -207,7 +207,6 @@ solving.
 | `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token           |
 | `--worker-router-timeout-ms` | -                     | `100`               | Default solve timeout                      |
 | `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
-| `--blacklist-config`         | `BLACKLIST_CONFIG`    | `blacklist.toml`    | Blacklist config                           |
 | `--gas-price-stale-threshold-secs` | -               | *(disabled)*        | Health returns 503 when gas price exceeds this age |
 
 See `--help` for the full list.

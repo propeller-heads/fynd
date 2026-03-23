@@ -9,7 +9,7 @@ use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
-    config::{defaults, BlacklistConfig, PoolConfig},
+    config::{defaults, BlocklistConfig, PoolConfig},
 };
 
 /// Builder that assembles Fynd and returns a running server handle.
@@ -138,11 +138,11 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets the blacklist configuration for filtering components.
-    pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
+    /// Sets the blocklist configuration for filtering components.
+    pub fn blocklist(mut self, blocklist: BlocklistConfig) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blacklisted_components(blacklist.into_components());
+            .blocklisted_components(blocklist.into_components());
         self
     }
 
