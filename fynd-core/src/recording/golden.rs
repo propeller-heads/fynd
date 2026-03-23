@@ -59,6 +59,21 @@ pub struct GoldenMetadata {
     pub num_pools: usize,
     pub num_tokens: usize,
     pub fynd_version: String,
+    /// Derived data metrics captured at golden generation time.
+    /// Integration tests assert exact equality against these.
+    #[serde(default)]
+    pub derived_data: Option<DerivedDataMetrics>,
+}
+
+/// Snapshot of derived data counts for deterministic replay assertions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivedDataMetrics {
+    /// Number of unique pools with at least one spot price.
+    pub spot_price_pools: usize,
+    /// Number of unique pools with at least one pool depth.
+    pub pool_depth_pools: usize,
+    /// Number of tokens with gas price conversions.
+    pub token_prices: usize,
 }
 
 /// Standard path for golden outputs in the fixtures directory.

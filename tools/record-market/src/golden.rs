@@ -255,12 +255,45 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         pool.shutdown();
     }
 
+    // Capture derived data metrics for deterministic replay assertions
+    let derived_metrics = {
+        let d = derived_data.read().await;
+        let spot_price_pools = d
+            .spot_prices()
+            .map(|sp| {
+                sp.keys()
+                    .map(|(id, _, _)| id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            })
+            .unwrap_or(0);
+        let pool_depth_pools = d
+            .pool_depths()
+            .map(|pd| {
+                pd.keys()
+                    .map(|(id, _, _)| id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            })
+            .unwrap_or(0);
+        let token_prices = d
+            .token_prices()
+            .map(|tp| tp.len())
+            .unwrap_or(0);
+        fynd_core::recording::DerivedDataMetrics {
+            spot_price_pools,
+            pool_depth_pools,
+            token_prices,
+        }
+    };
+
     Ok(GoldenFile {
         metadata: GoldenMetadata {
             block_number,
             num_pools,
             num_tokens,
             fynd_version: env!("CARGO_PKG_VERSION").to_string(),
+            derived_data: Some(derived_metrics),
         },
         scenarios: golden_scenarios,
     })

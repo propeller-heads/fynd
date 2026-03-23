@@ -1,4 +1,5 @@
 use crate::harness::TestHarness;
+use fynd_core::recording::golden::load_golden_file;
 
 /// All derived data fields should be computed after pipeline initialization.
 #[tokio::test]
@@ -20,84 +21,60 @@ async fn test_all_derived_fields_computed() {
     );
 }
 
-/// Spot prices should cover the majority of pools that have simulation states.
-/// Pools without states (VM-backed protocols filtered during recording) are
-/// excluded from the denominator since they can never compute spot prices.
+/// Derived data metrics should exactly match the golden baseline.
+/// Since replay is deterministic (same recording → same derived data),
+/// any deviation indicates a real bug, not expected variance.
 #[tokio::test]
-async fn test_spot_prices_coverage() {
+async fn test_derived_data_matches_golden() {
     let harness = TestHarness::from_fixture().await;
+    let golden = load_golden_file().expect("golden_outputs.json required");
+    let expected = golden
+        .metadata
+        .derived_data
+        .expect("golden file missing derived_data metrics — regenerate with record-market");
+
     let market = harness.market_data.read().await;
     let derived = harness.derived_data.read().await;
 
-    // Count only pools that have simulation states (can compute prices)
-    let pools_with_states = market
-        .component_topology()
-        .iter()
-        .filter(|(id, _)| market.get_simulation_state(id).is_some())
-        .count();
-
     let spot_prices = derived.spot_prices().expect("spot prices not computed");
-    let pools_with_prices: std::collections::HashSet<_> = spot_prices
+    let actual_spot_price_pools: std::collections::HashSet<_> = spot_prices
         .keys()
-        .map(|(component_id, _, _)| component_id.clone())
+        .map(|(id, _, _)| id.clone())
         .collect();
 
-    let coverage = pools_with_prices.len() as f64 / pools_with_states as f64;
-    assert!(
-        coverage >= 0.95,
-        "spot price coverage {:.1}% is below 95% threshold ({} of {} pools with states)",
-        coverage * 100.0,
-        pools_with_prices.len(),
-        pools_with_states
-    );
-}
-
-/// Pool depths should cover the majority of pools that have spot prices.
-#[tokio::test]
-async fn test_pool_depths_coverage() {
-    let harness = TestHarness::from_fixture().await;
-    let derived = harness.derived_data.read().await;
-
-    let spot_prices = derived.spot_prices().expect("spot prices not computed");
     let pool_depths = derived.pool_depths().expect("pool depths not computed");
-
-    let pools_with_prices: std::collections::HashSet<_> = spot_prices
-        .keys()
-        .map(|(id, _, _)| id.clone())
-        .collect();
-    let pools_with_depths: std::collections::HashSet<_> = pool_depths
+    let actual_pool_depth_pools: std::collections::HashSet<_> = pool_depths
         .keys()
         .map(|(id, _, _)| id.clone())
         .collect();
 
-    let coverage = pools_with_depths.len() as f64 / pools_with_prices.len() as f64;
-    assert!(
-        coverage >= 0.90,
-        "pool depth coverage {:.1}% is below 90% threshold ({} of {} pools with spot prices)",
-        coverage * 100.0,
-        pools_with_depths.len(),
-        pools_with_prices.len()
-    );
-}
-
-/// Token gas prices should cover the majority of tokens connected to the gas token.
-/// Tokens unreachable from the gas token through pools with simulation states
-/// cannot have gas prices computed, so we use a lower threshold.
-#[tokio::test]
-async fn test_token_gas_prices_coverage() {
-    let harness = TestHarness::from_fixture().await;
-    let market = harness.market_data.read().await;
-    let derived = harness.derived_data.read().await;
-
-    let total_tokens = market.token_registry_ref().len();
     let token_prices = derived.token_prices().expect("token prices not computed");
 
-    let coverage = token_prices.len() as f64 / total_tokens as f64;
-    assert!(
-        coverage >= 0.60,
-        "token gas price coverage {:.1}% is below 60% threshold ({} of {} tokens)",
-        coverage * 100.0,
+    // Also verify pool/token counts match golden metadata
+    let actual_pools = market.component_topology().len();
+    let actual_tokens = market.token_registry_ref().len();
+
+    assert_eq!(
+        actual_pools, golden.metadata.num_pools,
+        "pool count mismatch (actual vs golden)"
+    );
+    assert_eq!(
+        actual_tokens, golden.metadata.num_tokens,
+        "token count mismatch (actual vs golden)"
+    );
+    assert_eq!(
+        actual_spot_price_pools.len(),
+        expected.spot_price_pools,
+        "spot_price pool count mismatch (actual vs golden)"
+    );
+    assert_eq!(
+        actual_pool_depth_pools.len(),
+        expected.pool_depth_pools,
+        "pool_depth pool count mismatch (actual vs golden)"
+    );
+    assert_eq!(
         token_prices.len(),
-        total_tokens
+        expected.token_prices,
+        "token_prices count mismatch (actual vs golden)"
     );
 }
