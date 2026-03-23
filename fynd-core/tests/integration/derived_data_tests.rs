@@ -20,31 +20,35 @@ async fn test_all_derived_fields_computed() {
     );
 }
 
-/// Spot prices should cover the majority of pools in the market.
+/// Spot prices should cover the majority of pools that have simulation states.
+/// Pools without states (VM-backed protocols filtered during recording) are
+/// excluded from the denominator since they can never compute spot prices.
 #[tokio::test]
 async fn test_spot_prices_coverage() {
     let harness = TestHarness::from_fixture().await;
     let market = harness.market_data.read().await;
     let derived = harness.derived_data.read().await;
 
-    let total_pools = market.component_topology().len();
-    let spot_prices = derived.spot_prices().expect("spot prices not computed");
+    // Count only pools that have simulation states (can compute prices)
+    let pools_with_states = market
+        .component_topology()
+        .iter()
+        .filter(|(id, _)| market.get_simulation_state(id).is_some())
+        .count();
 
-    // Count unique pool IDs with at least one spot price
+    let spot_prices = derived.spot_prices().expect("spot prices not computed");
     let pools_with_prices: std::collections::HashSet<_> = spot_prices
         .keys()
         .map(|(component_id, _, _)| component_id.clone())
         .collect();
 
-    let coverage = pools_with_prices.len() as f64 / total_pools as f64;
-    // Threshold is 50% because VM-backed protocol states (UniswapV4, etc.)
-    // are filtered from recordings and won't have spot prices.
+    let coverage = pools_with_prices.len() as f64 / pools_with_states as f64;
     assert!(
-        coverage >= 0.50,
-        "spot price coverage {:.1}% is below 50% threshold ({} of {} pools)",
+        coverage >= 0.95,
+        "spot price coverage {:.1}% is below 95% threshold ({} of {} pools with states)",
         coverage * 100.0,
         pools_with_prices.len(),
-        total_pools
+        pools_with_states
     );
 }
 
@@ -57,7 +61,6 @@ async fn test_pool_depths_coverage() {
     let spot_prices = derived.spot_prices().expect("spot prices not computed");
     let pool_depths = derived.pool_depths().expect("pool depths not computed");
 
-    // Count unique pool IDs
     let pools_with_prices: std::collections::HashSet<_> = spot_prices
         .keys()
         .map(|(id, _, _)| id.clone())
@@ -78,6 +81,8 @@ async fn test_pool_depths_coverage() {
 }
 
 /// Token gas prices should cover the majority of tokens connected to the gas token.
+/// Tokens unreachable from the gas token through pools with simulation states
+/// cannot have gas prices computed, so we use a lower threshold.
 #[tokio::test]
 async fn test_token_gas_prices_coverage() {
     let harness = TestHarness::from_fixture().await;
@@ -88,11 +93,9 @@ async fn test_token_gas_prices_coverage() {
     let token_prices = derived.token_prices().expect("token prices not computed");
 
     let coverage = token_prices.len() as f64 / total_tokens as f64;
-    // Threshold is 50% because many tokens aren't reachable from the gas
-    // token through pools that survive VM-state filtering.
     assert!(
-        coverage >= 0.50,
-        "token gas price coverage {:.1}% is below 50% threshold ({} of {} tokens)",
+        coverage >= 0.60,
+        "token gas price coverage {:.1}% is below 60% threshold ({} of {} tokens)",
         coverage * 100.0,
         token_prices.len(),
         total_tokens

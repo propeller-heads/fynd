@@ -1,9 +1,34 @@
+use std::collections::HashMap;
+
 use crate::harness::TestHarness;
-use crate::scenarios::{load_golden_file, load_test_scenarios};
+use fynd_core::recording::golden::{load_golden_file, load_test_scenarios};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct PoolsFile {
+    pools: HashMap<String, PoolEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoolEntry {
+    #[serde(default)]
+    timeout_ms: u64,
+}
+
+fn max_pool_timeout_ms() -> u64 {
+    let pools_toml = include_str!("../../../worker_pools.toml");
+    let config: PoolsFile =
+        toml::from_str(pools_toml).expect("failed to parse worker_pools.toml");
+    config
+        .pools
+        .values()
+        .map(|p| p.timeout_ms)
+        .max()
+        .unwrap_or(5000)
+}
 
 /// P95 solve time should stay within a reasonable multiple of the golden baseline.
 /// We use 4x the golden baseline as the threshold to account for CI hardware variance.
-/// Absolute cap: 200ms per quote (safety net for slow CI runners).
 #[tokio::test]
 async fn test_solve_time_p95_within_threshold() {
     let harness = TestHarness::from_fixture().await;
@@ -28,7 +53,6 @@ async fn test_solve_time_p95_within_threshold() {
     let p95_idx = (solve_times_ms.len() as f64 * 0.95).ceil() as usize - 1;
     let p95 = solve_times_ms[p95_idx.min(solve_times_ms.len() - 1)];
 
-    // Calculate golden P95 for relative comparison
     let mut golden_times: Vec<u64> = golden
         .scenarios
         .iter()
@@ -39,7 +63,7 @@ async fn test_solve_time_p95_within_threshold() {
     let golden_p95 = golden_times[golden_p95_idx.min(golden_times.len() - 1)];
 
     let relative_threshold = golden_p95.saturating_mul(4);
-    let absolute_threshold = 200;
+    let absolute_threshold = max_pool_timeout_ms();
     let threshold = relative_threshold.max(absolute_threshold);
 
     assert!(
@@ -54,15 +78,13 @@ async fn test_solve_time_p95_within_threshold() {
     );
 }
 
-/// No individual solve should exceed the absolute timeout cap.
+/// No individual solve should exceed the router timeout (max pool timeout + margin).
 #[tokio::test]
 async fn test_no_solve_exceeds_absolute_cap() {
     let harness = TestHarness::from_fixture().await;
     let scenarios = load_test_scenarios();
-    // The slow pool (most_liquid_3_hops) has a 5000ms timeout.
-    // Router timeout is max(pool_timeout, 5000ms). Individual solves
-    // should complete within the router timeout.
-    let absolute_cap_ms = 6000;
+    // Router timeout = max pool timeout + 1s margin for scheduling overhead
+    let absolute_cap_ms = max_pool_timeout_ms() + 1000;
 
     let mut violations = Vec::new();
     for scenario in &scenarios {

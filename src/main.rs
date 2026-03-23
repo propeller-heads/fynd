@@ -33,8 +33,9 @@ use std::time::Duration;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
+use fynd_core::types::parse_chain;
 use fynd_rpc::{
-    builder::{parse_chain, FyndRPCBuilder},
+    builder::FyndRPCBuilder,
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };

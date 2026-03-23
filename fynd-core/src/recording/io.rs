@@ -36,7 +36,7 @@ mod tests {
                 min_tvl: 10.0,
                 min_token_quality: 100,
                 traded_n_days_ago: Some(3),
-                gas_price_gwei: Some(15.0),
+                gas_price_wei: Some("15000000000".to_string()),
             },
             updates: vec![RecordedUpdate {
                 block_number_or_timestamp: 12345,
@@ -83,7 +83,7 @@ mod tests {
                 min_tvl: 0.0,
                 min_token_quality: 100,
                 traded_n_days_ago: None,
-                gas_price_gwei: None,
+                gas_price_wei: None,
             },
             updates: vec![RecordedUpdate {
                 block_number_or_timestamp: 12345,

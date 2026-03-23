@@ -77,8 +77,12 @@ impl TestHarness {
     /// Build the pipeline by replaying a recording through TychoFeed.
     pub async fn from_recording(recording: MarketRecording) -> Self {
         let block_number = recording.last_block_number();
-        let gas_price_gwei = recording.metadata.gas_price_gwei.unwrap_or(10.0);
-        let gas_price_wei = (gas_price_gwei * 1e9) as u64;
+        let gas_price_wei: BigUint = recording
+            .metadata
+            .gas_price_wei
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| BigUint::from(10_000_000_000u64));
 
         // 1. Replay recording
         let market_data: SharedMarketDataRef =
@@ -109,7 +113,7 @@ impl TestHarness {
                 block_hash: Default::default(),
                 block_timestamp: 0,
                 pricing: GasPrice::Legacy {
-                    gas_price: BigUint::from(gas_price_wei),
+                    gas_price: gas_price_wei,
                 },
             });
         }
@@ -119,70 +123,62 @@ impl TestHarness {
             .expect("ethereum native token must be configured");
         let config =
             ComputationManagerConfig::default().with_gas_token(gas_token);
-        let (computation_manager, derived_events_rx) =
+        let (computation_manager, _derived_events_rx) =
             ComputationManager::new(config, market_data.clone())
                 .expect("failed to create computation manager");
         let derived_data = computation_manager.store();
+        let derived_event_tx = computation_manager.event_sender();
 
         let (market_tx, market_rx) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let cm_handle =
             tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
-        // 4. Build single worker pool from worker_pools.toml BEFORE sending
+        // 4. Build worker pools from worker_pools.toml BEFORE sending
         // MarketUpdated, so workers receive DerivedDataEvent broadcasts.
+        // Builds separate pools matching production (not merged).
         let pools_toml = include_str!("../../../worker_pools.toml");
         let pools_config: PoolsFile =
             toml::from_str(pools_toml).expect("failed to parse worker_pools.toml");
 
-        // Merge all pool configs: widest hop range, longest timeout
-        let mut min_hops = usize::MAX;
-        let mut max_hops = 0;
-        let mut timeout_ms = 0u64;
-        let mut max_routes: Option<usize> = None;
-        let mut total_workers = 0;
-        let mut algorithm = String::new();
+        let mut solver_pool_handles = Vec::new();
+        let mut worker_pools = Vec::new();
+        let mut max_timeout_ms = 0u64;
 
-        for (_name, pool_entry) in &pools_config.pools {
-            min_hops = min_hops.min(pool_entry.min_hops);
-            max_hops = max_hops.max(pool_entry.max_hops);
-            timeout_ms = timeout_ms.max(pool_entry.timeout_ms);
-            if let Some(mr) = pool_entry.max_routes {
-                max_routes =
-                    Some(max_routes.map_or(mr, |existing: usize| existing.max(mr)));
-            }
-            total_workers += pool_entry.num_workers;
-            if algorithm.is_empty() {
-                algorithm = pool_entry.algorithm.clone();
-            }
+        for (name, pool_entry) in &pools_config.pools {
+            let algo_config = AlgorithmConfig::new(
+                pool_entry.min_hops,
+                pool_entry.max_hops,
+                Duration::from_millis(pool_entry.timeout_ms),
+                pool_entry.max_routes,
+            )
+            .expect("invalid algorithm config from worker_pools.toml");
+
+            let market_event_rx = market_tx.subscribe();
+            let derived_event_rx = derived_event_tx.subscribe();
+
+            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+                .name(name.clone())
+                .algorithm(pool_entry.algorithm.clone())
+                .algorithm_config(algo_config)
+                .num_workers(pool_entry.num_workers)
+                .build(
+                    market_data.clone(),
+                    derived_data.clone(),
+                    market_event_rx,
+                    derived_event_rx,
+                )
+                .expect("failed to build worker pool");
+
+            solver_pool_handles
+                .push(SolverPoolHandle::new(worker_pool.name(), task_handle));
+            max_timeout_ms = max_timeout_ms.max(pool_entry.timeout_ms);
+            worker_pools.push(worker_pool);
         }
 
-        let algo_config = AlgorithmConfig::new(
-            min_hops,
-            max_hops,
-            Duration::from_millis(timeout_ms),
-            max_routes,
-        )
-        .expect("invalid algorithm config from worker_pools.toml");
-
-        let market_event_rx = market_tx.subscribe();
-        let (worker_pool, task_handle) = WorkerPoolBuilder::new()
-            .algorithm(algorithm)
-            .algorithm_config(algo_config)
-            .num_workers(total_workers)
-            .build(
-                market_data.clone(),
-                derived_data.clone(),
-                market_event_rx,
-                derived_events_rx,
-            )
-            .expect("failed to build worker pool");
-        let solver_pool_handles =
-            vec![SolverPoolHandle::new("test_pool", task_handle)];
-        let worker_pools = vec![worker_pool];
-
         let router_config = WorkerPoolRouterConfig::default()
-            .with_timeout(Duration::from_millis(timeout_ms.max(5000)));
+            .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
+            .with_min_responses(0);
         let router = WorkerPoolRouter::new(
             solver_pool_handles,
             router_config,

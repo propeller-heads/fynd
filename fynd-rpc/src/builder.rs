@@ -322,6 +322,3 @@ impl FyndRPC {
     }
 }
 
-pub fn parse_chain(chain: &str) -> Result<Chain> {
-    fynd_core::types::parse_chain(chain).map_err(|e| anyhow::anyhow!("{e}"))
-}

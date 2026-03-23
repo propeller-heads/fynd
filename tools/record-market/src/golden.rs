@@ -59,8 +59,12 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
     let block_number = recording.last_block_number();
 
     // Determine gas price: use recorded value or fall back to 10 gwei
-    let gas_price_gwei = recording.metadata.gas_price_gwei.unwrap_or(10.0);
-    let gas_price_wei = (gas_price_gwei * 1e9) as u64;
+    let gas_price_wei: BigUint = recording
+        .metadata
+        .gas_price_wei
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| BigUint::from(10_000_000_000u64));
 
     // 1. Replay recording through TychoFeed
     let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
@@ -94,7 +98,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
             block_hash: Default::default(),
             block_timestamp: 0,
             pricing: GasPrice::Legacy {
-                gas_price: BigUint::from(gas_price_wei),
+                gas_price: gas_price_wei,
             },
         });
     }

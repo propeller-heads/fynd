@@ -65,11 +65,11 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
     tracing::info!(count = all_tokens.len(), "loaded tokens");
 
     // 3. Fetch gas price from RPC (if URL provided)
-    let gas_price_gwei = match &opts.rpc_url {
-        Some(url) => match fetch_gas_price_gwei(url).await {
-            Ok(gwei) => {
-                tracing::info!(gas_price_gwei = gwei, "captured gas price from RPC");
-                Some(gwei)
+    let gas_price_wei = match &opts.rpc_url {
+        Some(url) => match fetch_gas_price_wei(url).await {
+            Ok(wei) => {
+                tracing::info!(gas_price_wei = %wei, "captured gas price from RPC");
+                Some(wei)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch gas price, using None");
@@ -86,8 +86,7 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
     // with_tvl_range(lower_bound, upper_bound): components are added when TVL >= upper
     // and removed when TVL < lower. Use same value for both (no hysteresis in recording).
     let tvl_filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
-    let builder = ProtocolStreamBuilder::new(&opts.tycho_url, chain)
-        .skip_state_decode_failures(true);
+    let builder = ProtocolStreamBuilder::new(&opts.tycho_url, chain);
 
     let builder =
         fynd_core::feed::protocol_registry::register_exchanges(builder, tvl_filter, &protocols)
@@ -151,13 +150,13 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
             min_tvl: opts.min_tvl,
             min_token_quality: opts.min_token_quality,
             traded_n_days_ago: Some(opts.traded_n_days_ago),
-            gas_price_gwei,
+            gas_price_wei,
         },
         updates,
     })
 }
 
-async fn fetch_gas_price_gwei(rpc_url: &str) -> anyhow::Result<f64> {
+async fn fetch_gas_price_wei(rpc_url: &str) -> anyhow::Result<String> {
     use tycho_simulation::tycho_ethereum::gas::GasPrice;
 
     let client = EthereumRpcClient::new(rpc_url)
@@ -166,17 +165,18 @@ async fn fetch_gas_price_gwei(rpc_url: &str) -> anyhow::Result<f64> {
         .get_latest_fee_price()
         .await
         .map_err(|e| anyhow::anyhow!("failed to fetch gas price: {e}"))?;
-    let gas_price_wei = match &block_gas_price.pricing {
-        GasPrice::Legacy { gas_price } => gas_price.clone(),
-        // EIP-1559 gas prices: extract the base-fee-equivalent
+    let gas_price_wei = match block_gas_price.pricing {
+        GasPrice::Legacy { gas_price } => gas_price,
+        // EIP-1559: use max_fee_per_gas as the upper bound
         other => {
-            tracing::debug!(?other, "non-legacy gas price, using gas_price field from legacy conversion");
-            // Fallback: just store a reasonable default
+            tracing::warn!(
+                ?other,
+                "non-legacy gas price, falling back to 10 gwei"
+            );
             num_bigint::BigUint::from(10_000_000_000u64)
         }
     };
-    let gwei = gas_price_wei.to_string().parse::<f64>().unwrap_or(0.0) / 1e9;
-    Ok(gwei)
+    Ok(gas_price_wei.to_string())
 }
 
 async fn fetch_protocol_systems(
@@ -185,8 +185,7 @@ async fn fetch_protocol_systems(
     chain: Chain,
 ) -> anyhow::Result<Vec<String>> {
     let rpc_url = format!("https://{tycho_url}");
-    let rpc_options =
-        HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
+    let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
     let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
 
     const PAGE_SIZE: i64 = 100;
@@ -196,12 +195,11 @@ async fn fetch_protocol_systems(
     loop {
         let request = ProtocolSystemsRequestBody {
             chain: chain.into(),
-            pagination: PaginationParams {
-                page,
-                page_size: PAGE_SIZE,
-            },
+            pagination: PaginationParams { page, page_size: PAGE_SIZE },
         };
-        let response = rpc_client.get_protocol_systems(&request).await?;
+        let response = rpc_client
+            .get_protocol_systems(&request)
+            .await?;
         let count = response.protocol_systems.len();
         all_protocols.extend(response.protocol_systems);
         if (count as i64) < PAGE_SIZE {

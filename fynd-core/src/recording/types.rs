@@ -25,6 +25,11 @@ impl From<Update> for RecordedUpdate {
     fn from(update: Update) -> Self {
         // Filter out states that can't be serialized (e.g., VM-backed
         // protocol states like UniswapV4 which depend on EVM engine state).
+        // This works because `#[typetag::serde]` dispatches to each
+        // concrete type's Serialize impl — VM-backed states return
+        // `Err(serde::ser::Error::custom("not supported due vm state deps"))`.
+        // Note: `new_pairs` still registers these pools as components, but
+        // without a simulation state they can't compute spot prices.
         let states = update
             .states
             .into_iter()
@@ -74,10 +79,11 @@ pub struct RecordingMetadata {
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: Option<u64>,
-    /// Gas price in gwei captured from RPC at recording time.
+    /// Gas price in wei captured from RPC at recording time.
+    /// Stored as a decimal string to preserve full precision.
     /// Used during replay to avoid needing a live RPC connection.
     #[serde(default)]
-    pub gas_price_gwei: Option<f64>,
+    pub gas_price_wei: Option<String>,
 }
 
 /// A complete market recording: metadata + ordered sequence of `Update` messages.

@@ -1,5 +1,5 @@
 use crate::harness::TestHarness;
-use crate::scenarios::{load_golden_file, load_test_scenarios};
+use fynd_core::recording::golden::{load_golden_file, load_test_scenarios};
 use fynd_core::types::QuoteStatus;
 
 /// Scenarios that succeeded in golden generation should also succeed in replay.
@@ -16,7 +16,6 @@ async fn test_all_golden_pairs_return_solutions() {
     let scenarios = load_test_scenarios();
     let mut failures = Vec::new();
     for scenario in &scenarios {
-        // Only check scenarios that are expected to succeed in the golden baseline
         let Some(expected) = golden_map.get(&scenario.name) else {
             continue;
         };
@@ -72,8 +71,6 @@ async fn test_unknown_token_returns_error() {
     );
 
     let result = harness.quote(vec![order]).await;
-    // Should either return an error or a quote with non-Success status.
-    // It must NOT panic.
     match result {
         Ok(quote) => {
             assert_ne!(
@@ -89,11 +86,6 @@ async fn test_unknown_token_returns_error() {
 /// Quality: each pair's amount_out_net_gas should be within 1% of golden baseline.
 #[tokio::test]
 async fn test_quality_within_golden_baseline() {
-    if std::env::var("BLESS_GOLDEN").is_ok() {
-        // Skip quality check when blessing — we're regenerating the baseline.
-        return;
-    }
-
     let harness = TestHarness::from_fixture().await;
     let golden = load_golden_file().expect("golden_outputs.json required for quality tests");
     let golden_map: std::collections::HashMap<_, _> = golden
@@ -106,7 +98,7 @@ async fn test_quality_within_golden_baseline() {
     let mut regressions = Vec::new();
     for scenario in &scenarios {
         let Some(expected_output) = golden_map.get(&scenario.name) else {
-            continue; // Scenario not in golden file — skip quality check
+            continue;
         };
         let order = scenario.to_order();
         let result = harness.quote(vec![order]).await;
@@ -118,14 +110,11 @@ async fn test_quality_within_golden_baseline() {
                 let expected = &expected_output.amount_out_net_gas;
 
                 if expected.gt(&num_bigint::BigUint::ZERO) {
-                    // Calculate percentage difference
                     let actual_f64 = actual.to_string().parse::<f64>().unwrap_or(0.0);
                     let expected_f64 = expected.to_string().parse::<f64>().unwrap_or(0.0);
                     let diff_pct = (actual_f64 - expected_f64) / expected_f64 * 100.0;
 
-                    // 10% threshold accounts for replay non-determinism
-                    // (derived data computation order, thread scheduling)
-                    if diff_pct < -10.0 {
+                    if diff_pct < -1.0 {
                         regressions.push(format!(
                             "{}: degraded by {:.2}% (expected {}, got {})",
                             scenario.name,
@@ -144,66 +133,6 @@ async fn test_quality_within_golden_baseline() {
         "quality regressions (>1% degradation):\n{}",
         regressions.join("\n")
     );
-}
-
-/// When BLESS_GOLDEN=1 is set, regenerate golden_outputs.json from the
-/// current recording. This test always "passes" — its purpose is the
-/// side effect of writing the golden file.
-#[tokio::test]
-async fn test_bless_golden_outputs() {
-    if !crate::scenarios::should_bless() {
-        return;
-    }
-
-    let harness = TestHarness::from_fixture().await;
-    let scenarios = crate::scenarios::load_test_scenarios();
-
-    let mut blessed_scenarios = Vec::new();
-    for scenario in &scenarios {
-        let order = scenario.to_order();
-        let result = harness.quote(vec![order]).await;
-
-        let expected = match result {
-            Ok(quote) => {
-                let oq = &quote.orders()[0];
-                crate::scenarios::GoldenOutput {
-                    status: oq.status(),
-                    amount_out_net_gas: oq.amount_out_net_gas().clone(),
-                    gas_estimate: oq.gas_estimate().clone(),
-                    num_swaps: oq
-                        .route()
-                        .map(|r| r.hop_count())
-                        .unwrap_or(0),
-                    solve_time_ms: quote.solve_time_ms(),
-                }
-            }
-            Err(_e) => crate::scenarios::GoldenOutput {
-                status: QuoteStatus::NoRouteFound,
-                amount_out_net_gas: num_bigint::BigUint::ZERO,
-                gas_estimate: num_bigint::BigUint::ZERO,
-                num_swaps: 0,
-                solve_time_ms: 0,
-            },
-        };
-
-        blessed_scenarios.push(crate::scenarios::GoldenScenario {
-            scenario: scenario.clone(),
-            expected,
-        });
-    }
-
-    let market = harness.market_data.read().await;
-    let blessed_file = crate::scenarios::GoldenFile {
-        metadata: crate::scenarios::GoldenMetadata {
-            block_number: 0, // TODO: extract from market data
-            num_pools: market.component_topology().len(),
-            num_tokens: market.token_registry_ref().len(),
-            fynd_version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-        scenarios: blessed_scenarios,
-    };
-
-    crate::scenarios::write_golden_file(&blessed_file);
 }
 
 /// Quality invariant: all successful quotes should have positive net output.
