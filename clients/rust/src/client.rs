@@ -474,9 +474,6 @@ where
 {
     /// Construct a client directly from its individual fields.
     ///
-    /// This is intended for testing; production code should use [`FyndClientBuilder`].
-    /// Construct a client directly from its individual fields.
-    ///
     /// Intended for testing only. Use [`FyndClientBuilder`] for production code.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
@@ -788,7 +785,7 @@ where
         options: &ApprovalOptions,
     ) -> Result<ApprovalPayload, FyndError> {
         let info = self.info().await?;
-        let router_addr = mapping::bytes_to_alloy_address(&info.router_address)?;
+        let router_addr = mapping::bytes_to_alloy_address(info.router_address())?;
 
         // Resolve sender.
         let sender = hints
@@ -1805,6 +1802,57 @@ mod tests {
             .expect("approval with allowance check should succeed");
 
         assert_eq!(payload.is_needed(), Some(true), "zero allowance should mean approval needed");
+    }
+
+    #[tokio::test]
+    async fn approval_with_check_allowance_sufficient_sets_is_needed_false() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_info_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = Address::with_last_byte(0xab);
+        let (client, asserter) =
+            make_test_client(server.uri(), RetryConfig::default(), Some(sender));
+
+        let hints = SigningHints {
+            sender: Some(sender),
+            nonce: Some(0),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas_limit: None,
+            simulate: false,
+        };
+
+        // Mock eth_call for allowance: return amount > requested (allowance sufficient).
+        let mut allowance_bytes = [0u8; 32];
+        // Encode 1_000_000 as big-endian uint256 (same as the amount we will request).
+        allowance_bytes[24..32].copy_from_slice(&1_000_000u64.to_be_bytes());
+        asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&allowance_bytes));
+
+        let token = bytes::Bytes::copy_from_slice(&[0xdd; 20]);
+        // Request 500_000, but allowance is 1_000_000 — sufficient.
+        let amount = num_bigint::BigUint::from(500_000u64);
+
+        let payload = client
+            .approval(token, amount, &hints, &ApprovalOptions { check_allowance: true })
+            .await
+            .expect("approval with sufficient allowance check should succeed");
+
+        assert_eq!(
+            payload.is_needed(),
+            Some(false),
+            "sufficient allowance should mean approval not needed"
+        );
     }
 
     // ========================================================================
