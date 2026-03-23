@@ -868,6 +868,41 @@ impl BatchQuote {
     }
 }
 
+/// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+pub struct InstanceInfo {
+    /// Router contract address (20 raw bytes).
+    pub router_address: bytes::Bytes,
+    /// Permit2 contract address (20 raw bytes).
+    pub permit2_address: bytes::Bytes,
+    /// Chain ID of the network this instance is deployed on.
+    pub chain_id: u64,
+}
+
+impl InstanceInfo {
+    pub(crate) fn new(
+        router_address: bytes::Bytes,
+        permit2_address: bytes::Bytes,
+        chain_id: u64,
+    ) -> Self {
+        Self { router_address, permit2_address, chain_id }
+    }
+
+    /// Router contract address (20 raw bytes).
+    pub fn router_address(&self) -> &bytes::Bytes {
+        &self.router_address
+    }
+
+    /// Permit2 contract address (20 raw bytes).
+    pub fn permit2_address(&self) -> &bytes::Bytes {
+        &self.permit2_address
+    }
+
+    /// Chain ID of the network this instance is deployed on.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+}
+
 /// Health information from the Fynd RPC server's `/v1/health` endpoint.
 #[derive(Debug)]
 pub struct HealthStatus {

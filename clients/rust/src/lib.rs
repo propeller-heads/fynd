@@ -50,14 +50,18 @@
 //! ```
 
 pub use client::{
-    ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints, StorageOverrides,
+    ApprovalOptions, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints,
+    StorageOverrides, SubmitOptions,
 };
 pub use error::{ErrorCode, FyndError};
-pub use signing::{ExecutionReceipt, FyndPayload, SettledOrder, SignablePayload, SignedOrder};
+pub use signing::{
+    ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx, SettledOrder, SignablePayload,
+    SignedApproval, SignedOrder, TxReceipt,
+};
 pub use types::{
-    BackendKind, BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown, HealthStatus, Order,
-    OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus, Route,
-    Swap, Transaction, UserTransferType,
+    BackendKind, BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown, HealthStatus,
+    InstanceInfo, Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
+    QuoteStatus, Route, Swap, Transaction, UserTransferType,
 };
 
 mod client;
