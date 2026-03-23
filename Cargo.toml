@@ -141,11 +141,3 @@ fynd-client = { path = "clients/rust" }
 
 # Dev dependencies
 rstest = "0.18"
-
-[[example]]
-name = "tutorial"
-path = "examples/tutorial/main.rs"
-
-[[example]]
-name = "tutorial_with_permit2"
-path = "examples/tutorial_with_permit2/main.rs"
