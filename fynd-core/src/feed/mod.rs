@@ -13,7 +13,7 @@ pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
-pub(crate) struct TychoFeedConfig {
+pub struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
@@ -49,7 +49,7 @@ pub(crate) struct TychoFeedConfig {
 }
 
 impl TychoFeedConfig {
-    pub(crate) fn new(
+    pub fn new(
         tycho_url: String,
         chain: Chain,
         tycho_api_key: Option<String>,
@@ -106,7 +106,7 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum DataFeedError {
+pub enum DataFeedError {
     #[error("gas price fetcher error: {0}")]
     GasPriceFetcherError(String),
 

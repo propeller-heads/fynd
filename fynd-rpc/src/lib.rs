@@ -27,3 +27,5 @@ pub use api::{ApiError, AppState, HealthStatus};
 // Re-export price guard types so users can implement custom providers
 // without depending on fynd-core directly.
 pub use fynd_core::price_guard::provider::{ExternalPrice, PriceProvider, PriceProviderError};
+// Re-export parse_chain so tools that depend on fynd-rpc (not fynd-core) can use it.
+pub use fynd_core::types::parse_chain;
