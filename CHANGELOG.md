@@ -1,3 +1,18 @@
+## [0.24.2](https://github.com/propeller-heads/fynd/compare/0.24.1...0.24.2) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove accidentally committed .env and add to .gitignore ([bdcb25e](https://github.com/propeller-heads/fynd/commit/bdcb25e4da0d6a36db43a299a069c15c053f7039))
+
+## [0.24.1](https://github.com/propeller-heads/fynd/compare/0.24.0...0.24.1) (2026-03-23)
+
+
+### Bug Fixes
+
+* **deps:** update rustls-webpki to 0.103.10 for RUSTSEC-2026-0049 ([73c4bd5](https://github.com/propeller-heads/fynd/commit/73c4bd5902c58b4e5880439208a62b28ad614036))
+* **most_liquid:** use per-component state overrides in simulate_path ([62ae7b8](https://github.com/propeller-heads/fynd/commit/62ae7b8f95f5247d14b53d67d1ebfad938ef48d0))
+
 ## [0.24.0](https://github.com/propeller-heads/fynd/compare/0.23.1...0.24.0) (2026-03-20)
 
 
