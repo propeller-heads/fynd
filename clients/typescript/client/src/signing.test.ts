@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { assembleSignedOrder, signingHash } from './signing.js';
-import type { SignablePayload, PrimitiveSignature } from './signing.js';
+import { approvalSigningHash, assembleSignedOrder, signingHash } from './signing.js';
+import type { ApprovalPayload, SignablePayload, PrimitiveSignature } from './signing.js';
 import type { Quote } from './types.js';
 
 const TOKEN_OUT = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as const;
@@ -128,5 +128,54 @@ describe('signingHash', () => {
       },
     };
     expect(signingHash(basePayload)).not.toBe(signingHash(withValue));
+  });
+});
+
+const TOKEN   = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as const;
+const SPENDER = '0x1111111111111111111111111111111111111111' as const;
+
+const baseApprovalPayload: ApprovalPayload = {
+  tx: {
+    chainId:              1,
+    nonce:                5,
+    maxFeePerGas:         20000000000n,
+    maxPriorityFeePerGas: 2000000000n,
+    gas:                  65_000n,
+    to:                   TOKEN,
+    value:                0n,
+    data:                 '0x095ea7b3000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000003e8',
+  },
+  token:   TOKEN,
+  spender: SPENDER,
+  amount:  1000n,
+};
+
+describe('approvalSigningHash', () => {
+  it('returns a 0x-prefixed 32-byte hex string', () => {
+    const hash = approvalSigningHash(baseApprovalPayload);
+    expect(hash).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it('is deterministic for the same payload', () => {
+    const hash1 = approvalSigningHash(baseApprovalPayload);
+    const hash2 = approvalSigningHash(baseApprovalPayload);
+    expect(hash1).toBe(hash2);
+  });
+
+  it('differs when nonce changes', () => {
+    const other: ApprovalPayload = {
+      ...baseApprovalPayload,
+      tx: { ...baseApprovalPayload.tx, nonce: 99 },
+    };
+    expect(approvalSigningHash(baseApprovalPayload)).not.toBe(approvalSigningHash(other));
+  });
+
+  it('differs when amount changes', () => {
+    const other: ApprovalPayload = {
+      ...baseApprovalPayload,
+      tx: { ...baseApprovalPayload.tx, data: '0xdeadbeef' as `0x${string}` },
+      amount: 9999n,
+    };
+    expect(approvalSigningHash(baseApprovalPayload)).not.toBe(approvalSigningHash(other));
   });
 });

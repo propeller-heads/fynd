@@ -1,6 +1,13 @@
 import type { Address, Hex } from './types.js';
 import type { EthProvider } from './client.js';
 
+const ERC20_ALLOWANCE_ABI = [{
+  name: 'allowance', type: 'function' as const,
+  inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+  outputs: [{ type: 'uint256' }],
+  stateMutability: 'view' as const,
+}] as const;
+
 /**
  * Minimal subset of viem's `PublicClient` used by {@link viemProvider}.
  *
@@ -49,6 +56,12 @@ export interface ViemPublicClient {
       data: string;
     }>;
   }>;
+  readContract(args: {
+    address: Address;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+  }): Promise<unknown>;
 }
 
 /**
@@ -119,6 +132,13 @@ export function viemProvider(
           data: log.data as Hex,
         })),
       };
+    },
+    async readAllowance(token, owner, spender) {
+      const result = await client.readContract({
+        address: token, abi: ERC20_ALLOWANCE_ABI,
+        functionName: 'allowance', args: [owner, spender],
+      });
+      return result as bigint;
     },
   };
 }

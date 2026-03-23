@@ -1,21 +1,31 @@
-import { keccak256, serializeTransaction, toHex } from 'viem';
+import { encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
 import { createFyndClient, type FyndClient as AutogenClient } from "@fynd/autogen";
 import type { components } from "@fynd/autogen";
 import { FyndError } from "./error.js";
 import * as mapping from "./mapping.js";
 import {
   DEFAULT_SETTLE_TIMEOUT_MS,
+  type ApprovalPayload,
   type Eip1559Transaction,
   type ExecutionReceipt,
   type FyndPayload,
   type SettledOrder,
   type SettleOptions,
   type SignablePayload,
+  type SignedApproval,
   type SignedOrder,
+  type TxReceipt,
 } from "./signing.js";
-import type { Address, Hex, HealthStatus, Quote, QuoteParams } from "./types.js";
+import type { Address, ApprovalOptions, Hex, HealthStatus, InstanceInfo, Quote, QuoteParams } from "./types.js";
 
 type WireErrorResponse = components["schemas"]["ErrorResponse"];
+
+const ERC20_APPROVE_ABI = [{
+  name: 'approve', type: 'function' as const,
+  inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+  outputs: [{ type: 'bool' }],
+  stateMutability: 'nonpayable' as const,
+}] as const;
 
 // ERC-20 Transfer(address,address,uint256)
 const ERC20_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,uint256)'));
@@ -42,6 +52,7 @@ export interface EthProvider {
   estimateGas(tx: Eip1559Transaction): Promise<bigint>;
   sendRawTransaction(rawTx: Hex): Promise<Hex>;
   getTransactionReceipt(args: { hash: Hex }): Promise<MinimalReceipt | null>;
+  readAllowance?(token: Address, owner: Address, spender: Address): Promise<bigint>;
 }
 
 /** Configuration for exponential backoff retry on transient quote errors. */
@@ -105,6 +116,7 @@ export interface FyndClientOptions {
 export class FyndClient {
   private readonly http: AutogenClient;
   private readonly options: FyndClientOptions;
+  private infoPromise: Promise<InstanceInfo> | undefined = undefined;
 
   constructor(options: FyndClientOptions) {
     this.http = createFyndClient(options.baseUrl);
@@ -191,6 +203,37 @@ export class FyndClient {
       throw FyndError.config("server returned no data for health response");
     }
     return mapping.fromWireHealth(data);
+  }
+
+  /**
+   * Fetches and caches static instance metadata from `GET /v1/info`.
+   *
+   * The result is cached for the lifetime of the client. On failure, the cache
+   * is cleared so the next call retries.
+   *
+   * @throws {FyndError} With a server error code on non-OK responses.
+   * @throws {FyndError} With code `HTTP` on network-level failures.
+   */
+  async info(): Promise<InstanceInfo> {
+    this.infoPromise ??= this.fetchInfo().catch((err: unknown) => {
+      this.infoPromise = undefined;
+      throw err;
+    });
+    return this.infoPromise;
+  }
+
+  private async fetchInfo(): Promise<InstanceInfo> {
+    const timeoutMs = this.options.timeoutMs ?? 30_000;
+    const { data, error } = await this.http.GET("/v1/info", {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (error !== undefined) {
+      throw FyndError.fromWireError(error as WireErrorResponse);
+    }
+    if (data === undefined) {
+      throw FyndError.config("server returned no data for /v1/info");
+    }
+    return mapping.fromWireInstanceInfo(data);
   }
 
   /**
@@ -309,6 +352,32 @@ export class FyndClient {
       throw FyndError.config("provider is required for execute");
     }
 
+    const txHash = await this.serializeAndBroadcast(tx, signature);
+    const tokenOut = quote.tokenOut;
+    const receiver = quote.receiver;
+
+    return {
+      settle: async (options?: SettleOptions): Promise<SettledOrder> => {
+        const timeoutMs = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
+        const receipt = await this.pollForReceipt(provider, txHash, timeoutMs);
+        const settledAmount = computeSettledAmount(receipt, tokenOut, receiver);
+        const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
+        // exactOptionalPropertyTypes: spread optional fields only when defined
+        return {
+          txHash,
+          gasCost,
+          ...(settledAmount !== undefined ? { settledAmount } : {}),
+        };
+      },
+    };
+  }
+
+  private async serializeAndBroadcast(tx: Eip1559Transaction, signature: Hex): Promise<Hex> {
+    const provider = this.options.submitProvider ?? this.options.provider;
+    if (provider === undefined) {
+      throw FyndError.config("provider is required for broadcast");
+    }
+
     // Parse r, s, yParity from the 65-byte hex signature: r[32] + s[32] + v[1]
     // signature is '0x' + 130 hex chars (65 bytes)
     const r = `0x${signature.slice(2, 66)}` as Hex;
@@ -336,35 +405,111 @@ export class FyndClient {
       { r, s, yParity },
     ) as Hex;
 
-    const txHash = await provider.sendRawTransaction(rawTx);
-    const tokenOut = quote.tokenOut;
-    const receiver = quote.receiver;
+    return provider.sendRawTransaction(rawTx);
+  }
+
+  private async pollForReceipt(
+    provider: EthProvider,
+    txHash: Hex,
+    timeoutMs: number,
+  ): Promise<MinimalReceipt> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const receipt = await provider.getTransactionReceipt({ hash: txHash });
+      if (receipt !== null) {
+        return receipt;
+      }
+      if (Date.now() >= deadline) {
+        throw FyndError.timeout(
+          `transaction ${txHash} did not settle within ${timeoutMs}ms`,
+        );
+      }
+      await sleep(2_000);
+    }
+  }
+
+  /**
+   * Builds an unsigned EIP-1559 `approve(spender, amount)` transaction for the Fynd router.
+   *
+   * Fetches the router address from `GET /v1/info` (cached after first call).
+   * Reads nonce and gas fees from `provider` unless overridden via `options`.
+   *
+   * @param token - ERC-20 token to approve.
+   * @param amount - Amount to approve (in token base units).
+   * @param options - Optional overrides for sender, nonce, gas, and allowance check.
+   * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
+   * @throws {FyndError} With code `CONFIG` if `checkAllowance` is `true` and `provider.readAllowance` is absent.
+   */
+  async approval(token: Address, amount: bigint, options?: ApprovalOptions): Promise<ApprovalPayload> {
+    const info = await this.info();
+    const provider = this.options.provider;
+    if (provider === undefined) throw FyndError.config("provider is required for approval");
+
+    const senderOpt = options?.sender ?? this.options.sender;
+    if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
+    const sender: Address = senderOpt;
+
+    const nonce = options?.nonce !== undefined
+      ? options.nonce
+      : await provider.getTransactionCount({ address: sender });
+
+    const { maxFeePerGas, maxPriorityFeePerGas } =
+      options?.maxFeePerGas !== undefined && options?.maxPriorityFeePerGas !== undefined
+        ? { maxFeePerGas: options.maxFeePerGas, maxPriorityFeePerGas: options.maxPriorityFeePerGas }
+        : await provider.estimateFeesPerGas();
+
+    const gas = options?.gasLimit ?? 65_000n;
+    const spender = info.routerAddress;
+
+    const data = encodeFunctionData({
+      abi: ERC20_APPROVE_ABI,
+      functionName: 'approve',
+      args: [spender, amount],
+    }) as Hex;
+
+    let isNeeded: boolean | undefined;
+    if (options?.checkAllowance === true) {
+      if (provider.readAllowance === undefined) {
+        throw FyndError.config("provider.readAllowance is required when checkAllowance is true");
+      }
+      const current = await provider.readAllowance(token, sender, spender);
+      isNeeded = current < amount;
+    }
+
+    const tx: Eip1559Transaction = {
+      chainId: this.options.chainId,
+      nonce,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      gas,
+      to: token,
+      value: 0n,
+      data,
+    };
 
     return {
-      settle: async (options?: SettleOptions): Promise<SettledOrder> => {
-        const timeout = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
-        const deadline = Date.now() + timeout;
-        for (;;) {
-          const receipt = await provider.getTransactionReceipt({ hash: txHash });
-          if (receipt !== null) {
-            const settledAmount = computeSettledAmount(receipt, tokenOut, receiver);
-            const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
-            // exactOptionalPropertyTypes: spread optional fields only when defined
-            return {
-              txHash,
-              gasCost,
-              ...(settledAmount !== undefined ? { settledAmount } : {}),
-            };
-          }
-          if (Date.now() >= deadline) {
-            throw FyndError.timeout(
-              `transaction ${txHash} did not settle within ${timeout}ms`,
-            );
-          }
-          await sleep(2_000);
-        }
-      },
+      tx, token, spender, amount,
+      // exactOptionalPropertyTypes: only spread when defined
+      ...(isNeeded !== undefined ? { isNeeded } : {}),
     };
+  }
+
+  /**
+   * Broadcasts a signed ERC-20 approval and polls for inclusion.
+   *
+   * @param signedApproval - Signed approval from {@link approval} + wallet signature.
+   * @param options - Optional poll timeout (defaults to {@link DEFAULT_SETTLE_TIMEOUT_MS}).
+   * @throws {FyndError} With code `CONFIG` if no provider is configured.
+   * @throws {FyndError} With code `SETTLE_TIMEOUT` if the transaction does not confirm in time.
+   */
+  async submit(signedApproval: SignedApproval, options?: SettleOptions): Promise<TxReceipt> {
+    const provider = this.options.submitProvider ?? this.options.provider;
+    if (provider === undefined) throw FyndError.config("provider is required for submit");
+    const txHash = await this.serializeAndBroadcast(signedApproval.tx, signedApproval.signature);
+    const receipt = await this.pollForReceipt(
+      provider, txHash, options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS,
+    );
+    return { txHash, gasCost: receipt.gasUsed * receipt.effectiveGasPrice };
   }
 
   private async dryRunExecute(tx: Eip1559Transaction, quote: Quote): Promise<ExecutionReceipt> {

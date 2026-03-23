@@ -1,6 +1,29 @@
 import { keccak256, serializeTransaction } from 'viem';
 import type { Address, Hex, Quote } from './types.js';
 
+/** An unsigned EIP-1559 `approve(spender, amount)` transaction. */
+export interface ApprovalPayload {
+  tx: Eip1559Transaction;
+  token: Address;
+  spender: Address;
+  amount: bigint;
+  /** Set only when {@link ApprovalOptions.checkAllowance} was `true`. */
+  isNeeded?: boolean;
+}
+
+/** A signed approval ready for {@link FyndClient.submit}. */
+export interface SignedApproval {
+  tx: Eip1559Transaction;
+  /** 65-byte hex signature over the EIP-1559 signing hash. */
+  signature: Hex;
+}
+
+/** Receipt for a mined transaction (gas cost only, no settled-amount). */
+export interface TxReceipt {
+  txHash: Hex;
+  gasCost: bigint;
+}
+
 /** An unsigned EIP-1559 transaction ready for signing. */
 export interface Eip1559Transaction {
   chainId: number;
@@ -90,4 +113,12 @@ export function assembleSignedOrder(
   signature: PrimitiveSignature,
 ): SignedOrder {
   return { payload, signature };
+}
+
+/**
+ * Compute the EIP-1559 signing hash for an approval payload.
+ * Sign this and pass the result to {@link FyndClient.submit} via {@link SignedApproval}.
+ */
+export function approvalSigningHash(payload: ApprovalPayload): Hex {
+  return keccak256(serializeTransaction({ type: 'eip1559', ...payload.tx })) as Hex;
 }

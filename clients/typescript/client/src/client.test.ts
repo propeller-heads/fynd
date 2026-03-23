@@ -10,7 +10,7 @@ const TOKEN_IN  = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address;
 const TOKEN_OUT = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as Address;
 
 // Build a mock provider with all methods returning sensible defaults
-function makeMockProvider(): { [K in keyof EthProvider]: ReturnType<typeof vi.fn> } & EthProvider {
+function makeMockProvider(): { [K in keyof Required<EthProvider>]: ReturnType<typeof vi.fn> } & Required<EthProvider> {
   return {
     getTransactionCount:    vi.fn().mockResolvedValue(5),
     estimateFeesPerGas:     vi.fn().mockResolvedValue({ maxFeePerGas: 20n, maxPriorityFeePerGas: 2n }),
@@ -18,14 +18,18 @@ function makeMockProvider(): { [K in keyof EthProvider]: ReturnType<typeof vi.fn
     estimateGas:            vi.fn().mockResolvedValue(150000n),
     sendRawTransaction:     vi.fn().mockResolvedValue('0xtxhash' as Hex),
     getTransactionReceipt:  vi.fn().mockResolvedValue(null),
+    readAllowance:          vi.fn().mockResolvedValue(0n),
   };
 }
 
+type MockResponse = { status: number; data?: unknown };
+
 // Minimal mock that replaces the openapi-fetch HTTP layer
 function makeClientWithHttpMock(
-  solveResponse: { status: number; data?: unknown },
-  healthResponse?: { status: number; data?: unknown },
+  solveResponse: MockResponse,
+  healthResponse?: MockResponse,
   opts?: Partial<FyndClientOptions>,
+  infoResponse?: MockResponse,
 ): FyndClient {
   const client = new FyndClient({
     baseUrl: 'http://localhost:8080',
@@ -34,22 +38,20 @@ function makeClientWithHttpMock(
     ...opts,
   });
 
+  function resolveResponse(resp: MockResponse | undefined) {
+    if (resp === undefined) return Promise.resolve({ data: undefined, error: undefined, response: {} });
+    if (resp.status >= 200 && resp.status < 300) {
+      return Promise.resolve({ data: resp.data, error: undefined, response: {} });
+    }
+    return Promise.resolve({ data: undefined, error: resp.data, response: {} });
+  }
+
   // Override the private http client by accessing it via a cast
   const httpMock = {
-    POST: vi.fn().mockImplementation(() => {
-      if (solveResponse.status >= 200 && solveResponse.status < 300) {
-        return Promise.resolve({ data: solveResponse.data, error: undefined, response: {} });
-      }
-      return Promise.resolve({ data: undefined, error: solveResponse.data, response: {} });
-    }),
-    GET: vi.fn().mockImplementation(() => {
-      if (healthResponse) {
-        if (healthResponse.status >= 200 && healthResponse.status < 300) {
-          return Promise.resolve({ data: healthResponse.data, error: undefined, response: {} });
-        }
-        return Promise.resolve({ data: undefined, error: healthResponse.data, response: {} });
-      }
-      return Promise.resolve({ data: undefined, error: undefined, response: {} });
+    POST: vi.fn().mockImplementation(() => resolveResponse(solveResponse)),
+    GET: vi.fn().mockImplementation((path: string) => {
+      if (path === '/v1/info') return resolveResponse(infoResponse);
+      return resolveResponse(healthResponse);
     }),
   };
   (client as any).http = httpMock;
@@ -742,6 +744,183 @@ describe('Transfer log decoding via settle()', () => {
   it('empty logs returns undefined', async () => {
     const settled = await executeAndSettle(makeDummyQuote(), makeReceiptWithLogs([]));
     expect(settled.settledAmount).toBeUndefined();
+  });
+});
+
+const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address;
+const TOKEN_IN_ADDR = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address;
+
+const wireInstanceInfo = {
+  router_address:  ROUTER,
+  permit2_address: PERMIT2,
+  chain_id:        1,
+};
+
+function makeInfoClient(opts?: Partial<FyndClientOptions>): FyndClient {
+  return makeClientWithHttpMock(
+    { status: 200, data: wireSolution },
+    undefined,
+    opts,
+    { status: 200, data: wireInstanceInfo },
+  );
+}
+
+describe('FyndClient.info', () => {
+  it('fetches and returns InstanceInfo', async () => {
+    const client = makeInfoClient();
+    const info = await client.info();
+    expect(info.routerAddress).toBe(ROUTER);
+    expect(info.permit2Address).toBe(PERMIT2);
+    expect(info.chainId).toBe(1);
+  });
+
+  it('caches: second call does not make an extra HTTP request', async () => {
+    const client = makeInfoClient();
+    await client.info();
+    await client.info();
+    // Access internal http mock
+    const httpMock = (client as any).http as { GET: ReturnType<typeof vi.fn> };
+    expect(httpMock.GET).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates errors and resets cache on failure', async () => {
+    const client = makeClientWithHttpMock(
+      { status: 200, data: wireSolution },
+      undefined,
+      undefined,
+      { status: 500, data: { code: 'INTERNAL', error: 'server error' } },
+    );
+    await expect(client.info()).rejects.toThrow(FyndError);
+    // After failure, infoPromise should be reset so next call retries
+    const httpMock = (client as any).http as { GET: ReturnType<typeof vi.fn> };
+    httpMock.GET.mockImplementationOnce((path: string) => {
+      if (path === '/v1/info') {
+        return Promise.resolve({ data: wireInstanceInfo, error: undefined, response: {} });
+      }
+      return Promise.resolve({ data: undefined, error: undefined, response: {} });
+    });
+    const info = await client.info();
+    expect(info.routerAddress).toBe(ROUTER);
+  });
+});
+
+describe('FyndClient.approval', () => {
+  it('builds approve calldata with correct 4-byte selector', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    // approve(address,uint256) selector = 0x095ea7b3
+    expect(payload.tx.data.startsWith('0x095ea7b3')).toBe(true);
+  });
+
+  it('sets spender to routerAddress from info', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 500n);
+    expect(payload.spender).toBe(ROUTER);
+    expect(payload.token).toBe(TOKEN_IN_ADDR);
+    expect(payload.amount).toBe(500n);
+  });
+
+  it('defaults gasLimit to 65_000n', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    expect(payload.tx.gas).toBe(65_000n);
+  });
+
+  it('respects gasLimit override', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { gasLimit: 80_000n });
+    expect(payload.tx.gas).toBe(80_000n);
+  });
+
+  it('throws CONFIG when provider is not set', async () => {
+    const client = makeInfoClient({ provider: undefined });
+    await expect(client.approval(TOKEN_IN_ADDR, 1000n)).rejects.toThrow(
+      expect.objectContaining({ code: 'CONFIG' }),
+    );
+  });
+
+  it('throws CONFIG when sender is not set', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider, sender: undefined });
+    await expect(client.approval(TOKEN_IN_ADDR, 1000n)).rejects.toThrow(
+      expect.objectContaining({ code: 'CONFIG' }),
+    );
+  });
+
+  it('checkAllowance: sets isNeeded true when current < amount', async () => {
+    const provider = makeMockProvider();
+    provider.readAllowance.mockResolvedValueOnce(100n);
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true });
+    expect(payload.isNeeded).toBe(true);
+  });
+
+  it('checkAllowance: sets isNeeded false when current >= amount', async () => {
+    const provider = makeMockProvider();
+    provider.readAllowance.mockResolvedValueOnce(5000n);
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true });
+    expect(payload.isNeeded).toBe(false);
+  });
+
+  it('checkAllowance: throws CONFIG when provider.readAllowance is absent', async () => {
+    // Build a provider without readAllowance
+    const baseProvider = makeMockProvider();
+    const { readAllowance: _, ...providerWithoutAllowance } = baseProvider;
+    const client = makeInfoClient({ provider: providerWithoutAllowance });
+    await expect(
+      client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'CONFIG' }));
+  });
+
+  it('isNeeded is absent when checkAllowance is not set', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    expect('isNeeded' in payload).toBe(false);
+  });
+});
+
+describe('FyndClient.submit', () => {
+  it('broadcasts and returns TxReceipt with gasCost', async () => {
+    const provider = makeMockProvider();
+    provider.sendRawTransaction.mockResolvedValueOnce('0xapprovalhash' as Hex);
+    const receipt: MinimalReceipt = {
+      transactionHash: '0xapprovalhash' as Hex,
+      gasUsed:         50000n,
+      effectiveGasPrice: 10n,
+      logs:            [],
+    };
+    provider.getTransactionReceipt.mockResolvedValueOnce(receipt);
+
+    const client = makeInfoClient({ provider });
+    const approvalPayload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    const signedApproval = {
+      tx:        approvalPayload.tx,
+      signature: `0x${'ab'.repeat(32)}${'cd'.repeat(32)}00` as Hex,
+    };
+
+    const txReceipt = await client.submit(signedApproval);
+    expect(txReceipt.txHash).toBe('0xapprovalhash');
+    expect(txReceipt.gasCost).toBe(500000n); // 50000 * 10
+  });
+
+  it('throws CONFIG when provider is not set', async () => {
+    const client = makeInfoClient({ provider: undefined });
+    const signedApproval = {
+      tx: {
+        chainId: 1, nonce: 0, maxFeePerGas: 20n, maxPriorityFeePerGas: 2n,
+        gas: 65_000n, to: TOKEN_IN_ADDR, value: 0n, data: '0x' as Hex,
+      },
+      signature: `0x${'ab'.repeat(32)}${'cd'.repeat(32)}00` as Hex,
+    };
+    await expect(client.submit(signedApproval)).rejects.toThrow(
+      expect.objectContaining({ code: 'CONFIG' }),
+    );
   });
 });
 

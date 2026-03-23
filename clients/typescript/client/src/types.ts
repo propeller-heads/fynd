@@ -182,3 +182,27 @@ export interface HealthStatus {
   numSolverPools: number;
   gasPriceAgeMs?: number;
 }
+
+/** Static metadata about a Fynd server instance. */
+export interface InstanceInfo {
+  routerAddress: Address;
+  permit2Address: Address;
+  chainId: number;
+}
+
+/** Options for {@link FyndClient.approval}. */
+export interface ApprovalOptions {
+  /**
+   * When `true`, read on-chain allowance and populate {@link ApprovalPayload.isNeeded}.
+   * Default: `false`. Requires `provider.readAllowance` to be implemented.
+   */
+  checkAllowance?: boolean;
+  /** Override the sender (defaults to {@link FyndClientOptions.sender}). */
+  sender?: Address;
+  /** Override the nonce. */
+  nonce?: number;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+  /** Override gas limit. Defaults to `65_000n` (safe for all ERC-20 approve calls). */
+  gasLimit?: bigint;
+}
