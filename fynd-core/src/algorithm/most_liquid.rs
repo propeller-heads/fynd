@@ -18,7 +18,6 @@ use num_traits::ToPrimitive;
 use petgraph::prelude::EdgeRef;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
-    evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
     tycho_common::simulation::protocol_sim::ProtocolSim,
     tycho_core::models::{token::Token, Address},
 };
@@ -266,9 +265,7 @@ impl MostLiquidAlgorithm {
         let mut swaps = Vec::with_capacity(path.len());
 
         // Track state overrides for pools we've already swapped through.
-        let mut native_state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> =
-            HashMap::new();
-        let mut vm_state_override: Option<Box<dyn ProtocolSim>> = None;
+        let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
 
         for (address_in, edge_data, address_out) in path.iter() {
             // Get token and component data for the simulation call
@@ -299,20 +296,8 @@ impl MostLiquidAlgorithm {
                     id: Some(component_id.clone()),
                 })?;
 
-            let is_component_vm = component_state
-                .as_any()
-                .downcast_ref::<EVMPoolState<PreCachedDB>>()
-                .is_some();
-
-            // If the component is a VM, use the VM state override shared across all VM components
-            // Otherwise, use the per-component native state overrides
-            let state_override = if is_component_vm {
-                vm_state_override.as_ref()
-            } else {
-                native_state_overrides.get(component_id)
-            };
-
-            let state = state_override
+            let state = state_overrides
+                .get(component_id)
                 .map(Box::as_ref)
                 .unwrap_or(component_state);
 
@@ -334,12 +319,7 @@ impl MostLiquidAlgorithm {
                 state.clone_box(),
             ));
 
-            // Store new state as override for next hops
-            if is_component_vm {
-                vm_state_override = Some(result.new_state);
-            } else {
-                native_state_overrides.insert(component_id, result.new_state);
-            }
+            state_overrides.insert(component_id, result.new_state);
             current_amount = result.amount;
         }
 
