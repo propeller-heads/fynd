@@ -1,3 +1,10 @@
+## [0.24.2](https://github.com/propeller-heads/fynd/compare/0.24.1...0.24.2) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove accidentally committed .env and add to .gitignore ([bdcb25e](https://github.com/propeller-heads/fynd/commit/bdcb25e4da0d6a36db43a299a069c15c053f7039))
+
 ## [0.24.1](https://github.com/propeller-heads/fynd/compare/0.24.0...0.24.1) (2026-03-23)
 
 
