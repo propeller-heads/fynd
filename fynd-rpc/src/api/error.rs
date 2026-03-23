@@ -38,6 +38,7 @@ impl ResponseError for ApiError {
             ApiError::SolveFailed(e) => match e {
                 SolveError::QueueFull => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+                SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
@@ -155,6 +156,14 @@ mod tests {
     #[actix_web::test]
     async fn test_stale_data() {
         let (status, body) = json_body(ApiError::StaleData { age_ms: 90_000 }).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "STALE_DATA");
+    }
+
+    #[actix_web::test]
+    async fn test_market_data_stale_via_solve_failed() {
+        let err = SolveError::market_data_stale(5_000);
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "STALE_DATA");
     }
