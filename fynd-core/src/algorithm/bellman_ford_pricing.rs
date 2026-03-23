@@ -4,23 +4,19 @@
 //! propagating to all reachable tokens within `max_hops`. Uses forbid-revisits to prevent
 //! paths through arbitrage loops that would distort prices.
 //!
-//! This is the pricing counterpart to the routing BF in `bellman_ford.rs`:
+//! Counterpart to the routing BF in [`bellman_ford`](super::bellman_ford):
 //! - Routing: one source, one destination, real trade amount
 //! - Pricing: one source, ALL destinations, small probe amount
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use num_bigint::BigUint;
 use num_traits::Zero;
-use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use petgraph::graph::NodeIndex;
 use tracing::trace;
-use tycho_simulation::{
-    evm::{engine_db::tycho_db::PreCachedDB, protocol::vm::state::EVMPoolState},
-    tycho_common::simulation::protocol_sim::ProtocolSim,
-    tycho_core::models::token::Token,
-};
+use tycho_simulation::tycho_core::models::token::Token;
 
-use super::AlgorithmError;
+use super::{bf_helpers, AlgorithmError};
 use crate::{
     feed::market_data::SharedMarketData,
     graph::petgraph::StableDiGraph,
@@ -37,12 +33,6 @@ pub(crate) struct SpfaAllResult {
 }
 
 impl SpfaAllResult {
-    /// Returns the best forward amount reachable at `node`.
-    #[allow(dead_code)]
-    pub fn amount_at(&self, node: NodeIndex) -> &BigUint {
-        &self.distance[node.index()]
-    }
-
     /// Returns true if `node` was reached by the SPFA.
     pub fn is_reachable(&self, node: NodeIndex) -> bool {
         !self.distance[node.index()].is_zero()
@@ -53,12 +43,18 @@ impl SpfaAllResult {
         &self,
         dest: NodeIndex,
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
-        reconstruct_path(dest, self.source, &self.predecessor)
+        bf_helpers::reconstruct_path(dest, self.source, &self.predecessor)
     }
 
     /// Returns a reference to the token map built during subgraph extraction.
     pub fn token_map(&self) -> &HashMap<NodeIndex, Token> {
         &self.token_map
+    }
+
+    /// Returns the best forward amount reachable at `node` (test-only).
+    #[cfg(test)]
+    pub fn amount_at(&self, node: NodeIndex) -> &BigUint {
+        &self.distance[node.index()]
     }
 }
 
@@ -74,8 +70,7 @@ pub(crate) fn solve_one_to_all(
     graph: &StableDiGraph<()>,
     market: &SharedMarketData,
 ) -> SpfaAllResult {
-    // Extract subgraph (BFS from source up to max_hops)
-    let subgraph_edges = extract_subgraph(source, max_hops, graph);
+    let subgraph_edges = bf_helpers::extract_subgraph_edges(source, max_hops, graph);
 
     let max_idx = graph
         .node_indices()
@@ -150,13 +145,8 @@ pub(crate) fn solve_one_to_all(
             for &(v, component_id) in edges {
                 let v_idx = v.index();
 
-                // Forbid token revisits
-                if path_contains_node(u, v, &predecessor) {
-                    continue;
-                }
-
-                // Forbid pool revisits
-                if path_contains_pool(u, component_id, &predecessor) {
+                // Forbid token and pool revisits (single predecessor walk)
+                if bf_helpers::path_has_conflict(u, v, component_id, &predecessor) {
                     continue;
                 }
 
@@ -197,7 +187,10 @@ pub(crate) fn solve_one_to_all(
     SpfaAllResult { distance, predecessor, source, token_map }
 }
 
-/// Re-simulates a path with exact amounts and state overrides for revisited pools.
+/// Simulates a path to build a Route with Swaps.
+///
+/// Forbid-revisits guarantees each pool appears at most once, so each step
+/// uses the original pool state directly (no state-override tracking needed).
 pub(crate) fn resimulate_path(
     path: &[(NodeIndex, NodeIndex, ComponentId)],
     amount_in: &BigUint,
@@ -206,9 +199,6 @@ pub(crate) fn resimulate_path(
 ) -> Result<(Route, BigUint), AlgorithmError> {
     let mut current_amount = amount_in.clone();
     let mut swaps = Vec::with_capacity(path.len());
-
-    let mut native_state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-    let mut vm_state_override: Option<Box<dyn ProtocolSim>> = None;
 
     for (from_node, to_node, component_id) in path {
         let token_in = token_map
@@ -230,27 +220,12 @@ pub(crate) fn resimulate_path(
                 kind: "component",
                 id: Some(component_id.clone()),
             })?;
-        let component_state = market
+        let state = market
             .get_simulation_state(component_id)
             .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "simulation state",
                 id: Some(component_id.clone()),
             })?;
-
-        let is_vm = component_state
-            .as_any()
-            .downcast_ref::<EVMPoolState<PreCachedDB>>()
-            .is_some();
-
-        let state_override = if is_vm {
-            vm_state_override.as_ref()
-        } else {
-            native_state_overrides.get(component_id)
-        };
-
-        let state = state_override
-            .map(Box::as_ref)
-            .unwrap_or(component_state);
 
         let result = state
             .get_amount_out(current_amount.clone(), token_in, token_out)
@@ -271,11 +246,6 @@ pub(crate) fn resimulate_path(
             state.clone_box(),
         ));
 
-        if is_vm {
-            vm_state_override = Some(result.new_state);
-        } else {
-            native_state_overrides.insert(component_id, result.new_state);
-        }
         current_amount = result.amount;
     }
 
@@ -283,122 +253,12 @@ pub(crate) fn resimulate_path(
     Ok((route, current_amount))
 }
 
-// --- Private helpers ---
-
-/// Extracts a subgraph via BFS from `start` up to `max_depth` hops.
-fn extract_subgraph(
-    start: NodeIndex,
-    max_depth: usize,
-    graph: &StableDiGraph<()>,
-) -> Vec<(NodeIndex, NodeIndex, ComponentId)> {
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-    let mut edges = Vec::new();
-
-    visited.insert(start);
-    queue.push_back((start, 0usize));
-
-    while let Some((node, depth)) = queue.pop_front() {
-        if depth >= max_depth {
-            continue;
-        }
-
-        for edge in graph.edges(node) {
-            let target = edge.target();
-            let component_id = &edge.weight().component_id;
-
-            edges.push((node, target, component_id.clone()));
-
-            if !visited.contains(&target) {
-                visited.insert(target);
-                queue.push_back((target, depth + 1));
-            }
-        }
-    }
-
-    edges
-}
-
-/// Checks whether `target` node is already in the predecessor path leading to `from`.
-fn path_contains_node(
-    from: NodeIndex,
-    target: NodeIndex,
-    predecessor: &[Option<(NodeIndex, ComponentId)>],
-) -> bool {
-    let mut current = from;
-    loop {
-        if current == target {
-            return true;
-        }
-        match &predecessor[current.index()] {
-            Some((prev, _)) => current = *prev,
-            None => return false,
-        }
-    }
-}
-
-/// Checks whether `target_pool` is already used in the predecessor path leading to `from`.
-fn path_contains_pool(
-    from: NodeIndex,
-    target_pool: &ComponentId,
-    predecessor: &[Option<(NodeIndex, ComponentId)>],
-) -> bool {
-    let mut current = from;
-    loop {
-        match &predecessor[current.index()] {
-            Some((prev, cid)) => {
-                if cid == target_pool {
-                    return true;
-                }
-                current = *prev;
-            }
-            None => return false,
-        }
-    }
-}
-
-/// Reconstructs the path from dest back to source by walking the flat predecessor array.
-fn reconstruct_path(
-    dest: NodeIndex,
-    source: NodeIndex,
-    predecessor: &[Option<(NodeIndex, ComponentId)>],
-) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
-    let mut path = Vec::new();
-    let mut current = dest;
-    let mut visited = HashSet::new();
-
-    while current != source {
-        if !visited.insert(current) {
-            return Err(AlgorithmError::Other(
-                "cycle in predecessor chain during path reconstruction".to_string(),
-            ));
-        }
-
-        let idx = current.index();
-        if idx >= predecessor.len() {
-            return Err(AlgorithmError::Other("predecessor index out of bounds".to_string()));
-        }
-
-        match &predecessor[idx] {
-            Some((prev_node, component_id)) => {
-                path.push((*prev_node, current, component_id.clone()));
-                current = *prev_node;
-            }
-            None => {
-                return Err(AlgorithmError::Other(format!(
-                    "broken predecessor chain at node {idx}"
-                )));
-            }
-        }
-    }
-
-    path.reverse();
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
-    use tycho_simulation::tycho_core::models::token::Token;
+    use tycho_simulation::{
+        tycho_common::simulation::protocol_sim::ProtocolSim,
+        tycho_core::models::token::Token,
+    };
 
     use super::*;
     use crate::algorithm::test_utils::{component, token, MockProtocolSim};

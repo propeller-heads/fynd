@@ -86,10 +86,6 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    pub fn simulation_amount(&self) -> &BigUint {
-        &self.simulation_amount
-    }
-
     /// Computes spread and mid_price for a given BF path by simulating both directions.
     ///
     /// Returns (spread_ratio, mid_price, path_components) where:
