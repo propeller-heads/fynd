@@ -1,3 +1,22 @@
+## [0.25.0](https://github.com/propeller-heads/fynd/compare/0.24.3...0.25.0) (2026-03-23)
+
+
+### Features
+
+* **benchmark:** improve compare tool with parallel requests, net-of-gas, timing ([a82e6af](https://github.com/propeller-heads/fynd/commit/a82e6af2eff980a5f05e8fe75941f3535a6daaca))
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([f4cc24e](https://github.com/propeller-heads/fynd/commit/f4cc24edae5d8aaf42b71df5c275d5289b4ff358))
+* **benchmark:** clean up unused deps, naming, and API surface ([0bd89bc](https://github.com/propeller-heads/fynd/commit/0bd89bcd2032c61abcb48cfe55b1062649213e9a))
+* **benchmark:** use server-side amount_out_net_gas and real aggregator trades ([a5080af](https://github.com/propeller-heads/fynd/commit/a5080af7ef1ae67088972dd22c3ef9a839967954))
+
+
+### Reverts
+
+* Revert "Replace committed Dune dataset with download-trades subcommand" ([7c580fe](https://github.com/propeller-heads/fynd/commit/7c580fe7c4af0b85b9dd0d93584feef4884a3434))
+
 ## [0.24.3](https://github.com/propeller-heads/fynd/compare/0.24.2...0.24.3) (2026-03-23)
 
 
