@@ -43,7 +43,7 @@ export interface paths {
          *     - 400 Bad Request: Invalid request format
          *     - 422 Unprocessable Entity: No routes found
          *     - 503 Service Unavailable: Queue full or service overloaded
-         *     - 504 Gateway Timeout: Quote timeout
+         *     - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
          */
         post: operations["quote"];
         delete?: never;
@@ -485,17 +485,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Service unavailable */
+            /** @description Queue full, overloaded, stale data, or timeout */
             503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Quote timeout */
-            504: {
                 headers: {
                     [name: string]: unknown;
                 };
