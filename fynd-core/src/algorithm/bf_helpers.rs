@@ -5,8 +5,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use petgraph::graph::NodeIndex;
-use petgraph::prelude::EdgeRef;
+use petgraph::{graph::NodeIndex, prelude::EdgeRef};
 
 use super::AlgorithmError;
 use crate::{graph::petgraph::StableDiGraph, types::ComponentId};
@@ -48,13 +47,14 @@ pub(crate) fn reconstruct_path(
 
     while current != source {
         if !visited.insert(current) {
-            return Err(AlgorithmError::Other(
-                "cycle in predecessor chain".to_string(),
-            ));
+            return Err(AlgorithmError::Other("cycle in predecessor chain".to_string()));
         }
 
         let idx = current.index();
-        match predecessor.get(idx).and_then(|p| p.as_ref()) {
+        match predecessor
+            .get(idx)
+            .and_then(|p| p.as_ref())
+        {
             Some((prev_node, component_id)) => {
                 path.push((*prev_node, current, component_id.clone()));
                 current = *prev_node;
@@ -118,47 +118,17 @@ mod tests {
         pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
 
         // Node conflict: node 0 is in path
-        assert!(path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(0),
-            &"any".into(),
-            &pred
-        ));
+        assert!(path_has_conflict(NodeIndex::new(2), NodeIndex::new(0), &"any".into(), &pred));
         // No conflict: node 3 is not in path
-        assert!(!path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(3),
-            &"any".into(),
-            &pred
-        ));
+        assert!(!path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"any".into(), &pred));
         // Self-check: node 2 is itself in the path
-        assert!(path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(2),
-            &"any".into(),
-            &pred
-        ));
+        assert!(path_has_conflict(NodeIndex::new(2), NodeIndex::new(2), &"any".into(), &pred));
         // Pool conflict: pool_a used
-        assert!(path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(3),
-            &"pool_a".into(),
-            &pred
-        ));
+        assert!(path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_a".into(), &pred));
         // Pool conflict: pool_b used
-        assert!(path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(3),
-            &"pool_b".into(),
-            &pred
-        ));
+        assert!(path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_b".into(), &pred));
         // No pool conflict: pool_c not used
-        assert!(!path_has_conflict(
-            NodeIndex::new(2),
-            NodeIndex::new(3),
-            &"pool_c".into(),
-            &pred
-        ));
+        assert!(!path_has_conflict(NodeIndex::new(2), NodeIndex::new(3), &"pool_c".into(), &pred));
     }
 
     #[test]
@@ -168,8 +138,7 @@ mod tests {
         pred[1] = Some((NodeIndex::new(0), "pool_a".into()));
         pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
 
-        let path =
-            reconstruct_path(NodeIndex::new(2), NodeIndex::new(0), &pred).unwrap();
+        let path = reconstruct_path(NodeIndex::new(2), NodeIndex::new(0), &pred).unwrap();
         assert_eq!(path.len(), 2);
         assert_eq!(path[0], (NodeIndex::new(0), NodeIndex::new(1), "pool_a".into()));
         assert_eq!(path[1], (NodeIndex::new(1), NodeIndex::new(2), "pool_b".into()));

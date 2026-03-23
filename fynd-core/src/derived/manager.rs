@@ -247,7 +247,8 @@ impl ComputationManager {
     ///
     /// **Dependency order**:
     /// 1. `SpotPriceComputation` - no dependencies
-    /// 2. `TokenGasPriceComputation` - depends on gas_price (uses BF SPFA, no spot_prices dependency)
+    /// 2. `TokenGasPriceComputation` - depends on gas_price (uses BF SPFA, no spot_prices
+    ///    dependency)
     /// 3. `PoolDepthComputation` - depends on spot_prices in store
     async fn compute_all(&self, changed: &ChangedComponents) {
         let total_start = Instant::now();
@@ -372,9 +373,9 @@ impl MarketEventHandler for ComputationManager {
                 added_components,
                 removed_components,
                 updated_components,
-            } if !added_components.is_empty()
-                || !removed_components.is_empty()
-                || !updated_components.is_empty() =>
+            } if !added_components.is_empty() ||
+                !removed_components.is_empty() ||
+                !updated_components.is_empty() =>
             {
                 trace!(
                     added = added_components.len(),

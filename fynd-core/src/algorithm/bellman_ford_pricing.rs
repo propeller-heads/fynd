@@ -76,8 +76,8 @@ pub(crate) fn solve_one_to_all(
         .node_indices()
         .map(|n| n.index())
         .max()
-        .unwrap_or(0)
-        + 1;
+        .unwrap_or(0) +
+        1;
 
     if subgraph_edges.is_empty() {
         return SpfaAllResult {
@@ -256,13 +256,14 @@ pub(crate) fn resimulate_path(
 #[cfg(test)]
 mod tests {
     use tycho_simulation::{
-        tycho_common::simulation::protocol_sim::ProtocolSim,
-        tycho_core::models::token::Token,
+        tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
     };
 
     use super::*;
-    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
-    use crate::graph::{GraphManager, PetgraphStableDiGraphManager};
+    use crate::{
+        algorithm::test_utils::{component, token, MockProtocolSim},
+        graph::{GraphManager, PetgraphStableDiGraphManager},
+    };
 
     fn setup_market_and_graph(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,

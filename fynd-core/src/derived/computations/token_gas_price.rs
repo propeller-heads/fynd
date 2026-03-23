@@ -4,12 +4,12 @@
 //!
 //! # Algorithm
 //!
-//! 1. **BF Forward Pass (one-to-all)**: Run SPFA from gas_token with a probe amount.
-//!    Each token's distance = the best amount reachable via simulation during relaxation.
-//!    This replaces DFS path enumeration AND spot-price scoring in a single pass.
+//! 1. **BF Forward Pass (one-to-all)**: Run SPFA from gas_token with a probe amount. Each token's
+//!    distance = the best amount reachable via simulation during relaxation. This replaces DFS path
+//!    enumeration AND spot-price scoring in a single pass.
 //!
-//! 2. **Reverse Simulation**: For each priced token, reverse the winning path and simulate
-//!    the sell direction. Compute spread and mid_price from forward + reverse amounts.
+//! 2. **Reverse Simulation**: For each priced token, reverse the winning path and simulate the sell
+//!    direction. Compute spread and mid_price from forward + reverse amounts.
 //!
 //! # Price Formulas
 //!
@@ -162,11 +162,11 @@ impl TokenGasPriceComputation {
         // Compute mid_price in numerator/denominator form (precise BigUint arithmetic)
         let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
-            numerator: &buy_out * &sell_out_net
-                + &buy_out * (&self.simulation_amount + &buy_gas_cost),
-            denominator: BigUint::from(2u8)
-                * (&self.simulation_amount + &buy_gas_cost)
-                * sell_out_net,
+            numerator: &buy_out * &sell_out_net +
+                &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8) *
+                (&self.simulation_amount + &buy_gas_cost) *
+                sell_out_net,
         };
 
         Ok((spread, buy_price_precise, path_components))
