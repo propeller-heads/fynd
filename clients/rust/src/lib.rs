@@ -50,13 +50,13 @@
 //! ```
 
 pub use client::{
-    ApprovalOptions, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints,
-    StorageOverrides, SubmitOptions,
+    ApprovalParams, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints,
+    StorageOverrides,
 };
 pub use error::{ErrorCode, FyndError};
 pub use signing::{
-    ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx, SettledOrder, SignablePayload,
-    SignedApproval, SignedOrder, TxReceipt,
+    ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx, SettledOrder, SignedApproval,
+    SignedSwap, SwapPayload, TxReceipt,
 };
 pub use types::{
     BackendKind, BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown, HealthStatus,

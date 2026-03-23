@@ -16,7 +16,7 @@ use alloy::{
 };
 use fynd_client::{
     ErrorCode, FyndClient, FyndError, Order, OrderSide, QuoteOptions, QuoteParams, RetryConfig,
-    SignablePayload, SigningHints,
+    SigningHints, SwapPayload,
 };
 use num_bigint::BigUint;
 use wiremock::{
@@ -385,14 +385,14 @@ async fn quote_receiver_defaults_to_sender_when_none() {
     server.verify().await;
 }
 
-/// Full round-trip: quote, then signable_payload with all hints — no RPC calls needed.
+/// Full round-trip: quote, then swap_payload with all hints — no RPC calls needed.
 ///
 /// This test exercises the complete flow that a real user would follow:
 /// 1. Call quote() to get an OrderQuote.
-/// 2. Call signable_payload() on the quote with explicit hints.
+/// 2. Call swap_payload() on the quote with explicit hints.
 /// 3. Verify the returned EIP-1559 tx has the expected fields.
 #[tokio::test]
-async fn full_quote_then_signable_payload_with_all_hints() {
+async fn full_quote_then_swap_payload_with_all_hints() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -418,11 +418,11 @@ async fn full_quote_then_signable_payload_with_all_hints() {
         .with_gas_limit(80_000);
 
     let payload = client
-        .signable_payload(quote, &hints)
+        .swap_payload(quote, &hints)
         .await
-        .expect("signable_payload should succeed");
+        .expect("swap_payload should succeed");
 
-    let SignablePayload::Fynd(fynd) = payload else {
+    let SwapPayload::Fynd(fynd) = payload else {
         panic!("expected Fynd payload");
     };
 
@@ -439,9 +439,9 @@ async fn full_quote_then_signable_payload_with_all_hints() {
     server.verify().await;
 }
 
-/// Full round-trip: quote, signable_payload resolving nonce/fees from mock provider.
+/// Full round-trip: quote, swap_payload resolving nonce/fees from mock provider.
 #[tokio::test]
-async fn full_quote_then_signable_payload_resolves_from_provider() {
+async fn full_quote_then_swap_payload_resolves_from_provider() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -472,11 +472,11 @@ async fn full_quote_then_signable_payload_resolves_from_provider() {
     let hints = SigningHints::default(); // no overrides — resolved from provider
 
     let payload = client
-        .signable_payload(quote, &hints)
+        .swap_payload(quote, &hints)
         .await
-        .expect("signable_payload should succeed");
+        .expect("swap_payload should succeed");
 
-    let SignablePayload::Fynd(fynd) = payload else {
+    let SwapPayload::Fynd(fynd) = payload else {
         panic!("expected Fynd payload");
     };
 

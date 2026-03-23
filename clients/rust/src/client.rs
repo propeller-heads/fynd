@@ -22,7 +22,7 @@ use crate::{
     mapping::dto_to_batch_quote,
     signing::{
         compute_settled_amount, ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx,
-        SettledOrder, SignablePayload, SignedApproval, SignedOrder, TxReceipt,
+        SettledOrder, SignedApproval, SignedSwap, SwapPayload, TxReceipt,
     },
     types::{BackendKind, HealthStatus, InstanceInfo, Quote, QuoteParams},
 };
@@ -85,7 +85,7 @@ impl Default for RetryConfig {
 /// Optional hints to override auto-resolved transaction parameters.
 ///
 /// All fields default to `None` / `false`. Unset fields are resolved automatically from the
-/// RPC node during [`FyndClient::signable_payload`].
+/// RPC node during [`FyndClient::swap_payload`].
 ///
 /// Build via the setter methods; all options are unset by default.
 #[derive(Default)]
@@ -252,22 +252,21 @@ pub struct ExecutionOptions {
 }
 
 // ============================================================================
-// APPROVAL OPTIONS
+// APPROVAL PARAMS
 // ============================================================================
 
-/// Options controlling the behaviour of [`FyndClient::approval`].
-#[derive(Default)]
-pub struct ApprovalOptions {
+/// Parameters for [`FyndClient::approval`].
+pub struct ApprovalParams {
+    /// ERC-20 token to approve (20 raw bytes).
+    pub token: bytes::Bytes,
+    /// Amount to approve (token units).
+    pub amount: num_bigint::BigUint,
     /// When `true`, check the current ERC-20 allowance before building the transaction.
     ///
     /// If the allowance is already sufficient, [`ApprovalPayload::is_needed`] returns
     /// `Some(false)`; otherwise `Some(true)`. When `false`, `is_needed` is always `None`.
     pub check_allowance: bool,
 }
-
-/// Options controlling the behaviour of [`FyndClient::submit`].
-#[derive(Default)]
-pub struct SubmitOptions {}
 
 // ============================================================================
 // ERC-20 ABI
@@ -348,7 +347,7 @@ impl FyndClientBuilder {
     /// Build a [`FyndClient`] without connecting to an Ethereum RPC node.
     ///
     /// Suitable for [`FyndClient::quote`] and [`FyndClient::health`] calls only.
-    /// [`FyndClient::signable_payload`] and [`FyndClient::execute`] require a live RPC URL and
+    /// [`FyndClient::swap_payload`] and [`FyndClient::execute`] require a live RPC URL and
     /// will fail if called on a client built this way.
     ///
     /// Returns [`FyndError::Config`] if `base_url` is invalid.
@@ -578,7 +577,7 @@ where
         Err(FyndError::Protocol(format!("unexpected health response ({status}): {body}")))
     }
 
-    /// Build a signable payload for a given order quote.
+    /// Build a swap payload for a given order quote, ready for signing.
     ///
     /// For [`BackendKind::Fynd`] quotes, this resolves the sender nonce and EIP-1559 fee
     /// parameters from the RPC node (unless overridden via `hints`), then constructs an
@@ -589,14 +588,14 @@ where
     ///
     /// `token_out` and `receiver` are read directly from the `quote` (populated during
     /// `quote()`). Pass `&SigningHints::default()` to auto-resolve all transaction parameters.
-    pub async fn signable_payload(
+    pub async fn swap_payload(
         &self,
         quote: Quote,
         hints: &SigningHints,
-    ) -> Result<SignablePayload, FyndError> {
+    ) -> Result<SwapPayload, FyndError> {
         match quote.backend() {
             BackendKind::Fynd => {
-                self.fynd_signable_payload(quote, hints)
+                self.fynd_swap_payload(quote, hints)
                     .await
             }
             BackendKind::Turbine => {
@@ -605,11 +604,11 @@ where
         }
     }
 
-    async fn fynd_signable_payload(
+    async fn fynd_swap_payload(
         &self,
         quote: Quote,
         hints: &SigningHints,
-    ) -> Result<SignablePayload, FyndError> {
+    ) -> Result<SwapPayload, FyndError> {
         // Resolve sender.
         let sender = hints
             .sender()
@@ -682,10 +681,10 @@ where
         }
 
         let tx = TypedTransaction::Eip1559(tx_eip1559);
-        Ok(SignablePayload::Fynd(Box::new(FyndPayload::new(quote, tx))))
+        Ok(SwapPayload::Fynd(Box::new(FyndPayload::new(quote, tx))))
     }
 
-    /// Broadcast a signed order and return an [`ExecutionReceipt`] that resolves once the
+    /// Broadcast a signed swap and return an [`ExecutionReceipt`] that resolves once the
     /// transaction is mined.
     ///
     /// Pass [`ExecutionOptions::default`] for standard on-chain submission. Set
@@ -695,9 +694,9 @@ where
     /// For real submissions, this method returns **immediately** after broadcasting. The inner
     /// future polls every 2 seconds and has no built-in timeout; wrap with
     /// [`tokio::time::timeout`] to bound the wait.
-    pub async fn execute(
+    pub async fn execute_swap(
         &self,
-        order: SignedOrder,
+        order: SignedSwap,
         options: &ExecutionOptions,
     ) -> Result<ExecutionReceipt, FyndError> {
         let (payload, signature) = order.into_parts();
@@ -767,22 +766,20 @@ where
         mapping::dto_to_instance_info(dto_info)
     }
 
-    /// Build an unsigned EIP-1559 `approve(spender, amount)` transaction.
+    /// Build an unsigned EIP-1559 `approve(router, amount)` transaction for the given token.
     ///
     /// 1. Calls [`info()`](Self::info) to resolve the router address (used as spender).
     /// 2. Resolves nonce and EIP-1559 fees via `hints` (same semantics as
-    ///    [`signable_payload`](Self::signable_payload)).
+    ///    [`swap_payload`](Self::swap_payload)).
     /// 3. Encodes the `approve(router, amount)` calldata using the ERC-20 ABI.
-    /// 4. Optionally checks the current allowance if `options.check_allowance` is `true` and sets
+    /// 4. Optionally checks the current allowance if `params.check_allowance` is `true` and sets
     ///    [`ApprovalPayload::is_needed`] accordingly.
     ///
     /// Gas defaults to `hints.gas_limit().unwrap_or(65_000)`.
     pub async fn approval(
         &self,
-        token: bytes::Bytes,
-        amount: num_bigint::BigUint,
+        params: &ApprovalParams,
         hints: &SigningHints,
-        options: &ApprovalOptions,
     ) -> Result<ApprovalPayload, FyndError> {
         let info = self.info().await?;
         let router_addr = mapping::bytes_to_alloy_address(info.router_address())?;
@@ -818,8 +815,8 @@ where
             };
 
         let gas_limit = hints.gas_limit().unwrap_or(65_000);
-        let token_addr = mapping::bytes_to_alloy_address(&token)?;
-        let amount_u256 = mapping::biguint_to_u256(&amount);
+        let token_addr = mapping::bytes_to_alloy_address(&params.token)?;
+        let amount_u256 = mapping::biguint_to_u256(&params.amount);
 
         // Encode approve(router, amount).
         use alloy::sol_types::SolCall;
@@ -839,7 +836,7 @@ where
         };
 
         // Optionally check current allowance.
-        let is_needed = if options.check_allowance {
+        let is_needed = if params.check_allowance {
             use alloy::sol_types::SolCall;
             let call_data =
                 erc20::allowanceCall { owner: sender, spender: router_addr }.abi_encode();
@@ -864,7 +861,13 @@ where
         };
 
         let spender = bytes::Bytes::copy_from_slice(router_addr.as_slice());
-        Ok(ApprovalPayload { tx, token, spender, amount, is_needed })
+        Ok(ApprovalPayload {
+            tx,
+            token: params.token.clone(),
+            spender,
+            amount: params.amount.clone(),
+            is_needed,
+        })
     }
 
     /// Broadcast a signed approval transaction and return a [`TxReceipt`] that resolves once
@@ -872,11 +875,7 @@ where
     ///
     /// This method returns immediately after broadcasting. The inner future polls every 2 seconds
     /// and has no built-in timeout; wrap with [`tokio::time::timeout`] to bound the wait.
-    pub async fn submit(
-        &self,
-        approval: SignedApproval,
-        _options: &SubmitOptions,
-    ) -> Result<TxReceipt, FyndError> {
+    pub async fn execute_approval(&self, approval: SignedApproval) -> Result<TxReceipt, FyndError> {
         let (payload, signature) = approval.into_parts();
         let tx_hash = self
             .send_raw(payload.tx, signature)
@@ -1314,11 +1313,11 @@ mod tests {
     }
 
     // ========================================================================
-    // signable_payload() tests
+    // swap_payload() tests
     // ========================================================================
 
     #[tokio::test]
-    async fn signable_payload_uses_hints_when_all_provided() {
+    async fn swap_payload_uses_hints_when_all_provided() {
         let sender = Address::with_last_byte(0xab);
         let (client, _asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
@@ -1334,11 +1333,11 @@ mod tests {
         };
 
         let payload = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
-            .expect("signable_payload should succeed");
+            .expect("swap_payload should succeed");
 
-        let SignablePayload::Fynd(fynd) = payload else {
+        let SwapPayload::Fynd(fynd) = payload else {
             panic!("expected Fynd payload");
         };
         let TypedTransaction::Eip1559(tx) = fynd.tx() else {
@@ -1351,7 +1350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signable_payload_fetches_nonce_and_fees_when_hints_absent() {
+    async fn swap_payload_fetches_nonce_and_fees_when_hints_absent() {
         let sender = Address::with_last_byte(0xde);
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
@@ -1373,11 +1372,11 @@ mod tests {
         let hints = SigningHints::default();
 
         let payload = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
-            .expect("signable_payload should succeed");
+            .expect("swap_payload should succeed");
 
-        let SignablePayload::Fynd(fynd) = payload else {
+        let SwapPayload::Fynd(fynd) = payload else {
             panic!("expected Fynd payload");
         };
         let TypedTransaction::Eip1559(tx) = fynd.tx() else {
@@ -1387,7 +1386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signable_payload_returns_config_error_when_no_sender() {
+    async fn swap_payload_returns_config_error_when_no_sender() {
         // No sender on client, no sender in hints.
         let (client, _asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
@@ -1396,7 +1395,7 @@ mod tests {
         let hints = SigningHints::default(); // no sender
 
         let err = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
             .unwrap_err();
 
@@ -1404,7 +1403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signable_payload_with_simulate_true_calls_eth_call_successfully() {
+    async fn swap_payload_with_simulate_true_calls_eth_call_successfully() {
         let sender = Address::with_last_byte(0xab);
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
@@ -1423,15 +1422,15 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::new());
 
         let payload = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
-            .expect("signable_payload with simulate=true should succeed");
+            .expect("swap_payload with simulate=true should succeed");
 
-        assert!(matches!(payload, SignablePayload::Fynd(_)));
+        assert!(matches!(payload, SwapPayload::Fynd(_)));
     }
 
     #[tokio::test]
-    async fn signable_payload_with_simulate_true_returns_simulation_failed_on_revert() {
+    async fn swap_payload_with_simulate_true_returns_simulation_failed_on_revert() {
         let sender = Address::with_last_byte(0xab);
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), None);
@@ -1450,7 +1449,7 @@ mod tests {
         asserter.push_failure_msg("execution reverted");
 
         let err = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
             .unwrap_err();
 
@@ -1461,14 +1460,14 @@ mod tests {
     }
 
     // ========================================================================
-    // execute() dry-run tests
+    // execute_swap() dry-run tests
     // ========================================================================
 
-    /// Build a [`SignedOrder`] from a minimal [`Quote`] and a dummy transaction.
+    /// Build a [`SignedSwap`] from a minimal [`Quote`] and a dummy transaction.
     ///
     /// Suitable for dry-run tests where neither the signature nor the transaction
     /// contents are validated on-chain.
-    fn make_signed_order() -> SignedOrder {
+    fn make_signed_swap() -> SignedSwap {
         use alloy::{
             eips::eip2930::AccessList,
             primitives::{Bytes as AlloyBytes, Signature, TxKind, U256},
@@ -1489,8 +1488,8 @@ mod tests {
             access_list: AccessList::default(),
         };
         let payload =
-            SignablePayload::Fynd(Box::new(FyndPayload::new(quote, TypedTransaction::Eip1559(tx))));
-        SignedOrder::assemble(payload, Signature::test_signature())
+            SwapPayload::Fynd(Box::new(FyndPayload::new(quote, TypedTransaction::Eip1559(tx))));
+        SignedSwap::assemble(payload, Signature::test_signature())
     }
 
     #[tokio::test]
@@ -1505,10 +1504,10 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&amount_bytes));
         asserter.push_success(&50_000u64); // estimate_gas response
 
-        let order = make_signed_order();
+        let order = make_signed_swap();
         let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
         let receipt = client
-            .execute(order, &opts)
+            .execute_swap(order, &opts)
             .await
             .expect("execute should succeed");
         let settled = receipt
@@ -1539,10 +1538,10 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&amount_bytes));
         asserter.push_success(&21_000u64);
 
-        let order = make_signed_order();
+        let order = make_signed_swap();
         let opts = ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) };
         let receipt = client
-            .execute(order, &opts)
+            .execute_swap(order, &opts)
             .await
             .expect("execute with overrides should succeed");
         receipt.await.expect("should resolve");
@@ -1556,9 +1555,9 @@ mod tests {
 
         asserter.push_failure_msg("execution reverted");
 
-        let order = make_signed_order();
+        let order = make_signed_swap();
         let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
-        let result = client.execute(order, &opts).await;
+        let result = client.execute_swap(order, &opts).await;
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected SimulationFailed error"),
@@ -1579,10 +1578,10 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::new());
         asserter.push_success(&21_000u64);
 
-        let order = make_signed_order();
+        let order = make_signed_swap();
         let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
         let receipt = client
-            .execute(order, &opts)
+            .execute_swap(order, &opts)
             .await
             .expect("execute should succeed");
         let settled = receipt.await.expect("should resolve");
@@ -1594,7 +1593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signable_payload_returns_protocol_error_when_no_transaction() {
+    async fn swap_payload_returns_protocol_error_when_no_transaction() {
         use crate::types::{BackendKind, BlockInfo, QuoteStatus};
 
         let sender = Address::with_last_byte(0xab);
@@ -1628,7 +1627,7 @@ mod tests {
         };
 
         let err = client
-            .signable_payload(quote, &hints)
+            .swap_payload(quote, &hints)
             .await
             .unwrap_err();
 
@@ -1744,11 +1743,14 @@ mod tests {
         // allowance check)
         let _ = &asserter; // suppress unused warning
 
-        let token = bytes::Bytes::copy_from_slice(&[0xdd; 20]);
-        let amount = num_bigint::BigUint::from(1_000_000u64);
+        let params = ApprovalParams {
+            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            amount: num_bigint::BigUint::from(1_000_000u64),
+            check_allowance: false,
+        };
 
         let payload = client
-            .approval(token, amount, &hints, &ApprovalOptions::default())
+            .approval(&params, &hints)
             .await
             .expect("approval should succeed");
 
@@ -1793,11 +1795,14 @@ mod tests {
         let zero_allowance = alloy::primitives::Bytes::copy_from_slice(&[0u8; 32]);
         asserter.push_success(&zero_allowance);
 
-        let token = bytes::Bytes::copy_from_slice(&[0xdd; 20]);
-        let amount = num_bigint::BigUint::from(500_000u64);
+        let params = ApprovalParams {
+            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            amount: num_bigint::BigUint::from(500_000u64),
+            check_allowance: true,
+        };
 
         let payload = client
-            .approval(token, amount, &hints, &ApprovalOptions { check_allowance: true })
+            .approval(&params, &hints)
             .await
             .expect("approval with allowance check should succeed");
 
@@ -1839,12 +1844,15 @@ mod tests {
         allowance_bytes[24..32].copy_from_slice(&1_000_000u64.to_be_bytes());
         asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&allowance_bytes));
 
-        let token = bytes::Bytes::copy_from_slice(&[0xdd; 20]);
         // Request 500_000, but allowance is 1_000_000 — sufficient.
-        let amount = num_bigint::BigUint::from(500_000u64);
+        let params = ApprovalParams {
+            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            amount: num_bigint::BigUint::from(500_000u64),
+            check_allowance: true,
+        };
 
         let payload = client
-            .approval(token, amount, &hints, &ApprovalOptions { check_allowance: true })
+            .approval(&params, &hints)
             .await
             .expect("approval with sufficient allowance check should succeed");
 
@@ -1856,7 +1864,7 @@ mod tests {
     }
 
     // ========================================================================
-    // submit() tests
+    // execute_approval() tests
     // ========================================================================
 
     fn make_signed_approval() -> crate::signing::SignedApproval {
@@ -1886,7 +1894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_broadcasts_and_polls() {
+    async fn execute_approval_broadcasts_and_polls() {
         let sender = Address::with_last_byte(0xab);
         let (client, asserter) =
             make_test_client("http://localhost".to_string(), RetryConfig::default(), Some(sender));
@@ -1922,9 +1930,9 @@ mod tests {
 
         let approval = make_signed_approval();
         let tx_receipt = client
-            .submit(approval, &SubmitOptions::default())
+            .execute_approval(approval)
             .await
-            .expect("submit should succeed");
+            .expect("execute_approval should succeed");
 
         let mined = tx_receipt
             .await

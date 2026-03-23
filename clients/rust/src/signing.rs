@@ -15,7 +15,7 @@ use crate::{error::FyndError, Quote};
 
 /// A ready-to-sign EIP-1559 transaction produced by the Fynd execution path.
 ///
-/// Obtain one via [`FyndClient::signable_payload`](crate::FyndClient::signable_payload) when
+/// Obtain one via [`FyndClient::swap_payload`](crate::FyndClient::swap_payload) when
 /// the quote's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
 #[derive(Debug)]
 pub struct FyndPayload {
@@ -35,7 +35,7 @@ impl FyndPayload {
 
     /// The unsigned EIP-1559 transaction. Sign its
     /// [`signature_hash()`](alloy::consensus::SignableTransaction::signature_hash) and pass the
-    /// result to [`SignedOrder::assemble`].
+    /// result to [`SignedSwap::assemble`].
     pub fn tx(&self) -> &TypedTransaction {
         &self.tx
     }
@@ -54,22 +54,22 @@ pub struct TurbinePayload {
     _order_quote: (),
 }
 
-/// A payload that needs to be signed before it can be executed.
+/// A payload that needs to be signed before a swap can be executed.
 ///
 /// Use [`signing_hash`](Self::signing_hash) to obtain the bytes to sign, then pass the resulting
-/// [`alloy::primitives::Signature`] to [`SignedOrder::assemble`].
+/// [`alloy::primitives::Signature`] to [`SignedSwap::assemble`].
 ///
 /// Only the [`Fynd`](Self::Fynd) variant is currently executable; calling methods on the
 /// [`Turbine`](Self::Turbine) variant will panic with `unimplemented!`.
 #[derive(Debug)]
-pub enum SignablePayload {
+pub enum SwapPayload {
     /// Fynd execution path — an EIP-1559 transaction targeting the RouterV3 contract.
     Fynd(Box<FyndPayload>),
     /// Turbine execution path — not yet implemented.
     Turbine(TurbinePayload),
 }
 
-impl SignablePayload {
+impl SwapPayload {
     /// Returns the 32-byte hash that must be signed.
     ///
     /// For the Fynd path this is the EIP-1559 transaction's `signature_hash()`.
@@ -110,7 +110,7 @@ impl SignablePayload {
         }
     }
 
-    /// Consume the payload and return its inner parts for use in `execute()`.
+    /// Consume the payload and return its inner parts for use in `execute_swap()`.
     pub(crate) fn into_fynd_parts(
         self,
     ) -> Result<(Quote, TypedTransaction), crate::error::FyndError> {
@@ -127,25 +127,25 @@ impl SignablePayload {
 // SIGNED ORDER
 // ============================================================================
 
-/// A [`SignablePayload`] paired with its cryptographic signature.
+/// A [`SwapPayload`] paired with its cryptographic signature.
 ///
-/// Construct via [`SignedOrder::assemble`] after signing the
-/// [`signing_hash`](SignablePayload::signing_hash). Pass to
-/// [`FyndClient::execute`](crate::FyndClient::execute) to broadcast and settle.
-pub struct SignedOrder {
-    payload: SignablePayload,
+/// Construct via [`SignedSwap::assemble`] after signing the
+/// [`signing_hash`](SwapPayload::signing_hash). Pass to
+/// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to broadcast and settle.
+pub struct SignedSwap {
+    payload: SwapPayload,
     signature: Signature,
 }
 
-impl SignedOrder {
+impl SignedSwap {
     /// Pair a payload with the signature produced by signing its
-    /// [`signing_hash`](SignablePayload::signing_hash).
-    pub fn assemble(payload: SignablePayload, signature: Signature) -> Self {
+    /// [`signing_hash`](SwapPayload::signing_hash).
+    pub fn assemble(payload: SwapPayload, signature: Signature) -> Self {
         Self { payload, signature }
     }
 
-    /// The underlying signable payload.
-    pub fn payload(&self) -> &SignablePayload {
+    /// The underlying swap payload.
+    pub fn payload(&self) -> &SwapPayload {
         &self.payload
     }
 
@@ -154,7 +154,7 @@ impl SignedOrder {
         &self.signature
     }
 
-    pub(crate) fn into_parts(self) -> (SignablePayload, Signature) {
+    pub(crate) fn into_parts(self) -> (SwapPayload, Signature) {
         (self.payload, self.signature)
     }
 }
