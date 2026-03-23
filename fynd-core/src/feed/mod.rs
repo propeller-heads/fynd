@@ -5,6 +5,8 @@ use tycho_simulation::tycho_common::models::Chain;
 pub(crate) mod events;
 pub mod gas;
 pub mod market_data;
+#[cfg(test)]
+mod write_lock_contention_test;
 
 pub use gas::GAS_PRICE_DEPENDENCY_ID;
 pub mod protocol_registry;
