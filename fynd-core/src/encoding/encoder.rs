@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use alloy::{
     primitives::{aliases::U48, Address, Keccak256, U160, U256},
     sol_types::SolValue,
@@ -18,15 +20,31 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{EncodingOptions, OrderQuote, QuoteStatus, SolveError, Transaction};
 
+/// Canonical Permit2 contract address — identical on all EVM chains.
+pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+/// Default Tycho Router addresses per chain, keyed by lowercase chain name.
+///
+/// `tycho_execution::encoding::evm::constants` is a private module, so we embed a copy here.
+/// When upgrading tycho-execution, verify this stays in sync with
+/// `tycho-execution/config/router_addresses.json`.
+const ROUTER_ADDRESSES_JSON: &str = r#"{
+  "ethereum": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35",
+  "base": "0xea3207778e39EB02D72C9D3c4Eac7E224ac5d369",
+  "unichain": "0xFfA5ec2e444e4285108e4a17b82dA495c178427B"
+}"#;
+
 /// Encodes solution into tycho compatible transactions.
 ///
 /// # Fields
 /// * `tycho_encoder` - Encoder created using the configured chain for encoding solutions into tycho
 ///   compatible transactions
 /// * `chain` - Chain to be used.
+/// * `router_address` - Address of the Tycho Router contract on this chain.
 pub struct Encoder {
     tycho_encoder: Box<dyn TychoEncoder>,
     chain: Chain,
+    router_address: Bytes,
 }
 
 impl TryFrom<&OrderQuote> for Solution {
@@ -89,13 +107,27 @@ impl Encoder {
         chain: Chain,
         swap_encoder_registry: SwapEncoderRegistry,
     ) -> Result<Self, SolveError> {
+        let default_routers: HashMap<Chain, Bytes> = serde_json::from_str(ROUTER_ADDRESSES_JSON)
+            .map_err(|e| SolveError::FailedEncoding(e.to_string()))?;
+        let router_address = default_routers
+            .get(&chain)
+            .ok_or_else(|| {
+                SolveError::FailedEncoding("no default router address found for chain".to_string())
+            })?
+            .clone();
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
                 .chain(chain)
                 .swap_encoder_registry(swap_encoder_registry)
                 .build()?,
             chain,
+            router_address,
         })
+    }
+
+    /// Returns the Tycho Router contract address for this chain.
+    pub fn router_address(&self) -> &Bytes {
+        &self.router_address
     }
 
     /// Encodes order solutions for execution.
@@ -391,7 +423,11 @@ mod tests {
     }
 
     fn mock_encoder(chain: Chain) -> Encoder {
-        Encoder { tycho_encoder: Box::new(MockTychoEncoder), chain }
+        Encoder {
+            tycho_encoder: Box::new(MockTychoEncoder),
+            chain,
+            router_address: Bytes::from([0u8; 20].as_ref()),
+        }
     }
 
     #[test]

@@ -16,7 +16,10 @@ use num_cpus;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
-use tycho_simulation::{tycho_common::models::Chain, tycho_ethereum::rpc::EthereumRpcClient};
+use tycho_simulation::{
+    tycho_common::{models::Chain, Bytes},
+    tycho_ethereum::rpc::EthereumRpcClient,
+};
 
 use crate::{
     algorithm::{AlgorithmConfig, AlgorithmError},
@@ -572,6 +575,9 @@ impl FyndBuilder {
             }
         };
 
+        let chain = self.chain;
+        let router_address = encoder.router_address().clone();
+
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
@@ -604,6 +610,8 @@ impl FyndBuilder {
             gas_price_handle,
             computation_handle,
             computation_shutdown_tx,
+            chain,
+            router_address,
         })
     }
 }
@@ -618,6 +626,8 @@ pub struct Solver {
     gas_price_handle: JoinHandle<()>,
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
+    chain: Chain,
+    router_address: Bytes,
 }
 
 impl Solver {
@@ -707,6 +717,8 @@ impl Solver {
             gas_price_handle: self.gas_price_handle,
             computation_handle: self.computation_handle,
             computation_shutdown_tx: self.computation_shutdown_tx,
+            chain: self.chain,
+            router_address: self.router_address,
         }
     }
 }
@@ -731,9 +743,23 @@ pub struct SolverParts {
     computation_handle: JoinHandle<()>,
     /// Send a unit value on this channel to trigger a graceful computation-manager shutdown.
     computation_shutdown_tx: broadcast::Sender<()>,
+    /// Chain this solver is configured for.
+    chain: Chain,
+    /// Address of the Tycho Router contract on this chain.
+    router_address: Bytes,
 }
 
 impl SolverParts {
+    /// Returns the chain this solver is configured for.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
+    /// Returns the Tycho Router contract address for this chain.
+    pub fn router_address(&self) -> &Bytes {
+        &self.router_address
+    }
+
     /// Returns a reference to the worker pools.
     pub fn worker_pools(&self) -> &[WorkerPool] {
         &self.worker_pools
@@ -777,6 +803,36 @@ impl SolverParts {
             self.gas_price_handle,
             self.computation_handle,
             self.computation_shutdown_tx,
+        )
+    }
+
+    /// Consumes the parts, returning all owned components including static instance metadata.
+    #[allow(clippy::type_complexity)]
+    pub fn into_components_with_info(
+        self,
+    ) -> (
+        WorkerPoolRouter,
+        Vec<WorkerPool>,
+        SharedMarketDataRef,
+        SharedDerivedDataRef,
+        JoinHandle<()>,
+        JoinHandle<()>,
+        JoinHandle<()>,
+        broadcast::Sender<()>,
+        Chain,
+        Bytes,
+    ) {
+        (
+            self.router,
+            self.worker_pools,
+            self.market_data,
+            self.derived_data,
+            self.feed_handle,
+            self.gas_price_handle,
+            self.computation_handle,
+            self.computation_shutdown_tx,
+            self.chain,
+            self.router_address,
         )
     }
 }
