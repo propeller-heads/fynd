@@ -37,7 +37,7 @@ impl ResponseError for ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::SolveFailed(e) => match e {
                 SolveError::QueueFull => StatusCode::SERVICE_UNAVAILABLE,
-                SolveError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+                SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
@@ -128,7 +128,7 @@ mod tests {
     #[actix_web::test]
     async fn test_timeout() {
         let (status, body) = json_body(ApiError::SolveFailed(SolveError::timeout(100))).await;
-        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "TIMEOUT");
     }
 

@@ -33,7 +33,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 400 Bad Request: Invalid request format
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
-/// - 504 Gateway Timeout: Quote timeout
+/// - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
 #[utoipa::path(
     post,
     path = "/v1/quote",
@@ -44,7 +44,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
-        (status = 504, description = "Quote timeout", body = ErrorResponse),
+        (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
