@@ -1,3 +1,11 @@
+## [0.24.3](https://github.com/propeller-heads/fynd/compare/0.24.2...0.24.3) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove unused SharedMarketData import ([824092b](https://github.com/propeller-heads/fynd/commit/824092bcc33bc2d88c73515b092e6b11176d4b72))
+* update rustls-webpki to 0.103.10 for RUSTSEC-2026-0049 ([1aa85c2](https://github.com/propeller-heads/fynd/commit/1aa85c2706b7991fbc6c647fc49b85c87047ac14))
+
 ## [0.24.2](https://github.com/propeller-heads/fynd/compare/0.24.1...0.24.2) (2026-03-23)
 
 
