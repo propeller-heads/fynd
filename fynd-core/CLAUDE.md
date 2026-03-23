@@ -46,12 +46,10 @@ pub trait EdgeWeightUpdaterWithDerived {
 }
 ```
 
-## Two Builder Levels
+## Builder
 
-- **`FyndBuilder`** (`solver.rs`): Assembles feed + gas + computations + pools + encoder + router.
-  Returns a `Solver` that can `quote()` directly. For standalone (non-HTTP) use.
-- **`FyndRPCBuilder`** (`fynd-rpc/builder.rs`): Wraps `FyndBuilder` and adds HTTP server. For
-  server deployments.
+**`FyndBuilder`** (`solver.rs`): Assembles feed + gas + computations + pools + encoder + router.
+Returns a `Solver` that can `quote()` directly. For standalone (non-HTTP) use.
 
 ## Adding a Custom Algorithm
 

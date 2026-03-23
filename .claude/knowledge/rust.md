@@ -10,21 +10,7 @@ cargo test
 cargo clippy --all-features
 ```
 
-After a task is done:
-
-```bash
-# Lint (always use nightly)
-cargo +nightly clippy --workspace --all-features --all-targets
-
-# Format
-cargo +nightly fmt --all
-
-# Tests (full workspace)
-cargo nextest run --workspace --all-targets --all-features
-
-# Build check (fast)
-cargo +nightly check --workspace --all-features
-```
+After a task is done, run `./check.sh` (the same script runs as a precommit hook).
 
 ## Coding Style
 

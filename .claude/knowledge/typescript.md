@@ -40,16 +40,6 @@ pnpm --dir clients/typescript --filter @fynd/client run lint
 pnpm --dir clients/typescript --filter @fynd/client run test
 ```
 
-## OpenAPI Codegen
-
-The TypeScript types are generated from `clients/openapi.json`:
-
-1. Update the OpenAPI spec: `./scripts/update-openapi.sh`
-2. This regenerates `clients/openapi.json` from Rust types and `autogen/src/schema.d.ts` via
-   `openapi-typescript`
-
-CI checks for drift in both the OpenAPI spec and the generated TypeScript types.
-
 ## Key Conventions
 
 - ESM only (`"type": "module"`)

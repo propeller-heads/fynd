@@ -33,6 +33,16 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `Transaction` — to, value, data (hex-encoded calldata)
 - `HealthStatus` — market_last_updated, derived_data_ready, num_components, num_solver_pools
 
+## OpenAPI Codegen
+
+When types change here, regenerate the OpenAPI spec and TypeScript types:
+
+1. Update the OpenAPI spec: `./scripts/update-openapi.sh`
+2. This regenerates `clients/openapi.json` from Rust types and `autogen/src/schema.d.ts` via
+   `openapi-typescript`
+
+CI checks for drift in both the OpenAPI spec and the generated TypeScript types.
+
 ## BigUint Serialization
 
 All `BigUint` fields use `#[serde_as(as = "DisplayFromStr")]` — they serialize as decimal strings
