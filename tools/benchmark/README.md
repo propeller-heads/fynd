@@ -56,25 +56,6 @@ Console output shows real-time progress, summary statistics, and ASCII histogram
 
 ---
 
-## Scale
-
-Measures how solver throughput scales with worker thread count. Builds a solver in-process for each worker count, runs a load test, shuts down, and repeats.
-
-```bash
-cargo run -p fynd-benchmark --release -- scale \
-  --base-config single_pool.toml \
-  --worker-counts 1,2,4,8,16 \
-  --protocols uniswap_v2,uniswap_v3 \
-  --tycho-url wss://tycho.example.com \
-  --tycho-api-key $TYCHO_API_KEY \
-  -n 200 \
-  -m fixed:8
-```
-
-Requires a `worker_pools.toml` with exactly one pool defined. Run `--help` for all options.
-
----
-
 ## Compare
 
 Sends identical quote requests to two running Fynd instances and compares output quality (amount out, gas, routes).
@@ -146,12 +127,11 @@ cargo run -p fynd-benchmark --release -- compare \
 | `--url-b` | `http://localhost:3001` | Solver B base URL |
 | `--label-a` | `main` | Label for solver A in output |
 | `--label-b` | `branch` | Label for solver B in output |
-| `-n` | `100` | Number of requests to send |
+| `-n` | `500` | Number of requests to send |
 | `--requests-file` | (none) | Path to JSON file with custom requests |
 | `--output` | `comparison_results.json` | Path for full results JSON |
 | `--timeout-ms` | `15000` | Per-request timeout |
 | `--seed` | `42` | Random seed for reproducibility |
-
 ### Custom Requests
 
 You can supply your own requests via `--requests-file`. The file should be a JSON array of quote request bodies:
@@ -170,27 +150,56 @@ You can supply your own requests via `--requests-file`. The file should be a JSO
 ]
 ```
 
+### Net-of-Gas Comparison
+
+The compare tool uses the server-computed `amount_out_net_gas` field for net-of-gas comparisons. This value is calculated by the solver and represents the output amount minus gas cost denominated in the output token. It works for all token pairs, not just WETH-paired trades.
+
 ### Output
 
-Prints a summary table to stdout and writes detailed per-request results to `comparison_results.json`. Positive bps diffs mean solver B returned more output.
+Prints a summary table to stdout and writes detailed per-request results to `comparison_results.json`. The summary includes:
+
+- **Coverage**: how many trades each solver found routes for
+- **Head-to-head win rate**: which solver returns more output (gross and net-of-gas)
+- **Gas estimate comparison**: which solver uses less gas
+- **Solve time**: latency percentiles for each solver
+- **Route depth**: average number of swaps per solver
+- **Significant outliers**: trades with >1 bps difference
+
+Positive bps diffs mean solver B returned more output.
 
 ---
 
-## Request Templates
+## Request Data
 
-By default, the benchmark uses a single WETH->USDC swap and the compare tool generates random requests from a built-in set of token pairs. Both tools accept `--requests-file` to use custom request sets. See `requests_set.json` in this directory for the format.
+By default, the load test uses a single WETH->USDC swap and the compare tool samples from a built-in set of 50 real aggregator trades. Both commands accept `--requests-file` to supply custom requests. See `requests_set.json` in this directory for the format.
+
+### Using the Full 10k Trade Dataset
+
+A 50-trade sample is embedded in the binary for zero-config use. For broader coverage, download the full 10k aggregator trade dataset:
+
+```bash
+# Download the dataset (~4.5 MB)
+cargo run -p fynd-benchmark --release -- download-trades
+
+# Use it with the compare tool
+cargo run -p fynd-benchmark --release -- compare \
+  --requests-file aggregator_trades_10k.json \
+  -n 500
+```
+
+The dataset contains real aggregator trades pulled from Dune Analytics, covering ~2,500 unique token pairs.
 
 ## File Layout
 
 | File | Description |
 |------|-------------|
-| `src/main.rs` | CLI entry point with `load`, `compare`, and `scale` subcommands |
+| `src/main.rs` | CLI entry point with `load`, `compare`, and `download-trades` subcommands |
 | `src/benchmark.rs` | Load-test implementation |
 | `src/compare.rs` | Comparison tool implementation |
-| `src/scale.rs` | CPU scaling benchmark implementation |
 | `src/config.rs` | Benchmark config, request templates, statistics types |
 | `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `src/exporter.rs` | Statistics calculation and JSON export |
-| `src/requests.rs` | Request generation and file loading |
-| `src/pairs.json` | Token and pair definitions for random request generation |
+| `src/requests.rs` | Request generation, embedded trades, and file loading |
+| `src/pairs.json` | Token definitions for symbol lookups in request labels |
+| `src/trades_sample.json` | 50 real aggregator trades embedded in the binary |
 | `requests_set.json` | Sample request templates |

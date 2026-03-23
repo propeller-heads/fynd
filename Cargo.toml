@@ -141,4 +141,3 @@ fynd-client = { path = "clients/rust" }
 
 # Dev dependencies
 rstest = "0.18"
-
