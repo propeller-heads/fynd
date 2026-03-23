@@ -28,6 +28,7 @@ pub mod encoding;
 pub mod feed;
 pub(crate) mod graph;
 pub mod price_guard;
+pub mod recording;
 pub mod solver;
 pub mod types;
 pub mod worker_pool;

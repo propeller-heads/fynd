@@ -15,8 +15,9 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_client::FyndClientBuilder;
 use fynd_rpc::{
-    builder::{parse_chain, FyndRPC, FyndRPCBuilder},
+    builder::{FyndRPC, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
+    parse_chain,
 };
 use serde::Serialize;
 use tracing::info;

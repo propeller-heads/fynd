@@ -321,9 +321,3 @@ impl FyndRPC {
         Ok(())
     }
 }
-
-pub fn parse_chain(chain: &str) -> Result<Chain> {
-    let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
-    serde_json::from_str::<Chain>(&candidate)
-        .map_err(|_| anyhow::anyhow!("unsupported chain '{}'. Try values like 'Ethereum'", chain))
-}

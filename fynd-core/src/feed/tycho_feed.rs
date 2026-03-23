@@ -44,7 +44,7 @@ use crate::{
 /// - Update SharedMarketData (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
-pub(crate) struct TychoFeed {
+pub struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
@@ -62,14 +62,14 @@ impl TychoFeed {
     ///
     /// * `config` - Indexer configuration
     /// * `market_data` - Shared market data reference
-    pub(crate) fn new(config: TychoFeedConfig, market_data: SharedMarketDataRef) -> Self {
+    pub fn new(config: TychoFeedConfig, market_data: SharedMarketDataRef) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
 
         Self { config, market_data, event_tx, gas_price_worker_signal_tx: None }
     }
 
     /// Returns a new subscriber for market events.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
         self.event_tx.subscribe()
     }
 
@@ -254,7 +254,7 @@ impl TychoFeed {
 
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
-    async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
+    pub async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
         // Collect variables for market shared data update
         let Update {
             new_pairs: added_components,

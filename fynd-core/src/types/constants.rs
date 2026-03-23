@@ -58,3 +58,20 @@ pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
         .cloned()
         .ok_or(UnsupportedChainError { chain: *chain })
 }
+
+/// Parses a chain name string (case-insensitive) into a [`Chain`] enum.
+///
+/// Uses serde deserialization so it automatically supports all `Chain` variants.
+///
+/// # Errors
+///
+/// Returns an error if the chain name is not recognized.
+pub fn parse_chain(chain: &str) -> Result<Chain, ParseChainError> {
+    let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
+    serde_json::from_str::<Chain>(&candidate).map_err(|_| ParseChainError(chain.to_string()))
+}
+
+/// Error returned when a chain name string cannot be parsed.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("unsupported chain '{0}'. Try values like 'ethereum', 'base', 'unichain'")]
+pub struct ParseChainError(pub String);

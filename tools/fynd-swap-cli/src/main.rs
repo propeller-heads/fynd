@@ -31,8 +31,9 @@ use fynd_client::{
     QuoteParams, SignedOrder, SigningHints, StorageOverrides,
 };
 use fynd_rpc::{
-    builder::{parse_chain, FyndRPCBuilder},
+    builder::FyndRPCBuilder,
     config::WorkerPoolsConfig,
+    parse_chain,
     protocols::fetch_protocol_systems,
 };
 use num_bigint::BigUint;

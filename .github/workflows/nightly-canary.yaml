@@ -1,0 +1,53 @@
+name: Nightly Canary
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  live-canary:
+    name: Live Tycho Canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+
+      - name: Record fresh market state
+        run: |
+          cargo run -p record-market -- \
+            --tycho-url "$TYCHO_URL" \
+            --rpc-url "$RPC_URL" \
+            --tycho-api-key "$TYCHO_API_KEY" \
+            --duration-secs 120 \
+            --output /tmp/canary-fixtures
+        env:
+          TYCHO_URL: ${{ secrets.TYCHO_URL }}
+          RPC_URL: ${{ secrets.RPC_URL }}
+          TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
+
+      - name: Run solver against live market
+        run: |
+          # Copy fresh recording to fixture location
+          mkdir -p fixtures/integration
+          cp /tmp/canary-fixtures/market_recording.json.zst fixtures/integration/
+          cp /tmp/canary-fixtures/golden_outputs.json fixtures/integration/
+          # Run integration tests against fresh data
+          cargo nextest run -p fynd-core --test integration

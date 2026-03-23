@@ -63,7 +63,7 @@ bytes = { workspace = true }
 fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
+members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli", "tools/record-market"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -117,6 +117,9 @@ tycho-simulation = ">=0.250.0"
 tycho-execution = { version = ">=0.165.0", features = ["evm"] }
 typetag = "0.2"
 
+# Compression
+zstd = "0.13"
+
 # Graph algorithms
 petgraph = "0.6"
 
@@ -141,4 +144,5 @@ fynd-client = { path = "clients/rust" }
 
 # Dev dependencies
 rstest = "0.18"
+tempfile = "3"
 

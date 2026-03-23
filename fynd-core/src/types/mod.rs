@@ -12,7 +12,7 @@ pub mod primitives;
 pub mod quote;
 
 // Re-export constants
-pub use constants::{native_token, UnsupportedChainError};
+pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
 // Re-export error types (needed for API responses)
 pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;

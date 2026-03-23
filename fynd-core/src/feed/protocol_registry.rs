@@ -32,7 +32,7 @@ use tycho_simulation::{
 
 use super::DataFeedError;
 
-pub(crate) fn register_exchanges(
+pub fn register_exchanges(
     mut builder: ProtocolStreamBuilder,
     tvl_filter: ComponentFilter,
     protocols: &[String],
