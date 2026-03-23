@@ -558,4 +558,29 @@ mod tests {
             "expected canonical Permit2 address, got {addr}"
         );
     }
+
+    #[actix_web::test]
+    async fn test_info_returns_correct_router_address() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        let addr = body["router_address"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(
+            addr.contains("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
+            "expected Ethereum Tycho Router address, got {addr}"
+        );
+    }
 }

@@ -431,6 +431,19 @@ mod tests {
     }
 
     #[test]
+    fn test_encoder_new_fails_on_unsupported_chain() {
+        // Arbitrum has no entry in ROUTER_ADDRESSES_JSON.
+        // Build a registry for Ethereum (which is valid) but pass Arbitrum to Encoder::new —
+        // the router address lookup must fail before the encoder builder is invoked.
+        let registry =
+            tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry::new(Chain::Ethereum)
+                .add_default_encoders(None)
+                .expect("registry should build for Ethereum");
+        let result = Encoder::new(Chain::Arbitrum, registry);
+        assert!(result.is_err(), "expected Err for chain without router address, got Ok");
+    }
+
+    #[test]
     fn test_try_from_without_route_errors() {
         let quote = make_order_quote();
 

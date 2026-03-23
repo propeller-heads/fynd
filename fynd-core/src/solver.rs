@@ -805,34 +805,4 @@ impl SolverParts {
             self.computation_shutdown_tx,
         )
     }
-
-    /// Consumes the parts, returning all owned components including static instance metadata.
-    #[allow(clippy::type_complexity)]
-    pub fn into_components_with_info(
-        self,
-    ) -> (
-        WorkerPoolRouter,
-        Vec<WorkerPool>,
-        SharedMarketDataRef,
-        SharedDerivedDataRef,
-        JoinHandle<()>,
-        JoinHandle<()>,
-        JoinHandle<()>,
-        broadcast::Sender<()>,
-        Chain,
-        Bytes,
-    ) {
-        (
-            self.router,
-            self.worker_pools,
-            self.market_data,
-            self.derived_data,
-            self.feed_handle,
-            self.gas_price_handle,
-            self.computation_handle,
-            self.computation_shutdown_tx,
-            self.chain,
-            self.router_address,
-        )
-    }
 }
