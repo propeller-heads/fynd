@@ -44,8 +44,8 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) reconnect_delay: Duration,
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
-    /// Component IDs to exclude from routing.
-    pub(crate) blacklisted_components: HashSet<String>,
+    /// Component IDs to exclude from the Tycho stream.
+    pub(crate) blocklisted_components: HashSet<String>,
 }
 
 impl TychoFeedConfig {
@@ -69,7 +69,7 @@ impl TychoFeedConfig {
             tvl_buffer_ratio: 1.1,
             gas_refresh_interval: Duration::from_secs(30),
             reconnect_delay: Duration::from_secs(5),
-            blacklisted_components: HashSet::new(),
+            blocklisted_components: HashSet::new(),
         }
     }
 
@@ -98,8 +98,8 @@ impl TychoFeedConfig {
         self
     }
 
-    pub(crate) fn blacklisted_components(mut self, components: HashSet<String>) -> Self {
-        self.blacklisted_components = components;
+    pub(crate) fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+        self.blocklisted_components = components;
         self
     }
 }
