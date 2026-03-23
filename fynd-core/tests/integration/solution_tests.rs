@@ -1,6 +1,9 @@
+use fynd_core::{
+    recording::golden::{load_golden_file, load_test_scenarios},
+    types::QuoteStatus,
+};
+
 use crate::harness::TestHarness;
-use fynd_core::recording::golden::{load_golden_file, load_test_scenarios};
-use fynd_core::types::QuoteStatus;
 
 /// Scenarios that succeeded in golden generation should also succeed in replay.
 #[tokio::test]
@@ -43,11 +46,7 @@ async fn test_all_golden_pairs_return_solutions() {
         }
     }
 
-    assert!(
-        failures.is_empty(),
-        "solution availability failures:\n{}",
-        failures.join("\n")
-    );
+    assert!(failures.is_empty(), "solution availability failures:\n{}", failures.join("\n"));
 }
 
 /// Unknown tokens should return an error, not panic.
@@ -60,7 +59,10 @@ async fn test_unknown_token_returns_error() {
             .parse()
             .unwrap();
     let golden = load_golden_file().expect("golden_outputs.json required");
-    let known_token = golden.scenarios[0].scenario.token_in.clone();
+    let known_token = golden.scenarios[0]
+        .scenario
+        .token_in
+        .clone();
 
     let order = fynd_core::types::Order::new(
         fake_token,
@@ -110,8 +112,14 @@ async fn test_quality_within_golden_baseline() {
                 let expected = &expected_output.amount_out_net_gas;
 
                 if expected.gt(&num_bigint::BigUint::ZERO) {
-                    let actual_f64 = actual.to_string().parse::<f64>().unwrap_or(0.0);
-                    let expected_f64 = expected.to_string().parse::<f64>().unwrap_or(0.0);
+                    let actual_f64 = actual
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let expected_f64 = expected
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
                     let diff_pct = (actual_f64 - expected_f64) / expected_f64 * 100.0;
 
                     if diff_pct < -1.0 {

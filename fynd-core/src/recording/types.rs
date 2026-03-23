@@ -57,13 +57,9 @@ impl From<Update> for RecordedUpdate {
 
 impl From<RecordedUpdate> for Update {
     fn from(rec: RecordedUpdate) -> Self {
-        Update::new(
-            rec.block_number_or_timestamp,
-            rec.states,
-            rec.new_pairs,
-        )
-        .set_removed_pairs(rec.removed_pairs)
-        .set_sync_states(rec.sync_states)
+        Update::new(rec.block_number_or_timestamp, rec.states, rec.new_pairs)
+            .set_removed_pairs(rec.removed_pairs)
+            .set_sync_states(rec.sync_states)
     }
 }
 

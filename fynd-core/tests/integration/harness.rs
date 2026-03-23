@@ -1,7 +1,4 @@
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use fynd_core::{
     algorithm::AlgorithmConfig,
@@ -57,10 +54,18 @@ struct PoolEntry {
     max_routes: Option<usize>,
 }
 
-fn default_num_workers() -> usize { num_cpus::get() }
-fn default_min_hops() -> usize { 1 }
-fn default_max_hops() -> usize { 3 }
-fn default_timeout_ms() -> u64 { 100 }
+fn default_num_workers() -> usize {
+    num_cpus::get()
+}
+fn default_min_hops() -> usize {
+    1
+}
+fn default_max_hops() -> usize {
+    3
+}
+fn default_timeout_ms() -> u64 {
+    100
+}
 
 impl TestHarness {
     /// Load recording from the fixtures directory and build the full pipeline.
@@ -85,8 +90,7 @@ impl TestHarness {
             .unwrap_or_else(|| BigUint::from(10_000_000_000u64));
 
         // 1. Replay recording
-        let market_data: SharedMarketDataRef =
-            Arc::new(RwLock::new(SharedMarketData::new()));
+        let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
         let feed_config = TychoFeedConfig::new(
             "ws://replay".to_string(),
             Chain::Ethereum,
@@ -112,17 +116,14 @@ impl TestHarness {
                 block_number,
                 block_hash: Default::default(),
                 block_timestamp: 0,
-                pricing: GasPrice::Legacy {
-                    gas_price: gas_price_wei,
-                },
+                pricing: GasPrice::Legacy { gas_price: gas_price_wei },
             });
         }
 
         // 3. Create ComputationManager
-        let gas_token = native_token(&Chain::Ethereum)
-            .expect("ethereum native token must be configured");
-        let config =
-            ComputationManagerConfig::default().with_gas_token(gas_token);
+        let gas_token =
+            native_token(&Chain::Ethereum).expect("ethereum native token must be configured");
+        let config = ComputationManagerConfig::default().with_gas_token(gas_token);
         let (computation_manager, _derived_events_rx) =
             ComputationManager::new(config, market_data.clone())
                 .expect("failed to create computation manager");
@@ -131,8 +132,7 @@ impl TestHarness {
 
         let (market_tx, market_rx) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let cm_handle =
-            tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
+        let cm_handle = tokio::spawn(computation_manager.run(market_rx, shutdown_rx));
 
         // 4. Build worker pools from worker_pools.toml BEFORE sending
         // MarketUpdated, so workers receive DerivedDataEvent broadcasts.
@@ -162,16 +162,10 @@ impl TestHarness {
                 .algorithm(pool_entry.algorithm.clone())
                 .algorithm_config(algo_config)
                 .num_workers(pool_entry.num_workers)
-                .build(
-                    market_data.clone(),
-                    derived_data.clone(),
-                    market_event_rx,
-                    derived_event_rx,
-                )
+                .build(market_data.clone(), derived_data.clone(), market_event_rx, derived_event_rx)
                 .expect("failed to build worker pool");
 
-            solver_pool_handles
-                .push(SolverPoolHandle::new(worker_pool.name(), task_handle));
+            solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
             max_timeout_ms = max_timeout_ms.max(pool_entry.timeout_ms);
             worker_pools.push(worker_pool);
         }
@@ -179,11 +173,8 @@ impl TestHarness {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
             .with_min_responses(0);
-        let router = WorkerPoolRouter::new(
-            solver_pool_handles,
-            router_config,
-            default_test_encoder(),
-        );
+        let router =
+            WorkerPoolRouter::new(solver_pool_handles, router_config, default_test_encoder());
 
         // 5. Trigger derived data computation
         let market_read = market_data.read().await;

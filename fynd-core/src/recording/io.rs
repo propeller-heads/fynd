@@ -20,9 +20,10 @@ pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::recording::types::{RecordedUpdate, RecordingMetadata};
-    use std::collections::HashMap;
 
     fn make_empty_recording() -> MarketRecording {
         MarketRecording {
@@ -52,7 +53,9 @@ mod tests {
     fn test_write_read_roundtrip_empty() {
         let recording = make_empty_recording();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_recording.json.zst");
+        let path = dir
+            .path()
+            .join("test_recording.json.zst");
 
         write_recording(&recording, &path).unwrap();
         let loaded = read_recording(&path).unwrap();
@@ -66,8 +69,9 @@ mod tests {
 
     #[test]
     fn test_write_read_roundtrip_with_protocol_sim() {
-        use crate::algorithm::test_utils::MockProtocolSim;
         use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
+
+        use crate::algorithm::test_utils::MockProtocolSim;
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert("pool_1".to_string(), Box::new(MockProtocolSim::new(2000.0)));
@@ -95,12 +99,16 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_with_sim.json.zst");
+        let path = dir
+            .path()
+            .join("test_with_sim.json.zst");
 
         write_recording(&recording, &path).unwrap();
         let loaded = read_recording(&path).unwrap();
 
         assert_eq!(loaded.updates[0].states.len(), 1);
-        assert!(loaded.updates[0].states.contains_key("pool_1"));
+        assert!(loaded.updates[0]
+            .states
+            .contains_key("pool_1"));
     }
 }

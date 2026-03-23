@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use fynd_core::{
     algorithm::AlgorithmConfig,
@@ -11,9 +9,7 @@ use fynd_core::{
         tycho_feed::TychoFeed,
         MarketEvent, TychoFeedConfig,
     },
-    recording::{
-        GoldenFile, GoldenMetadata, GoldenOutput, GoldenScenario, MarketRecording,
-    },
+    recording::{GoldenFile, GoldenMetadata, GoldenOutput, GoldenScenario, MarketRecording},
     types::{constants::native_token, QuoteOptions, QuoteRequest, QuoteStatus},
     worker_pool::pool::WorkerPoolBuilder,
     worker_pool_router::{SolverPoolHandle, WorkerPoolRouter},
@@ -49,10 +45,18 @@ struct PoolEntry {
     max_routes: Option<usize>,
 }
 
-fn default_num_workers() -> usize { num_cpus::get() }
-fn default_min_hops() -> usize { 1 }
-fn default_max_hops() -> usize { 3 }
-fn default_timeout_ms() -> u64 { 100 }
+fn default_num_workers() -> usize {
+    num_cpus::get()
+}
+fn default_min_hops() -> usize {
+    1
+}
+fn default_max_hops() -> usize {
+    3
+}
+fn default_timeout_ms() -> u64 {
+    100
+}
 
 /// Generate golden outputs by replaying a recording through the full pipeline.
 pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Result<GoldenFile> {
@@ -68,26 +72,24 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
 
     // 1. Replay recording through TychoFeed
     let market_data: SharedMarketDataRef = Arc::new(RwLock::new(SharedMarketData::new()));
-    let feed_config = TychoFeedConfig::new(
-        "ws://replay".to_string(),
-        Chain::Ethereum,
-        None,
-        false,
-        vec![],
-        0.0,
-    );
+    let feed_config =
+        TychoFeedConfig::new("ws://replay".to_string(), Chain::Ethereum, None, false, vec![], 0.0);
     let feed = TychoFeed::new(feed_config, market_data.clone());
     let _feed_rx = feed.subscribe();
 
     let num_updates = recording.updates.len();
-    for (i, recorded_update) in recording.updates.into_iter().enumerate() {
+    for (i, recorded_update) in recording
+        .updates
+        .into_iter()
+        .enumerate()
+    {
         if i % 10 == 0 {
             tracing::debug!("replaying update {i}/{num_updates}");
         }
         let update = recorded_update.into();
-        feed.handle_tycho_message(update).await.map_err(|e| {
-            anyhow::anyhow!("replay failed at update {i}: {e}")
-        })?;
+        feed.handle_tycho_message(update)
+            .await
+            .map_err(|e| anyhow::anyhow!("replay failed at update {i}: {e}"))?;
     }
 
     // 2. Inject gas price (recorded from RPC, or default 10 gwei)
@@ -97,15 +99,12 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
             block_number,
             block_hash: Default::default(),
             block_timestamp: 0,
-            pricing: GasPrice::Legacy {
-                gas_price: gas_price_wei,
-            },
+            pricing: GasPrice::Legacy { gas_price: gas_price_wei },
         });
     }
 
     // 3. Create ComputationManager
-    let gas_token = native_token(&Chain::Ethereum)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let gas_token = native_token(&Chain::Ethereum).map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = ComputationManagerConfig::default().with_gas_token(gas_token);
     let (computation_manager, _derived_events_rx) =
         ComputationManager::new(config, market_data.clone())?;
@@ -141,12 +140,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
             .algorithm(pool_entry.algorithm.clone())
             .algorithm_config(algo_config)
             .num_workers(pool_entry.num_workers)
-            .build(
-                market_data.clone(),
-                derived_data.clone(),
-                market_event_rx,
-                derived_event_rx,
-            )?;
+            .build(market_data.clone(), derived_data.clone(), market_event_rx, derived_event_rx)?;
 
         tracing::info!(
             pool = %name,
@@ -165,8 +159,7 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
     let router_config = WorkerPoolRouterConfig::default()
         .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
         .with_min_responses(0);
-    let registry = SwapEncoderRegistry::new(Chain::Ethereum)
-        .add_default_encoders(None)?;
+    let registry = SwapEncoderRegistry::new(Chain::Ethereum).add_default_encoders(None)?;
     let encoder = Encoder::new(Chain::Ethereum, registry)?;
     let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
 
@@ -218,7 +211,10 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
                     status: oq.status(),
                     amount_out_net_gas: oq.amount_out_net_gas().clone(),
                     gas_estimate: oq.gas_estimate().clone(),
-                    num_swaps: oq.route().map(|r| r.hop_count()).unwrap_or(0),
+                    num_swaps: oq
+                        .route()
+                        .map(|r| r.hop_count())
+                        .unwrap_or(0),
                     solve_time_ms: quote.solve_time_ms(),
                 }
             }
@@ -234,21 +230,14 @@ pub async fn generate_golden_outputs(recording: MarketRecording) -> anyhow::Resu
         let status_str = format!("{:?}", expected.status);
         tracing::info!(name = %scenario.name, status = %status_str, "scenario complete");
 
-        golden_scenarios.push(GoldenScenario {
-            scenario: scenario.clone(),
-            expected,
-        });
+        golden_scenarios.push(GoldenScenario { scenario: scenario.clone(), expected });
     }
 
     let successful = golden_scenarios
         .iter()
         .filter(|s| s.expected.status == QuoteStatus::Success)
         .count();
-    tracing::info!(
-        total = golden_scenarios.len(),
-        successful,
-        "golden output generation complete"
-    );
+    tracing::info!(total = golden_scenarios.len(), successful, "golden output generation complete");
 
     drop(shutdown_tx);
     for pool in worker_pools {

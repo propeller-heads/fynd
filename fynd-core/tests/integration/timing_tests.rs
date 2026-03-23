@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use crate::harness::TestHarness;
 use fynd_core::recording::golden::{load_golden_file, load_test_scenarios};
 use serde::Deserialize;
+
+use crate::harness::TestHarness;
 
 #[derive(Debug, Deserialize)]
 struct PoolsFile {
@@ -17,8 +18,7 @@ struct PoolEntry {
 
 fn max_pool_timeout_ms() -> u64 {
     let pools_toml = include_str!("../../../worker_pools.toml");
-    let config: PoolsFile =
-        toml::from_str(pools_toml).expect("failed to parse worker_pools.toml");
+    let config: PoolsFile = toml::from_str(pools_toml).expect("failed to parse worker_pools.toml");
     config
         .pools
         .values()
@@ -44,10 +44,7 @@ async fn test_solve_time_p95_within_threshold() {
         }
     }
 
-    assert!(
-        !solve_times_ms.is_empty(),
-        "no successful solves to measure timing"
-    );
+    assert!(!solve_times_ms.is_empty(), "no successful solves to measure timing");
 
     solve_times_ms.sort_unstable();
     let p95_idx = (solve_times_ms.len() as f64 * 0.95).ceil() as usize - 1;
@@ -101,9 +98,5 @@ async fn test_no_solve_exceeds_absolute_cap() {
         }
     }
 
-    assert!(
-        violations.is_empty(),
-        "solve time violations:\n{}",
-        violations.join("\n")
-    );
+    assert!(violations.is_empty(), "solve time violations:\n{}", violations.join("\n"));
 }

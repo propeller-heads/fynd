@@ -1,15 +1,13 @@
-use clap::Parser;
 use std::path::PathBuf;
+
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 mod golden;
 mod recorder;
 
 #[derive(Parser)]
-#[command(
-    name = "record-market",
-    about = "Capture Tycho market state for integration testing"
-)]
+#[command(name = "record-market", about = "Capture Tycho market state for integration testing")]
 struct Cli {
     /// Tycho WebSocket URL
     #[arg(long, env = "TYCHO_URL")]
@@ -83,13 +81,17 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. Write recording
     std::fs::create_dir_all(&cli.output_dir)?;
-    let recording_path = cli.output_dir.join("market_recording.json.zst");
+    let recording_path = cli
+        .output_dir
+        .join("market_recording.json.zst");
     fynd_core::recording::write_recording(&recording, &recording_path)?;
     tracing::info!(path = %recording_path.display(), "recording written");
 
     // 3. Generate golden outputs by replaying the recording
     let golden = golden::generate_golden_outputs(recording).await?;
-    let golden_path = cli.output_dir.join("golden_outputs.json");
+    let golden_path = cli
+        .output_dir
+        .join("golden_outputs.json");
     let golden_json = serde_json::to_string_pretty(&golden)?;
     std::fs::write(&golden_path, golden_json)?;
     tracing::info!(

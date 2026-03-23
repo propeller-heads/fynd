@@ -169,10 +169,7 @@ async fn fetch_gas_price_wei(rpc_url: &str) -> anyhow::Result<String> {
         GasPrice::Legacy { gas_price } => gas_price,
         // EIP-1559: use max_fee_per_gas as the upper bound
         other => {
-            tracing::warn!(
-                ?other,
-                "non-legacy gas price, falling back to 10 gwei"
-            );
+            tracing::warn!(?other, "non-legacy gas price, falling back to 10 gwei");
             num_bigint::BigUint::from(10_000_000_000u64)
         }
     };

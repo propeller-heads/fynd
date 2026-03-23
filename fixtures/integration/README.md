@@ -84,11 +84,6 @@ and test assertions use the same algorithm settings as production.
   recording. Pools for these protocols are registered as components but have
   no simulation state, so they cannot compute spot prices or be used for
   routing.
-- **Replay non-determinism**: The solver's routing algorithm may find
-  different routes on different runs due to derived data computation ordering
-  and thread scheduling. The 1% quality threshold can occasionally be hit.
-  If this happens consistently, regenerate the golden file from the recording
-  tool.
 - **No live RPC during replay**: Gas prices must be recorded or default to
   10 gwei. Token prices computed from replayed data may differ slightly from
   live conditions.

@@ -68,8 +68,7 @@ pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
 /// Returns an error if the chain name is not recognized.
 pub fn parse_chain(chain: &str) -> Result<Chain, ParseChainError> {
     let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
-    serde_json::from_str::<Chain>(&candidate)
-        .map_err(|_| ParseChainError(chain.to_string()))
+    serde_json::from_str::<Chain>(&candidate).map_err(|_| ParseChainError(chain.to_string()))
 }
 
 /// Error returned when a chain name string cannot be parsed.
