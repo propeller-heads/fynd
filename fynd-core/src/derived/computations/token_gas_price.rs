@@ -376,6 +376,25 @@ impl TokenGasPriceComputation {
             paths_by_token.retain(|token, _| tokens.contains(token));
         }
 
+        // Collect all component IDs from every candidate path per token.
+        // This ensures path_components captures any pool that could flip which path is best,
+        // not just pools on the currently-selected path.
+        let all_candidate_components: HashMap<Address, HashSet<ComponentId>> = paths_by_token
+            .iter()
+            .map(|(token, candidates)| {
+                let components = candidates
+                    .iter()
+                    .flat_map(|c| {
+                        c.path
+                            .edge_data
+                            .iter()
+                            .map(|e| e.component_id.clone())
+                    })
+                    .collect::<HashSet<_>>();
+                (token.clone(), components)
+            })
+            .collect();
+
         // Sort each token's paths: lowest spread last (for popping)
         for paths in paths_by_token.values_mut() {
             paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
@@ -411,6 +430,14 @@ impl TokenGasPriceComputation {
                     }
                     Err(_) => continue,
                 }
+            }
+        }
+
+        // Extend each token's path_components with all candidate path components so
+        // incremental recomputation fires when any competing path's pool changes.
+        for (token, (_, _, components)) in best_prices.iter_mut() {
+            if let Some(all_comps) = all_candidate_components.get(token) {
+                components.extend(all_comps.iter().cloned());
             }
         }
 
@@ -1071,6 +1098,134 @@ mod tests {
         assert_eq!(
             eth_price.numerator, eth_price.denominator,
             "gas token must have exact 1:1 price"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_path_components_includes_all_candidate_paths() {
+        // Diamond topology: two paths to token_a
+        //
+        //   pool_direct: ETH → token_a  (fee-free, ratio=2, lower spread → selected)
+        //   pool_indirect_1 + pool_indirect_2: ETH → token_b → token_a (higher spread)
+        //
+        // After full compute, token_a's path_components must include all three pool IDs
+        // even though only pool_direct is on the best path.
+        let eth = token(0, "ETH");
+        let token_a = token(1, "A");
+        let token_b = token(2, "B");
+
+        let (market, derived) = setup_test_env(vec![
+            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            (
+                "pool_indirect_1",
+                &eth,
+                &token_b,
+                MockProtocolSim::new(3.0)
+                    .with_fee(0.1)
+                    .with_gas(0),
+            ),
+            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+        ])
+        .await;
+        let changed = ChangedComponents::default();
+
+        let computation = computation_for(&eth.address);
+        computation
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        // Inspect stored deps to verify path_components
+        let store = derived.read().await;
+        let deps = store
+            .token_prices_deps()
+            .expect("deps should be stored");
+        let entry = deps
+            .get(&token_a.address)
+            .expect("token_a should have deps");
+
+        assert!(
+            entry
+                .path_components
+                .contains("pool_direct"),
+            "path_components should contain pool_direct (best path)"
+        );
+        assert!(
+            entry
+                .path_components
+                .contains("pool_indirect_1"),
+            "path_components should contain pool_indirect_1 (competing path)"
+        );
+        assert!(
+            entry
+                .path_components
+                .contains("pool_indirect_2"),
+            "path_components should contain pool_indirect_2 (competing path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incremental_recompute_triggered_by_competing_path_pool() {
+        // Same diamond topology as above.
+        // After full compute, changing pool_indirect_1 (not on best path) must
+        // put token_a in tokens_to_recompute because it's now in path_components.
+        let eth = token(0, "ETH");
+        let token_a = token(1, "A");
+        let token_b = token(2, "B");
+
+        let (market, derived) = setup_test_env(vec![
+            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            (
+                "pool_indirect_1",
+                &eth,
+                &token_b,
+                MockProtocolSim::new(3.0)
+                    .with_fee(0.1)
+                    .with_gas(0),
+            ),
+            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+        ])
+        .await;
+
+        // Full compute to store deps
+        let full_changed = ChangedComponents::default();
+        let computation = computation_for(&eth.address);
+        computation
+            .compute(&market, &derived, &full_changed)
+            .await
+            .unwrap();
+
+        // Incremental change: only pool_indirect_1 updated
+        let incremental_changed = ChangedComponents {
+            added: HashMap::new(),
+            removed: vec![],
+            updated: vec!["pool_indirect_1".to_string()],
+            is_full_recompute: false,
+        };
+
+        let store = derived.read().await;
+        let deps = store
+            .token_prices_deps()
+            .expect("deps should be stored");
+        let changed_ids = incremental_changed.all_changed_ids();
+
+        let tokens_to_recompute: HashSet<Address> = deps
+            .iter()
+            .filter(|(_, entry)| {
+                !entry
+                    .path_components
+                    .is_disjoint(&changed_ids)
+            })
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        assert!(
+            tokens_to_recompute.contains(&token_a.address),
+            "token_a should be scheduled for recomputation when pool_indirect_1 changes"
+        );
+        assert!(
+            tokens_to_recompute.contains(&token_b.address),
+            "token_b should be scheduled for recomputation when pool_indirect_1 changes"
         );
     }
 
