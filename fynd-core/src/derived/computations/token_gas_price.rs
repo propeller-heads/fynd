@@ -297,21 +297,78 @@ impl TokenGasPriceComputation {
     }
 
     /// Core simulation logic: discovers paths, runs round-robin simulation,
-    /// returns best prices with dependency tracking.
+    /// returns best prices with dependency tracking and block number.
     ///
-    /// If `filter_tokens` is `Some`, only simulates those tokens (incremental mode).
-    /// If `None`, simulates all discovered tokens (full mode).
+    /// Takes two brief read locks on market:
+    /// 1. Clone topology + gas_price + block (cheap)
+    /// 2. `extract_subset` with only the components on candidate paths
+    ///
+    /// Path discovery (cheap DFS) runs twice to avoid holding borrows across await
+    /// points. The expensive part — EVM simulation — runs lock-free on the subset.
+    ///
+    /// # Arguments
+    ///
+    /// * `market`: The market data to simulate token prices on.
+    /// * `spot_prices`: The spot prices to use for the simulation.
+    /// * `filter_tokens`: An optional set of tokens to filter the simulation by. If None, all
+    ///   tokens are simulated.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the best prices and the block number.
     #[allow(clippy::type_complexity)]
-    fn simulate_token_prices(
+    async fn simulate_token_prices(
         &self,
-        market: &SharedMarketData,
+        market: &SharedMarketDataRef,
         spot_prices: &SpotPrices,
-        gas_price: &BigUint,
         filter_tokens: Option<&HashSet<Address>>,
-    ) -> Result<HashMap<Address, (f64, Price, HashSet<ComponentId>)>, ComputationError> {
-        let mut graph_manager = PetgraphStableDiGraphManager::new();
-        graph_manager.initialize_graph(&market.component_topology());
+    ) -> Result<(HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64), ComputationError> {
+        // Brief lock 1: topology + gas_price + block (all cheap clones)
+        let (topology, gas_price, block) = {
+            let guard = market.read().await;
+            let topology = guard.component_topology();
+            let block = guard
+                .last_updated()
+                .map(|b| b.number())
+                .unwrap_or(0);
+            let gas_price = guard
+                .gas_price()
+                .ok_or(ComputationError::MissingDependency("gas_price"))?
+                .effective_gas_price();
+            (topology, gas_price, block)
+        };
 
+        // Discover paths to find which components candidate paths need (cheap DFS)
+        let needed_component_ids = {
+            let mut graph_manager = PetgraphStableDiGraphManager::new();
+            graph_manager.initialize_graph(&topology);
+            let mut paths = self.discover_paths(&graph_manager, spot_prices)?;
+            if let Some(tokens) = filter_tokens {
+                paths.retain(|token, _| tokens.contains(token));
+            }
+            paths
+                .values()
+                .flatten()
+                .flat_map(|c| {
+                    c.path
+                        .edge_data
+                        .iter()
+                        .map(|e| e.component_id.clone())
+                })
+                .collect::<HashSet<ComponentId>>()
+        };
+
+        // Brief lock 2: extract only the simulation states we need
+        let subset = {
+            market
+                .read()
+                .await
+                .extract_subset(&needed_component_ids)
+        };
+
+        // Rediscover paths from subset + simulate (no lock, expensive EVM simulation)
+        let mut graph_manager = PetgraphStableDiGraphManager::new();
+        graph_manager.initialize_graph(&subset.component_topology());
         let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
 
         // Optionally filter to only requested tokens
@@ -337,7 +394,7 @@ impl TokenGasPriceComputation {
                 };
                 candidates_exhausted = false;
 
-                match self.compute_spread_and_mid_price(candidate.path, market, gas_price) {
+                match self.compute_spread_and_mid_price(candidate.path, &subset, &gas_price) {
                     Ok((spread, price, components)) => {
                         let is_better = best_prices
                             .get(token)
@@ -357,7 +414,7 @@ impl TokenGasPriceComputation {
             }
         }
 
-        Ok(best_prices)
+        Ok((best_prices, block))
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -414,36 +471,9 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        // Snapshot market data under brief lock, then simulate on snapshot.
-        // simulate_token_prices calls get_amount_out (EVM simulation) which can take 100ms+.
-        let (snapshot, gas_price, block) = {
-            let market_guard = market.read().await;
-            let block = market_guard
-                .last_updated()
-                .map(|b| b.number())
-                .unwrap_or(0);
-
-            let gas_price = market_guard
-                .gas_price()
-                .ok_or(ComputationError::MissingDependency("gas_price"))?
-                .effective_gas_price();
-
-            let component_ids: HashSet<ComponentId> = market_guard
-                .component_topology()
-                .keys()
-                .cloned()
-                .collect();
-            let snapshot = market_guard.extract_subset(&component_ids);
-
-            (snapshot, gas_price, block)
-        };
-
-        let best_prices = self.simulate_token_prices(
-            &snapshot,
-            &spot_prices,
-            &gas_price,
-            Some(&tokens_to_recompute),
-        )?;
+        let (best_prices, block) = self
+            .simulate_token_prices(market, &spot_prices, Some(&tokens_to_recompute))
+            .await?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
@@ -506,32 +536,9 @@ impl DerivedComputation for TokenGasPriceComputation {
             .ok_or(ComputationError::MissingDependency("spot_prices"))?
             .clone();
 
-        // Snapshot market data under brief lock, then simulate on snapshot.
-        // simulate_token_prices calls get_amount_out (EVM simulation) which can take 100ms+.
-        let (snapshot, gas_price, block) = {
-            let market_guard = market.read().await;
-
-            let block = market_guard
-                .last_updated()
-                .map(|b| b.number())
-                .unwrap_or(0);
-
-            let gas_price = market_guard
-                .gas_price()
-                .ok_or(ComputationError::MissingDependency("gas_price"))?
-                .effective_gas_price();
-
-            let component_ids: HashSet<ComponentId> = market_guard
-                .component_topology()
-                .keys()
-                .cloned()
-                .collect();
-            let snapshot = market_guard.extract_subset(&component_ids);
-
-            (snapshot, gas_price, block)
-        };
-
-        let best_prices = self.simulate_token_prices(&snapshot, &spot_prices, &gas_price, None)?;
+        let (best_prices, block) = self
+            .simulate_token_prices(market, &spot_prices, None)
+            .await?;
 
         // Build token prices with dependencies for incremental computation
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
