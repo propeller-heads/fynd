@@ -190,19 +190,15 @@ export interface InstanceInfo {
   chainId: number;
 }
 
-/** Options for {@link FyndClient.approval}. */
-export interface ApprovalOptions {
+/** Parameters for {@link FyndClient.approval}. */
+export interface ApprovalParams {
+  /** ERC-20 token to approve. */
+  token: Address;
+  /** Amount to approve (in token base units). */
+  amount: bigint;
   /**
    * When `true`, read on-chain allowance and populate {@link ApprovalPayload.isNeeded}.
    * Default: `false`. Requires `provider.readAllowance` to be implemented.
    */
   checkAllowance?: boolean;
-  /** Override the sender (defaults to {@link FyndClientOptions.sender}). */
-  sender?: Address;
-  /** Override the nonce. */
-  nonce?: number;
-  maxFeePerGas?: bigint;
-  maxPriorityFeePerGas?: bigint;
-  /** Override gas limit. Defaults to `65_000n` (safe for all ERC-20 approve calls). */
-  gasLimit?: bigint;
 }

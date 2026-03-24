@@ -7,11 +7,11 @@ export interface ApprovalPayload {
   token: Address;
   spender: Address;
   amount: bigint;
-  /** Set only when {@link ApprovalOptions.checkAllowance} was `true`. */
+  /** Set only when {@link ApprovalParams.checkAllowance} was `true`. */
   isNeeded?: boolean;
 }
 
-/** A signed approval ready for {@link FyndClient.submit}. */
+/** A signed approval ready for {@link FyndClient.executeApproval}. */
 export interface SignedApproval {
   tx: Eip1559Transaction;
   /** 65-byte hex signature over the EIP-1559 signing hash. */
@@ -43,15 +43,15 @@ export interface FyndPayload {
   tx: Eip1559Transaction;
 }
 
-/** Discriminated union of backend-specific payloads ready to be signed. */
-export type SignablePayload = { kind: 'fynd'; payload: FyndPayload };
+/** Discriminated union of backend-specific swap payloads ready to be signed. */
+export type SwapPayload = { kind: 'fynd'; payload: FyndPayload };
 
 /** A 65-byte ECDSA signature encoded as a hex string. */
 export type PrimitiveSignature = `0x${string}`;
 
-/** A payload paired with its cryptographic signature, ready for on-chain submission. */
-export interface SignedOrder {
-  payload: SignablePayload;
+/** A swap payload paired with its cryptographic signature, ready for on-chain submission. */
+export interface SignedSwap {
+  payload: SwapPayload;
   signature: PrimitiveSignature;
 }
 
@@ -74,7 +74,7 @@ export interface SettleOptions {
 /** Default timeout for {@link ExecutionReceipt.settle} (120 seconds). */
 export const DEFAULT_SETTLE_TIMEOUT_MS = 120_000;
 
-/** Handle returned by {@link FyndClient.execute} to await transaction settlement. */
+/** Handle returned by {@link FyndClient.executeSwap} to await transaction settlement. */
 export interface ExecutionReceipt {
   /** Polls for the transaction receipt and returns the settled result.
    * @throws {FyndError} With code `SETTLE_TIMEOUT` if the transaction does not confirm in time.
@@ -83,12 +83,12 @@ export interface ExecutionReceipt {
 }
 
 /**
- * Computes the EIP-1559 signing hash for a signable payload.
+ * Computes the EIP-1559 signing hash for a swap payload.
  *
  * Equivalent to keccak256 of the unsigned serialized EIP-1559 transaction,
  * which is the hash the signer must sign.
  */
-export function signingHash(payload: SignablePayload): Hex {
+export function swapSigningHash(payload: SwapPayload): Hex {
   const tx = payload.payload.tx;
   const serialized = serializeTransaction({
     type: 'eip1559',
@@ -105,19 +105,19 @@ export function signingHash(payload: SignablePayload): Hex {
 }
 
 /**
- * Wraps a payload and signature into a SignedOrder without any I/O.
- * Mirrors Rust's SignedOrder::assemble.
+ * Wraps a swap payload and signature into a {@link SignedSwap} without any I/O.
+ * Mirrors Rust's `SignedSwap::assemble`.
  */
-export function assembleSignedOrder(
-  payload: SignablePayload,
+export function assembleSignedSwap(
+  payload: SwapPayload,
   signature: PrimitiveSignature,
-): SignedOrder {
+): SignedSwap {
   return { payload, signature };
 }
 
 /**
  * Compute the EIP-1559 signing hash for an approval payload.
- * Sign this and pass the result to {@link FyndClient.submit} via {@link SignedApproval}.
+ * Sign this and pass the result to {@link FyndClient.executeApproval} via {@link SignedApproval}.
  */
 export function approvalSigningHash(payload: ApprovalPayload): Hex {
   return keccak256(serializeTransaction({ type: 'eip1559', ...payload.tx })) as Hex;

@@ -1,6 +1,6 @@
 export type {
   Address,
-  ApprovalOptions,
+  ApprovalParams,
   BackendKind,
   BlockInfo,
   ClientFeeParams,
@@ -32,12 +32,12 @@ export type {
   PrimitiveSignature,
   SettledOrder,
   SettleOptions,
-  SignablePayload,
   SignedApproval,
-  SignedOrder,
+  SignedSwap,
+  SwapPayload,
   TxReceipt,
 } from "./signing.js";
-export { approvalSigningHash, assembleSignedOrder, DEFAULT_SETTLE_TIMEOUT_MS, signingHash } from "./signing.js";
+export { approvalSigningHash, assembleSignedSwap, DEFAULT_SETTLE_TIMEOUT_MS, swapSigningHash } from "./signing.js";
 export {
   permit2SigningHash,
   encodingOptions,

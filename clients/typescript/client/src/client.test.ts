@@ -258,7 +258,7 @@ describe('FyndClient.health', () => {
   });
 });
 
-describe('FyndClient.signablePayload', () => {
+describe('FyndClient.swapPayload', () => {
   it('throws for turbine backend (not yet implemented)', async () => {
     const provider = makeMockProvider();
     const client = new FyndClient({
@@ -268,7 +268,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const turbineQuote = { ...makeDummyQuote(), backend: 'turbine' as const };
-    await expect(client.signablePayload(turbineQuote)).rejects.toThrow(
+    await expect(client.swapPayload(turbineQuote)).rejects.toThrow(
       'not implemented: Turbine backend signing',
     );
   });
@@ -280,9 +280,9 @@ describe('FyndClient.signablePayload', () => {
       sender:  SENDER,
     });
     const quote = { ...makeDummyQuote() };
-    await expect(client.signablePayload(quote)).rejects.toThrow(FyndError);
+    await expect(client.swapPayload(quote)).rejects.toThrow(FyndError);
     try {
-      await client.signablePayload(quote);
+      await client.swapPayload(quote);
     } catch (e) {
       expect(e instanceof FyndError && e.code).toBe('CONFIG');
     }
@@ -297,9 +297,9 @@ describe('FyndClient.signablePayload', () => {
       // no sender
     });
     const quote = makeDummyQuote();
-    await expect(client.signablePayload(quote)).rejects.toThrow(FyndError);
+    await expect(client.swapPayload(quote)).rejects.toThrow(FyndError);
     try {
-      await client.signablePayload(quote);
+      await client.swapPayload(quote);
     } catch (e) {
       expect(e instanceof FyndError && e.code).toBe('CONFIG');
     }
@@ -314,7 +314,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    const payload = await client.signablePayload(quote);
+    const payload = await client.swapPayload(quote);
     expect(payload.kind).toBe('fynd');
     expect(payload.payload.tx.to).toBe(ROUTER);
     expect(payload.payload.tx.value).toBe(0n);
@@ -337,7 +337,7 @@ describe('FyndClient.signablePayload', () => {
         data: '0xdeadbeef' as Hex,
       },
     };
-    const payload = await client.signablePayload(quote);
+    const payload = await client.swapPayload(quote);
     expect(payload.payload.tx.to).toBe('0x2222222222222222222222222222222222222222');
     expect(payload.payload.tx.value).toBe(42n);
     expect(payload.payload.tx.data).toBe('0xdeadbeef');
@@ -352,9 +352,9 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const { transaction: _, ...quoteWithoutTx } = makeDummyQuote();
-    await expect(client.signablePayload(quoteWithoutTx)).rejects.toThrow(FyndError);
+    await expect(client.swapPayload(quoteWithoutTx)).rejects.toThrow(FyndError);
     try {
-      await client.signablePayload(quoteWithoutTx);
+      await client.swapPayload(quoteWithoutTx);
     } catch (e) {
       expect(e instanceof FyndError && e.code).toBe('CONFIG');
     }
@@ -370,7 +370,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    await client.signablePayload(quote, { sender: altSender });
+    await client.swapPayload(quote, { sender: altSender });
     expect(provider.getTransactionCount).toHaveBeenCalledWith({ address: altSender });
   });
 
@@ -383,7 +383,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    const payload = await client.signablePayload(quote, { nonce: 99 });
+    const payload = await client.swapPayload(quote, { nonce: 99 });
     expect(payload.payload.tx.nonce).toBe(99);
     expect(provider.getTransactionCount).not.toHaveBeenCalled();
   });
@@ -397,7 +397,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    const payload = await client.signablePayload(quote, {
+    const payload = await client.swapPayload(quote, {
       maxFeePerGas:         50n,
       maxPriorityFeePerGas: 5n,
     });
@@ -415,7 +415,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote(); // gasEstimate = 150000n
-    const payload = await client.signablePayload(quote, { gasLimit: 200000n });
+    const payload = await client.swapPayload(quote, { gasLimit: 200000n });
     expect(payload.payload.tx.gas).toBe(200000n);
   });
 
@@ -428,7 +428,7 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    await client.signablePayload(quote, { simulate: true });
+    await client.swapPayload(quote, { simulate: true });
     expect(provider.call).toHaveBeenCalledOnce();
   });
 
@@ -442,16 +442,16 @@ describe('FyndClient.signablePayload', () => {
       provider,
     });
     const quote = makeDummyQuote();
-    await expect(client.signablePayload(quote, { simulate: true })).rejects.toThrow(FyndError);
+    await expect(client.swapPayload(quote, { simulate: true })).rejects.toThrow(FyndError);
     try {
-      await client.signablePayload(quote, { simulate: true });
+      await client.swapPayload(quote, { simulate: true });
     } catch (e) {
       expect(e instanceof FyndError && e.code).toBe('SIMULATE_FAILED');
     }
   });
 });
 
-describe('FyndClient.execute — standard path', () => {
+describe('FyndClient.executeSwap — standard path', () => {
   it('calls sendRawTransaction and returns receipt with settle()', async () => {
     const provider = makeMockProvider();
     provider.sendRawTransaction.mockResolvedValueOnce('0xhash123' as Hex);
@@ -470,8 +470,8 @@ describe('FyndClient.execute — standard path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const executionReceipt = await client.execute(signedOrder);
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const executionReceipt = await client.executeSwap(signedOrder);
     expect(provider.sendRawTransaction).toHaveBeenCalledOnce();
 
     const settled = await executionReceipt.settle();
@@ -485,8 +485,8 @@ describe('FyndClient.execute — standard path', () => {
       chainId: 1,
       sender:  SENDER,
     });
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    await expect(client.execute(signedOrder)).rejects.toThrow(FyndError);
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    await expect(client.executeSwap(signedOrder)).rejects.toThrow(FyndError);
   });
 
   it('settle() throws SETTLE_TIMEOUT when receipt never arrives', async () => {
@@ -501,15 +501,15 @@ describe('FyndClient.execute — standard path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const executionReceipt = await client.execute(signedOrder);
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const executionReceipt = await client.executeSwap(signedOrder);
     await expect(executionReceipt.settle({ timeoutMs: 0 })).rejects.toThrow(
       expect.objectContaining({ code: 'SETTLE_TIMEOUT' }),
     );
   });
 });
 
-describe('FyndClient.execute — dry-run path', () => {
+describe('FyndClient.executeSwap — dry-run path', () => {
   it('calls provider.call and estimateGas, not sendRawTransaction', async () => {
     const provider = makeMockProvider();
     // Return 32 bytes of return data (1000 in big-endian uint256)
@@ -525,8 +525,8 @@ describe('FyndClient.execute — dry-run path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const executionReceipt = await client.execute(signedOrder, { dryRun: true });
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const executionReceipt = await client.executeSwap(signedOrder, { dryRun: true });
     expect(provider.sendRawTransaction).not.toHaveBeenCalled();
     expect(provider.call).toHaveBeenCalledOnce();
     expect(provider.estimateGas).toHaveBeenCalledOnce();
@@ -548,8 +548,8 @@ describe('FyndClient.execute — dry-run path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const executionReceipt = await client.execute(signedOrder, { dryRun: true });
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const executionReceipt = await client.executeSwap(signedOrder, { dryRun: true });
     // Should resolve without any polling
     const settled = await executionReceipt.settle();
     expect(provider.getTransactionReceipt).not.toHaveBeenCalled();
@@ -571,8 +571,8 @@ describe('FyndClient.execute — dry-run path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const receipt = await client.execute(signedOrder, { dryRun: true });
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const receipt = await client.executeSwap(signedOrder, { dryRun: true });
     const settled = await receipt.settle();
     expect(settled.settledAmount).toBe(0x123n);
   });
@@ -589,8 +589,8 @@ describe('FyndClient.execute — dry-run path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    const receipt = await client.execute(signedOrder, { dryRun: true });
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    const receipt = await client.executeSwap(signedOrder, { dryRun: true });
     const settled = await receipt.settle();
     expect(settled.settledAmount).toBeUndefined();
   });
@@ -606,10 +606,10 @@ describe('FyndClient.execute — dry-run path', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(makeDummyQuote());
-    await expect(client.execute(signedOrder, { dryRun: true })).rejects.toThrow(FyndError);
+    const signedOrder = makeSignedSwap(makeDummyQuote());
+    await expect(client.executeSwap(signedOrder, { dryRun: true })).rejects.toThrow(FyndError);
     try {
-      await client.execute(signedOrder, { dryRun: true });
+      await client.executeSwap(signedOrder, { dryRun: true });
     } catch (e) {
       expect(e instanceof FyndError && e.code).toBe('SIMULATE_FAILED');
     }
@@ -628,9 +628,9 @@ describe('FyndClient.execute — dry-run path', () => {
     });
 
     const quote = makeDummyQuote();
-    // maxFeePerGas is set in signablePayload; here we create a signed order directly
-    const signedOrder = makeSignedOrder(quote, { maxFeePerGas: 30n });
-    const receipt = await client.execute(signedOrder, { dryRun: true });
+    // maxFeePerGas is set in swapPayload; here we create a signed order directly
+    const signedOrder = makeSignedSwap(quote, { maxFeePerGas: 30n });
+    const receipt = await client.executeSwap(signedOrder, { dryRun: true });
     const settled = await receipt.settle();
     expect(settled.gasCost).toBe(200000n * 30n); // gasUsed * maxFeePerGas
   });
@@ -669,8 +669,8 @@ describe('Transfer log decoding via settle()', () => {
       provider,
     });
 
-    const signedOrder = makeSignedOrder(quote);
-    const executionReceipt = await client.execute(signedOrder);
+    const signedOrder = makeSignedSwap(quote);
+    const executionReceipt = await client.executeSwap(signedOrder);
     return executionReceipt.settle();
   }
 
@@ -808,7 +808,7 @@ describe('FyndClient.approval', () => {
   it('builds approve calldata with correct 4-byte selector', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
     // approve(address,uint256) selector = 0x095ea7b3
     expect(payload.tx.data.startsWith('0x095ea7b3')).toBe(true);
   });
@@ -816,7 +816,7 @@ describe('FyndClient.approval', () => {
   it('sets spender to routerAddress from info', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 500n);
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 500n });
     expect(payload.spender).toBe(ROUTER);
     expect(payload.token).toBe(TOKEN_IN_ADDR);
     expect(payload.amount).toBe(500n);
@@ -825,20 +825,20 @@ describe('FyndClient.approval', () => {
   it('defaults gasLimit to 65_000n', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
     expect(payload.tx.gas).toBe(65_000n);
   });
 
   it('respects gasLimit override', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { gasLimit: 80_000n });
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n }, { gasLimit: 80_000n });
     expect(payload.tx.gas).toBe(80_000n);
   });
 
   it('throws CONFIG when provider is not set', async () => {
     const client = makeInfoClient({ provider: undefined });
-    await expect(client.approval(TOKEN_IN_ADDR, 1000n)).rejects.toThrow(
+    await expect(client.approval({ token: TOKEN_IN_ADDR, amount: 1000n })).rejects.toThrow(
       expect.objectContaining({ code: 'CONFIG' }),
     );
   });
@@ -846,7 +846,7 @@ describe('FyndClient.approval', () => {
   it('throws CONFIG when sender is not set', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider, sender: undefined });
-    await expect(client.approval(TOKEN_IN_ADDR, 1000n)).rejects.toThrow(
+    await expect(client.approval({ token: TOKEN_IN_ADDR, amount: 1000n })).rejects.toThrow(
       expect.objectContaining({ code: 'CONFIG' }),
     );
   });
@@ -855,7 +855,7 @@ describe('FyndClient.approval', () => {
     const provider = makeMockProvider();
     provider.readAllowance.mockResolvedValueOnce(100n);
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true });
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
     expect(payload.isNeeded).toBe(true);
   });
 
@@ -863,7 +863,7 @@ describe('FyndClient.approval', () => {
     const provider = makeMockProvider();
     provider.readAllowance.mockResolvedValueOnce(5000n);
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true });
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
     expect(payload.isNeeded).toBe(false);
   });
 
@@ -873,19 +873,19 @@ describe('FyndClient.approval', () => {
     const { readAllowance: _, ...providerWithoutAllowance } = baseProvider;
     const client = makeInfoClient({ provider: providerWithoutAllowance });
     await expect(
-      client.approval(TOKEN_IN_ADDR, 1000n, { checkAllowance: true }),
+      client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true }),
     ).rejects.toThrow(expect.objectContaining({ code: 'CONFIG' }));
   });
 
   it('isNeeded is absent when checkAllowance is not set', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
-    const payload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
     expect('isNeeded' in payload).toBe(false);
   });
 });
 
-describe('FyndClient.submit', () => {
+describe('FyndClient.executeApproval', () => {
   it('broadcasts and returns TxReceipt with gasCost', async () => {
     const provider = makeMockProvider();
     provider.sendRawTransaction.mockResolvedValueOnce('0xapprovalhash' as Hex);
@@ -898,13 +898,13 @@ describe('FyndClient.submit', () => {
     provider.getTransactionReceipt.mockResolvedValueOnce(receipt);
 
     const client = makeInfoClient({ provider });
-    const approvalPayload = await client.approval(TOKEN_IN_ADDR, 1000n);
+    const approvalPayload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
     const signedApproval = {
       tx:        approvalPayload.tx,
       signature: `0x${'ab'.repeat(32)}${'cd'.repeat(32)}00` as Hex,
     };
 
-    const txReceipt = await client.submit(signedApproval);
+    const txReceipt = await client.executeApproval(signedApproval);
     expect(txReceipt.txHash).toBe('0xapprovalhash');
     expect(txReceipt.gasCost).toBe(500000n); // 50000 * 10
   });
@@ -918,7 +918,7 @@ describe('FyndClient.submit', () => {
       },
       signature: `0x${'ab'.repeat(32)}${'cd'.repeat(32)}00` as Hex,
     };
-    await expect(client.submit(signedApproval)).rejects.toThrow(
+    await expect(client.executeApproval(signedApproval)).rejects.toThrow(
       expect.objectContaining({ code: 'CONFIG' }),
     );
   });
@@ -945,7 +945,7 @@ function makeDummyQuote(overrides?: Partial<{ gasEstimate: bigint }>) {
   };
 }
 
-function makeSignedOrder(
+function makeSignedSwap(
   quote: ReturnType<typeof makeDummyQuote>,
   txOverrides?: { maxFeePerGas?: bigint },
 ) {

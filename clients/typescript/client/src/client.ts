@@ -11,12 +11,12 @@ import {
   type FyndPayload,
   type SettledOrder,
   type SettleOptions,
-  type SignablePayload,
   type SignedApproval,
-  type SignedOrder,
+  type SignedSwap,
+  type SwapPayload,
   type TxReceipt,
 } from "./signing.js";
-import type { Address, ApprovalOptions, Hex, HealthStatus, InstanceInfo, Quote, QuoteParams } from "./types.js";
+import type { Address, ApprovalParams, Hex, HealthStatus, InstanceInfo, Quote, QuoteParams } from "./types.js";
 
 type WireErrorResponse = components["schemas"]["ErrorResponse"];
 
@@ -65,7 +65,7 @@ export interface RetryConfig {
   maxBackoffMs?: number;
 }
 
-/** Overrides for transaction parameters when building a signable payload. */
+/** Overrides for transaction parameters when building a swap or approval payload. */
 export interface SigningHints {
   /** Override the sender address (defaults to {@link FyndClientOptions.sender}). */
   sender?: Address;
@@ -81,7 +81,7 @@ export interface SigningHints {
   simulate?: boolean;
 }
 
-/** Options for {@link FyndClient.execute}. */
+/** Options for {@link FyndClient.executeSwap}. */
 export interface ExecutionOptions {
   /** When `true`, simulate execution without broadcasting a transaction. */
   dryRun?: boolean;
@@ -255,14 +255,14 @@ export class FyndClient {
    * @throws {FyndError} With code `CONFIG` if `quote.transaction` is absent (forgot `encodingOptions`).
    * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the `eth_call` reverts.
    */
-  async signablePayload(quote: Quote, hints?: SigningHints): Promise<SignablePayload> {
+  async swapPayload(quote: Quote, hints?: SigningHints): Promise<SwapPayload> {
     if (quote.backend !== 'fynd') {
       throw new Error('not implemented: Turbine backend signing');
     }
-    return this.fyndSignablePayload(quote, hints ?? {});
+    return this.fyndSwapPayload(quote, hints ?? {});
   }
 
-  private async fyndSignablePayload(quote: Quote, hints: SigningHints): Promise<SignablePayload> {
+  private async fyndSwapPayload(quote: Quote, hints: SigningHints): Promise<SwapPayload> {
     const senderOpt = hints.sender ?? this.options.sender;
     if (senderOpt === undefined) {
       throw FyndError.config(
@@ -273,7 +273,7 @@ export class FyndClient {
 
     const provider = this.options.provider;
     if (provider === undefined) {
-      throw FyndError.config("provider is required for signablePayload");
+      throw FyndError.config("provider is required for swapPayload");
     }
 
     const nonce = hints.nonce !== undefined
@@ -332,13 +332,13 @@ export class FyndClient {
    * `eth_estimateGas` without broadcasting. The returned `settle()` resolves
    * immediately with estimated gas cost and decoded return data.
    *
-   * @param order - A signed order from {@link assembleSignedOrder}.
+   * @param order - A signed swap from {@link assembleSignedSwap}.
    * @param options - Set `dryRun: true` to simulate without broadcasting.
    * @throws {FyndError} With code `CONFIG` if no provider is configured.
    * @throws {FyndError} With code `CONFIG` if the signature has an invalid v byte.
    * @throws {FyndError} With code `SIMULATE_FAILED` when `dryRun` is `true` and the simulation reverts.
    */
-  async execute(order: SignedOrder, options?: ExecutionOptions): Promise<ExecutionReceipt> {
+  async executeSwap(order: SignedSwap, options?: ExecutionOptions): Promise<ExecutionReceipt> {
     const { payload, signature } = order;
     const tx = payload.payload.tx;
     const quote = payload.payload.quote;
@@ -349,7 +349,7 @@ export class FyndClient {
 
     const provider = this.options.submitProvider ?? this.options.provider;
     if (provider === undefined) {
-      throw FyndError.config("provider is required for execute");
+      throw FyndError.config("provider is required for executeSwap");
     }
 
     const txHash = await this.serializeAndBroadcast(tx, signature);
@@ -429,36 +429,37 @@ export class FyndClient {
   }
 
   /**
-   * Builds an unsigned EIP-1559 `approve(spender, amount)` transaction for the Fynd router.
+   * Builds an unsigned EIP-1559 `approve(router, amount)` transaction for the given token.
    *
    * Fetches the router address from `GET /v1/info` (cached after first call).
-   * Reads nonce and gas fees from `provider` unless overridden via `options`.
+   * Reads nonce and gas fees from `provider` unless overridden via `hints`.
+   * Gas defaults to `hints.gasLimit ?? 65_000n` (safe for all ERC-20 approve calls).
    *
-   * @param token - ERC-20 token to approve.
-   * @param amount - Amount to approve (in token base units).
-   * @param options - Optional overrides for sender, nonce, gas, and allowance check.
+   * @param params - Token, amount, and optional allowance-check flag.
+   * @param hints - Optional overrides for sender, nonce, gas fees, and gas limit.
    * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
-   * @throws {FyndError} With code `CONFIG` if `checkAllowance` is `true` and `provider.readAllowance` is absent.
+   * @throws {FyndError} With code `CONFIG` if `params.checkAllowance` is `true` and `provider.readAllowance` is absent.
    */
-  async approval(token: Address, amount: bigint, options?: ApprovalOptions): Promise<ApprovalPayload> {
+  async approval(params: ApprovalParams, hints?: SigningHints): Promise<ApprovalPayload> {
     const info = await this.info();
     const provider = this.options.provider;
     if (provider === undefined) throw FyndError.config("provider is required for approval");
 
-    const senderOpt = options?.sender ?? this.options.sender;
+    const senderOpt = hints?.sender ?? this.options.sender;
     if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
     const sender: Address = senderOpt;
 
-    const nonce = options?.nonce !== undefined
-      ? options.nonce
+    const nonce = hints?.nonce !== undefined
+      ? hints.nonce
       : await provider.getTransactionCount({ address: sender });
 
     const { maxFeePerGas, maxPriorityFeePerGas } =
-      options?.maxFeePerGas !== undefined && options?.maxPriorityFeePerGas !== undefined
-        ? { maxFeePerGas: options.maxFeePerGas, maxPriorityFeePerGas: options.maxPriorityFeePerGas }
+      hints?.maxFeePerGas !== undefined && hints?.maxPriorityFeePerGas !== undefined
+        ? { maxFeePerGas: hints.maxFeePerGas, maxPriorityFeePerGas: hints.maxPriorityFeePerGas }
         : await provider.estimateFeesPerGas();
 
-    const gas = options?.gasLimit ?? 65_000n;
+    const gas = hints?.gasLimit ?? 65_000n;
+    const { token, amount } = params;
     const spender = info.routerAddress;
 
     const data = encodeFunctionData({
@@ -468,7 +469,7 @@ export class FyndClient {
     }) as Hex;
 
     let isNeeded: boolean | undefined;
-    if (options?.checkAllowance === true) {
+    if (params.checkAllowance === true) {
       if (provider.readAllowance === undefined) {
         throw FyndError.config("provider.readAllowance is required when checkAllowance is true");
       }
@@ -502,9 +503,9 @@ export class FyndClient {
    * @throws {FyndError} With code `CONFIG` if no provider is configured.
    * @throws {FyndError} With code `SETTLE_TIMEOUT` if the transaction does not confirm in time.
    */
-  async submit(signedApproval: SignedApproval, options?: SettleOptions): Promise<TxReceipt> {
+  async executeApproval(signedApproval: SignedApproval, options?: SettleOptions): Promise<TxReceipt> {
     const provider = this.options.submitProvider ?? this.options.provider;
-    if (provider === undefined) throw FyndError.config("provider is required for submit");
+    if (provider === undefined) throw FyndError.config("provider is required for executeApproval");
     const txHash = await this.serializeAndBroadcast(signedApproval.tx, signedApproval.signature);
     const receipt = await this.pollForReceipt(
       provider, txHash, options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS,
