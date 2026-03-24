@@ -275,12 +275,6 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
                     .map(Duration::from_secs),
             );
 
-    if let Some(blocklist_path) = &args.blocklist {
-        let blocklist = BlocklistConfig::load_from_file(blocklist_path).map_err(|e| {
-            SolverError::SetupError(format!("failed to load blocklist config: {}", e))
-        })?;
-        builder = builder.blocklist(blocklist);
-    }
     if args.disable_tls {
         builder = builder.disable_tls();
     }

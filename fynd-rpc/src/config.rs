@@ -112,9 +112,9 @@ impl BlacklistConfig {
 
     /// Load blacklist configuration from a TOML file.
     ///
-    /// The TOML file should have a `[blacklist]` section:
+    /// The TOML file should have a `[blocklist]` section:
     /// ```toml
-    /// [blacklist]
+    /// [blocklist]
     /// components = ["0x86d257cdb7bc9c0df10e84c8709697f92770b335"]
     /// ```
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
@@ -124,12 +124,12 @@ impl BlacklistConfig {
 
         #[derive(Deserialize)]
         struct Wrapper {
-            blacklist: BlocklistConfig,
+            blocklist: BlocklistConfig,
         }
 
         let wrapper: Wrapper = toml::from_str(&contents)
             .with_context(|| format!("failed to parse blocklist config {}", path.display()))?;
-        Ok(wrapper.blacklist)
+        Ok(wrapper.blocklist)
     }
 
     pub(crate) fn into_components(self) -> HashSet<String> {

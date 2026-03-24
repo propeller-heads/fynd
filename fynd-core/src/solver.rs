@@ -10,7 +10,7 @@
 //!     .algorithm("most_liquid")
 //!     .build()?;
 //! ```
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use num_cpus;
 use serde::{Deserialize, Serialize};
@@ -289,6 +289,7 @@ pub struct FyndBuilder {
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
+    blocklisted_components: HashSet<String>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -317,6 +318,7 @@ impl FyndBuilder {
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
             reconnect_delay: defaults::RECONNECT_DELAY,
+            blocklisted_components: HashSet::new(),
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -375,6 +377,12 @@ impl FyndBuilder {
     /// Sets the delay before reconnecting to Tycho after a disconnection (default: 5 s).
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
         self.reconnect_delay = delay;
+        self
+    }
+
+    /// Sets component IDs to exclude from the Tycho stream.
+    pub fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+        self.blocklisted_components = components;
         self
     }
 
@@ -477,7 +485,8 @@ impl FyndBuilder {
         .gas_refresh_interval(self.gas_refresh_interval)
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago);
+        .traded_n_days_ago(self.traded_n_days_ago)
+        .blocklisted_components(self.blocklisted_components);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;

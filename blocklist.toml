@@ -1,7 +1,7 @@
-# Component blacklist configuration
+# Component blocklist configuration
 # Exclude specific pools from routing due to simulation issues
 
-[blacklist]
+[blocklist]
 # Component IDs to exclude (pool addresses)
 components = [
     # AMPL pools - AMPL is a rebasing token that breaks simulation assumptions

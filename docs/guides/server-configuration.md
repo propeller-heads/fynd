@@ -4,7 +4,7 @@ icon: server
 
 # Server Configuration
 
-Reference for all Fynd server flags, worker pool tuning, blacklisting, logging, and monitoring.
+Reference for all Fynd server flags, worker pool tuning, blocklist configuration, logging, and monitoring.
 
 ## Run options
 
@@ -87,7 +87,7 @@ Run `cargo run --release -- serve --help` for the full list.
 | `--worker-router-timeout-ms`       | —                     | `100`                      | Default solve timeout (ms)                                                                                                                                                                                     |
 | `--worker-router-min-responses`    | —                     | `0`                        | Early return threshold (0 = wait for all pools)                                                                                                                                                                |
 | `-w, --worker-pools-config`        | `WORKER_POOLS_CONFIG` | `worker_pools.toml`        | Worker pools config file path                                                                                                                                                                                  |
-| `--blacklist-config`               | `BLACKLIST_CONFIG`    | `blacklist.toml`           | Blacklist config file path                                                                                                                                                                                     |
+| `--blocklist-config` | `BLOCKLIST_CONFIG` | `blocklist.toml` | Path to blocklist TOML config file. Components listed here are excluded from the Tycho stream.                                                                                                                                                                                     |
 | `--disable-tls`                    | —                     | `false`                    | Disable TLS for Tycho connection                                                                                                                                                                               |
 | `--min-token-quality`              | —                     | `100`                      | Minimum [token quality](https://docs.propellerheads.xyz/tycho/overview/concepts#token) filter                                                                                                                  |
 | `--gas-refresh-interval-secs`      | —                     | `30`                       | Gas price refresh interval                                                                                                                                                                                     |
@@ -128,12 +128,18 @@ To use a custom config file:
 cargo run --release -- serve -w my_worker_pools.toml
 ```
 
-## Blacklist (`blacklist.toml`)
+## Blocklist config
 
-Exclude specific components from routing, useful for components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)):
+By default, Fynd loads `blocklist.toml` from the working directory. The shipped default excludes components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)). Override with `--blocklist-config`:
+
+```bash
+cargo run --release -- serve --blocklist-config my_blocklist.toml
+```
+
+The config file uses a `[blocklist]` section listing component IDs to exclude:
 
 ```toml
-[blacklist]
+[blocklist]
 components = [
     "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
 ]
