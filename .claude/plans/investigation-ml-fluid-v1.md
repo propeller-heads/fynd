@@ -39,7 +39,24 @@ Clean near-monotonic scaling. Peaks at 28 workers (462 req/s). P99 stays tightly
 |      28 |             400.13 |             94 |         238 |
 |      32 |             274.16 |            123 |         337 |
 
-Non-monotonic. Throughput dips at 16 and 32 workers with no consistent trend.
+Non-monotonic (partial run, 12–32 only). Throughput dips at 16 and 32 workers with no consistent trend.
+
+### most_liquid 3-hop — 8 protocols (with fluid_v1, post lock-PR, full range)
+
+| Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) |
+| ------: | -----------------: | -------------: | ----------: |
+|       1 |              22.30 |           2138 |        2531 |
+|       2 |              39.46 |           1208 |        1465 |
+|       4 |              75.95 |            627 |         784 |
+|       8 |             146.52 |            319 |         440 |
+|      12 |             177.23 |            260 |         386 |
+|      16 |             298.22 |            146 |         243 |
+|      20 |             352.63 |            117 |         226 |
+|      24 |             243.00 |            163 |         320 |
+|      28 |             384.13 |             92 |         251 |
+|      32 |             366.06 |             86 |         272 |
+
+Non-monotonic. Notable drops at 24 workers (243 req/s, down from 352 at 20) and at 32 (366, down from 384 at 28). P99 spikes eliminated (max 440ms vs 794ms pre-lock-PR), but non-monotonic throughput pattern persists — confirming the issue is `fluid_v1`-specific, not a lock contention artifact.
 
 ### most_liquid 3-hop — 8 protocols (with fluid_v1, pre lock-PR)
 

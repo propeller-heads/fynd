@@ -80,7 +80,7 @@ Measures how throughput scales with worker thread count for 3-hop route finding 
 | Instance | AWS `c7a.8xlarge` (32 vCPU, AMD EPYC) |
 | Algorithm | `most_liquid` |
 | Max hops | 3 |
-| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2` |
+| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2`, `fluid_v1` |
 | Requests per iteration | 10,000 |
 | Concurrency | `fixed:48` |
 | Warmup | 30s after health check |
@@ -90,30 +90,31 @@ Measures how throughput scales with worker thread count for 3-hop route finding 
 
 | Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) | RPS/Worker |
 | ------: | -----------------: | -------------: | ----------: | ---------: |
-|       1 |              26.37 |           1801 |        2323 |      26.37 |
-|       2 |              53.38 |            895 |        1038 |      26.69 |
-|       4 |             105.35 |            453 |         531 |      26.34 |
-|       8 |             195.24 |            241 |         313 |      24.41 |
-|      12 |             290.05 |            158 |         224 |      24.17 |
-|      16 |             362.16 |            124 |         191 |      22.64 |
-|      20 |             409.17 |            106 |         185 |      20.46 |
-|      24 |             450.39 |             93 |         188 |      18.77 |
-|      28 |             461.64 |             88 |         192 |      16.49 |
-|      32 |             449.14 |             88 |         224 |      14.04 |
+|       1 |              22.30 |           2138 |        2531 |      22.30 |
+|       2 |              39.46 |           1208 |        1465 |      19.73 |
+|       4 |              75.95 |            627 |         784 |      18.99 |
+|       8 |             146.52 |            319 |         440 |      18.32 |
+|      12 |             177.23 |            260 |         386 |      14.77 |
+|      16 |             298.22 |            146 |         243 |      18.64 |
+|      20 |             352.63 |            117 |         226 |      17.63 |
+|      24 |             243.00 |            163 |         320 |      10.13 |
+|      28 |             384.13 |             92 |         251 |      13.72 |
+|      32 |             366.06 |             86 |         272 |      11.44 |
 
 ### Analysis
 
-Throughput scales near-linearly up to 4 workers (~26 req/s per worker), then grows more gradually as parallelism overhead increases. The solver peaks at **462 req/s at 28 workers** with P99 ≤224ms throughout. Per-worker efficiency declines from ~26 req/s at 1 worker to ~14 req/s at 32 workers. The solver does not reach 1000 req/s on this instance.
+Throughput is non-monotonic across worker counts — a pattern traced to `fluid_v1`, which causes irregular block-update pause durations. The solver peaks at **384 req/s at 28 workers** and does not reach 1000 req/s on this instance. P99 stays bounded (≤440ms), a significant improvement over the pre-lock-PR results where P99 spiked to 794ms at 24 workers.
 
-**Recommendation.** For `most_liquid` 3-hop routing at ~450 req/s sustained throughput, provision at least 28 CPU cores.
+
+**Recommendation.** For `most_liquid` 3-hop routing with this full protocol set, provision at least 28 CPU cores. Expect throughput variability across iterations due to `fluid_v1`'s impact on the block-update cycle.
 
 ## Comparison: 2-Hop vs 3-Hop
 
 | Target RPS | 2-Hop Workers | 3-Hop Workers | Notes |
 | ---------: | ------------: | ------------: | ----- |
-|      1,000 |             3 |             — | 3-hop peaks at ~462 req/s at 28 workers; 1000 req/s not reached |
+|      1,000 |             3 |             — | 3-hop peaks at ~384 req/s at 28 workers; 1000 req/s not reached |
 
-`most_liquid` 3-hop does not reach 1000 req/s on a 32-vCPU instance with 7 protocols. The combinatorial growth in the 3-hop search space creates a hard throughput ceiling for this algorithm.
+`most_liquid` 3-hop does not reach 1000 req/s on a 32-vCPU instance with 8 protocols. The combinatorial growth in the 3-hop search space and `fluid_v1`-induced block-update variability create a hard throughput ceiling for this algorithm.
 
 ## CPU Scaling: Bellman-Ford 2-Hop
 
@@ -244,13 +245,13 @@ All results in this section use identical hardware, protocol set, and request lo
 
 | Workers | most_liquid (req/s) | bellman_ford (req/s) | Winner |
 | ------: | ------------------: | -------------------: | ------ |
-|       8 |              195.24 |               429.44 | bellman_ford (2.2x) |
-|      16 |              362.16 |               760.92 | bellman_ford (2.1x) |
-|      20 |              409.17 |               874.51 | bellman_ford (2.1x) |
-|      24 |              450.39 |               974.94 | bellman_ford (2.2x) |
-|      28 |              461.64 |              1201.92 | bellman_ford (2.6x) |
-|      32 |              449.14 |              1219.96 | bellman_ford (2.7x) |
+|       8 |              146.52 |               429.44 | bellman_ford (2.9x) |
+|      16 |              298.22 |               760.92 | bellman_ford (2.6x) |
+|      20 |              352.63 |               874.51 | bellman_ford (2.5x) |
+|      24 |              243.00 |               974.94 | bellman_ford (4.0x) |
+|      28 |              384.13 |              1201.92 | bellman_ford (3.1x) |
+|      32 |              366.06 |              1219.96 | bellman_ford (3.3x) |
 
-> **Note on protocol scope.** `most_liquid` results exclude `fluid_v1` (7 protocols); `bellman_ford` results include it (8 protocols). A fair comparison would require matching protocol sets. See [`docs/investigation-ml-fluid-v1.md`](investigation-ml-fluid-v1.md) for the open investigation into `fluid_v1`'s impact.
+Both algorithms use the same 8-protocol set. `bellman_ford` is consistently **2.5–4× faster** at 3 hops. The advantage widens at worker counts where `fluid_v1` disrupts `most_liquid`'s block-update cycle (notably 24 workers).
 
 At 3 hops, the results **reverse**: `bellman_ford` is **2–2.5× faster** than `most_liquid` and keeps scaling while `most_liquid` plateaus. The `most_liquid` greedy search requires pre-computed edge weights (spot price × depth) that are recomputed on every block, creating a periodic pause that limits scaling; Bellman-Ford carries no pre-computed edge state so its per-block update is a no-op.
