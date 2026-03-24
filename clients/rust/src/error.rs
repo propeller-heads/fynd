@@ -5,6 +5,7 @@ use thiserror::Error;
 /// Mapped from the raw string `code` field in
 /// [`fynd_rpc_types::ErrorResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// The request was malformed or contained invalid parameters.
     ///
