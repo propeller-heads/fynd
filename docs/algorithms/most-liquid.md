@@ -17,7 +17,7 @@ The key insight is that phases 1-2 are cheap (graph traversal and arithmetic), w
 
 Starting from the source token, BFS explores all outgoing edges up to `max_hops` depth. At each step it follows every edge (including parallel edges between the same token pair from different pools), building complete paths from source to destination.
 
-The result is a list of all simple paths (no repeated tokens) from source to destination within the hop limit. For common pairs like WETH/USDC at 2 hops, this might be a few dozen paths. At 4-5 hops, it can be thousands.
+The result is a list of all simple paths (no repeated tokens) from source to destination within the hop limit.
 
 ## Phase 2: Heuristic scoring
 
@@ -34,7 +34,7 @@ score = (product of spot prices along the route) × min(depth along the route)
 
 The spot price product estimates the exchange rate. The minimum depth acts as a bottleneck indicator: a path is only as liquid as its shallowest pool. Paths through deep, well-priced pools score highest.
 
-This scoring is approximate. It ignores price impact (the spot price assumes infinitesimal trade size) and doesn't account for how liquidity changes after each hop. But it's fast and good enough to rank thousands of candidates so the expensive simulation phase focuses on the right ones.
+This scoring is approximate. It ignores price impact (the spot price assumes infinitesimal trade size) and doesn't account for how liquidity changes after each hop. But it's fast and good enough to rank tens of thousands of candidates so the expensive simulation phase focuses on the right ones.
 
 Paths are sorted by score descending. If `max_routes` is configured, only the top-N proceed to simulation.
 
