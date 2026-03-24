@@ -8,7 +8,7 @@
 //! ```bash
 //! export TYCHO_API_KEY="your-api-key"  # Get from https://tycho.propellerheads.xyz
 //! export RPC_URL="https://eth.llamarpc.com"
-//! export TYCHO_URL="tycho-fynd-ethereum.propellerheads.xyz"  # Optional, defaults to tycho-beta
+//! export TYCHO_URL="tycho-fynd-ethereum.propellerheads.xyz"  # Optional, defaults to chain-specific Fynd endpoint
 //! cargo run --package fynd-core --example solve_order
 //! ```
 use std::{env, str::FromStr, time::Duration};
