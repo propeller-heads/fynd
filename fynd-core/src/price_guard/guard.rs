@@ -1,7 +1,6 @@
 //! PriceGuard: validates solver outputs against external price sources.
 
 use num_bigint::BigUint;
-use num_traits::Zero;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -63,7 +62,8 @@ impl PriceGuard {
                 continue;
             }
             let Some((token_in, token_out)) = self.check_structure(quote) else {
-                quote.set_status(QuoteStatus::PriceCheckFailed);
+                // This should not happen.
+                quote.set_status(QuoteStatus::NoRouteFound);
                 continue;
             };
             if !self.check_price(quote, &token_in, &token_out, config) {
@@ -81,13 +81,11 @@ impl PriceGuard {
             warn!(order_id = quote.order_id(), "successful quote has no route");
             return None;
         };
-        match (route.input_token(), route.output_token()) {
-            (Some(token_in), Some(token_out)) => Some((token_in, token_out)),
-            _ => {
-                warn!(order_id = quote.order_id(), "successful quote has empty route");
-                None
-            }
-        }
+        let (Some(token_in), Some(token_out)) = (route.input_token(), route.output_token()) else {
+            warn!(order_id = quote.order_id(), "successful quote has empty route");
+            return None;
+        };
+        Some((token_in, token_out))
     }
 
     /// Queries all providers and returns `true` if at least one validates.
@@ -102,28 +100,22 @@ impl PriceGuard {
             .registry
             .get_all_expected_out(token_in, token_out, quote.amount_in());
 
-        let mut any_validated = false;
-        let mut all_errors = true;
-
+        let mut has_price = false;
         for result in &results {
             match result {
                 Ok(price) => {
-                    all_errors = false;
                     if self.price_within_tolerance(quote, price, config) {
-                        any_validated = true;
-                        break;
+                        return true;
                     }
+                    has_price = true;
                 }
-                Err(e) => {
-                    debug!(error = %e, "price provider error");
-                }
+                Err(e) => debug!(error = %e, "price provider error"),
             }
         }
-
-        if all_errors {
-            config.allow_on_provider_error()
+        if has_price {
+            false
         } else {
-            any_validated
+            config.allow_on_provider_error()
         }
     }
 
@@ -134,27 +126,14 @@ impl PriceGuard {
         provider_price: &ExternalPrice,
         config: &PriceGuardConfig,
     ) -> bool {
-        if provider_price
-            .expected_amount_out()
-            .is_zero()
-        {
-            return true;
-        }
-
         let provider_amount_out = provider_price.expected_amount_out();
         let fynd_amount_out = quote.amount_out();
-        let diff;
-        let tolerance;
 
-        // Fynd price is higher than the price provider
-        if fynd_amount_out >= provider_amount_out {
-            diff = fynd_amount_out - provider_amount_out;
-            tolerance = config.upper_tolerance_bps();
-        // Fynd price is lower than the price provider
+        let (diff, tolerance) = if fynd_amount_out >= provider_amount_out {
+            (fynd_amount_out - provider_amount_out, config.upper_tolerance_bps())
         } else {
-            diff = provider_amount_out - fynd_amount_out;
-            tolerance = config.lower_tolerance_bps();
-        }
+            (provider_amount_out - fynd_amount_out, config.lower_tolerance_bps())
+        };
 
         let deviation_bps: u32 = ((&diff * BigUint::from(10_000u32)) / provider_amount_out)
             .try_into()
