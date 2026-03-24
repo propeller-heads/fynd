@@ -80,7 +80,7 @@ Measures how throughput scales with worker thread count for 3-hop route finding 
 | Instance | AWS `c7a.8xlarge` (32 vCPU, AMD EPYC) |
 | Algorithm | `most_liquid` |
 | Max hops | 3 |
-| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2`, `fluid_v1` |
+| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2` |
 | Requests per iteration | 10,000 |
 | Concurrency | `fixed:48` |
 | Warmup | 30s after health check |
@@ -88,30 +88,28 @@ Measures how throughput scales with worker thread count for 3-hop route finding 
 
 ### Results
 
-The 12–32 worker results below reflect the lock-handling improvements merged after the initial run (snapshot-then-simulate, two-phase locking in derived computations). The P99 spikes previously observed at 24+ workers are eliminated.
-
 | Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) | RPS/Worker |
 | ------: | -----------------: | -------------: | ----------: | ---------: |
-|      12 |             211.99 |            213 |         338 |      17.67 |
-|      16 |             221.04 |            201 |         334 |      13.82 |
-|      20 |             342.76 |            120 |         238 |      17.14 |
-|      24 |             323.45 |            113 |         289 |      13.48 |
-|      28 |             400.13 |             94 |         238 |      14.29 |
-|      32 |             274.16 |            123 |         337 |       8.57 |
+|      12 |             270.82 |            167 |         247 |      22.57 |
+|      16 |             356.81 |            125 |         201 |      22.30 |
+|      20 |             411.52 |            105 |         181 |      20.58 |
+|      24 |             435.48 |             96 |         200 |      18.15 |
+|      28 |             476.51 |             85 |         183 |      17.02 |
+|      32 |             501.76 |             79 |         191 |      15.68 |
 
 ### Analysis
 
-Throughput is non-monotonic across worker counts, reflecting the periodic block-update pause rather than a clean CPU-bound scaling curve. The peak is **400 req/s at 28 workers**. P99 stays bounded (≤338ms) across all tested counts — a significant improvement over the previous run where P99 reached 794ms at 24 workers due to write-lock contention during derived data recomputation. The solver does not reach 1000 req/s on this instance with 8 protocols.
+Throughput scales monotonically with worker count. Per-worker efficiency declines gradually from ~22 req/s at 12 workers to ~16 req/s at 32 workers. The solver crosses **500 req/s at 32 workers**. P99 stays tightly bounded (≤247ms) throughout.
 
-**Recommendation.** For `most_liquid` 3-hop routing with a large protocol set, expect a throughput ceiling around 300–400 req/s on a 32-vCPU instance. Consider `bellman_ford` for higher 3-hop throughput (see below).
+**Recommendation.** For `most_liquid` 3-hop routing at 500 req/s sustained throughput, provision at least 32 CPU cores.
 
 ## Comparison: 2-Hop vs 3-Hop
 
 | Target RPS | 2-Hop Workers | 3-Hop Workers | Notes |
 | ---------: | ------------: | ------------: | ----- |
-|      1,000 |             3 |             — | 3-hop peaks at ~400 req/s; 1000 req/s not reached |
+|      1,000 |             3 |             — | 3-hop peaks at ~502 req/s at 32 workers; 1000 req/s not reached |
 
-With 8 protocols, `most_liquid` 3-hop does not reach 1000 req/s on a 32-vCPU instance. The combinatorial growth in the 3-hop search space over a large protocol set creates a hard throughput ceiling for this algorithm.
+With 7 protocols, `most_liquid` 3-hop does not reach 1000 req/s on a 32-vCPU instance. The combinatorial growth in the 3-hop search space creates a hard throughput ceiling for this algorithm.
 
 ## CPU Scaling: Bellman-Ford 2-Hop
 
@@ -242,10 +240,12 @@ All results in this section use identical hardware, protocol set, and request lo
 
 | Workers | most_liquid (req/s) | bellman_ford (req/s) | Winner |
 | ------: | ------------------: | -------------------: | ------ |
-|      16 |              221.04 |               760.92 | bellman_ford (3.4x) |
-|      20 |              342.76 |               874.51 | bellman_ford (2.6x) |
-|      24 |              323.45 |               974.94 | bellman_ford (3.0x) |
-|      28 |              400.13 |              1201.92 | bellman_ford (3.0x) |
-|      32 |              274.16 |              1219.96 | bellman_ford (4.4x) |
+|      16 |              356.81 |               760.92 | bellman_ford (2.1x) |
+|      20 |              411.52 |               874.51 | bellman_ford (2.1x) |
+|      24 |              435.48 |               974.94 | bellman_ford (2.2x) |
+|      28 |              476.51 |              1201.92 | bellman_ford (2.5x) |
+|      32 |              501.76 |              1219.96 | bellman_ford (2.4x) |
 
-At 3 hops with 8 protocols, the results **reverse**: `bellman_ford` is **3–4× faster** than `most_liquid` and keeps scaling linearly while `most_liquid` plateaus around 300–400 req/s. The `most_liquid` greedy search over a large 3-hop graph is bounded by periodic block-update pauses (edge weight recomputation on every block); Bellman-Ford carries no pre-computed edge state so its per-block pause is negligible.
+> **Note on protocol scope.** `most_liquid` results use 7 protocols (excluding `fluid_v1`); `bellman_ford` results use 8 (including `fluid_v1`). The comparison favours `bellman_ford` slightly as a result.
+
+At 3 hops, the results **reverse**: `bellman_ford` is **2–2.5× faster** than `most_liquid` and keeps scaling while `most_liquid` plateaus. The `most_liquid` greedy search requires pre-computed edge weights (spot price × depth) that are recomputed on every block, creating a periodic pause that limits scaling; Bellman-Ford carries no pre-computed edge state so its per-block update is a no-op.
