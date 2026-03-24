@@ -1,3 +1,12 @@
+## [0.25.1](https://github.com/propeller-heads/fynd/compare/0.25.0...0.25.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* fix after incorrect rebase ([200abcb](https://github.com/propeller-heads/fynd/commit/200abcbdf5cf2a07e92b0343e7bc7aac54a88fd6))
+* track all candidate path pools in path_components for incremental invalidation ([5badb5c](https://github.com/propeller-heads/fynd/commit/5badb5c29fe33887e5a03907ac97587ee2f3cf94))
+* update the path to the relevant docs ([a423bd0](https://github.com/propeller-heads/fynd/commit/a423bd029de7b9ac7b64707ee88dc3ec6e2b0a9c))
+
 ## [0.25.0](https://github.com/propeller-heads/fynd/compare/0.24.3...0.25.0) (2026-03-23)
 
 
