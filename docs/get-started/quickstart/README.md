@@ -139,57 +139,62 @@ The full tutorial (signing + on-chain execution) is at `clients/typescript/examp
 {% endtab %}
 
 {% tab title="Rust" %}
-From [`clients/rust/examples/quote.rs`](../../../clients/rust/examples/quote.rs):
+From [`clients/rust/examples/swap_erc20.rs`](../../../clients/rust/examples/swap_erc20.rs):
 
 ```rust
-    let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
-        .build_quote_only()
-        .expect("valid URL");
+let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
+    .with_sender(sender)
+    .build()
+    .await?;
 
-    // -----------------------------------------------------------------------
-    // Health check
-    // -----------------------------------------------------------------------
-    let health = client.health().await?;
-    println!("=== Health ===");
-    println!("  healthy:            {}", health.healthy());
-    println!("  last_update_ms:     {}", health.last_update_ms());
-    println!("  num_solver_pools:   {}", health.num_solver_pools());
-    println!("  derived_data_ready: {}", health.derived_data_ready());
-    println!();
+// 1. Quote
+let quote = client
+    .quote(QuoteParams::new(
+        Order::new(
+            Bytes::copy_from_slice(sell_token.as_slice()),
+            Bytes::copy_from_slice(buy_token.as_slice()),
+            BigUint::from(SELL_AMOUNT),
+            OrderSide::Sell,
+            Bytes::copy_from_slice(sender.as_slice()),
+            None,
+        ),
+        QuoteOptions::default()
+            .with_timeout_ms(5_000)
+            .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
+    ))
+    .await?;
+println!("amount_out: {}", quote.amount_out());
 
-    // -----------------------------------------------------------------------
-    // Quote 1: sell 1 WETH for USDC
-    // -----------------------------------------------------------------------
-    let quote = client
-        .quote(QuoteParams::new(
-            Order::new(addr(WETH), addr(USDC), one_ether(), OrderSide::Sell, addr(VITALIK), None),
-            QuoteOptions::default(),
-        ))
+// 2. Approve if needed (checks on-chain allowance, skips if sufficient)
+if let Some(approval_payload) = client
+    .approval(
+        &ApprovalParams::new(
+            Bytes::copy_from_slice(sell_token.as_slice()),
+            BigUint::from(SELL_AMOUNT),
+            true,
+        ),
+        &SigningHints::default(),
+    )
+    .await?
+{
+    let sig = signer.sign_hash(&approval_payload.signing_hash()).await?;
+    client
+        .execute_approval(SignedApproval::assemble(approval_payload, sig))
+        .await?
         .await?;
+}
 
-    println!("=== Quote: 1 WETH → USDC ===");
-    println!("  order_id:      {}", quote.order_id());
-    println!("  status:        {:?}", quote.status());
-    println!("  amount_in:     {}", quote.amount_in());
-    println!("  amount_out:    {}", quote.amount_out());
-    println!("  gas_estimate:  {}", quote.gas_estimate());
-    println!("  solve_time_ms: {}", quote.solve_time_ms());
-    println!("  block:         #{} ({})", quote.block().number(), quote.block().hash());
-    if let Some(route) = quote.route() {
-        for (i, swap) in route.swaps().iter().enumerate() {
-            println!(
-                "  swap[{i}]: {} {} → {} (pool {})",
-                swap.protocol(),
-                swap.amount_in(),
-                swap.amount_out(),
-                swap.component_id(),
-            );
-        }
-    }
-    println!();
+// 3. Sign and execute swap
+let payload = client.swap_payload(quote, &SigningHints::default()).await?;
+let sig = signer.sign_hash(&payload.signing_hash()).await?;
+let receipt = client
+    .execute_swap(SignedSwap::assemble(payload, sig), &ExecutionOptions::default())
+    .await?
+    .await?;
+println!("gas: {}", receipt.gas_cost());
 ```
 
-Run with: `cargo run --example quote`
+Run with: `cargo run --example swap_erc20 -p fynd-client`
 {% endtab %}
 {% endtabs %}
 

@@ -15,8 +15,8 @@ use alloy::{
 };
 use bytes::Bytes;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide, QuoteOptions,
-    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
+    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
+    QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides,
 };
 use num_bigint::BigUint;
 
@@ -43,6 +43,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_sender(sender)
         .build()
         .await?;
+
+    // Check whether a router approval is needed and sign it if so.
+    // In this dry-run example the broadcast is skipped — storage overrides inject the allowance
+    // below. In production, remove the `let _ =` line and uncomment `execute_approval`.
+    if let Some(approval_payload) = client
+        .approval(
+            &ApprovalParams::new(
+                Bytes::copy_from_slice(sell_token.as_slice()),
+                BigUint::from(SELL_AMOUNT),
+                true, // check on-chain allowance first
+            ),
+            &SigningHints::default(),
+        )
+        .await?
+    {
+        println!("approval needed — signing");
+        let approval_sig = signer
+            .sign_hash(&approval_payload.signing_hash())
+            .await?;
+        let signed_approval = SignedApproval::assemble(approval_payload, approval_sig);
+        // In production: client.execute_approval(signed_approval).await?.await?;
+        let _ = signed_approval;
+    } else {
+        println!("allowance sufficient — skipping approval");
+    }
 
     // Request a quote with ERC-20 encoding.
     let quote = client

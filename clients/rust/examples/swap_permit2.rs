@@ -18,9 +18,9 @@ use alloy::{
 };
 use bytes::Bytes;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
+    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
     PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
-    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
+    QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides, UserTransferType,
 };
 use num_bigint::BigUint;
 
@@ -46,37 +46,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProviderBuilder::default().connect_http(RPC_URL.parse::<reqwest::Url>()?);
     let sell_token: Address = USDC.parse()?;
     let buy_token: Address = WETH.parse()?;
-    let permit2_addr: Address = PERMIT2.parse()?;
 
     let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
         .with_sender(sender)
         .build()
         .await?;
 
-    // Discover the router address from a plain ERC-20 quote — it becomes the Permit2 spender.
-    let router = {
-        let q = client
-            .quote(QuoteParams::new(
-                Order::new(
-                    Bytes::copy_from_slice(sell_token.as_slice()),
-                    Bytes::copy_from_slice(buy_token.as_slice()),
-                    BigUint::from(SELL_AMOUNT),
-                    OrderSide::Sell,
-                    Bytes::copy_from_slice(sender.as_slice()),
-                    None,
-                ),
-                QuoteOptions::default()
-                    .with_timeout_ms(5_000)
-                    .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
-            ))
-            .await?;
-        Address::from_slice(
-            q.transaction()
-                .ok_or("no calldata in quote")?
-                .to()
-                .as_ref(),
+    // Resolve the router address from the instance info endpoint.
+    let info = client.info().await?;
+    let router = Address::from_slice(info.router_address().as_ref());
+    let permit2_addr: Address = PERMIT2.parse()?;
+
+    // Check whether an ERC-20 approval to the Permit2 contract is needed and sign it if so.
+    // In this dry-run example the broadcast is skipped — storage overrides inject the allowance
+    // below. In production, remove the `let _ =` line and uncomment `execute_approval`.
+    if let Some(approval_payload) = client
+        .approval(
+            &ApprovalParams::new(
+                Bytes::copy_from_slice(sell_token.as_slice()),
+                BigUint::from(SELL_AMOUNT),
+                true, // check on-chain allowance first
+            )
+            .with_transfer_type(UserTransferType::TransferFromPermit2),
+            &SigningHints::default(),
         )
-    };
+        .await?
+    {
+        println!("Permit2 approval needed — signing");
+        let approval_sig = signer
+            .sign_hash(&approval_payload.signing_hash())
+            .await?;
+        let signed_approval = SignedApproval::assemble(approval_payload, approval_sig);
+        // In production: client.execute_approval(signed_approval).await?.await?;
+        let _ = signed_approval;
+    } else {
+        println!("Permit2 allowance sufficient — skipping approval");
+    }
 
     // Build and sign the Permit2 EIP-712 message off-chain.
     // Dry-run: nonce 0, uint48::MAX deadlines — no chain reads needed.
