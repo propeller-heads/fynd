@@ -68,7 +68,7 @@ This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
 {% endtab %}
 
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/swap_erc20.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/swap_erc20.ts):
+From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/tutorial/main.ts):
 
 ```typescript
 const client = new FyndClient({
@@ -80,34 +80,22 @@ const client = new FyndClient({
 
 // 1. Quote
 const quote = await client.quote({
-  order: {
-    tokenIn: USDC,
-    tokenOut: WETH,
-    amount: SELL_AMOUNT,
-    side: 'sell',
-    sender: account.address,
-  },
+  order: { tokenIn: USDC, tokenOut: WETH, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
   options: { encodingOptions: encodingOptions(0.005) },
 });
 console.log(`amount_out: ${quote.amountOut}`);
 
 // 2. Approve if needed (checks on-chain allowance, skips if sufficient)
-const approvalPayload = await client.approval({
-  token: USDC,
-  amount: SELL_AMOUNT,
-  checkAllowance: true,
-});
+const approvalPayload = await client.approval({ token: USDC, amount: SELL_AMOUNT, checkAllowance: true });
 if (approvalPayload !== null) {
-  const approvalHash = approvalSigningHash(approvalPayload);
-  const approvalSig = await walletClient.signMessage({ message: { raw: approvalHash } });
-  await client.executeApproval({ tx: approvalPayload.tx, signature: approvalSig });
+  const sig = await walletClient.signMessage({ message: { raw: approvalSigningHash(approvalPayload) } });
+  await client.executeApproval({ tx: approvalPayload.tx, signature: sig });
 }
 
 // 3. Sign and execute swap
 const payload = await client.swapPayload(quote);
 const sig = await walletClient.signMessage({ message: { raw: swapSigningHash(payload) } });
-const receipt = await client.executeSwap(assembleSignedSwap(payload, sig));
-const settled = await receipt.settle();
+const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
 console.log(`gas: ${settled.gasCost}`);
 ```
 {% endtab %}
