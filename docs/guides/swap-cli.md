@@ -9,7 +9,7 @@ icon: rectangle-terminal
 
 ## Prerequisites
 
-1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
+1. **Running Fynd server** — start `fynd serve` first. See the [quickstart.md](../get-started/quickstart.md "mention") if you haven't.
 2. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
 
 ## Build

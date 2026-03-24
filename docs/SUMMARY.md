@@ -6,7 +6,7 @@
 
 * [Overview](README.md)
   * [API Specifications](get-started/overview/api-specifications.md)
-* [Quickstart](get-started/quickstart/README.md)
+* [Quickstart](get-started/quickstart.md)
 
 ## Guides
 
