@@ -286,11 +286,11 @@ impl TokenGasPriceComputation {
         // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
         let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
-            numerator: &buy_out * &sell_out_net +
-                &buy_out * (&self.simulation_amount + &buy_gas_cost),
-            denominator: BigUint::from(2u8) *
-                (&self.simulation_amount + &buy_gas_cost) *
-                sell_out_net,
+            numerator: &buy_out * &sell_out_net
+                + &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8)
+                * (&self.simulation_amount + &buy_gas_cost)
+                * sell_out_net,
         };
 
         Ok((spread, buy_price_precise, path_components))
@@ -372,19 +372,28 @@ impl TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Option<TokenGasPrices>, ComputationError> {
-        let store_guard = store.read().await;
+        // Read all needed data from store in a single lock acquisition.
+        let (existing_deps, existing_prices, spot_prices) = {
+            let store_guard = store.read().await;
 
-        // Need existing deps to do incremental computation
-        let Some(existing_deps) = store_guard.token_prices_deps() else {
-            return Ok(None); // No deps stored yet, need full compute
-        };
-        let Some(existing_prices) = store_guard.token_prices() else {
-            return Ok(None);
+            // Need existing deps to do incremental computation.
+            let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
+                return Ok(None); // No deps stored yet, need full compute
+            };
+            let Some(existing_prices) = store_guard.token_prices().cloned() else {
+                return Ok(None);
+            };
+            let spot_prices = store_guard
+                .spot_prices()
+                .ok_or(ComputationError::MissingDependency("spot_prices"))?
+                .clone();
+
+            (existing_deps, existing_prices, spot_prices)
         };
 
         let changed_components = changed.all_changed_ids();
 
-        // Find tokens whose paths intersect with changed components
+        // Find tokens whose paths intersect with changed components.
         let tokens_to_recompute: HashSet<Address> = existing_deps
             .iter()
             .filter(|(_, entry)| {
@@ -396,12 +405,8 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(existing_prices.clone()));
+            return Ok(Some(existing_prices));
         }
-
-        let existing_prices = existing_prices.clone();
-        let existing_deps = existing_deps.clone();
-        drop(store_guard);
 
         debug!(
             affected_tokens = tokens_to_recompute.len(),
@@ -409,26 +414,32 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let market = market.read().await;
-        let block = market
-            .last_updated()
-            .map(|b| b.number())
-            .unwrap_or(0);
+        // Snapshot market data under brief lock, then simulate on snapshot.
+        // simulate_token_prices calls get_amount_out (EVM simulation) which can take 100ms+.
+        let (snapshot, gas_price, block) = {
+            let market_guard = market.read().await;
+            let block = market_guard
+                .last_updated()
+                .map(|b| b.number())
+                .unwrap_or(0);
 
-        let store_guard = store.read().await;
-        let spot_prices = store_guard
-            .spot_prices()
-            .ok_or(ComputationError::MissingDependency("spot_prices"))?
-            .clone();
-        drop(store_guard);
+            let gas_price = market_guard
+                .gas_price()
+                .ok_or(ComputationError::MissingDependency("gas_price"))?
+                .effective_gas_price();
 
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
+            let component_ids: HashSet<ComponentId> = market_guard
+                .component_topology()
+                .keys()
+                .cloned()
+                .collect();
+            let snapshot = market_guard.extract_subset(&component_ids);
+
+            (snapshot, gas_price, block)
+        };
 
         let best_prices = self.simulate_token_prices(
-            &market,
+            &snapshot,
             &spot_prices,
             &gas_price,
             Some(&tokens_to_recompute),
@@ -487,26 +498,40 @@ impl DerivedComputation for TokenGasPriceComputation {
             // Fall through to full compute if incremental is not possible
         }
 
-        let market = market.read().await;
-        let store_guard = store.read().await;
-
-        let block = market
-            .last_updated()
-            .map(|b| b.number())
-            .unwrap_or(0);
-
-        let spot_prices = store_guard
+        // Read spot prices from store (independent of market lock).
+        let spot_prices = store
+            .read()
+            .await
             .spot_prices()
             .ok_or(ComputationError::MissingDependency("spot_prices"))?
             .clone();
-        drop(store_guard);
 
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
+        // Snapshot market data under brief lock, then simulate on snapshot.
+        // simulate_token_prices calls get_amount_out (EVM simulation) which can take 100ms+.
+        let (snapshot, gas_price, block) = {
+            let market_guard = market.read().await;
 
-        let best_prices = self.simulate_token_prices(&market, &spot_prices, &gas_price, None)?;
+            let block = market_guard
+                .last_updated()
+                .map(|b| b.number())
+                .unwrap_or(0);
+
+            let gas_price = market_guard
+                .gas_price()
+                .ok_or(ComputationError::MissingDependency("gas_price"))?
+                .effective_gas_price();
+
+            let component_ids: HashSet<ComponentId> = market_guard
+                .component_topology()
+                .keys()
+                .cloned()
+                .collect();
+            let snapshot = market_guard.extract_subset(&component_ids);
+
+            (snapshot, gas_price, block)
+        };
+
+        let best_prices = self.simulate_token_prices(&snapshot, &spot_prices, &gas_price, None)?;
 
         // Build token prices with dependencies for incremental computation
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
