@@ -241,8 +241,6 @@ pub struct ApprovalPayload {
     pub(crate) spender: bytes::Bytes,
     /// Amount being approved (token units).
     pub(crate) amount: BigUint,
-    /// Whether an approval is actually needed (populated when `check_allowance` is `true`).
-    pub(crate) is_needed: Option<bool>,
 }
 
 impl ApprovalPayload {
@@ -270,14 +268,6 @@ impl ApprovalPayload {
     /// Amount to approve (token units).
     pub fn amount(&self) -> &BigUint {
         &self.amount
-    }
-
-    /// Whether the approval is still needed.
-    ///
-    /// `None` when `check_allowance` was `false`. `Some(true)` means the current allowance is
-    /// less than `amount`; `Some(false)` means the allowance is already sufficient.
-    pub fn is_needed(&self) -> Option<bool> {
-        self.is_needed
     }
 }
 

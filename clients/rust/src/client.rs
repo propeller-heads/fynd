@@ -24,7 +24,7 @@ use crate::{
         compute_settled_amount, ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx,
         SettledOrder, SignedApproval, SignedSwap, SwapPayload, TxReceipt,
     },
-    types::{BackendKind, HealthStatus, InstanceInfo, Quote, QuoteParams},
+    types::{BackendKind, HealthStatus, InstanceInfo, Quote, QuoteParams, UserTransferType},
 };
 // ============================================================================
 // RETRY CONFIG
@@ -261,10 +261,15 @@ pub struct ApprovalParams {
     pub token: bytes::Bytes,
     /// Amount to approve (token units).
     pub amount: num_bigint::BigUint,
+    /// Which contract to set as the ERC-20 spender.
+    ///
+    /// `UserTransferType::TransferFrom` approves the router contract (default).
+    /// `UserTransferType::TransferFromPermit2` approves the Permit2 contract.
+    pub spender: UserTransferType,
     /// When `true`, check the current ERC-20 allowance before building the transaction.
     ///
-    /// If the allowance is already sufficient, [`ApprovalPayload::is_needed`] returns
-    /// `Some(false)`; otherwise `Some(true)`. When `false`, `is_needed` is always `None`.
+    /// If the allowance is already sufficient, [`FyndClient::approval`] returns `None`.
+    /// When `false`, the payload is always built.
     pub check_allowance: bool,
 }
 
@@ -766,29 +771,70 @@ where
         mapping::dto_to_instance_info(dto_info)
     }
 
-    /// Build an unsigned EIP-1559 `approve(router, amount)` transaction for the given token.
+    /// Build an unsigned EIP-1559 `approve(spender, amount)` transaction for the given token,
+    /// or `None` if the allowance is already sufficient.
     ///
-    /// 1. Calls [`info()`](Self::info) to resolve the router address (used as spender).
-    /// 2. Resolves nonce and EIP-1559 fees via `hints` (same semantics as
+    /// 1. Calls [`info()`](Self::info) to resolve the spender address from `params.spender`.
+    /// 2. If `params.check_allowance` is `true`, checks the current ERC-20 allowance and returns
+    ///    `None` immediately if it is already sufficient (skipping nonce and fee resolution).
+    /// 3. Resolves nonce and EIP-1559 fees via `hints` (same semantics as
     ///    [`swap_payload`](Self::swap_payload)).
-    /// 3. Encodes the `approve(router, amount)` calldata using the ERC-20 ABI.
-    /// 4. Optionally checks the current allowance if `params.check_allowance` is `true` and sets
-    ///    [`ApprovalPayload::is_needed`] accordingly.
+    /// 4. Encodes the `approve(spender, amount)` calldata using the ERC-20 ABI.
     ///
     /// Gas defaults to `hints.gas_limit().unwrap_or(65_000)`.
     pub async fn approval(
         &self,
         params: &ApprovalParams,
         hints: &SigningHints,
-    ) -> Result<ApprovalPayload, FyndError> {
-        let info = self.info().await?;
-        let router_addr = mapping::bytes_to_alloy_address(info.router_address())?;
+    ) -> Result<Option<ApprovalPayload>, FyndError> {
+        use alloy::sol_types::SolCall;
 
-        // Resolve sender.
+        let info = self.info().await?;
+        let spender_addr = match params.spender {
+            UserTransferType::TransferFrom => {
+                mapping::bytes_to_alloy_address(info.router_address())?
+            }
+            UserTransferType::TransferFromPermit2 => {
+                mapping::bytes_to_alloy_address(info.permit2_address())?
+            }
+            UserTransferType::None => {
+                return Err(FyndError::Config(
+                    "UserTransferType::None does not require an approval".into(),
+                ))
+            }
+        };
+
         let sender = hints
             .sender()
             .or(self.default_sender)
             .ok_or_else(|| FyndError::Config("no sender configured".into()))?;
+
+        let token_addr = mapping::bytes_to_alloy_address(&params.token)?;
+        let amount_u256 = mapping::biguint_to_u256(&params.amount);
+
+        // Check allowance before any other RPC calls so we can return early.
+        if params.check_allowance {
+            let call_data =
+                erc20::allowanceCall { owner: sender, spender: spender_addr }.abi_encode();
+            let req = alloy::rpc::types::TransactionRequest {
+                to: Some(alloy::primitives::TxKind::Call(token_addr)),
+                input: alloy::rpc::types::TransactionInput::new(AlloyBytes::from(call_data)),
+                ..Default::default()
+            };
+            let result = self
+                .provider
+                .call(req)
+                .await
+                .map_err(|e| FyndError::Protocol(format!("allowance call failed: {e}")))?;
+            let current_allowance = if result.len() >= 32 {
+                alloy::primitives::U256::from_be_slice(&result[0..32])
+            } else {
+                alloy::primitives::U256::ZERO
+            };
+            if current_allowance >= amount_u256 {
+                return Ok(None);
+            }
+        }
 
         // Resolve nonce.
         let nonce = match hints.nonce() {
@@ -815,13 +861,8 @@ where
             };
 
         let gas_limit = hints.gas_limit().unwrap_or(65_000);
-        let token_addr = mapping::bytes_to_alloy_address(&params.token)?;
-        let amount_u256 = mapping::biguint_to_u256(&params.amount);
-
-        // Encode approve(router, amount).
-        use alloy::sol_types::SolCall;
         let calldata =
-            erc20::approveCall { spender: router_addr, amount: amount_u256 }.abi_encode();
+            erc20::approveCall { spender: spender_addr, amount: amount_u256 }.abi_encode();
 
         let tx = TxEip1559 {
             chain_id: self.chain_id,
@@ -835,39 +876,13 @@ where
             access_list: alloy::eips::eip2930::AccessList::default(),
         };
 
-        // Optionally check current allowance.
-        let is_needed = if params.check_allowance {
-            use alloy::sol_types::SolCall;
-            let call_data =
-                erc20::allowanceCall { owner: sender, spender: router_addr }.abi_encode();
-            let req = alloy::rpc::types::TransactionRequest {
-                to: Some(alloy::primitives::TxKind::Call(token_addr)),
-                input: alloy::rpc::types::TransactionInput::new(AlloyBytes::from(call_data)),
-                ..Default::default()
-            };
-            let result = self
-                .provider
-                .call(req)
-                .await
-                .map_err(|e| FyndError::Protocol(format!("allowance call failed: {e}")))?;
-            let current_allowance = if result.len() >= 32 {
-                alloy::primitives::U256::from_be_slice(&result[0..32])
-            } else {
-                alloy::primitives::U256::ZERO
-            };
-            Some(current_allowance < amount_u256)
-        } else {
-            None
-        };
-
-        let spender = bytes::Bytes::copy_from_slice(router_addr.as_slice());
-        Ok(ApprovalPayload {
+        let spender = bytes::Bytes::copy_from_slice(spender_addr.as_slice());
+        Ok(Some(ApprovalPayload {
             tx,
             token: params.token.clone(),
             spender,
             amount: params.amount.clone(),
-            is_needed,
-        })
+        }))
     }
 
     /// Broadcast a signed approval transaction and return a [`TxReceipt`] that resolves once
@@ -1746,24 +1761,25 @@ mod tests {
         let params = ApprovalParams {
             token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             amount: num_bigint::BigUint::from(1_000_000u64),
+            spender: crate::types::UserTransferType::TransferFrom,
             check_allowance: false,
         };
 
         let payload = client
             .approval(&params, &hints)
             .await
-            .expect("approval should succeed");
+            .expect("approval should succeed")
+            .expect("should build payload when check_allowance is false");
 
         // Verify function selector is approve(address,uint256) = 0x095ea7b3.
         let selector = &payload.tx().input[0..4];
         assert_eq!(selector, &[0x09, 0x5e, 0xa7, 0xb3]);
         assert_eq!(payload.tx().gas_limit, 65_000);
         assert_eq!(payload.tx().nonce, 3);
-        assert!(payload.is_needed().is_none());
     }
 
     #[tokio::test]
-    async fn approval_with_check_allowance_sets_is_needed() {
+    async fn approval_with_insufficient_allowance_returns_some() {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -1798,19 +1814,20 @@ mod tests {
         let params = ApprovalParams {
             token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             amount: num_bigint::BigUint::from(500_000u64),
+            spender: crate::types::UserTransferType::TransferFrom,
             check_allowance: true,
         };
 
-        let payload = client
+        let result = client
             .approval(&params, &hints)
             .await
             .expect("approval with allowance check should succeed");
 
-        assert_eq!(payload.is_needed(), Some(true), "zero allowance should mean approval needed");
+        assert!(result.is_some(), "zero allowance should return a payload");
     }
 
     #[tokio::test]
-    async fn approval_with_check_allowance_sufficient_sets_is_needed_false() {
+    async fn approval_with_sufficient_allowance_returns_none() {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -1848,19 +1865,16 @@ mod tests {
         let params = ApprovalParams {
             token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             amount: num_bigint::BigUint::from(500_000u64),
+            spender: crate::types::UserTransferType::TransferFrom,
             check_allowance: true,
         };
 
-        let payload = client
+        let result = client
             .approval(&params, &hints)
             .await
             .expect("approval with sufficient allowance check should succeed");
 
-        assert_eq!(
-            payload.is_needed(),
-            Some(false),
-            "sufficient allowance should mean approval not needed"
-        );
+        assert!(result.is_none(), "sufficient allowance should return None");
     }
 
     // ========================================================================
@@ -1888,7 +1902,6 @@ mod tests {
             token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             spender: bytes::Bytes::copy_from_slice(&[0x01; 20]),
             amount: num_bigint::BigUint::from(1_000_000u64),
-            is_needed: None,
         };
         SignedApproval::assemble(payload, Signature::test_signature())
     }
