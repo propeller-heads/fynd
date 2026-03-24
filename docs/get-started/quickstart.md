@@ -68,7 +68,7 @@ This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
 {% endtab %}
 
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/tutorial/main.ts):
+From [`clients/typescript/examples/tutorial/main.ts`](../../clients/typescript/examples/tutorial/main.ts):
 
 ```typescript
   // FyndClient accepts a viemProvider adapter — no manual wrapping needed.
@@ -139,7 +139,7 @@ The full tutorial (signing + on-chain execution) is at `clients/typescript/examp
 {% endtab %}
 
 {% tab title="Rust" %}
-From [`clients/rust/examples/quote.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/quote.rs):
+From [`clients/rust/examples/quote.rs`](../../clients/rust/examples/quote.rs):
 
 ```rust
     let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
@@ -195,7 +195,7 @@ Run with: `cargo run --example quote`
 
 ## Next steps
 
-* [Server configuration](../../guides/server-configuration.md)
-* [Custom algorithm](../../guides/custom-algorithm.md)
-* [Benchmarking](../../guides/benchmarking.md)
-* [Swap CLI](../../guides/swap-cli.md)
+* [Server configuration](../guides/server-configuration.md)
+* [Custom algorithm](../guides/custom-algorithm.md)
+* [Benchmarking](../guides/benchmarking.md)
+* [Swap CLI](../guides/swap-cli.md)

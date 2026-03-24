@@ -1,14 +1,12 @@
 # Table of contents
 
-* [Quickstart](get-started/quickstart/README.md)
 * [Contact us](https://t.me/+B4CNQwv7dgIyYTJl)
 
 ## Get Started
 
 * [Overview](README.md)
   * [API Specifications](get-started/overview/api-specifications.md)
-* [Quickstart](get-started/quickstart/README.md)
-
+* [Quickstart](get-started/quickstart.md)
 
 ## Guides
 
@@ -21,3 +19,7 @@
 
 * [Architecture](ARCHITECTURE.md)
 * [Performance](benchmark-results.md)
+
+## MEDIA KIT
+
+* [Brand Assets](https://drive.google.com/drive/folders/1AZzrF_3r9lVMRUZJbNNNaPiDM7GJ4ySc?usp=sharing)

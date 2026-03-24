@@ -66,4 +66,4 @@ Fynd works with any protocol Tycho supports. See the [list of supported protocol
 
 ## Try it out
 
-Head to the [quickstart](get-started/quickstart/ "mention") to get Fynd running.
+Head to the [quickstart.md](get-started/quickstart.md "mention") to get Fynd running.
