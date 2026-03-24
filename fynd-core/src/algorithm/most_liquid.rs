@@ -427,30 +427,8 @@ impl Algorithm for MostLiquidAlgorithm {
             });
         }
 
-        // Acquire lock to read market data
-        let market = market.read().await;
-
-        // Early return if gas price is not found, we know this is required for simulation
-        if market.gas_price().is_none() {
-            return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
-        }
-
-        // Debug: log edge weight status
-        let total_edges = graph.edge_count();
-        let edges_with_weights = graph
-            .edge_indices()
-            .filter(|&idx| {
-                graph
-                    .edge_weight(idx)
-                    .is_some_and(|e| e.data.is_some())
-            })
-            .count();
-        debug!(
-            total_edges,
-            edges_with_weights, paths_candidates, "graph edge weight status before scoring"
-        );
-
         // Step 2: Score and sort all paths by estimated output (higher score = better)
+        // No lock needed — scoring uses only local graph data.
         let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
             .filter_map(|path| {
@@ -490,8 +468,12 @@ impl Algorithm for MostLiquidAlgorithm {
             })
             .collect();
 
-        // Step 4: Extract market subset and release the lock over the main market data
+        // Step 4: Brief lock — check gas price + extract market subset for simulation
         let market = {
+            let market = market.read().await;
+            if market.gas_price().is_none() {
+                return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
+            }
             let market_subset = market.extract_subset(&component_ids);
             drop(market);
             market_subset
