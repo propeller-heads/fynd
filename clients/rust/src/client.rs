@@ -176,7 +176,7 @@ impl SigningHints {
 ///
 /// Maps 20-byte contract addresses to a set of 32-byte slot → value pairs. Passed via
 /// [`ExecutionOptions::storage_overrides`] to override on-chain state during a
-/// [`FyndClient::execute`] dry run.
+/// [`FyndClient::execute_swap`] dry run.
 ///
 /// # Example
 ///
@@ -238,7 +238,7 @@ fn bytes_to_b256(b: &Bytes) -> Result<B256, FyndError> {
 // EXECUTION OPTIONS
 // ============================================================================
 
-/// Options controlling the behaviour of [`FyndClient::execute`].
+/// Options controlling the behaviour of [`FyndClient::execute_swap`].
 #[derive(Default)]
 pub struct ExecutionOptions {
     /// When `true`, simulate the transaction via `eth_call` and `estimate_gas` instead of
@@ -347,7 +347,7 @@ impl FyndClientBuilder {
     /// Build a [`FyndClient`] without connecting to an Ethereum RPC node.
     ///
     /// Suitable for [`FyndClient::quote`] and [`FyndClient::health`] calls only.
-    /// [`FyndClient::swap_payload`] and [`FyndClient::execute`] require a live RPC URL and
+    /// [`FyndClient::swap_payload`] and [`FyndClient::execute_swap`] require a live RPC URL and
     /// will fail if called on a client built this way.
     ///
     /// Returns [`FyndError::Config`] if `base_url` is invalid.

@@ -777,7 +777,7 @@ impl Quote {
     /// The `token_out` address from the originating [`Order`] (20 raw bytes).
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote) and used by
-    /// [`FyndClient::execute`](crate::FyndClient::execute) to parse the settlement log.
+    /// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to parse the settlement log.
     pub fn token_out(&self) -> &Bytes {
         &self.token_out
     }
@@ -786,7 +786,8 @@ impl Quote {
     ///
     /// Defaults to `sender` when the order had no explicit receiver. Populated by
     /// [`FyndClient::quote`](crate::FyndClient::quote) and used by
-    /// [`FyndClient::execute`](crate::FyndClient::execute) to verify the Transfer log recipient.
+    /// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to verify the Transfer log
+    /// recipient.
     pub fn receiver(&self) -> &Bytes {
         &self.receiver
     }

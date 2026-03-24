@@ -196,9 +196,9 @@ impl SettledOrder {
 
 /// A future that resolves once the swap transaction is mined and settled.
 ///
-/// Returned by [`FyndClient::execute`](crate::FyndClient::execute). The inner future polls the
-/// RPC node every 2 seconds and **has no built-in timeout** — it will poll indefinitely if the
-/// transaction is never mined. Callers should wrap it with [`tokio::time::timeout`]:
+/// Returned by [`FyndClient::execute_swap`](crate::FyndClient::execute_swap). The inner future
+/// polls the RPC node every 2 seconds and **has no built-in timeout** — it will poll indefinitely
+/// if the transaction is never mined. Callers should wrap it with [`tokio::time::timeout`]:
 ///
 /// ```rust,no_run
 /// # use fynd_client::ExecutionReceipt;
@@ -285,7 +285,7 @@ impl ApprovalPayload {
 ///
 /// Construct via [`SignedApproval::assemble`] after signing the
 /// [`signing_hash`](ApprovalPayload::signing_hash). Pass to
-/// [`FyndClient::submit`](crate::FyndClient::submit).
+/// [`FyndClient::execute_approval`](crate::FyndClient::execute_approval).
 pub struct SignedApproval {
     payload: ApprovalPayload,
     signature: Signature,
@@ -341,8 +341,8 @@ impl MinedTx {
 
 /// A future that resolves once a submitted transaction is mined.
 ///
-/// Returned by [`FyndClient::submit`](crate::FyndClient::submit). Polls the RPC node every
-/// 2 seconds with no built-in timeout — wrap with [`tokio::time::timeout`] as needed.
+/// Returned by [`FyndClient::execute_approval`](crate::FyndClient::execute_approval). Polls the RPC
+/// node every 2 seconds with no built-in timeout — wrap with [`tokio::time::timeout`] as needed.
 pub enum TxReceipt {
     /// A pending on-chain transaction.
     Pending(Pin<Box<dyn Future<Output = Result<MinedTx, FyndError>> + Send + 'static>>),
