@@ -46,28 +46,28 @@ Measures how throughput scales with worker thread count for 2-hop route finding 
 | Instance | AWS `c7a.8xlarge` (32 vCPU, AMD EPYC) |
 | Algorithm | `most_liquid` |
 | Max hops | 2 |
-| Protocols | `uniswap_v2`, `uniswap_v3` |
+| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2`, `fluid_v1` |
 | Requests per iteration | 10,000 |
 | Concurrency | `fixed:48` |
 | Warmup | 30s after health check |
-| Min TVL | 10.0 (native token) |
+| Config | [`tools/benchmark/most_liquid_2hop.toml`](../tools/benchmark/most_liquid_2hop.toml) |
 
 ### Results
 
 | Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) | RPS/Worker |
 | ------: | -----------------: | -------------: | ----------: | ---------: |
-|       1 |             501.55 |             95 |         102 |     501.55 |
-|       2 |             905.47 |             53 |          56 |     452.73 |
-|       3 |            1264.86 |             37 |          40 |     421.62 |
-|       4 |            1687.48 |             28 |          30 |     421.87 |
-|       6 |            2449.78 |             19 |          21 |     408.30 |
-|       8 |            3338.90 |             14 |          15 |     417.36 |
+|       1 |             397.19 |            120 |         129 |     397.19 |
+|       2 |             743.16 |             64 |          69 |     371.58 |
+|       3 |            1035.84 |             46 |          50 |     345.28 |
+|       4 |            1444.04 |             33 |          36 |     361.01 |
+|       6 |            2109.26 |             22 |          25 |     351.54 |
+|       8 |            2820.08 |             16 |          18 |     352.51 |
 
 ### Analysis
 
-Throughput scales nearly linearly across all tested worker counts, with each worker contributing ~420-500 req/s. Per-worker efficiency remains stable from 3 to 8 workers (~420 req/s), indicating minimal contention at these counts. The solver crosses 1000 req/s at just **3 workers** (1265 req/s). Latency stays tight throughout — P99 is only 15ms at 8 workers.
+Throughput scales nearly linearly across all tested worker counts (~350-397 req/s per worker). The solver crosses 1000 req/s at **3 workers** (1036 req/s). Latency stays tight throughout — P99 is only 18ms at 8 workers.
 
-**Recommendation.** For 2-hop routing at 1000 req/s sustained throughput, provision at least 3 CPU cores. Use 4 cores for comfortable headroom.
+**Recommendation.** For `most_liquid` 2-hop routing at 1000 req/s sustained throughput, provision at least 3 CPU cores. Use 4 cores for comfortable headroom.
 
 ## CPU Scaling: 3-Hop Routing
 
@@ -80,40 +80,42 @@ Measures how throughput scales with worker thread count for 3-hop route finding 
 | Instance | AWS `c7a.8xlarge` (32 vCPU, AMD EPYC) |
 | Algorithm | `most_liquid` |
 | Max hops | 3 |
-| Protocols | `uniswap_v2`, `uniswap_v3` |
+| Protocols | `uniswap_v2`, `uniswap_v3`, `uniswap_v4`, `sushiswap_v2`, `pancakeswap_v2`, `pancakeswap_v3`, `ekubo_v2`, `fluid_v1` |
 | Requests per iteration | 10,000 |
 | Concurrency | `fixed:48` |
 | Warmup | 30s after health check |
-| Min TVL | 10.0 (native token) |
+| Config | [`tools/benchmark/most_liquid_3hop.toml`](../tools/benchmark/most_liquid_3hop.toml) |
 
 ### Results
 
 | Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) | RPS/Worker |
 | ------: | -----------------: | -------------: | ----------: | ---------: |
-|       1 |              66.68 |            714 |         884 |      66.68 |
-|       2 |             128.07 |            372 |         458 |      64.04 |
-|       4 |             240.02 |            198 |         256 |      60.01 |
-|       8 |             469.44 |             99 |         136 |      58.68 |
-|      12 |             642.88 |             70 |         110 |      53.57 |
-|      16 |             820.75 |             53 |          91 |      51.30 |
-|      20 |             939.58 |             45 |          92 |      46.98 |
-|      24 |            1122.21 |             37 |          73 |      46.76 |
-|      28 |            1205.98 |             33 |          70 |      43.07 |
-|      32 |            1237.47 |             31 |          78 |      38.67 |
+|       1 |              22.87 |           2080 |        2601 |      22.87 |
+|       2 |              40.16 |           1198 |        1439 |      20.08 |
+|       4 |              72.34 |            664 |         818 |      18.09 |
+|       8 |             147.87 |            316 |         433 |      18.48 |
+|      12 |             236.87 |            190 |         290 |      19.74 |
+|      16 |             308.74 |            140 |         238 |      19.30 |
+|      20 |             332.83 |            124 |         237 |      16.64 |
+|      24 |             306.92 |            102 |         794 |      12.79 |
+|      28 |             310.44 |             93 |         617 |      11.09 |
+|      32 |             319.20 |             77 |         694 |       9.98 |
 
 ### Analysis
 
-Throughput scales near-linearly up to 8 workers (~59 req/s per worker). Beyond that, per-worker efficiency gradually declines due to contention — dropping to ~39 req/s at 32 workers. The solver crosses 1000 req/s at **24 workers** (1122 req/s). Median latency drops from 714ms at 1 worker to 31ms at 32 workers, though P99 ticks up slightly at 32 workers (78ms vs 70ms at 28) reflecting the CPU limit of the instance.
+Throughput scales near-linearly up to 16 workers (~19 req/s per worker), then peaks at **332 req/s at 20 workers**. Beyond that, throughput plateaus and P99 latency spikes sharply (794ms at 24 workers, vs 238ms at 16), indicating contention on the enlarged graph. The solver does not cross 1000 req/s on this instance with 8 protocols.
 
-**Recommendation.** For 3-hop routing at 1000 req/s sustained throughput, provision at least 24 CPU cores. Use 28-32 cores for headroom under variable load.
+With 8 protocols the 3-hop search space is substantially larger than in single-pair benchmarks. The `most_liquid` greedy algorithm traverses the full graph to find the highest-liquidity path, and the combinatorial expansion at 3 hops over 8 protocols saturates available parallelism well below the CPU ceiling.
+
+**Recommendation.** For `most_liquid` 3-hop routing with a large protocol set, expect a throughput ceiling around 300–330 req/s on a 32-vCPU instance. Consider `bellman_ford` for higher 3-hop throughput (see below).
 
 ## Comparison: 2-Hop vs 3-Hop
 
-| Target RPS | 2-Hop Workers | 3-Hop Workers | Ratio |
-| ---------: | ------------: | ------------: | ----: |
-|      1,000 |             3 |            24 |    8x |
+| Target RPS | 2-Hop Workers | 3-Hop Workers | Notes |
+| ---------: | ------------: | ------------: | ----- |
+|      1,000 |             3 |             — | 3-hop peaks at ~333 req/s; 1000 req/s not reached |
 
-2-hop routing requires roughly **8x fewer CPU cores** than 3-hop to reach the same throughput target. This reflects the combinatorial growth in route search space as hop count increases.
+With 8 protocols, `most_liquid` 3-hop does not reach 1000 req/s on a 32-vCPU instance. The combinatorial growth in the 3-hop search space over a large protocol set creates a hard throughput ceiling for this algorithm.
 
 ## CPU Scaling: Bellman-Ford 2-Hop
 
@@ -222,3 +224,32 @@ Throughput scales near-linearly up to 8 workers (~54 req/s per worker). Beyond t
 |      1,000 |           ~16 |            28 |  ~1.8x |
 
 Bellman-Ford 3-hop requires roughly **1.8× more CPU cores** than 2-hop to reach the same throughput target. This is a much smaller penalty than seen with `most_liquid` (8×), reflecting Bellman-Ford's more uniform search cost growth across hop counts — it already explores the full path space at 2 hops, so adding a third hop grows the search space less dramatically relative to the base cost.
+
+## Algorithm Comparison: most_liquid vs bellman_ford
+
+All results in this section use identical hardware, protocol set, and request load.
+
+### 2-Hop
+
+| Workers | most_liquid (req/s) | bellman_ford (req/s) | Ratio |
+| ------: | ------------------: | -------------------: | ----: |
+|       1 |              397.19 |                85.31 |  4.7x |
+|       2 |              743.16 |               154.58 |  4.8x |
+|       3 |             1035.84 |               220.12 |  4.7x |
+|       4 |             1444.04 |               290.93 |  5.0x |
+|       6 |             2109.26 |               406.87 |  5.2x |
+|       8 |             2820.08 |               518.54 |  5.4x |
+
+`most_liquid` is consistently **~5× faster** for 2-hop routing. Its greedy liquidity-ranked search terminates early once the best path is found, while Bellman-Ford explores all paths exhaustively.
+
+### 3-Hop
+
+| Workers | most_liquid (req/s) | bellman_ford (req/s) | Winner |
+| ------: | ------------------: | -------------------: | ------ |
+|       8 |              147.87 |               429.44 | bellman_ford (2.9x) |
+|      16 |              308.74 |               760.92 | bellman_ford (2.5x) |
+|      20 |              332.83 |               874.51 | bellman_ford (2.6x) |
+|      28 |              310.44 |              1201.92 | bellman_ford (3.9x) |
+|      32 |              319.20 |              1219.96 | bellman_ford (3.8x) |
+
+At 3 hops with 8 protocols, the results **reverse**: `bellman_ford` is **3–4× faster** than `most_liquid` and keeps scaling while `most_liquid` saturates. The `most_liquid` greedy search over a large 3-hop graph creates significant contention; Bellman-Ford's structured path enumeration scales more predictably under these conditions.
