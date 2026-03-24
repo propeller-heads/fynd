@@ -154,7 +154,7 @@ impl DerivedComputation for SpotPriceComputation {
                                 "{}/{}/{}",
                                 component_id, token_in.address, token_out.address
                             ),
-                            error: FailedItemError::SpotPriceComputation(e.to_string()),
+                            error: FailedItemError::SpotPriceComputationFailed(e.to_string()),
                         });
                     }
                 }

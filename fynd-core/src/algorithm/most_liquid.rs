@@ -777,7 +777,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::SpotPriceComputation("sim error".into()),
+                error: FailedItemError::SpotPriceComputationFailed("sim error".into()),
             }],
             10,
             true,
@@ -812,7 +812,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::PoolDepthComputation("depth error".into()),
+                error: FailedItemError::PoolDepthComputationFailed("depth error".into()),
             }],
             10,
             true,
@@ -841,7 +841,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str.clone(),
-                error: FailedItemError::SpotPriceComputation("spot error".into()),
+                error: FailedItemError::SpotPriceComputationFailed("spot error".into()),
             }],
             10,
             true,
@@ -850,7 +850,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::PoolDepthComputation("depth error".into()),
+                error: FailedItemError::PoolDepthComputationFailed("depth error".into()),
             }],
             10,
             true,

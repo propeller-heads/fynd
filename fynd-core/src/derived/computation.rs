@@ -135,10 +135,10 @@ pub enum FailedItemError {
     SpotPriceTooSmall(f64),
 
     #[error("spot price computation failed: {0}")]
-    SpotPriceComputation(String),
+    SpotPriceComputationFailed(String),
 
     #[error("pool depth computation failed: {0}")]
-    PoolDepthComputation(String),
+    PoolDepthComputationFailed(String),
 
     #[error("all simulation paths failed")]
     AllSimulationPathsFailed,
