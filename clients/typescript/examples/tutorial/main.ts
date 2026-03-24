@@ -52,5 +52,5 @@ if (approvalPayload !== null) {
 const payload = await client.swapPayload(quote);
 const sig = await walletClient.signMessage({ message: { raw: swapSigningHash(payload) } });
 const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
-console.log(`gas: ${settled.gasCost}`);
+console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
 // [doc:end swap-typescript]
