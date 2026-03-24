@@ -24,8 +24,8 @@ Get a quote from Fynd in three steps.
 
 ## Prerequisites
 
-* **Tycho API key** — set as `TYCHO_API_KEY` ([get one here](https://app.gitbook.com/s/jrIe0oInIEt65tHqWn2w/for-solvers/indexer/tycho-client#authentication))
-* **Rust 1.92+** — install via [rustup](https://rustup.rs/)
+* **Tycho API key** (set as `TYCHO_API_KEY`, [get one here](https://t.me/fynd_portal_bot))
+* **Rust 1.92+** ([install via rustup](https://rustup.rs/))
 
 ## Step 1 — Start Fynd
 

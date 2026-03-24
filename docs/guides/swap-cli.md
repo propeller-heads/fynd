@@ -40,7 +40,7 @@ The output prints the quote (amount\_in, amount\_out, gas estimate, route) follo
 
 ## Dry-run a swap (Permit2)
 
-Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines — no chain reads for Permit2 state are needed.
+Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines, so you don't need any chain reads for Permit2 state.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
