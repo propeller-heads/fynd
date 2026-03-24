@@ -7,8 +7,6 @@ export interface ApprovalPayload {
   token: Address;
   spender: Address;
   amount: bigint;
-  /** Set only when {@link ApprovalParams.checkAllowance} was `true`. */
-  isNeeded?: boolean;
 }
 
 /** A signed approval ready for {@link FyndClient.executeApproval}. */

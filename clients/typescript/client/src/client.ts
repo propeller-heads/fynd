@@ -429,25 +429,47 @@ export class FyndClient {
   }
 
   /**
-   * Builds an unsigned EIP-1559 `approve(router, amount)` transaction for the given token.
+   * Builds an unsigned EIP-1559 `approve(spender, amount)` transaction for the given token,
+   * or `null` if the approval is not needed.
    *
-   * Fetches the router address from `GET /v1/info` (cached after first call).
+   * Returns `null` immediately when `params.transferType` is `'none'`.
+   * When `params.checkAllowance` is `true`, reads the on-chain allowance first and returns
+   * `null` if it is already sufficient (skipping nonce and fee resolution).
+   *
+   * Fetches the spender address from `GET /v1/info` (cached after first call):
+   * `'transfer_from'` → router, `'transfer_from_permit2'` → Permit2.
    * Reads nonce and gas fees from `provider` unless overridden via `hints`.
-   * Gas defaults to `hints.gasLimit ?? 65_000n` (safe for all ERC-20 approve calls).
+   * Gas defaults to `hints.gasLimit ?? 65_000n`.
    *
-   * @param params - Token, amount, and optional allowance-check flag.
+   * @param params - Token, amount, transfer type, and optional allowance-check flag.
    * @param hints - Optional overrides for sender, nonce, gas fees, and gas limit.
    * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
    * @throws {FyndError} With code `CONFIG` if `params.checkAllowance` is `true` and `provider.readAllowance` is absent.
    */
-  async approval(params: ApprovalParams, hints?: SigningHints): Promise<ApprovalPayload> {
+  async approval(params: ApprovalParams, hints?: SigningHints): Promise<ApprovalPayload | null> {
+    if (params.transferType === 'none') return null;
+
     const info = await this.info();
+    const spender = params.transferType === 'transfer_from_permit2'
+      ? info.permit2Address
+      : info.routerAddress;
+
     const provider = this.options.provider;
     if (provider === undefined) throw FyndError.config("provider is required for approval");
 
     const senderOpt = hints?.sender ?? this.options.sender;
     if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
     const sender: Address = senderOpt;
+
+    const { token, amount } = params;
+
+    if (params.checkAllowance === true) {
+      if (provider.readAllowance === undefined) {
+        throw FyndError.config("provider.readAllowance is required when checkAllowance is true");
+      }
+      const current = await provider.readAllowance(token, sender, spender);
+      if (current >= amount) return null;
+    }
 
     const nonce = hints?.nonce !== undefined
       ? hints.nonce
@@ -459,23 +481,12 @@ export class FyndClient {
         : await provider.estimateFeesPerGas();
 
     const gas = hints?.gasLimit ?? 65_000n;
-    const { token, amount } = params;
-    const spender = info.routerAddress;
 
     const data = encodeFunctionData({
       abi: ERC20_APPROVE_ABI,
       functionName: 'approve',
       args: [spender, amount],
     }) as Hex;
-
-    let isNeeded: boolean | undefined;
-    if (params.checkAllowance === true) {
-      if (provider.readAllowance === undefined) {
-        throw FyndError.config("provider.readAllowance is required when checkAllowance is true");
-      }
-      const current = await provider.readAllowance(token, sender, spender);
-      isNeeded = current < amount;
-    }
 
     const tx: Eip1559Transaction = {
       chainId: this.options.chainId,
@@ -488,11 +499,7 @@ export class FyndClient {
       data,
     };
 
-    return {
-      tx, token, spender, amount,
-      // exactOptionalPropertyTypes: only spread when defined
-      ...(isNeeded !== undefined ? { isNeeded } : {}),
-    };
+    return { tx, token, spender, amount };
   }
 
   /**

@@ -809,31 +809,52 @@ describe('FyndClient.approval', () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
     const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
+    expect(payload).not.toBeNull();
     // approve(address,uint256) selector = 0x095ea7b3
-    expect(payload.tx.data.startsWith('0x095ea7b3')).toBe(true);
+    expect(payload!.tx.data.startsWith('0x095ea7b3')).toBe(true);
   });
 
   it('sets spender to routerAddress from info', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
     const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 500n });
-    expect(payload.spender).toBe(ROUTER);
-    expect(payload.token).toBe(TOKEN_IN_ADDR);
-    expect(payload.amount).toBe(500n);
+    expect(payload).not.toBeNull();
+    expect(payload!.spender).toBe(ROUTER);
+    expect(payload!.token).toBe(TOKEN_IN_ADDR);
+    expect(payload!.amount).toBe(500n);
+  });
+
+  it('sets spender to permit2Address when transferType is transfer_from_permit2', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const payload = await client.approval({
+      token: TOKEN_IN_ADDR, amount: 500n, transferType: 'transfer_from_permit2',
+    });
+    expect(payload).not.toBeNull();
+    expect(payload!.spender).toBe(PERMIT2);
+  });
+
+  it('returns null immediately when transferType is none', async () => {
+    const provider = makeMockProvider();
+    const client = makeInfoClient({ provider });
+    const result = await client.approval({ token: TOKEN_IN_ADDR, amount: 500n, transferType: 'none' });
+    expect(result).toBeNull();
   });
 
   it('defaults gasLimit to 65_000n', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
     const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
-    expect(payload.tx.gas).toBe(65_000n);
+    expect(payload).not.toBeNull();
+    expect(payload!.tx.gas).toBe(65_000n);
   });
 
   it('respects gasLimit override', async () => {
     const provider = makeMockProvider();
     const client = makeInfoClient({ provider });
     const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n }, { gasLimit: 80_000n });
-    expect(payload.tx.gas).toBe(80_000n);
+    expect(payload).not.toBeNull();
+    expect(payload!.tx.gas).toBe(80_000n);
   });
 
   it('throws CONFIG when provider is not set', async () => {
@@ -851,37 +872,29 @@ describe('FyndClient.approval', () => {
     );
   });
 
-  it('checkAllowance: sets isNeeded true when current < amount', async () => {
+  it('checkAllowance: returns payload when allowance is insufficient', async () => {
     const provider = makeMockProvider();
     provider.readAllowance.mockResolvedValueOnce(100n);
     const client = makeInfoClient({ provider });
-    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
-    expect(payload.isNeeded).toBe(true);
+    const result = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
+    expect(result).not.toBeNull();
   });
 
-  it('checkAllowance: sets isNeeded false when current >= amount', async () => {
+  it('checkAllowance: returns null when allowance is sufficient', async () => {
     const provider = makeMockProvider();
     provider.readAllowance.mockResolvedValueOnce(5000n);
     const client = makeInfoClient({ provider });
-    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
-    expect(payload.isNeeded).toBe(false);
+    const result = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true });
+    expect(result).toBeNull();
   });
 
   it('checkAllowance: throws CONFIG when provider.readAllowance is absent', async () => {
-    // Build a provider without readAllowance
     const baseProvider = makeMockProvider();
     const { readAllowance: _, ...providerWithoutAllowance } = baseProvider;
     const client = makeInfoClient({ provider: providerWithoutAllowance });
     await expect(
       client.approval({ token: TOKEN_IN_ADDR, amount: 1000n, checkAllowance: true }),
     ).rejects.toThrow(expect.objectContaining({ code: 'CONFIG' }));
-  });
-
-  it('isNeeded is absent when checkAllowance is not set', async () => {
-    const provider = makeMockProvider();
-    const client = makeInfoClient({ provider });
-    const payload = await client.approval({ token: TOKEN_IN_ADDR, amount: 1000n });
-    expect('isNeeded' in payload).toBe(false);
   });
 });
 

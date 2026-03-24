@@ -197,8 +197,18 @@ export interface ApprovalParams {
   /** Amount to approve (in token base units). */
   amount: bigint;
   /**
-   * When `true`, read on-chain allowance and populate {@link ApprovalPayload.isNeeded}.
-   * Default: `false`. Requires `provider.readAllowance` to be implemented.
+   * Which contract to approve as spender.
+   *
+   * `'transfer_from'` → router contract (default).
+   * `'transfer_from_permit2'` → Permit2 contract.
+   * `'none'` → {@link FyndClient.approval} returns `null` immediately.
+   */
+  transferType?: UserTransferType;
+  /**
+   * When `true`, read on-chain allowance before building the transaction.
+   *
+   * If the allowance is already sufficient, {@link FyndClient.approval} returns `null`.
+   * Requires `provider.readAllowance` to be implemented.
    */
   checkAllowance?: boolean;
 }
