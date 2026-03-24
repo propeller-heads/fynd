@@ -3340,6 +3340,7 @@ dependencies = [
  "clap",
  "fastrand",
  "fynd-client",
+ "fynd-rpc",
  "num-bigint",
  "reqwest",
  "serde",
