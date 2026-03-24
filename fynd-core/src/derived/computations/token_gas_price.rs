@@ -441,15 +441,7 @@ impl TokenGasPriceComputation {
             }
         }
 
-        // Extend each token's path_components with all candidate path components so
-        // incremental recomputation fires when any competing path's pool changes.
-        for (token, (_, _, components)) in best_prices.iter_mut() {
-            if let Some(all_comps) = all_candidate_components.get(token) {
-                components.extend(all_comps.iter().cloned());
-            }
-        }
-
-        Ok((best_prices))
+        Ok((best_prices, block))
     }
 
     /// Attempts incremental recomputation for state-only changes.
