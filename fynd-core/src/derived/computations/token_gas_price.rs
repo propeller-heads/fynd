@@ -286,11 +286,11 @@ impl TokenGasPriceComputation {
         // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
         let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
-            numerator: &buy_out * &sell_out_net
-                + &buy_out * (&self.simulation_amount + &buy_gas_cost),
-            denominator: BigUint::from(2u8)
-                * (&self.simulation_amount + &buy_gas_cost)
-                * sell_out_net,
+            numerator: &buy_out * &sell_out_net +
+                &buy_out * (&self.simulation_amount + &buy_gas_cost),
+            denominator: BigUint::from(2u8) *
+                (&self.simulation_amount + &buy_gas_cost) *
+                sell_out_net,
         };
 
         Ok((spread, buy_price_precise, path_components))

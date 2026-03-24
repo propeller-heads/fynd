@@ -142,12 +142,7 @@ impl DerivedComputation for SpotPriceComputation {
 
         drop(market_guard);
 
-        debug!(
-            succeeded,
-            failed,
-            total = spot_prices.len(),
-            "spot price computation complete"
-        );
+        debug!(succeeded, failed, total = spot_prices.len(), "spot price computation complete");
         Span::current().record("updated_spot_prices", spot_prices.len());
 
         // Return error if all calculations failed for a full recompute.

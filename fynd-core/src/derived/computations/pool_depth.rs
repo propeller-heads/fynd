@@ -609,8 +609,8 @@ mod tests {
 
             let reserve_in =
                 U256::from(case.reserve_in_human) * U256::from(10u64).pow(U256::from(decimals_in));
-            let reserve_out = U256::from(case.reserve_out_human)
-                * U256::from(10u64).pow(U256::from(decimals_out));
+            let reserve_out = U256::from(case.reserve_out_human) *
+                U256::from(10u64).pow(U256::from(decimals_out));
             let univ2 = UniswapV2State::new(reserve_in, reserve_out);
 
             let spot_price = univ2
