@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use alloy::{
     primitives::{aliases::U48, Address, Keccak256, U160, U256},
     sol_types::SolValue,
@@ -10,6 +8,7 @@ use tycho_execution::encoding::{
     evm::{
         approvals::permit2::{PermitDetails as SolPermitDetails, PermitSingle},
         encoder_builders::TychoRouterEncoderBuilder,
+        get_router_address,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{biguint_to_u256, bytes_to_address},
     },
@@ -22,17 +21,6 @@ use crate::{EncodingOptions, OrderQuote, QuoteStatus, SolveError, Transaction};
 
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-
-/// Default Tycho Router addresses per chain, keyed by lowercase chain name.
-///
-/// `tycho_execution::encoding::evm::constants` is a private module, so we embed a copy here.
-/// When upgrading tycho-execution, verify this stays in sync with
-/// `tycho-execution/config/router_addresses.json`.
-const ROUTER_ADDRESSES_JSON: &str = r#"{
-  "ethereum": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35",
-  "base": "0xea3207778e39EB02D72C9D3c4Eac7E224ac5d369",
-  "unichain": "0xFfA5ec2e444e4285108e4a17b82dA495c178427B"
-}"#;
 
 /// Encodes solution into tycho compatible transactions.
 ///
@@ -107,13 +95,8 @@ impl Encoder {
         chain: Chain,
         swap_encoder_registry: SwapEncoderRegistry,
     ) -> Result<Self, SolveError> {
-        let default_routers: HashMap<Chain, Bytes> = serde_json::from_str(ROUTER_ADDRESSES_JSON)
-            .map_err(|e| SolveError::FailedEncoding(e.to_string()))?;
-        let router_address = default_routers
-            .get(&chain)
-            .ok_or_else(|| {
-                SolveError::FailedEncoding("no default router address found for chain".to_string())
-            })?
+        let router_address = get_router_address(&chain)
+            .map_err(|e| SolveError::FailedEncoding(e.to_string()))?
             .clone();
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
