@@ -26,7 +26,13 @@ Each path is scored without simulation using two derived data values per edge:
 - **Spot price**: the marginal exchange rate at zero trade size (includes pool fees)
 - **Depth**: the pool's available liquidity in USD terms
 
-The score for a path multiplies the spot prices along the route and applies a depth-weighted penalty. Paths through deep, well-priced pools score highest.
+The score for a path is:
+
+```
+score = (product of spot prices along the route) × min(depth along the route)
+```
+
+The spot price product estimates the exchange rate. The minimum depth acts as a bottleneck indicator: a path is only as liquid as its shallowest pool. Paths through deep, well-priced pools score highest.
 
 This scoring is approximate. It ignores price impact (the spot price assumes infinitesimal trade size) and doesn't account for how liquidity changes after each hop. But it's fast and good enough to rank thousands of candidates so the expensive simulation phase focuses on the right ones.
 
