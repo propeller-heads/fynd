@@ -257,20 +257,34 @@ pub struct ExecutionOptions {
 
 /// Parameters for [`FyndClient::approval`].
 pub struct ApprovalParams {
-    /// ERC-20 token to approve (20 raw bytes).
-    pub token: bytes::Bytes,
-    /// Amount to approve (token units).
-    pub amount: num_bigint::BigUint,
-    /// Which contract to set as the ERC-20 spender.
+    token: bytes::Bytes,
+    amount: num_bigint::BigUint,
+    transfer_type: UserTransferType,
+    check_allowance: bool,
+}
+
+impl ApprovalParams {
+    /// Create approval parameters for the given token and amount.
     ///
-    /// `UserTransferType::TransferFrom` approves the router contract (default).
-    /// `UserTransferType::TransferFromPermit2` approves the Permit2 contract.
-    pub spender: UserTransferType,
-    /// When `true`, check the current ERC-20 allowance before building the transaction.
+    /// Defaults to a standard ERC-20 approval against the router contract.
+    /// Use [`with_transfer_type`](Self::with_transfer_type) to approve the Permit2 contract
+    /// instead.
     ///
-    /// If the allowance is already sufficient, [`FyndClient::approval`] returns `None`.
-    /// When `false`, the payload is always built.
-    pub check_allowance: bool,
+    /// When `check_allowance` is `true`, [`FyndClient::approval`] checks the on-chain allowance
+    /// first and returns `None` if it is already sufficient.
+    pub fn new(token: bytes::Bytes, amount: num_bigint::BigUint, check_allowance: bool) -> Self {
+        Self { token, amount, transfer_type: UserTransferType::TransferFrom, check_allowance }
+    }
+
+    /// Override the transfer type (and thus the spender contract).
+    ///
+    /// `UserTransferType::TransferFrom` → router (default).
+    /// `UserTransferType::TransferFromPermit2` → Permit2.
+    /// `UserTransferType::None` → [`FyndClient::approval`] returns `None` immediately.
+    pub fn with_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
+        self.transfer_type = transfer_type;
+        self
+    }
 }
 
 // ============================================================================
@@ -789,19 +803,19 @@ where
     ) -> Result<Option<ApprovalPayload>, FyndError> {
         use alloy::sol_types::SolCall;
 
+        if params.transfer_type == UserTransferType::None {
+            return Ok(None);
+        }
+
         let info = self.info().await?;
-        let spender_addr = match params.spender {
+        let spender_addr = match params.transfer_type {
             UserTransferType::TransferFrom => {
                 mapping::bytes_to_alloy_address(info.router_address())?
             }
             UserTransferType::TransferFromPermit2 => {
                 mapping::bytes_to_alloy_address(info.permit2_address())?
             }
-            UserTransferType::None => {
-                return Err(FyndError::Config(
-                    "UserTransferType::None does not require an approval".into(),
-                ))
-            }
+            UserTransferType::None => unreachable!(),
         };
 
         let sender = hints
@@ -1758,12 +1772,11 @@ mod tests {
         // allowance check)
         let _ = &asserter; // suppress unused warning
 
-        let params = ApprovalParams {
-            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
-            amount: num_bigint::BigUint::from(1_000_000u64),
-            spender: crate::types::UserTransferType::TransferFrom,
-            check_allowance: false,
-        };
+        let params = ApprovalParams::new(
+            bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            num_bigint::BigUint::from(1_000_000u64),
+            false,
+        );
 
         let payload = client
             .approval(&params, &hints)
@@ -1811,12 +1824,11 @@ mod tests {
         let zero_allowance = alloy::primitives::Bytes::copy_from_slice(&[0u8; 32]);
         asserter.push_success(&zero_allowance);
 
-        let params = ApprovalParams {
-            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
-            amount: num_bigint::BigUint::from(500_000u64),
-            spender: crate::types::UserTransferType::TransferFrom,
-            check_allowance: true,
-        };
+        let params = ApprovalParams::new(
+            bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            num_bigint::BigUint::from(500_000u64),
+            true,
+        );
 
         let result = client
             .approval(&params, &hints)
@@ -1862,12 +1874,11 @@ mod tests {
         asserter.push_success(&alloy::primitives::Bytes::copy_from_slice(&allowance_bytes));
 
         // Request 500_000, but allowance is 1_000_000 — sufficient.
-        let params = ApprovalParams {
-            token: bytes::Bytes::copy_from_slice(&[0xdd; 20]),
-            amount: num_bigint::BigUint::from(500_000u64),
-            spender: crate::types::UserTransferType::TransferFrom,
-            check_allowance: true,
-        };
+        let params = ApprovalParams::new(
+            bytes::Bytes::copy_from_slice(&[0xdd; 20]),
+            num_bigint::BigUint::from(500_000u64),
+            true,
+        );
 
         let result = client
             .approval(&params, &hints)
