@@ -30,7 +30,9 @@ use fynd_client::{
 use num_bigint::BigUint;
 
 const DEFAULT_FYND_URL: &str = "http://localhost:3000";
-const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
+const DEFAULT_RPC_URL: &str = "http://localhost:8545";
+// Matches the key funded by scripts/dev-env.sh. Override with PRIVATE_KEY env var.
+const DEV_PRIVATE_KEY: &str = "0x912a64d0474cbddb4afd9b1aa2e800c433a3e975fa858395e6134220cf2b4cd5";
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const SELL_AMOUNT: u128 = 1_000_000_000; // 1000 USDC (6 decimals)
@@ -46,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fynd_url = std::env::var("FYND_URL").unwrap_or_else(|_| DEFAULT_FYND_URL.to_owned());
     let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_owned());
 
-    let sender_signer = PrivateKeySigner::random();
+    let private_key = std::env::var("PRIVATE_KEY").unwrap_or_else(|_| DEV_PRIVATE_KEY.to_owned());
+    let sender_signer: PrivateKeySigner = private_key.parse()?;
     let sender = sender_signer.address();
     let sell_token: Address = USDC.parse()?;
     let buy_token: Address = WETH.parse()?;
