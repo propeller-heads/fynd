@@ -39,6 +39,7 @@ use crate::api::error::ErrorResponse;
         dto::Order,
         dto::OrderSide,
         dto::QuoteOptions,
+        dto::PriceGuardConfig,
         dto::Quote,
         dto::OrderQuote,
         dto::QuoteStatus,
