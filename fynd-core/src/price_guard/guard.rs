@@ -77,6 +77,7 @@ impl PriceGuard {
     /// Checks that a successful quote has a route with input/output tokens.
     /// Returns the token pair if valid, `None` otherwise.
     fn check_structure(&self, quote: &OrderQuote) -> Option<(Address, Address)> {
+        //invalid route would be rejected earlier; this prevents using expect
         let Some(route) = quote.route() else {
             warn!(order_id = quote.order_id(), "successful quote has no route");
             return None;

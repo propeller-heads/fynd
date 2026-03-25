@@ -85,10 +85,6 @@ pub struct QuoteOptions {
     /// Options for encoding the solution into an on-chain transaction.
     /// If `None`, the solution is returned without an encoded transaction.
     encoding_options: Option<EncodingOptions>,
-    /// TODO: Should we move to `Order` for per-order price guard control if needed?
-    /// One might want to turn off the price guard for a few orders of their list, but not all,
-    /// depending on tokens. At the same time - I kept it in here to be coherent with where we
-    /// are passing the encoding options. Please let me know if you disagree.
     /// Per-request price guard overrides. If `None`, uses server defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     price_guard: Option<PriceGuardConfig>,
