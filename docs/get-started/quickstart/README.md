@@ -24,8 +24,8 @@ Get a quote from Fynd in three steps.
 
 ## Prerequisites
 
-* **Tycho API key** — set as `TYCHO_API_KEY` ([get one here](https://app.gitbook.com/s/jrIe0oInIEt65tHqWn2w/for-solvers/indexer/tycho-client#authentication))
-* **Rust 1.92+** — install via [rustup](https://rustup.rs/)
+* **Tycho API key** (set as `TYCHO_API_KEY`, [get one here](https://t.me/fynd_portal_bot))
+* **Rust 1.92+** ([install via rustup](https://rustup.rs/))
 
 ## Step 1 — Start Fynd
 
@@ -68,7 +68,7 @@ This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
 {% endtab %}
 
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/tutorial/main.ts):
+From [`clients/typescript/examples/tutorial/main.ts`](../../../clients/typescript/examples/tutorial/main.ts):
 
 ```typescript
   // FyndClient accepts a viemProvider adapter — no manual wrapping needed.
@@ -139,7 +139,7 @@ The full tutorial (signing + on-chain execution) is at `clients/typescript/examp
 {% endtab %}
 
 {% tab title="Rust" %}
-From [`clients/rust/examples/quote.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/quote.rs):
+From [`clients/rust/examples/quote.rs`](../../../clients/rust/examples/quote.rs):
 
 ```rust
     let client = FyndClientBuilder::new(FYND_URL, FYND_URL)

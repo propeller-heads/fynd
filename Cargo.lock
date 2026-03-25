@@ -2832,6 +2832,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2881,9 +2887,9 @@ dependencies = [
 
 [[package]]
 name = "ekubo_sdk"
-version = "2.1.2"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c776f792b440944a399fb8c8b46b35be0451ced35ba30c2a628f2f61c3ca4899"
+checksum = "5aa1080f5ab48d30a0221e764e51bb7de756251834b639fa1bbd187a60c04608"
 dependencies = [
  "alloy-primitives 0.6.4",
  "alloy-primitives 1.5.7",
@@ -3297,7 +3303,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3332,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3340,21 +3346,19 @@ dependencies = [
  "clap",
  "fastrand",
  "fynd-client",
- "fynd-rpc",
  "num-bigint",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber 0.3.23",
- "tycho-simulation",
  "wiremock",
 ]
 
 [[package]]
 name = "fynd-client"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "alloy",
  "bytes",
@@ -3373,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3403,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3432,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "fynd-core",
  "hex",
@@ -3447,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.24.3"
+version = "0.28.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -7546,14 +7550,14 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.165.1"
+version = "0.168.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e6a51bf94daa33f83a46b09881a03e0c06554df630af92e9956d21d3bcb863f"
+checksum = "714750a271d45ac626a5d4754b18780c4390a5759f263cb5222fecd70643d4c8"
 dependencies = [
  "alloy",
  "chrono",
  "clap",
- "dotenv",
+ "dotenvy",
  "hex",
  "num-bigint",
  "once_cell",
@@ -7567,9 +7571,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.250.0"
+version = "0.251.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "423a95c347f85f550301095169174b4bef084a32027ac0e2e7409e81657926f8"
+checksum = "b00857ca975c4c63f4bfa8c3ba7ef034b1a91979650867d5da03cb92cb101a7e"
 dependencies = [
  "alloy",
  "alloy-chains",

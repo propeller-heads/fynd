@@ -24,6 +24,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /v1/info - Return static metadata about this Fynd instance. */
+        get: operations["info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/quote": {
         parameters: {
             query?: never;
@@ -43,7 +60,7 @@ export interface paths {
          *     - 400 Bad Request: Invalid request format
          *     - 422 Unprocessable Entity: No routes found
          *     - 503 Service Unavailable: Queue full or service overloaded
-         *     - 504 Gateway Timeout: Quote timeout
+         *     - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
          */
         post: operations["quote"];
         delete?: never;
@@ -81,8 +98,44 @@ export interface components {
              */
             timestamp: number;
         };
+        /**
+         * @description Client fee configuration for the Tycho Router.
+         *
+         *     When provided, the router charges a client fee on the swap output. The `signature`
+         *     must be an EIP-712 signature by the `receiver` over the `ClientFee` typed data.
+         */
+        ClientFeeParams: {
+            /**
+             * Format: int32
+             * @description Fee in basis points (0–10,000). 100 = 1%.
+             * @example 100
+             */
+            bps: number;
+            /**
+             * Format: int64
+             * @description Unix timestamp after which the signature is invalid.
+             * @example 1893456000
+             */
+            deadline: number;
+            /**
+             * @description Maximum subsidy from the client's vault balance.
+             * @example 0
+             */
+            max_contribution: string;
+            /**
+             * @description Address that receives the fee (also the required EIP-712 signer).
+             * @example 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+             */
+            receiver: string;
+            /**
+             * @description 65-byte EIP-712 ECDSA signature by `receiver` (hex-encoded).
+             * @example 0xabcd...
+             */
+            signature: string;
+        };
         /** @description Options to customize the encoding behavior. */
         EncodingOptions: {
+            client_fee_params?: null | components["schemas"]["ClientFeeParams"];
             permit?: null | components["schemas"]["PermitSingle"];
             /**
              * @description Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
@@ -138,6 +191,25 @@ export interface components {
              * @example 2
              */
             num_solver_pools: number;
+        };
+        /** @description Static metadata about this Fynd instance, returned by `GET /v1/info`. */
+        InstanceInfo: {
+            /**
+             * Format: int64
+             * @description EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * @description Address of the canonical Permit2 contract (same on all EVM chains).
+             * @example 0x000000000022D473030F116dDEE9F6B43aC78BA3
+             */
+            permit2_address: string;
+            /**
+             * @description Address of the Tycho Router contract on this chain.
+             * @example 0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35
+             */
+            router_address: string;
         };
         /**
          * @description A single swap order to be solved.
@@ -406,7 +478,7 @@ export interface components {
          * @description Token transfer method for moving funds into Tycho execution.
          * @enum {string}
          */
-        UserTransferType: "transfer_from_permit2" | "transfer_from" | "none";
+        UserTransferType: "transfer_from_permit2" | "transfer_from" | "use_vaults_funds";
     };
     responses: never;
     parameters: never;
@@ -441,6 +513,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthStatus"];
+                };
+            };
+        };
+    };
+    info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance info */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstanceInfo"];
                 };
             };
         };
@@ -485,17 +577,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Service unavailable */
+            /** @description Queue full, overloaded, stale data, or timeout */
             503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Quote timeout */
-            504: {
                 headers: {
                     [name: string]: unknown;
                 };

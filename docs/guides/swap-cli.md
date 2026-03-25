@@ -1,6 +1,6 @@
 ---
-description: >-
-  Use fynd-swap-cli to dry-run and execute swaps against a running Fynd server.
+description: Use fynd-swap-cli to dry-run and execute swaps against a running Fynd server.
+icon: rectangle-terminal
 ---
 
 # Swap CLI
@@ -9,7 +9,7 @@ description: >-
 
 ## Prerequisites
 
-1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/README.md "mention") if you haven't.
+1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
 2. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
 
 ## Build
@@ -40,7 +40,7 @@ The output prints the quote (amount\_in, amount\_out, gas estimate, route) follo
 
 ## Dry-run a swap (Permit2)
 
-Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines — no chain reads for Permit2 state are needed.
+Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines, so you don't need any chain reads for Permit2 state.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
@@ -93,6 +93,20 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
   --execute
 ```
 
+## Swap using vault funds
+
+If tokens are already deposited in the Tycho Router vault, use `--transfer-type use-vaults-funds`. No ERC-20 approval or Permit2 signature is needed.
+
+```bash
+./target/release/fynd-swap-cli \
+  --sell-token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --buy-token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
+  --sell-amount 1000000000 \
+  --transfer-type use-vaults-funds
+```
+
+***
+
 ## Embedded server (no separate `fynd serve` needed)
 
 {% hint style="info" %}
@@ -112,25 +126,25 @@ This is convenient for a one-off swap but slow to initialize on every run (the s
 
 ## CLI Reference
 
-| Flag                    | Env var         | Default                                        | Description                                                                                      |
-| ----------------------- | --------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `--sell-token`          | —               | USDC (mainnet)                                 | Token address to sell                                                                            |
-| `--buy-token`           | —               | WETH (mainnet)                                 | Token address to buy                                                                             |
-| `--sell-amount`         | —               | `1000000000`                                   | Amount to sell in raw atomic units                                                               |
-| `--slippage-bps`        | —               | `50` (0.5%)                                    | Slippage tolerance in basis points                                                               |
-| `--fynd-url`            | —               | `http://localhost:3000`                        | Fynd server URL (ignored when `--tycho-url` is set)                                              |
-| `--transfer-type`       | —               | `transfer-from`                                | `transfer-from` or `transfer-from-permit2`                                                       |
-| `--execute`             | —               | false (dry-run)                                | Submit the swap on-chain. Requires `PRIVATE_KEY`.                                                |
-| `--router`              | —               | —                                              | TychoRouter address. Required for `transfer-from-permit2`.                                       |
-| `--permit2`             | —               | `0x000000000022D473030F116dDEE9F6B43aC78BA3`   | Permit2 contract address                                                                         |
-| `--rpc-url`             | `RPC_URL`       | `https://eth.llamarpc.com`                     | Ethereum RPC endpoint                                                                            |
-| `--chain`               | —               | `Ethereum`                                     | Target chain                                                                                     |
-| `--tycho-url`           | —               | —                                              | If set, spawns an embedded Fynd solver connecting to this Tycho WebSocket URL                    |
-| `--tycho-api-key`       | `TYCHO_API_KEY` | —                                              | Tycho API key (required when `--tycho-url` is set)                                               |
-| `--disable-tls`         | —               | false                                          | Disable TLS for the Tycho WebSocket connection                                                   |
-| `--protocols`           | —               | (all on-chain, fetched from Tycho)             | Comma-separated protocols to index. Only used with `--tycho-url`.                                |
-| `--worker-pools-config` | —               | —                                              | Path to worker pools TOML config. Only used with `--tycho-url`.                                  |
-| `--http-port`           | —               | `3000`                                         | HTTP port for the embedded solver. Only used with `--tycho-url`.                                 |
+| Flag                    | Env var         | Default                                      | Description                                                                   |
+| ----------------------- | --------------- | -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `--sell-token`          | —               | USDC (mainnet)                               | Token address to sell                                                         |
+| `--buy-token`           | —               | WETH (mainnet)                               | Token address to buy                                                          |
+| `--sell-amount`         | —               | `1000000000`                                 | Amount to sell in raw atomic units                                            |
+| `--slippage-bps`        | —               | `50` (0.5%)                                  | Slippage tolerance in basis points                                            |
+| `--fynd-url`            | —               | `http://localhost:3000`                      | Fynd server URL (ignored when `--tycho-url` is set)                           |
+| `--transfer-type`       | —               | `transfer-from`                              | `transfer-from`, `transfer-from-permit2`, or `use-vaults-funds`               |
+| `--execute`             | —               | false (dry-run)                              | Submit the swap on-chain. Requires `PRIVATE_KEY`.                             |
+| `--router`              | —               | —                                            | TychoRouter address. Required for `transfer-from-permit2`.                    |
+| `--permit2`             | —               | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Permit2 contract address                                                      |
+| `--rpc-url`             | `RPC_URL`       | `https://eth.llamarpc.com`                   | Ethereum RPC endpoint                                                         |
+| `--chain`               | —               | `Ethereum`                                   | Target chain                                                                  |
+| `--tycho-url`           | —               | —                                            | If set, spawns an embedded Fynd solver connecting to this Tycho WebSocket URL |
+| `--tycho-api-key`       | `TYCHO_API_KEY` | —                                            | Tycho API key (required when `--tycho-url` is set)                            |
+| `--disable-tls`         | —               | false                                        | Disable TLS for the Tycho WebSocket connection                                |
+| `--protocols`           | —               | (all on-chain, fetched from Tycho)           | Comma-separated protocols to index. Only used with `--tycho-url`.             |
+| `--worker-pools-config` | —               | —                                            | Path to worker pools TOML config. Only used with `--tycho-url`.               |
+| `--http-port`           | —               | `3000`                                       | HTTP port for the embedded solver. Only used with `--tycho-url`.              |
 
 ## Security Notes
 

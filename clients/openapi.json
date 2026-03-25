@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.22.0"
+    "version": "0.25.2"
   },
   "paths": {
     "/v1/health": {
@@ -42,13 +42,34 @@
         }
       }
     },
+    "/v1/info": {
+      "get": {
+        "tags": [
+          "solver"
+        ],
+        "summary": "GET /v1/info - Return static metadata about this Fynd instance.",
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "description": "Instance info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/quote": {
       "post": {
         "tags": [
           "solver"
         ],
         "summary": "POST /v1/quote - Request a quote.",
-        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 504 Gateway Timeout: Quote timeout",
+        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 503 Service Unavailable: Queue full, service overloaded, or quote timeout",
         "operationId": "quote",
         "requestBody": {
           "content": {
@@ -92,17 +113,7 @@
             }
           },
           "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "504": {
-            "description": "Quote timeout",
+            "description": "Queue full, overloaded, stale data, or timeout",
             "content": {
               "application/json": {
                 "schema": {
@@ -147,6 +158,48 @@
           }
         }
       },
+      "ClientFeeParams": {
+        "type": "object",
+        "description": "Client fee configuration for the Tycho Router.\n\nWhen provided, the router charges a client fee on the swap output. The `signature`\nmust be an EIP-712 signature by the `receiver` over the `ClientFee` typed data.",
+        "required": [
+          "bps",
+          "receiver",
+          "max_contribution",
+          "deadline",
+          "signature"
+        ],
+        "properties": {
+          "bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Fee in basis points (0–10,000). 100 = 1%.",
+            "example": 100,
+            "minimum": 0
+          },
+          "deadline": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp after which the signature is invalid.",
+            "example": 1893456000,
+            "minimum": 0
+          },
+          "max_contribution": {
+            "type": "string",
+            "description": "Maximum subsidy from the client's vault balance.",
+            "example": "0"
+          },
+          "receiver": {
+            "type": "string",
+            "description": "Address that receives the fee (also the required EIP-712 signer).",
+            "example": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+          },
+          "signature": {
+            "type": "string",
+            "description": "65-byte EIP-712 ECDSA signature by `receiver` (hex-encoded).",
+            "example": "0xabcd..."
+          }
+        }
+      },
       "EncodingOptions": {
         "type": "object",
         "description": "Options to customize the encoding behavior.",
@@ -154,6 +207,17 @@
           "slippage"
         ],
         "properties": {
+          "client_fee_params": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClientFeeParams",
+                "description": "Client fee configuration. When absent, no fee is charged."
+              }
+            ]
+          },
           "permit": {
             "oneOf": [
               {
@@ -244,6 +308,34 @@
             "description": "Number of active solver pools.",
             "example": 2,
             "minimum": 0
+          }
+        }
+      },
+      "InstanceInfo": {
+        "type": "object",
+        "description": "Static metadata about this Fynd instance, returned by `GET /v1/info`.",
+        "required": [
+          "chain_id",
+          "router_address",
+          "permit2_address"
+        ],
+        "properties": {
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EIP-155 chain ID (e.g. 1 for Ethereum mainnet).",
+            "example": 1,
+            "minimum": 0
+          },
+          "permit2_address": {
+            "type": "string",
+            "description": "Address of the canonical Permit2 contract (same on all EVM chains).",
+            "example": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+          },
+          "router_address": {
+            "type": "string",
+            "description": "Address of the Tycho Router contract on this chain.",
+            "example": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
           }
         }
       },
@@ -651,7 +743,7 @@
         "enum": [
           "transfer_from_permit2",
           "transfer_from",
-          "none"
+          "use_vaults_funds"
         ]
       }
     }

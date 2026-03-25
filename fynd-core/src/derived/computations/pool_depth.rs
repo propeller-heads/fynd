@@ -83,19 +83,16 @@ impl DerivedComputation for PoolDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Self::Output, ComputationError> {
-        // Fetch all data needed for the computation under short-lived locks, then drop guards.
-        let (snapshot, spot_prices, mut pool_depths, components_to_compute) = {
-            let market_guard = market.read().await;
+        // Read derived data from store
+        let (spot_prices, mut pool_depths) = {
             let store_guard = store.read().await;
-
-            // Get precomputed spot prices (required dependency)
+            // Get precomputed spot prices (required dependency).
             let spot_prices = store_guard
                 .spot_prices()
                 .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
                 .clone();
-
-            // Start with existing depths (or empty for full recompute)
-            let mut pool_depths = if changed.is_full_recompute {
+            // Start with existing depths (or empty for full recompute).
+            let pool_depths = if changed.is_full_recompute {
                 PoolDepths::new()
             } else {
                 store_guard
@@ -103,15 +100,20 @@ impl DerivedComputation for PoolDepthComputation {
                     .cloned()
                     .unwrap_or_default()
             };
+            (spot_prices, pool_depths)
+        };
 
-            // Remove pool depths for removed components
-            for component_id in &changed.removed {
-                pool_depths.retain(|key, _| &key.0 != component_id);
-            }
+        // Remove pool depths for removed components.
+        for component_id in &changed.removed {
+            pool_depths.retain(|key, _| &key.0 != component_id);
+        }
 
+        // Snapshot market data under brief lock.
+        let (snapshot, components_to_compute) = {
+            let market_guard = market.read().await;
             let topology = market_guard.component_topology();
 
-            // Determine which components to compute
+            // Determine which components need (re)computation.
             let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
                 topology.keys().cloned().collect()
             } else {
@@ -129,7 +131,7 @@ impl DerivedComputation for PoolDepthComputation {
                 .collect();
             let snapshot: SharedMarketData = market_guard.extract_subset(&component_ids);
 
-            (snapshot, spot_prices, pool_depths, components_to_compute)
+            (snapshot, components_to_compute)
         };
 
         let topology = snapshot.component_topology();

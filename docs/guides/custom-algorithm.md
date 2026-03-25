@@ -1,3 +1,7 @@
+---
+icon: code-branch
+---
+
 # Custom Algorithm
 
 Fynd exposes an `Algorithm` trait that lets you plug in custom routing logic without modifying `fynd-core`. This guide walks through implementing the trait and wiring it into a worker pool.
@@ -15,7 +19,7 @@ Your algorithm receives a read-only reference to the routing graph and shared ma
 
 ## Implement the trait
 
-From [`fynd-core/examples/custom_algorithm.rs`](https://github.com/propeller-heads/fynd/blob/main/fynd-core/examples/custom_algorithm.rs):
+From [`fynd-core/examples/custom_algorithm.rs`](../../fynd-core/examples/custom_algorithm.rs):
 
 ```rust
 /// A custom algorithm that wraps [`MostLiquidAlgorithm`].
@@ -104,5 +108,4 @@ cargo run --package fynd-core --example custom_algorithm
 
 The example connects to Tycho, loads market data, and solves a 1000 USDC → WBTC order using `MyAlgorithm`.
 
-For the complete runnable example, see [`fynd-core/examples/custom_algorithm.rs`](https://github.com/propeller-heads/fynd/blob/main/fynd-core/examples/custom_algorithm.rs).
-
+For the complete runnable example, see [`fynd-core/examples/custom_algorithm.rs`](../../fynd-core/examples/custom_algorithm.rs).

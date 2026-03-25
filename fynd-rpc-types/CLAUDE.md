@@ -19,7 +19,9 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `QuoteRequest` — orders + options
 - `Order` — token_in, token_out, amount, side (Sell only), sender, optional receiver
 - `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options
-- `EncodingOptions` — slippage, transfer_type (TransferFrom / TransferFromPermit2 / None), permit, signature
+- `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params
+- `UserTransferType` — TransferFrom (default) / TransferFromPermit2 / UseVaultsFunds
+- `ClientFeeParams` — bps, receiver, max_subsidy, signature (client fee on swap output)
 - `PermitSingle`, `PermitDetails` — Permit2 authorization data
 
 ## Response Types

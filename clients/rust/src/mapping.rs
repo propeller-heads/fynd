@@ -133,6 +133,15 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
         ) {
             dto_opts = dto_opts.with_permit2(permit, sig);
         }
+        if let Some(fee) = opts.client_fee_params {
+            dto_opts = dto_opts.with_client_fee_params(dto::ClientFeeParams::new(
+                fee.bps,
+                TychoBytes::from(fee.receiver),
+                fee.max_contribution,
+                fee.deadline,
+                TychoBytes::from(fee.signature.unwrap_or_default()),
+            ));
+        }
         Ok(dto_opts)
     }
 }
@@ -163,7 +172,7 @@ impl From<UserTransferType> for dto::UserTransferType {
         match t {
             UserTransferType::TransferFrom => dto::UserTransferType::TransferFrom,
             UserTransferType::TransferFromPermit2 => dto::UserTransferType::TransferFromPermit2,
-            UserTransferType::None => dto::UserTransferType::None,
+            UserTransferType::UseVaultsFunds => dto::UserTransferType::UseVaultsFunds,
         }
     }
 }
@@ -196,6 +205,7 @@ pub(crate) fn dto_to_quote(
         ds.amount_in().clone(),
         ds.amount_out().clone(),
         ds.gas_estimate().clone(),
+        ds.amount_out_net_gas().clone(),
         ds.price_impact_bps(),
         block,
         token_out,
@@ -453,7 +463,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn quote_try_from_dto_drops_amount_out_net_gas_and_defaults_to_fynd() {
+    fn quote_from_dto() {
         let ds = sample_dto_order_quote();
         let quote = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(quote.order_id(), "test-order-id");
@@ -462,6 +472,7 @@ mod tests {
         assert_eq!(quote.amount_in(), &BigUint::from(1_000u32));
         assert_eq!(quote.amount_out(), &BigUint::from(999u32));
         assert_eq!(quote.gas_estimate(), &BigUint::from(100_000u32));
+        assert_eq!(quote.amount_out_net_gas(), &BigUint::from(998u32));
         assert_eq!(quote.price_impact_bps(), Some(5));
         // token_out and receiver are left empty until populated by quote()
         assert!(quote.token_out().is_empty());
@@ -532,9 +543,9 @@ mod tests {
     }
 
     #[test]
-    fn user_transfer_type_none_maps_correctly() {
-        let result = dto::UserTransferType::from(UserTransferType::None);
-        assert!(matches!(result, dto::UserTransferType::None));
+    fn user_transfer_type_vault_funds_maps_correctly() {
+        let result = dto::UserTransferType::from(UserTransferType::UseVaultsFunds);
+        assert!(matches!(result, dto::UserTransferType::UseVaultsFunds));
     }
 
     // -----------------------------------------------------------------------
@@ -624,5 +635,40 @@ mod tests {
                 .as_ref(),
             sig.as_ref()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EncodingOptions TryFrom with client fee
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoding_options_try_from_with_client_fee() {
+        use crate::types::{ClientFeeParams, EncodingOptions};
+
+        let fee = ClientFeeParams::new(
+            100,
+            Bytes::copy_from_slice(&[0x44; 20]),
+            BigUint::from(500_000u64),
+            1_893_456_000u64,
+        )
+        .with_signature(Bytes::copy_from_slice(&[0xAB; 65]));
+        let opts = EncodingOptions::new(0.01).with_client_fee(fee);
+
+        let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
+        assert!(dto_opts.client_fee_params().is_some());
+        let dto_fee = dto_opts.client_fee_params().unwrap();
+        assert_eq!(dto_fee.bps(), 100);
+        assert_eq!(*dto_fee.max_contribution(), BigUint::from(500_000u64));
+        assert_eq!(dto_fee.deadline(), 1_893_456_000u64);
+        assert_eq!(dto_fee.signature().len(), 65);
+    }
+
+    #[test]
+    fn encoding_options_try_from_without_client_fee() {
+        use crate::types::EncodingOptions;
+
+        let opts = EncodingOptions::new(0.005);
+        let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
+        assert!(dto_opts.client_fee_params().is_none());
     }
 }

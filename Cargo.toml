@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.24.3"
+version = "0.28.0"
 
 [package]
 name = "fynd"
@@ -63,7 +63,14 @@ bytes = { workspace = true }
 fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
+members = [
+    "fynd-core",
+    "fynd-rpc",
+    "fynd-rpc-types",
+    "clients/rust",
+    "tools/benchmark",
+    "tools/fynd-swap-cli",
+]
 resolver = "2"
 
 [workspace.dependencies]
@@ -113,8 +120,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.250.0"
-tycho-execution = { version = ">=0.165.0", features = ["evm"] }
+tycho-simulation = ">=0.251.1"
+tycho-execution = { version = ">=0.168.0", features = ["evm"] }
 typetag = "0.2"
 
 # Graph algorithms
@@ -141,4 +148,3 @@ fynd-client = { path = "clients/rust" }
 
 # Dev dependencies
 rstest = "0.18"
-

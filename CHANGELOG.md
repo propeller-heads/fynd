@@ -1,3 +1,75 @@
+## [0.28.0](https://github.com/propeller-heads/fynd/compare/0.27.0...0.28.0) (2026-03-25)
+
+
+### Features
+
+* **rpc:** add GET /v1/info endpoint ([a502dfd](https://github.com/propeller-heads/fynd/commit/a502dfdc65a3c19171a314f4eeee1855addb9cb5))
+
+
+### Bug Fixes
+
+* **rpc:** remove dead into_components_with_info, add missing tests ([fda01c0](https://github.com/propeller-heads/fynd/commit/fda01c0fba1a0c0f07d7d691e3156ee249bd6421))
+
+## [0.27.0](https://github.com/propeller-heads/fynd/compare/0.26.1...0.27.0) (2026-03-25)
+
+
+### Features
+
+* support Router v3 (tycho-execution=0.167.0) ([b46414d](https://github.com/propeller-heads/fynd/commit/b46414d301fe4c8d160f89d60d2348a162ef0185))
+
+## [0.26.1](https://github.com/propeller-heads/fynd/compare/0.26.0...0.26.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* **client:** map all known server error codes to typed ErrorCode variants ([f45071e](https://github.com/propeller-heads/fynd/commit/f45071ef794498ffb562c48c877294a61b051c56))
+* **fynd-client:** mark ErrorCode as non_exhaustive ([facc5da](https://github.com/propeller-heads/fynd/commit/facc5da6b18555866e35c66e9d08a7d5759426fc))
+* **rpc:** always return JSON bodies, including on extractor errors ([ae6ba4f](https://github.com/propeller-heads/fynd/commit/ae6ba4f0c02f3ab90f62b115af9601782aeeeaa1))
+* **rpc:** return 503 for MarketDataStale, add missing test coverage ([0432dec](https://github.com/propeller-heads/fynd/commit/0432dec56ef7d60e1c34b7ff8bf5dfab159de5b4))
+* **rpc:** return 503 for solver timeout instead of 504 ([95cc60d](https://github.com/propeller-heads/fynd/commit/95cc60d7c9177b664fb72e29a489b18849a5407e))
+
+## [0.26.0](https://github.com/propeller-heads/fynd/compare/0.25.2...0.26.0) (2026-03-25)
+
+
+### Features
+
+* update tycho-simulation dependency ([b0a7647](https://github.com/propeller-heads/fynd/commit/b0a76478888ca3e37ebaa22f91a7a0d6c81f383f))
+
+## [0.25.2](https://github.com/propeller-heads/fynd/compare/0.25.1...0.25.2) (2026-03-25)
+
+
+### Bug Fixes
+
+* update doc snippet checker for quickstart folder move ([a2770de](https://github.com/propeller-heads/fynd/commit/a2770de5f4e3e9928e2ba44ad44528424ffe5f76))
+
+## [0.25.1](https://github.com/propeller-heads/fynd/compare/0.25.0...0.25.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* fix after incorrect rebase ([200abcb](https://github.com/propeller-heads/fynd/commit/200abcbdf5cf2a07e92b0343e7bc7aac54a88fd6))
+* track all candidate path pools in path_components for incremental invalidation ([5badb5c](https://github.com/propeller-heads/fynd/commit/5badb5c29fe33887e5a03907ac97587ee2f3cf94))
+* update the path to the relevant docs ([a423bd0](https://github.com/propeller-heads/fynd/commit/a423bd029de7b9ac7b64707ee88dc3ec6e2b0a9c))
+
+## [0.25.0](https://github.com/propeller-heads/fynd/compare/0.24.3...0.25.0) (2026-03-23)
+
+
+### Features
+
+* **benchmark:** improve compare tool with parallel requests, net-of-gas, timing ([a82e6af](https://github.com/propeller-heads/fynd/commit/a82e6af2eff980a5f05e8fe75941f3535a6daaca))
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([f4cc24e](https://github.com/propeller-heads/fynd/commit/f4cc24edae5d8aaf42b71df5c275d5289b4ff358))
+* **benchmark:** clean up unused deps, naming, and API surface ([0bd89bc](https://github.com/propeller-heads/fynd/commit/0bd89bcd2032c61abcb48cfe55b1062649213e9a))
+* **benchmark:** use server-side amount_out_net_gas and real aggregator trades ([a5080af](https://github.com/propeller-heads/fynd/commit/a5080af7ef1ae67088972dd22c3ef9a839967954))
+
+
+### Reverts
+
+* Revert "Replace committed Dune dataset with download-trades subcommand" ([7c580fe](https://github.com/propeller-heads/fynd/commit/7c580fe7c4af0b85b9dd0d93584feef4884a3434))
+
 ## [0.24.3](https://github.com/propeller-heads/fynd/compare/0.24.2...0.24.3) (2026-03-23)
 
 

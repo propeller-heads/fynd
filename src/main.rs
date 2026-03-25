@@ -102,12 +102,12 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
                 let provider = TracerProvider::builder()
                     .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                     .with_resource(opentelemetry_sdk::Resource::new(vec![
-                        opentelemetry::KeyValue::new("service.name", "tycho-solver"),
+                        opentelemetry::KeyValue::new("service.name", "fynd"),
                     ]))
                     .build();
 
                 let otel_layer =
-                    tracing_opentelemetry::layer().with_tracer(provider.tracer("tycho-solver"));
+                    tracing_opentelemetry::layer().with_tracer(provider.tracer("fynd"));
 
                 tracing_subscriber::registry()
                     .with(EnvFilter::from_default_env())

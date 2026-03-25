@@ -24,7 +24,7 @@ layout:
 Fynd ships with a benchmark tool (`fynd-benchmark`) for load-testing a solver and comparing output quality between two solver instances. Both features live in `tools/benchmark/` and run against live solver instances.
 
 {% hint style="info" %}
-**Prerequisite:** You need a running solver before using any benchmark command. See [quickstart](../get-started/quickstart/README.md "mention") for setup instructions.
+**Prerequisite:** You need a running solver before using any benchmark command. See [quickstart](../get-started/quickstart/ "mention") for setup instructions.
 {% endhint %}
 
 ## Load Testing
@@ -41,13 +41,13 @@ Always build with `--release`. Debug builds produce misleading latency numbers.
 
 ### Options
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--solver-url` | `http://localhost:3000` | Solver URL to benchmark against |
-| `-n` | `1` | Number of requests to send |
-| `-m` | `sequential` | Parallelization mode |
-| `--requests-file` | _(none)_ | Path to JSON file with request templates |
-| `--output-file` | _(none)_ | Output file for JSON results |
+| Flag              | Default                 | Description                              |
+| ----------------- | ----------------------- | ---------------------------------------- |
+| `--solver-url`    | `http://localhost:3000` | Solver URL to benchmark against          |
+| `-n`              | `1`                     | Number of requests to send               |
+| `-m`              | `sequential`            | Parallelization mode                     |
+| `--requests-file` | _(none)_                | Path to JSON file with request templates |
+| `--output-file`   | _(none)_                | Output file for JSON results             |
 
 ### Parallelization Modes
 
@@ -81,7 +81,7 @@ cargo run -p fynd-benchmark --release -- load \
 
 The tool prints real-time progress, summary statistics (min, max, mean, median, p95, p99, stddev), and ASCII histograms of timing distributions. Pass `--output-file` to export the full results as JSON.
 
----
+***
 
 ## Comparing Two Solvers
 
@@ -146,23 +146,23 @@ cargo run -p fynd-benchmark --release -- compare \
 
 ### Options
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--url-a` | `http://localhost:3000` | Solver A (baseline) URL |
-| `--url-b` | `http://localhost:3001` | Solver B (candidate) URL |
-| `--label-a` | `main` | Label for solver A in output |
-| `--label-b` | `branch` | Label for solver B in output |
-| `-n` | `100` | Number of requests to send |
-| `--requests-file` | _(none)_ | Path to JSON file with custom requests |
-| `--output` | `comparison_results.json` | Path for full results JSON |
-| `--timeout-ms` | `15000` | Per-request timeout in milliseconds |
-| `--seed` | `42` | Random seed for reproducibility |
+| Flag              | Default                   | Description                            |
+| ----------------- | ------------------------- | -------------------------------------- |
+| `--url-a`         | `http://localhost:3000`   | Solver A (baseline) URL                |
+| `--url-b`         | `http://localhost:3001`   | Solver B (candidate) URL               |
+| `--label-a`       | `main`                    | Label for solver A in output           |
+| `--label-b`       | `branch`                  | Label for solver B in output           |
+| `-n`              | `100`                     | Number of requests to send             |
+| `--requests-file` | _(none)_                  | Path to JSON file with custom requests |
+| `--output`        | `comparison_results.json` | Path for full results JSON             |
+| `--timeout-ms`    | `15000`                   | Per-request timeout in milliseconds    |
+| `--seed`          | `42`                      | Random seed for reproducibility        |
 
 ### Output
 
 Prints a summary table to stdout showing win/loss counts and bps differences. Writes detailed per-request results to the output JSON file. Positive bps diffs mean solver B returned more output than solver A.
 
----
+***
 
 ## CPU Scaling
 
@@ -178,23 +178,23 @@ Requires a `worker_pools.toml` with exactly **one** pool defined.
 
 ### Options
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--base-config` | `worker_pools.toml` | Single-pool TOML config |
-| `--worker-counts` | _(required)_ | Comma-separated worker counts (e.g. `1,2,4,8,16`) |
-| `--protocols` | _(required)_ | Comma-separated protocols for solver |
-| `--tycho-url` | `localhost:4242` | Tycho WebSocket URL |
-| `--tycho-api-key` | _(none)_ | Tycho API key |
-| `--disable-tls` | `false` | Disable TLS for Tycho connection |
-| `--rpc-url` | _(none)_ | Node RPC URL |
-| `--chain` | `ethereum` | Chain name |
-| `--http-port` | `3000` | Solver HTTP port |
-| `-n` | `100` | Requests per iteration |
-| `-m` | `fixed:8` | Parallelization mode |
-| `--requests-file` | _(none)_ | Custom request templates |
-| `--warmup-secs` | `30` | Seconds to wait after health before benchmarking |
-| `--health-timeout-secs` | `300` | Max seconds to wait for solver health |
-| `--output-file` | _(none)_ | JSON output file |
+| Flag                    | Default             | Description                                       |
+| ----------------------- | ------------------- | ------------------------------------------------- |
+| `--base-config`         | `worker_pools.toml` | Single-pool TOML config                           |
+| `--worker-counts`       | _(required)_        | Comma-separated worker counts (e.g. `1,2,4,8,16`) |
+| `--protocols`           | _(required)_        | Comma-separated protocols for solver              |
+| `--tycho-url`           | `localhost:4242`    | Tycho WebSocket URL                               |
+| `--tycho-api-key`       | _(none)_            | Tycho API key                                     |
+| `--disable-tls`         | `false`             | Disable TLS for Tycho connection                  |
+| `--rpc-url`             | _(none)_            | Node RPC URL                                      |
+| `--chain`               | `ethereum`          | Chain name                                        |
+| `--http-port`           | `3000`              | Solver HTTP port                                  |
+| `-n`                    | `100`               | Requests per iteration                            |
+| `-m`                    | `fixed:8`           | Parallelization mode                              |
+| `--requests-file`       | _(none)_            | Custom request templates                          |
+| `--warmup-secs`         | `30`                | Seconds to wait after health before benchmarking  |
+| `--health-timeout-secs` | `300`               | Max seconds to wait for solver health             |
+| `--output-file`         | _(none)_            | JSON output file                                  |
 
 ### Example
 
@@ -231,7 +231,7 @@ Requests per run: 200, Mode: fixed:8
 
 Pass `--output-file` to export the full results as JSON for further analysis.
 
----
+***
 
 ## Custom Request Templates
 
