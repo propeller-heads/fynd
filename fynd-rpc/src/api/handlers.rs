@@ -33,7 +33,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 400 Bad Request: Invalid request format
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
-/// - 504 Gateway Timeout: Quote timeout
+/// - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
 #[utoipa::path(
     post,
     path = "/v1/quote",
@@ -44,7 +44,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
-        (status = 504, description = "Quote timeout", body = ErrorResponse),
+        (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
@@ -268,5 +268,167 @@ pub async fn get_prices(
 
 #[cfg(test)]
 mod tests {
-    // TODO: Add integration tests for handlers
+    use actix_web::{test, web, App, HttpResponse};
+    use serde_json::Value;
+
+    use crate::api::dto::QuoteRequest;
+
+    /// Minimal handler that mirrors the real quote handler's JSON extraction.
+    /// The body deserialization error happens before this is called.
+    async fn echo_quote(_req: web::Json<QuoteRequest>) -> HttpResponse {
+        HttpResponse::Ok().finish()
+    }
+
+    /// Creates a test service that mirrors `configure_app`'s extractor setup.
+    /// This intentionally matches the real server's `configure_app` call so that
+    /// fixes to the app config are reflected here.
+    macro_rules! make_test_app {
+        () => {
+            test::init_service(
+                App::new()
+                    .configure(crate::api::configure_error_handlers)
+                    .route("/v1/quote", web::post().to(echo_quote)),
+            )
+            .await
+        };
+    }
+
+    async fn body_json(resp: actix_web::dev::ServiceResponse) -> Value {
+        let bytes = test::read_body(resp).await;
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    // ── Unknown route (default_service) ────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_unknown_route_returns_json_404() {
+        use crate::api::error::ErrorResponse;
+
+        let app = test::init_service(
+            App::new()
+                .configure(crate::api::configure_error_handlers)
+                .route("/v1/quote", web::post().to(echo_quote))
+                .default_service(web::to(|| async {
+                    let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
+                    HttpResponse::NotFound().json(body)
+                })),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/does-not-exist")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "NOT_FOUND", "body was: {body}");
+    }
+
+    // ── JSON body errors ────────────────────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_malformed_json_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{not valid json}")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_empty_body_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_wrong_content_type_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "text/plain"))
+            .set_payload(r#"{"orders":[]}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    // ── Query-string errors (QueryConfig) ──────────────────────────────────
+    //
+    // The prices endpoint uses `web::Query<PricesQuery>` to extract URL query
+    // params like `?limit=100&include=depths`. This is completely separate from
+    // the JSON body: `JsonConfig` only applies to `web::Json<T>` (request body),
+    // while `QueryConfig` applies to `web::Query<T>` (URL query string).
+    //
+    // Without `QueryConfig`, a request like `?limit=not-a-number` would trigger
+    // actix-web's default `QueryPayloadError` handler which returns plain text.
+
+    #[actix_web::test]
+    async fn test_invalid_query_param_returns_json_error() {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            #[allow(dead_code)]
+            limit: usize,
+        }
+
+        async fn handler(_: web::Query<Params>) -> HttpResponse {
+            HttpResponse::Ok().finish()
+        }
+
+        let app = test::init_service(
+            App::new()
+                .configure(crate::api::configure_error_handlers)
+                .route("/v1/prices", web::get().to(handler)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/prices?limit=not-a-number")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_invalid_field_type_returns_json_error() {
+        let app = make_test_app!();
+        // `orders` must be an array, not a string
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"orders": "not-an-array"}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
 }

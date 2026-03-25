@@ -112,4 +112,24 @@ impl SolveError {
             SolveError::Timeout { .. } | SolveError::MarketDataStale { .. } | SolveError::QueueFull
         )
     }
+
+    /// Creates a [`SolveError::NoRouteFound`] for the given order ID.
+    pub fn no_route_found(order_id: impl Into<String>) -> Self {
+        Self::NoRouteFound { order_id: order_id.into() }
+    }
+
+    /// Creates a [`SolveError::InsufficientLiquidity`] with the required and available amounts.
+    pub fn insufficient_liquidity(required: BigUint, available: BigUint) -> Self {
+        Self::InsufficientLiquidity { required, available }
+    }
+
+    /// Creates a [`SolveError::Timeout`] with the elapsed time in milliseconds.
+    pub fn timeout(elapsed_ms: u64) -> Self {
+        Self::Timeout { elapsed_ms }
+    }
+
+    /// Creates a [`SolveError::MarketDataStale`] with the data age in milliseconds.
+    pub fn market_data_stale(age_ms: u64) -> Self {
+        Self::MarketDataStale { age_ms }
+    }
 }
