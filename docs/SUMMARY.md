@@ -12,6 +12,7 @@
 
 * [Server Configuration](guides/server-configuration.md)
 * [Swap CLI](guides/swap-cli.md)
+* [Client Fees](guides/client-fees.md)
 * [Benchmarking](guides/benchmarking.md)
 * [Custom Algorithm](guides/custom-algorithm.md)
 

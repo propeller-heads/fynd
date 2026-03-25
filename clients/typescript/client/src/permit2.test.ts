@@ -3,7 +3,7 @@ import {
   permit2SigningHash,
   encodingOptions,
   withPermit2,
-  withNoTransfer,
+  withVaultFunds,
 } from './permit2.js';
 import { FyndError } from './error.js';
 import type { Address, Hex, PermitSingle } from './types.js';
@@ -103,11 +103,11 @@ describe('withPermit2', () => {
   });
 });
 
-describe('withNoTransfer', () => {
-  it('sets transfer type to none', () => {
+describe('withVaultFunds', () => {
+  it('sets transfer type to use_vaults_funds', () => {
     const base = encodingOptions(0.01);
-    const result = withNoTransfer(base);
-    expect(result.transferType).toBe('none');
+    const result = withVaultFunds(base);
+    expect(result.transferType).toBe('use_vaults_funds');
     expect(result.slippage).toBe(0.01);
   });
 });

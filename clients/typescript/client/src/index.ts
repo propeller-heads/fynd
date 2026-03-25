@@ -2,6 +2,7 @@ export type {
   Address,
   BackendKind,
   BlockInfo,
+  ClientFeeParams,
   EncodingOptions,
   Hex,
   HealthStatus,
@@ -35,8 +36,12 @@ export {
   permit2SigningHash,
   encodingOptions,
   withPermit2,
-  withNoTransfer,
+  withVaultFunds,
 } from "./permit2.js";
+export {
+  clientFeeSigningHash,
+  withClientFee,
+} from "./client-fee.js";
 export { FyndClient } from "./client.js";
 export type {
   EthProvider,

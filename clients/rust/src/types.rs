@@ -1,5 +1,11 @@
+use alloy::{
+    primitives::{keccak256, U256},
+    sol_types::SolValue,
+};
 use bytes::Bytes;
 use num_bigint::BigUint;
+
+use crate::mapping::biguint_to_u256;
 
 // ============================================================================
 // ENCODING TYPES
@@ -13,8 +19,8 @@ pub enum UserTransferType {
     TransferFrom,
     /// Use Permit2 single-token authorization. Requires [`EncodingOptions::with_permit2`].
     TransferFromPermit2,
-    /// Funds are already present in the Tycho Router; no token transfer performed.
-    None,
+    /// Use funds from the Tycho Router vault (no token transfer performed).
+    UseVaultsFunds,
 }
 
 /// Per-token details for a Permit2 single-token authorization.
@@ -97,6 +103,84 @@ impl PermitSingle {
     }
 }
 
+/// Client fee configuration for the Tycho Router.
+///
+/// When attached to [`EncodingOptions`] via [`EncodingOptions::with_client_fee`], the router
+/// charges a client fee on the swap output. The `signature` must be an EIP-712 signature by the
+/// `receiver` over the `ClientFee` typed data — compute the hash with
+/// [`ClientFeeParams::eip712_signing_hash`].
+#[derive(Debug, Clone)]
+pub struct ClientFeeParams {
+    pub(crate) bps: u16,
+    pub(crate) receiver: Bytes,
+    pub(crate) max_contribution: BigUint,
+    pub(crate) deadline: u64,
+    pub(crate) signature: Option<Bytes>,
+}
+
+impl ClientFeeParams {
+    /// Create client fee params.
+    ///
+    /// `signature` must be a 65-byte EIP-712 signature by `receiver`.
+    pub fn new(bps: u16, receiver: Bytes, max_contribution: BigUint, deadline: u64) -> Self {
+        Self { bps, receiver, max_contribution, deadline, signature: None }
+    }
+
+    /// Set the EIP-712 signature.
+    pub fn with_signature(mut self, signature: Bytes) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    /// Compute the EIP-712 signing hash for the client fee params.
+    ///
+    /// Pass the returned hash to the fee receiver's signer, then supply the
+    /// 65-byte result as `signature` when constructing [`ClientFeeParams`].
+    ///
+    /// `router_address` is the 20-byte address of the TychoRouter contract.
+    pub fn eip712_signing_hash(
+        &self,
+        chain_id: u64,
+        router_address: &Bytes,
+    ) -> Result<[u8; 32], crate::error::FyndError> {
+        let router_addr = p2_bytes_to_address(router_address, "router_address")?;
+        let fee_receiver = p2_bytes_to_address(&self.receiver, "receiver")?;
+        let max_contrib = biguint_to_u256(&self.max_contribution);
+        let dl = U256::from(self.deadline);
+
+        let type_hash = keccak256(
+            b"ClientFee(uint16 clientFeeBps,address clientFeeReceiver,\
+uint256 maxClientContribution,uint256 deadline)",
+        );
+
+        let domain_type_hash = keccak256(
+            b"EIP712Domain(string name,string version,\
+uint256 chainId,address verifyingContract)",
+        );
+        let domain_separator = keccak256(
+            (
+                domain_type_hash,
+                keccak256(b"TychoRouter"),
+                keccak256(b"1"),
+                U256::from(chain_id),
+                router_addr,
+            )
+                .abi_encode(),
+        );
+
+        let struct_hash = keccak256(
+            (type_hash, U256::from(self.bps), fee_receiver, max_contrib, dl).abi_encode(),
+        );
+
+        let mut data = [0u8; 66];
+        data[0] = 0x19;
+        data[1] = 0x01;
+        data[2..34].copy_from_slice(domain_separator.as_ref());
+        data[34..66].copy_from_slice(struct_hash.as_ref());
+        Ok(keccak256(data).0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers for eip712_signing_hash
 // ---------------------------------------------------------------------------
@@ -171,7 +255,8 @@ pub struct EncodingOptions {
     pub(crate) slippage: f64,
     pub(crate) transfer_type: UserTransferType,
     pub(crate) permit: Option<PermitSingle>,
-    pub(crate) permit2_signature: Option<bytes::Bytes>,
+    pub(crate) permit2_signature: Option<Bytes>,
+    pub(crate) client_fee_params: Option<ClientFeeParams>,
 }
 
 impl EncodingOptions {
@@ -185,6 +270,7 @@ impl EncodingOptions {
             transfer_type: UserTransferType::TransferFrom,
             permit: None,
             permit2_signature: None,
+            client_fee_params: None,
         }
     }
 
@@ -213,9 +299,15 @@ impl EncodingOptions {
         Ok(self)
     }
 
-    /// Use funds already present in the Tycho Router (no token transfer performed).
-    pub fn with_no_transfer(mut self) -> Self {
-        self.transfer_type = UserTransferType::None;
+    /// Use funds from the Tycho Router vault (no token transfer performed).
+    pub fn with_vault_funds(mut self) -> Self {
+        self.transfer_type = UserTransferType::UseVaultsFunds;
+        self
+    }
+
+    /// Attach client fee configuration with a pre-signed EIP-712 signature.
+    pub fn with_client_fee(mut self, params: ClientFeeParams) -> Self {
+        self.client_fee_params = Some(params);
         self
     }
 }
@@ -883,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn encoding_options_with_no_transfer_sets_variant() {
-        let opts = EncodingOptions::new(0.005).with_no_transfer();
-        assert_eq!(opts.transfer_type, UserTransferType::None);
+    fn encoding_options_with_vault_funds_sets_variant() {
+        let opts = EncodingOptions::new(0.005).with_vault_funds();
+        assert_eq!(opts.transfer_type, UserTransferType::UseVaultsFunds);
         assert!(opts.permit.is_none());
         assert!(opts.permit2_signature.is_none());
     }
@@ -978,6 +1070,114 @@ mod tests {
         let permit2_addr = Bytes::copy_from_slice(&[0xcc; 20]);
         assert!(matches!(
             permit.eip712_signing_hash(1, &permit2_addr),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // ClientFeeParams Tests
+    // -------------------------------------------------------------------------
+
+    fn sample_fee_receiver() -> Bytes {
+        Bytes::copy_from_slice(&[0x44; 20])
+    }
+
+    fn sample_router_address() -> Bytes {
+        Bytes::copy_from_slice(&[0x33; 20])
+    }
+
+    fn sample_fee_params(bps: u16, receiver: Bytes) -> ClientFeeParams {
+        ClientFeeParams::new(bps, receiver, BigUint::ZERO, 1_893_456_000)
+    }
+
+    #[test]
+    fn client_fee_with_client_fee_sets_fields() {
+        let fee = ClientFeeParams::new(
+            100,
+            sample_fee_receiver(),
+            BigUint::from(500_000u64),
+            1_893_456_000,
+        );
+        let opts = EncodingOptions::new(0.01).with_client_fee(fee);
+        assert!(opts.client_fee_params.is_some());
+        let stored = opts.client_fee_params.as_ref().unwrap();
+        assert_eq!(stored.bps, 100);
+        assert_eq!(stored.max_contribution, BigUint::from(500_000u64));
+    }
+
+    #[test]
+    fn client_fee_signing_hash_returns_32_bytes() {
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let hash = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        assert_eq!(hash.len(), 32);
+        assert_ne!(hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_is_deterministic() {
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let h1 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h2 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_differs_by_chain_id() {
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let h1 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h137 = fee
+            .eip712_signing_hash(137, &sample_router_address())
+            .unwrap();
+        assert_ne!(h1, h137);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_differs_by_bps() {
+        let h100 = sample_fee_params(100, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h200 = sample_fee_params(200, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        assert_ne!(h100, h200);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_differs_by_receiver() {
+        let other_receiver = Bytes::copy_from_slice(&[0x55; 20]);
+        let h1 = sample_fee_params(100, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h2 = sample_fee_params(100, other_receiver)
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_rejects_bad_receiver_address() {
+        let bad_addr = Bytes::copy_from_slice(&[0x44; 4]);
+        let fee = sample_fee_params(100, bad_addr);
+        assert!(matches!(
+            fee.eip712_signing_hash(1, &sample_router_address()),
+            Err(crate::error::FyndError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn client_fee_signing_hash_rejects_bad_router_address() {
+        let bad_addr = Bytes::copy_from_slice(&[0x33; 4]);
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        assert!(matches!(
+            fee.eip712_signing_hash(1, &bad_addr),
             Err(crate::error::FyndError::Protocol(_))
         ));
     }

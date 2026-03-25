@@ -197,7 +197,10 @@ Pluggable interface for route-finding algorithms:
 * Stateless: receives graph as parameter
 * Declares derived data requirements (fresh vs stale)
 
-**Built-in:** `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
+**Built-in algorithms:**
+
+* `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
+* `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
 
 ***
 
@@ -205,7 +208,7 @@ Pluggable interface for route-finding algorithms:
 
 **Crate:** `fynd-core` **Location:** `fynd-core/src/encoding/`
 
-Encodes solved routes into on-chain transactions. When `EncodingOptions` are provided, delegates to `TychoEncoder` to produce ABI-encoded calldata for the appropriate router function (`singleSwap`, `sequentialSwap`, or their Permit2 variants).
+Encodes solved routes into on-chain transactions. When `EncodingOptions` are provided, delegates to `TychoEncoder` to produce ABI-encoded calldata for the appropriate router function (`singleSwap`, `sequentialSwap`, `splitSwap`, and their Permit2/Vault variants). Supports optional `ClientFeeParams` for client fee configuration.
 
 ***
 
@@ -266,7 +269,7 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 
 **Crate:** `fynd-rpc` **Location:** `fynd-rpc/src/builder.rs`
 
-`FyndRPCBuilder` assembles the entire system: creates feed, worker pools, computation manager, worker pool router, and HTTP server. `Fynd` runs the system and handles graceful shutdown.
+`FyndRPCBuilder` assembles the entire system: creates feed, worker pools, computation manager, worker pool router, and HTTP server. `FyndRPC` runs the system and handles graceful shutdown.
 
 ***
 

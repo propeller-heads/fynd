@@ -20,6 +20,7 @@ clients/typescript/
       mapping.ts              # Maps between API schema types and public types
       signing.ts              # EIP-712 signing utilities
       permit2.ts              # Permit2 helpers
+      client-fee.ts           # Client fee helpers
       error.ts                # Error types
       viem.ts                 # Viem integration utilities
       index.ts                # Public API re-exports

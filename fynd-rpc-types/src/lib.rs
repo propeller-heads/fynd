@@ -132,8 +132,75 @@ pub enum UserTransferType {
     /// Use standard ERC-20 approval and `transferFrom`. Default.
     #[default]
     TransferFrom,
-    /// Use funds already present in the Tycho Router (no transfer performed).
-    None,
+    /// Use funds from the Tycho Router vault (no transfer performed).
+    UseVaultsFunds,
+}
+
+/// Client fee configuration for the Tycho Router.
+///
+/// When provided, the router charges a client fee on the swap output. The `signature`
+/// must be an EIP-712 signature by the `receiver` over the `ClientFee` typed data.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ClientFeeParams {
+    /// Fee in basis points (0–10,000). 100 = 1%.
+    #[cfg_attr(feature = "openapi", schema(example = 100))]
+    bps: u16,
+    /// Address that receives the fee (also the required EIP-712 signer).
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = String, example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
+    )]
+    receiver: Bytes,
+    /// Maximum subsidy from the client's vault balance.
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "0"))]
+    max_contribution: BigUint,
+    /// Unix timestamp after which the signature is invalid.
+    #[cfg_attr(feature = "openapi", schema(example = 1893456000))]
+    deadline: u64,
+    /// 65-byte EIP-712 ECDSA signature by `receiver` (hex-encoded).
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "0xabcd..."))]
+    signature: Bytes,
+}
+
+impl ClientFeeParams {
+    /// Create new client fee params.
+    pub fn new(
+        bps: u16,
+        receiver: Bytes,
+        max_contribution: BigUint,
+        deadline: u64,
+        signature: Bytes,
+    ) -> Self {
+        Self { bps, receiver, max_contribution, deadline, signature }
+    }
+
+    /// Fee in basis points.
+    pub fn bps(&self) -> u16 {
+        self.bps
+    }
+
+    /// Address that receives the fee.
+    pub fn receiver(&self) -> &Bytes {
+        &self.receiver
+    }
+
+    /// Maximum subsidy from client vault.
+    pub fn max_contribution(&self) -> &BigUint {
+        &self.max_contribution
+    }
+
+    /// Signature deadline timestamp.
+    pub fn deadline(&self) -> u64 {
+        self.deadline
+    }
+
+    /// EIP-712 signature by the receiver.
+    pub fn signature(&self) -> &Bytes {
+        &self.signature
+    }
 }
 
 /// Options to customize the encoding behavior.
@@ -154,6 +221,9 @@ pub struct EncodingOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, example = "0xabcd..."))]
     permit2_signature: Option<Bytes>,
+    /// Client fee configuration. When absent, no fee is charged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_fee_params: Option<ClientFeeParams>,
 }
 
 impl EncodingOptions {
@@ -164,6 +234,7 @@ impl EncodingOptions {
             transfer_type: UserTransferType::default(),
             permit: None,
             permit2_signature: None,
+            client_fee_params: None,
         }
     }
 
@@ -198,6 +269,17 @@ impl EncodingOptions {
     /// Permit2 signature, if set.
     pub fn permit2_signature(&self) -> Option<&Bytes> {
         self.permit2_signature.as_ref()
+    }
+
+    /// Set the client fee params.
+    pub fn with_client_fee_params(mut self, params: ClientFeeParams) -> Self {
+        self.client_fee_params = Some(params);
+        self
+    }
+
+    /// Client fee params, if set.
+    pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
+        self.client_fee_params.as_ref()
     }
 }
 
@@ -1019,7 +1101,22 @@ mod conversions {
                     .with_permit(permit.into())
                     .with_signature(sig);
             }
+            if let Some(fee) = self.client_fee_params {
+                opts = opts.with_client_fee_params(fee.into());
+            }
             opts
+        }
+    }
+
+    impl Into<fynd_core::ClientFeeParams> for ClientFeeParams {
+        fn into(self) -> fynd_core::ClientFeeParams {
+            fynd_core::ClientFeeParams::new(
+                self.bps,
+                self.receiver,
+                self.max_contribution,
+                self.deadline,
+                self.signature,
+            )
         }
     }
 
@@ -1030,7 +1127,7 @@ mod conversions {
                     fynd_core::UserTransferType::TransferFromPermit2
                 }
                 UserTransferType::TransferFrom => fynd_core::UserTransferType::TransferFrom,
-                UserTransferType::None => fynd_core::UserTransferType::None,
+                UserTransferType::UseVaultsFunds => fynd_core::UserTransferType::UseVaultsFunds,
             }
         }
     }
@@ -1234,6 +1331,64 @@ mod conversions {
         fn test_order_side_into_core() {
             let core: fynd_core::OrderSide = OrderSide::Sell.into();
             assert_eq!(core, fynd_core::OrderSide::Sell);
+        }
+
+        #[test]
+        fn test_client_fee_params_into_core() {
+            use tycho_simulation::tycho_core::Bytes as TychoBytes;
+
+            let dto = ClientFeeParams::new(
+                200,
+                TychoBytes::from(make_address(0xBB).as_ref()),
+                BigUint::from(1_000_000u64),
+                1_893_456_000u64,
+                TychoBytes::from(vec![0xAB; 65]),
+            );
+            let core: fynd_core::ClientFeeParams = dto.into();
+            assert_eq!(core.bps(), 200);
+            assert_eq!(*core.max_contribution(), BigUint::from(1_000_000u64));
+            assert_eq!(core.deadline(), 1_893_456_000u64);
+            assert_eq!(core.signature().len(), 65);
+        }
+
+        #[test]
+        fn test_encoding_options_with_client_fee_into_core() {
+            use tycho_simulation::tycho_core::Bytes as TychoBytes;
+
+            let fee = ClientFeeParams::new(
+                100,
+                TychoBytes::from(make_address(0xCC).as_ref()),
+                BigUint::from(500u64),
+                9_999u64,
+                TychoBytes::from(vec![0xDE; 65]),
+            );
+            let dto = EncodingOptions::new(0.005).with_client_fee_params(fee);
+            let core: fynd_core::EncodingOptions = dto.into();
+
+            assert!(core.client_fee_params().is_some());
+            let core_fee = core.client_fee_params().unwrap();
+            assert_eq!(core_fee.bps(), 100);
+            assert_eq!(*core_fee.max_contribution(), BigUint::from(500u64));
+        }
+
+        #[test]
+        fn test_client_fee_params_serde_roundtrip() {
+            use tycho_simulation::tycho_core::Bytes as TychoBytes;
+
+            let fee = ClientFeeParams::new(
+                150,
+                TychoBytes::from(make_address(0xDD).as_ref()),
+                BigUint::from(999_999u64),
+                1_700_000_000u64,
+                TychoBytes::from(vec![0xFF; 65]),
+            );
+            let json = serde_json::to_string(&fee).unwrap();
+            assert!(json.contains(r#""max_contribution":"999999""#));
+            assert!(json.contains(r#""deadline":1700000000"#));
+
+            let deserialized: ClientFeeParams = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.bps(), 150);
+            assert_eq!(*deserialized.max_contribution(), BigUint::from(999_999u64));
         }
 
         #[test]

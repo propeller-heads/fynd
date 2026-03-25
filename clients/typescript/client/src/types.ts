@@ -33,7 +33,7 @@ export interface Order {
 }
 
 /** How the router pulls input tokens from the sender. */
-export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'none';
+export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds';
 
 /** Uniswap Permit2 allowance details for a single token. */
 export interface PermitDetails {
@@ -55,6 +55,25 @@ export interface PermitSingle {
   sigDeadline: bigint;
 }
 
+/** Client fee configuration for the Tycho Router.
+ *
+ * When provided, the router charges a fee in basis points on the swap output.
+ * The `signature` must be an EIP-712 signature by the `receiver` over the
+ * `ClientFee` typed data — compute the hash with `clientFeeSigningHash`.
+ */
+export interface ClientFeeParams {
+  /** Fee in basis points (0–10,000). 100 = 1%. */
+  bps: number;
+  /** Address that receives the fee (also the required EIP-712 signer). */
+  receiver: Address;
+  /** Maximum subsidy from the client's vault balance. */
+  maxContribution: bigint;
+  /** Unix timestamp after which the signature is invalid. */
+  deadline: number;
+  /** 65-byte EIP-712 ECDSA signature by `receiver`. Set after signing. */
+  signature?: Hex;
+}
+
 /** Controls how the solver encodes the settlement transaction. */
 export interface EncodingOptions {
   /** Maximum acceptable slippage as a fraction (e.g. 0.01 for 1%). */
@@ -65,6 +84,8 @@ export interface EncodingOptions {
   permit?: PermitSingle;
   /** 65-byte Permit2 signature over the permit; required with `permit`. */
   permit2Signature?: Hex;
+  /** Client fee configuration. When absent, no fee is charged. */
+  clientFeeParams?: ClientFeeParams;
 }
 
 /** An encoded on-chain transaction returned by the solver. */
