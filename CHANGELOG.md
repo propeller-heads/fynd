@@ -1,3 +1,15 @@
+## [0.28.0](https://github.com/propeller-heads/fynd/compare/0.27.0...0.28.0) (2026-03-25)
+
+
+### Features
+
+* **rpc:** add GET /v1/info endpoint ([a502dfd](https://github.com/propeller-heads/fynd/commit/a502dfdc65a3c19171a314f4eeee1855addb9cb5))
+
+
+### Bug Fixes
+
+* **rpc:** remove dead into_components_with_info, add missing tests ([fda01c0](https://github.com/propeller-heads/fynd/commit/fda01c0fba1a0c0f07d7d691e3156ee249bd6421))
+
 ## [0.27.0](https://github.com/propeller-heads/fynd/compare/0.26.1...0.27.0) (2026-03-25)
 
 
