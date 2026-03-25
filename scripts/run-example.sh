@@ -31,7 +31,7 @@ if [[ -z "$EXAMPLE" ]]; then
     exit 1
 fi
 
-# shellcheck source=scripts/_env-setup.sh
+# shellcheck source=scripts/_env-setup.sh disable=SC1091
 source "$(dirname "$0")/_env-setup.sh"
 
 check_deps

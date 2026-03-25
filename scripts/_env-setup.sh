@@ -72,9 +72,11 @@ wrap_weth() {
 }
 
 start_fynd() {
-    echo "==> Building and starting fynd serve (RPC: $ANVIL_RPC_URL, TYCHO_URL: $TYCHO_URL)..."
+    local tycho_args=()
+    [[ -n "${TYCHO_URL:-}" ]] && tycho_args+=(--tycho-url "$TYCHO_URL")
+    echo "==> Building and starting fynd serve (RPC: $ANVIL_RPC_URL${TYCHO_URL:+, TYCHO_URL: $TYCHO_URL})..."
     cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --release --quiet -- \
-        serve --rpc-url "$ANVIL_RPC_URL" --tycho-url "$TYCHO_URL" &
+        serve --rpc-url "$ANVIL_RPC_URL" "${tycho_args[@]}" &
     _FYND_PID=$!
 
     echo "    Waiting for fynd to be healthy (this may take a minute on first run)..."

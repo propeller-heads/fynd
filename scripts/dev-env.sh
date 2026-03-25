@@ -23,7 +23,7 @@
 #   ./scripts/run-example.sh swap_erc20
 set -euo pipefail
 
-# shellcheck source=scripts/_env-setup.sh
+# shellcheck source=scripts/_env-setup.sh disable=SC1091
 source "$(dirname "$0")/_env-setup.sh"
 
 check_deps
