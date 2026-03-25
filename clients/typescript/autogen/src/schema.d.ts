@@ -81,8 +81,43 @@ export interface components {
              */
             timestamp: number;
         };
+        /**
+         * @description Client fee configuration for the Tycho Router.
+         *
+         *     When provided, the router charges a client fee on the swap output. The `signature`
+         *     must be an EIP-712 signature by the `receiver` over the `ClientFee` typed data.
+         */
+        ClientFeeParams: {
+            /**
+             * Format: int32
+             * @description Fee in basis points (0–10,000). 100 = 1%.
+             * @example 100
+             */
+            bps: number;
+            /**
+             * @description Unix timestamp after which the signature is invalid.
+             * @example 1893456000
+             */
+            deadline: string;
+            /**
+             * @description Maximum subsidy from the client's vault balance.
+             * @example 0
+             */
+            max_contribution: string;
+            /**
+             * @description Address that receives the fee (also the required EIP-712 signer).
+             * @example 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+             */
+            receiver: string;
+            /**
+             * @description 65-byte EIP-712 ECDSA signature by `receiver` (hex-encoded).
+             * @example 0xabcd...
+             */
+            signature: string;
+        };
         /** @description Options to customize the encoding behavior. */
         EncodingOptions: {
+            client_fee_params?: null | components["schemas"]["ClientFeeParams"];
             permit?: null | components["schemas"]["PermitSingle"];
             /**
              * @description Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
@@ -406,7 +441,7 @@ export interface components {
          * @description Token transfer method for moving funds into Tycho execution.
          * @enum {string}
          */
-        UserTransferType: "transfer_from_permit2" | "transfer_from" | "none";
+        UserTransferType: "transfer_from_permit2" | "transfer_from" | "use_vaults_funds";
     };
     responses: never;
     parameters: never;

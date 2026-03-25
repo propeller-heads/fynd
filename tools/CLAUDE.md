@@ -4,7 +4,7 @@ Developer and operational tooling for the Fynd solver.
 
 | Tool | Crate | Description |
 |---|---|---|
-| [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, scaling analysis |
+| [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | [fynd-swap-cli](#fynd-swap-cli) | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
 
 ---
@@ -17,7 +17,7 @@ Three subcommands via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver (latency, throughput, histograms)
 - **`compare`** — Compare output quality between two solver instances (amount out diff in bps)
-- **`scale`** — Measure throughput scaling across different worker counts
+- **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
 
 ---
 
@@ -41,5 +41,6 @@ End-to-end CLI for quoting and executing swaps. Supports both ERC-20 approval an
   `eth_call`. No real funds or approvals needed
 - **On-chain execution** (`--execute`): Requires `PRIVATE_KEY` env var. Checks balances/approvals,
   prompts for confirmation, submits the transaction
-- **Transfer types**: `--transfer-type transfer-from` (ERC-20 approve) or
-  `--transfer-type transfer-from-permit2` (off-chain signature)
+- **Transfer types**: `--transfer-type transfer-from` (ERC-20 approve),
+  `--transfer-type transfer-from-permit2` (off-chain signature), or
+  `--transfer-type use-vaults-funds` (funds already in router vault)

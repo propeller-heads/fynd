@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 9d0e3279fbb5e482a87e1d6d51ef86ea0a155286 -->
+<!-- docs-synced-at: d16ad8b53ffde372528ec744ffb4ecf41d5170a3 -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -42,7 +42,7 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 
 | Tool | Location | Description |
 |---|---|---|
-| `fynd-benchmark` | `tools/benchmark/` | Load testing, solver comparison, scaling analysis |
+| `fynd-benchmark` | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | `fynd-swap-cli` | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
 
 ## Architecture Overview
@@ -54,7 +54,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
-4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in: `MostLiquidAlgorithm`
+4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in: `MostLiquidAlgorithm`, `BellmanFordAlgorithm`
 5. **SharedMarketData** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → SharedMarketData → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices

@@ -133,6 +133,66 @@ impl QuoteOptions {
     }
 }
 
+/// Client fee configuration for the Tycho Router.
+///
+/// When present, the router charges a client fee in basis points on the swap output.
+/// The `signature` must be an EIP-712 signature by the `receiver` over the
+/// `ClientFee` typed data (see client libraries for helper methods).
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientFeeParams {
+    /// Fee in basis points (0–10,000). 100 = 1%.
+    bps: u16,
+    /// Address that receives the fee (also the required EIP-712 signer).
+    receiver: Bytes,
+    /// Maximum subsidy from the client's vault balance (in token out denomination)
+    #[serde_as(as = "DisplayFromStr")]
+    max_contribution: BigUint,
+    /// Unix timestamp after which the signature is invalid.
+    #[serde_as(as = "DisplayFromStr")]
+    deadline: BigUint,
+    /// 65-byte EIP-712 ECDSA signature by `receiver`.
+    signature: Bytes,
+}
+
+impl ClientFeeParams {
+    /// Creates new client fee params.
+    pub fn new(
+        bps: u16,
+        receiver: Bytes,
+        max_contribution: BigUint,
+        deadline: BigUint,
+        signature: Bytes,
+    ) -> Self {
+        Self { bps, receiver, max_contribution, deadline, signature }
+    }
+
+    /// Fee in basis points.
+    pub fn bps(&self) -> u16 {
+        self.bps
+    }
+
+    /// Address that receives the fee.
+    pub fn receiver(&self) -> &Bytes {
+        &self.receiver
+    }
+
+    /// Maximum subsidy from client vault.
+    pub fn max_contribution(&self) -> &BigUint {
+        &self.max_contribution
+    }
+
+    /// Signature deadline timestamp.
+    pub fn deadline(&self) -> &BigUint {
+        &self.deadline
+    }
+
+    /// EIP-712 signature by the receiver.
+    pub fn signature(&self) -> &Bytes {
+        &self.signature
+    }
+}
+
 /// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +207,9 @@ pub struct EncodingOptions {
     /// Permit2 signature (65 bytes). Required when `permit` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permit2_signature: Option<Bytes>,
+    /// Client fee configuration. When absent, no client fee is charged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_fee_params: Option<ClientFeeParams>,
 }
 
 impl EncodingOptions {
@@ -157,6 +220,7 @@ impl EncodingOptions {
             transfer_type: default_transfer_type(),
             permit: None,
             permit2_signature: None,
+            client_fee_params: None,
         }
     }
 
@@ -196,6 +260,17 @@ impl EncodingOptions {
     /// Returns the permit2 signature, if set.
     pub fn permit2_signature(&self) -> Option<&Bytes> {
         self.permit2_signature.as_ref()
+    }
+
+    /// Sets the client fee params.
+    pub fn with_client_fee_params(mut self, params: ClientFeeParams) -> Self {
+        self.client_fee_params = Some(params);
+        self
+    }
+
+    /// Returns the client fee params, if set.
+    pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
+        self.client_fee_params.as_ref()
     }
 }
 
@@ -1479,5 +1554,66 @@ mod tests {
             .collect();
 
         assert_eq!(route.path_description(&tokens), expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // ClientFeeParams & EncodingOptions Tests
+    // -------------------------------------------------------------------------
+
+    fn make_client_fee_params() -> ClientFeeParams {
+        ClientFeeParams::new(
+            100,
+            Bytes::from(make_address(0xBB).as_ref()),
+            BigUint::from(500_000u64),
+            BigUint::from(1_893_456_000u64),
+            Bytes::from(vec![0xAB; 65]),
+        )
+    }
+
+    #[test]
+    fn test_client_fee_params_serde_roundtrip() {
+        let fee = make_client_fee_params();
+        let json = serde_json::to_string(&fee).unwrap();
+
+        assert!(json.contains(r#""max_contribution":"500000""#));
+        assert!(json.contains(r#""deadline":"1893456000""#));
+
+        let deserialized: ClientFeeParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.bps(), fee.bps());
+        assert_eq!(*deserialized.max_contribution(), *fee.max_contribution());
+        assert_eq!(*deserialized.deadline(), *fee.deadline());
+    }
+
+    #[test]
+    fn test_encoding_options_serde_with_client_fee() {
+        let fee = make_client_fee_params();
+        let opts = EncodingOptions::new(0.005).with_client_fee_params(fee);
+        let json = serde_json::to_string(&opts).unwrap();
+
+        let deserialized: EncodingOptions = serde_json::from_str(&json).unwrap();
+        assert!(deserialized
+            .client_fee_params()
+            .is_some());
+        assert_eq!(
+            deserialized
+                .client_fee_params()
+                .unwrap()
+                .bps(),
+            100
+        );
+        assert!((deserialized.slippage() - 0.005).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_encoding_options_serde_without_client_fee() {
+        let opts = EncodingOptions::new(0.01);
+        let json = serde_json::to_string(&opts).unwrap();
+
+        assert!(!json.contains("client_fee_params"));
+
+        let deserialized: EncodingOptions = serde_json::from_str(&json).unwrap();
+        assert!(deserialized
+            .client_fee_params()
+            .is_none());
     }
 }

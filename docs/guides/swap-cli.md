@@ -93,6 +93,20 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
   --execute
 ```
 
+## Swap using vault funds
+
+If tokens are already deposited in the Tycho Router vault, use `--transfer-type use-vaults-funds`. No ERC-20 approval or Permit2 signature is needed.
+
+```bash
+./target/release/fynd-swap-cli \
+  --sell-token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --buy-token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
+  --sell-amount 1000000000 \
+  --transfer-type use-vaults-funds
+```
+
+***
+
 ## Embedded server (no separate `fynd serve` needed)
 
 {% hint style="info" %}
@@ -119,7 +133,7 @@ This is convenient for a one-off swap but slow to initialize on every run (the s
 | `--sell-amount`         | —               | `1000000000`                                 | Amount to sell in raw atomic units                                            |
 | `--slippage-bps`        | —               | `50` (0.5%)                                  | Slippage tolerance in basis points                                            |
 | `--fynd-url`            | —               | `http://localhost:3000`                      | Fynd server URL (ignored when `--tycho-url` is set)                           |
-| `--transfer-type`       | —               | `transfer-from`                              | `transfer-from` or `transfer-from-permit2`                                    |
+| `--transfer-type`       | —               | `transfer-from`                              | `transfer-from`, `transfer-from-permit2`, or `use-vaults-funds`               |
 | `--execute`             | —               | false (dry-run)                              | Submit the swap on-chain. Requires `PRIVATE_KEY`.                             |
 | `--router`              | —               | —                                            | TychoRouter address. Required for `transfer-from-permit2`.                    |
 | `--permit2`             | —               | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Permit2 contract address                                                      |

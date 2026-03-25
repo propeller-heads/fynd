@@ -147,6 +147,41 @@ describe('toWireRequest', () => {
     expect(enc?.permit2_signature).toBe(`0x${'ab'.repeat(65)}`);
   });
 
+  it('serializes encodingOptions with clientFeeParams', () => {
+    const params: QuoteParams = {
+      ...baseParams,
+      options: {
+        encodingOptions: {
+          slippage: 0.01,
+          clientFeeParams: {
+            bps: 100,
+            receiver: '0x4444444444444444444444444444444444444444' as Address,
+            maxContribution: 500000n,
+            deadline: 1893456000n,
+            signature: `0x${'ab'.repeat(65)}` as Hex,
+          },
+        },
+      },
+    };
+    const wire = toWireRequest(params);
+    const fee = wire.options?.encoding_options?.client_fee_params;
+    expect(fee).toBeDefined();
+    expect(fee?.bps).toBe(100);
+    expect(fee?.receiver).toBe('0x4444444444444444444444444444444444444444');
+    expect(fee?.max_contribution).toBe('500000');
+    expect(fee?.deadline).toBe('1893456000');
+    expect(fee?.signature).toBe(`0x${'ab'.repeat(65)}`);
+  });
+
+  it('omits client_fee_params when not provided', () => {
+    const params: QuoteParams = {
+      ...baseParams,
+      options: { encodingOptions: { slippage: 0.01 } },
+    };
+    const wire = toWireRequest(params);
+    expect(wire.options?.encoding_options?.client_fee_params).toBeUndefined();
+  });
+
   it('omits encoding_options when not provided', () => {
     const wire = toWireRequest(baseParams);
     expect(wire).not.toHaveProperty('options');

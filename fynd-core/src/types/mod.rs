@@ -18,7 +18,8 @@ pub use internal::{SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
 // Re-export public quote types
 pub use quote::{
-    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails,
-    PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteResult,
-    RouteValidationError, SingleOrderQuote, Swap, Transaction, UserTransferType,
+    BlockInfo, ClientFeeParams, EncodingOptions, Order, OrderQuote, OrderSide,
+    OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, Route, RouteResult, RouteValidationError, SingleOrderQuote, Swap, Transaction,
+    UserTransferType,
 };
