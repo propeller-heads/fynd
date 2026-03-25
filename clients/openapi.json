@@ -42,6 +42,27 @@
         }
       }
     },
+    "/v1/info": {
+      "get": {
+        "tags": [
+          "solver"
+        ],
+        "summary": "GET /v1/info - Return static metadata about this Fynd instance.",
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "description": "Instance info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/quote": {
       "post": {
         "tags": [
@@ -287,6 +308,34 @@
             "description": "Number of active solver pools.",
             "example": 2,
             "minimum": 0
+          }
+        }
+      },
+      "InstanceInfo": {
+        "type": "object",
+        "description": "Static metadata about this Fynd instance, returned by `GET /v1/info`.",
+        "required": [
+          "chain_id",
+          "router_address",
+          "permit2_address"
+        ],
+        "properties": {
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EIP-155 chain ID (e.g. 1 for Ethereum mainnet).",
+            "example": 1,
+            "minimum": 0
+          },
+          "permit2_address": {
+            "type": "string",
+            "description": "Address of the canonical Permit2 contract (same on all EVM chains).",
+            "example": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+          },
+          "router_address": {
+            "type": "string",
+            "description": "Address of the Tycho Router contract on this chain.",
+            "example": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
           }
         }
       },

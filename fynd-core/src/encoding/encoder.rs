@@ -8,6 +8,7 @@ use tycho_execution::encoding::{
     evm::{
         approvals::permit2::{PermitDetails as SolPermitDetails, PermitSingle},
         encoder_builders::TychoRouterEncoderBuilder,
+        get_router_address,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{biguint_to_u256, bytes_to_address},
     },
@@ -18,15 +19,20 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{EncodingOptions, OrderQuote, QuoteStatus, SolveError, Transaction};
 
+/// Canonical Permit2 contract address — identical on all EVM chains.
+pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
 /// Encodes solution into tycho compatible transactions.
 ///
 /// # Fields
 /// * `tycho_encoder` - Encoder created using the configured chain for encoding solutions into tycho
 ///   compatible transactions
 /// * `chain` - Chain to be used.
+/// * `router_address` - Address of the Tycho Router contract on this chain.
 pub struct Encoder {
     tycho_encoder: Box<dyn TychoEncoder>,
     chain: Chain,
+    router_address: Bytes,
 }
 
 impl TryFrom<&OrderQuote> for Solution {
@@ -89,13 +95,22 @@ impl Encoder {
         chain: Chain,
         swap_encoder_registry: SwapEncoderRegistry,
     ) -> Result<Self, SolveError> {
+        let router_address = get_router_address(&chain)
+            .map_err(|e| SolveError::FailedEncoding(e.to_string()))?
+            .clone();
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
                 .chain(chain)
                 .swap_encoder_registry(swap_encoder_registry)
                 .build()?,
             chain,
+            router_address,
         })
+    }
+
+    /// Returns the Tycho Router contract address for this chain.
+    pub fn router_address(&self) -> &Bytes {
+        &self.router_address
     }
 
     /// Encodes order solutions for execution.
@@ -391,7 +406,24 @@ mod tests {
     }
 
     fn mock_encoder(chain: Chain) -> Encoder {
-        Encoder { tycho_encoder: Box::new(MockTychoEncoder), chain }
+        Encoder {
+            tycho_encoder: Box::new(MockTychoEncoder),
+            chain,
+            router_address: Bytes::from([0u8; 20].as_ref()),
+        }
+    }
+
+    #[test]
+    fn test_encoder_new_fails_on_unsupported_chain() {
+        // Arbitrum has no entry in ROUTER_ADDRESSES_JSON.
+        // Build a registry for Ethereum (which is valid) but pass Arbitrum to Encoder::new —
+        // the router address lookup must fail before the encoder builder is invoked.
+        let registry =
+            tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry::new(Chain::Ethereum)
+                .add_default_encoders(None)
+                .expect("registry should build for Ethereum");
+        let result = Encoder::new(Chain::Arbitrum, registry);
+        assert!(result.is_err(), "expected Err for chain without router address, got Ok");
     }
 
     #[test]

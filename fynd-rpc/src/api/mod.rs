@@ -25,6 +25,7 @@ use fynd_core::{
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::tycho_common::Bytes;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -32,7 +33,7 @@ use crate::api::error::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::quote, handlers::health,),
+    paths(handlers::quote, handlers::health, handlers::info),
     components(schemas(
         dto::QuoteRequest,
         dto::Order,
@@ -44,6 +45,7 @@ use crate::api::error::ErrorResponse;
         dto::Route,
         dto::Swap,
         dto::BlockInfo,
+        dto::InstanceInfo,
         HealthStatus,
         ErrorResponse,
     ))
@@ -157,6 +159,9 @@ impl HealthTracker {
 pub struct AppState {
     worker_router: Arc<WorkerPoolRouter>,
     health_tracker: HealthTracker,
+    chain_id: u64,
+    router_address: Bytes,
+    permit2_address: Bytes,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
@@ -168,12 +173,18 @@ impl AppState {
     pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
+        chain_id: u64,
+        router_address: Bytes,
+        permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
             health_tracker,
+            chain_id,
+            router_address,
+            permit2_address,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
@@ -187,6 +198,18 @@ impl AppState {
 
     pub(crate) fn health_tracker(&self) -> &HealthTracker {
         &self.health_tracker
+    }
+
+    pub(crate) fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    pub(crate) fn router_address(&self) -> &Bytes {
+        &self.router_address
+    }
+
+    pub(crate) fn permit2_address(&self) -> &Bytes {
+        &self.permit2_address
     }
 }
 

@@ -928,6 +928,49 @@ impl HealthStatus {
     }
 }
 
+/// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct InstanceInfo {
+    /// EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
+    #[cfg_attr(feature = "openapi", schema(example = 1))]
+    chain_id: u64,
+    /// Address of the Tycho Router contract on this chain.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = String, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
+    )]
+    router_address: Bytes,
+    /// Address of the canonical Permit2 contract (same on all EVM chains).
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = String, example = "0x000000000022D473030F116dDEE9F6B43aC78BA3")
+    )]
+    permit2_address: Bytes,
+}
+
+impl InstanceInfo {
+    /// Creates a new instance info.
+    pub fn new(chain_id: u64, router_address: Bytes, permit2_address: Bytes) -> Self {
+        Self { chain_id, router_address, permit2_address }
+    }
+
+    /// EIP-155 chain ID.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Address of the Tycho Router contract.
+    pub fn router_address(&self) -> &Bytes {
+        &self.router_address
+    }
+
+    /// Address of the canonical Permit2 contract.
+    pub fn permit2_address(&self) -> &Bytes {
+        &self.permit2_address
+    }
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

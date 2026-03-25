@@ -5,7 +5,7 @@
 //! `fynd-rpc-types` via `From`/`Into` (enabled by the `core` feature).
 
 pub use fynd_rpc_types::{
-    BlockInfo, EncodingOptions, ErrorResponse, HealthStatus, Order, OrderQuote, OrderSide,
-    PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, Swap,
-    Transaction, UserTransferType,
+    BlockInfo, EncodingOptions, ErrorResponse, HealthStatus, InstanceInfo, Order, OrderQuote,
+    OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
+    Swap, Transaction, UserTransferType,
 };

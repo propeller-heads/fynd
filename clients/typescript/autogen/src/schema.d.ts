@@ -24,6 +24,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /v1/info - Return static metadata about this Fynd instance. */
+        get: operations["info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/quote": {
         parameters: {
             query?: never;
@@ -174,6 +191,25 @@ export interface components {
              * @example 2
              */
             num_solver_pools: number;
+        };
+        /** @description Static metadata about this Fynd instance, returned by `GET /v1/info`. */
+        InstanceInfo: {
+            /**
+             * Format: int64
+             * @description EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * @description Address of the canonical Permit2 contract (same on all EVM chains).
+             * @example 0x000000000022D473030F116dDEE9F6B43aC78BA3
+             */
+            permit2_address: string;
+            /**
+             * @description Address of the Tycho Router contract on this chain.
+             * @example 0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35
+             */
+            router_address: string;
         };
         /**
          * @description A single swap order to be solved.
@@ -477,6 +513,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthStatus"];
+                };
+            };
+        };
+    };
+    info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance info */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstanceInfo"];
                 };
             };
         };
