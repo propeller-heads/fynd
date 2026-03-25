@@ -157,7 +157,7 @@ describe('toWireRequest', () => {
             bps: 100,
             receiver: '0x4444444444444444444444444444444444444444' as Address,
             maxContribution: 500000n,
-            deadline: 1893456000n,
+            deadline: 1893456000,
             signature: `0x${'ab'.repeat(65)}` as Hex,
           },
         },
@@ -169,7 +169,7 @@ describe('toWireRequest', () => {
     expect(fee?.bps).toBe(100);
     expect(fee?.receiver).toBe('0x4444444444444444444444444444444444444444');
     expect(fee?.max_contribution).toBe('500000');
-    expect(fee?.deadline).toBe('1893456000');
+    expect(fee?.deadline).toBe(1893456000);
     expect(fee?.signature).toBe(`0x${'ab'.repeat(65)}`);
   });
 

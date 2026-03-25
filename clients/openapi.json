@@ -156,9 +156,11 @@
             "minimum": 0
           },
           "deadline": {
-            "type": "string",
+            "type": "integer",
+            "format": "int64",
             "description": "Unix timestamp after which the signature is invalid.",
-            "example": "1893456000"
+            "example": 1893456000,
+            "minimum": 0
           },
           "max_contribution": {
             "type": "string",

@@ -201,7 +201,7 @@ impl Encoder {
                 fee.bps(),
                 bytes_to_address(fee.receiver())?,
                 biguint_to_u256(fee.max_contribution()),
-                biguint_to_u256(fee.deadline()),
+                U256::from(fee.deadline()),
                 fee.signature().to_vec(),
             )
         } else {
@@ -523,7 +523,7 @@ mod tests {
             100,
             Bytes::from(make_address(0xBB).as_ref()),
             BigUint::from(0u64),
-            BigUint::from(1_893_456_000u64),
+            1_893_456_000u64,
             Bytes::from(vec![0xAB; 65]),
         );
         let encoding_options = EncodingOptions::new(0.01).with_client_fee_params(fee);

@@ -139,7 +139,7 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
                 TychoBytes::from(fee.receiver),
                 fee.max_contribution,
                 fee.deadline,
-                TychoBytes::from(fee.signature),
+                TychoBytes::from(fee.signature.unwrap_or_default()),
             ));
         }
         Ok(dto_opts)
@@ -649,9 +649,9 @@ mod tests {
             100,
             Bytes::copy_from_slice(&[0x44; 20]),
             BigUint::from(500_000u64),
-            BigUint::from(1_893_456_000u64),
-            Bytes::copy_from_slice(&[0xAB; 65]),
-        );
+            1_893_456_000u64,
+        )
+        .with_signature(Bytes::copy_from_slice(&[0xAB; 65]));
         let opts = EncodingOptions::new(0.01).with_client_fee(fee);
 
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
@@ -659,7 +659,7 @@ mod tests {
         let dto_fee = dto_opts.client_fee_params().unwrap();
         assert_eq!(dto_fee.bps(), 100);
         assert_eq!(*dto_fee.max_contribution(), BigUint::from(500_000u64));
-        assert_eq!(*dto_fee.deadline(), BigUint::from(1_893_456_000u64));
+        assert_eq!(dto_fee.deadline(), 1_893_456_000u64);
         assert_eq!(dto_fee.signature().len(), 65);
     }
 

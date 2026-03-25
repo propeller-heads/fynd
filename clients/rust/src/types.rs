@@ -1,3 +1,7 @@
+use alloy::{
+    primitives::{keccak256, U256},
+    sol_types::SolValue,
+};
 use bytes::Bytes;
 use num_bigint::BigUint;
 
@@ -110,22 +114,22 @@ pub struct ClientFeeParams {
     pub(crate) bps: u16,
     pub(crate) receiver: Bytes,
     pub(crate) max_contribution: BigUint,
-    pub(crate) deadline: BigUint,
-    pub(crate) signature: Bytes,
+    pub(crate) deadline: u64,
+    pub(crate) signature: Option<Bytes>,
 }
 
 impl ClientFeeParams {
     /// Create client fee params.
     ///
     /// `signature` must be a 65-byte EIP-712 signature by `receiver`.
-    pub fn new(
-        bps: u16,
-        receiver: Bytes,
-        max_contribution: BigUint,
-        deadline: BigUint,
-        signature: Bytes,
-    ) -> Self {
-        Self { bps, receiver, max_contribution, deadline, signature }
+    pub fn new(bps: u16, receiver: Bytes, max_contribution: BigUint, deadline: u64) -> Self {
+        Self { bps, receiver, max_contribution, deadline, signature: None }
+    }
+
+    /// Set the EIP-712 signature.
+    pub fn with_signature(mut self, signature: Bytes) -> Self {
+        self.signature = Some(signature);
+        self
     }
 
     /// Compute the EIP-712 signing hash for the client fee params.
@@ -135,22 +139,14 @@ impl ClientFeeParams {
     ///
     /// `router_address` is the 20-byte address of the TychoRouter contract.
     pub fn eip712_signing_hash(
-        bps: u16,
-        receiver: &Bytes,
-        max_contribution: &BigUint,
-        deadline: &BigUint,
+        &self,
         chain_id: u64,
         router_address: &Bytes,
     ) -> Result<[u8; 32], crate::error::FyndError> {
-        use alloy::{
-            primitives::{keccak256, U256},
-            sol_types::SolValue,
-        };
-
         let router_addr = p2_bytes_to_address(router_address, "router_address")?;
-        let fee_receiver = p2_bytes_to_address(receiver, "receiver")?;
-        let max_contrib = biguint_to_u256(max_contribution);
-        let dl = biguint_to_u256(deadline);
+        let fee_receiver = p2_bytes_to_address(&self.receiver, "receiver")?;
+        let max_contrib = biguint_to_u256(&self.max_contribution);
+        let dl = U256::from(self.deadline);
 
         let type_hash = keccak256(
             b"ClientFee(uint16 clientFeeBps,address clientFeeReceiver,\
@@ -172,8 +168,9 @@ uint256 chainId,address verifyingContract)",
                 .abi_encode(),
         );
 
-        let struct_hash =
-            keccak256((type_hash, U256::from(bps), fee_receiver, max_contrib, dl).abi_encode());
+        let struct_hash = keccak256(
+            (type_hash, U256::from(self.bps), fee_receiver, max_contrib, dl).abi_encode(),
+        );
 
         let mut data = [0u8; 66];
         data[0] = 0x19;
@@ -1089,14 +1086,17 @@ mod tests {
         Bytes::copy_from_slice(&[0x33; 20])
     }
 
+    fn sample_fee_params(bps: u16, receiver: Bytes) -> ClientFeeParams {
+        ClientFeeParams::new(bps, receiver, BigUint::ZERO, 1_893_456_000)
+    }
+
     #[test]
     fn client_fee_with_client_fee_sets_fields() {
         let fee = ClientFeeParams::new(
             100,
             sample_fee_receiver(),
             BigUint::from(500_000u64),
-            BigUint::from(1_893_456_000u64),
-            Bytes::copy_from_slice(&[0xAB; 65]),
+            1_893_456_000,
         );
         let opts = EncodingOptions::new(0.01).with_client_fee(fee);
         assert!(opts.client_fee_params.is_some());
@@ -1107,124 +1107,67 @@ mod tests {
 
     #[test]
     fn client_fee_signing_hash_returns_32_bytes() {
-        let hash = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::from(0u64),
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let hash = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
         assert_eq!(hash.len(), 32);
         assert_ne!(hash, [0u8; 32]);
     }
 
     #[test]
     fn client_fee_signing_hash_is_deterministic() {
-        let h1 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::from(0u64),
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
-        let h2 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::from(0u64),
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let h1 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h2 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn client_fee_signing_hash_differs_by_chain_id() {
-        let h1 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
-        let h137 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            137,
-            &sample_router_address(),
-        )
-        .unwrap();
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let h1 = fee
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h137 = fee
+            .eip712_signing_hash(137, &sample_router_address())
+            .unwrap();
         assert_ne!(h1, h137);
     }
 
     #[test]
     fn client_fee_signing_hash_differs_by_bps() {
-        let h100 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
-        let h200 = ClientFeeParams::eip712_signing_hash(
-            200,
-            &sample_fee_receiver(),
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
+        let h100 = sample_fee_params(100, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h200 = sample_fee_params(200, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
         assert_ne!(h100, h200);
     }
 
     #[test]
     fn client_fee_signing_hash_differs_by_receiver() {
         let other_receiver = Bytes::copy_from_slice(&[0x55; 20]);
-        let h1 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &sample_fee_receiver(),
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
-        let h2 = ClientFeeParams::eip712_signing_hash(
-            100,
-            &other_receiver,
-            &BigUint::ZERO,
-            &BigUint::from(1_893_456_000u64),
-            1,
-            &sample_router_address(),
-        )
-        .unwrap();
+        let h1 = sample_fee_params(100, sample_fee_receiver())
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
+        let h2 = sample_fee_params(100, other_receiver)
+            .eip712_signing_hash(1, &sample_router_address())
+            .unwrap();
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn client_fee_signing_hash_rejects_bad_receiver_address() {
         let bad_addr = Bytes::copy_from_slice(&[0x44; 4]);
+        let fee = sample_fee_params(100, bad_addr);
         assert!(matches!(
-            ClientFeeParams::eip712_signing_hash(
-                100,
-                &bad_addr,
-                &BigUint::ZERO,
-                &BigUint::from(1_893_456_000u64),
-                1,
-                &sample_router_address(),
-            ),
+            fee.eip712_signing_hash(1, &sample_router_address()),
             Err(crate::error::FyndError::Protocol(_))
         ));
     }
@@ -1232,15 +1175,9 @@ mod tests {
     #[test]
     fn client_fee_signing_hash_rejects_bad_router_address() {
         let bad_addr = Bytes::copy_from_slice(&[0x33; 4]);
+        let fee = sample_fee_params(100, sample_fee_receiver());
         assert!(matches!(
-            ClientFeeParams::eip712_signing_hash(
-                100,
-                &sample_fee_receiver(),
-                &BigUint::ZERO,
-                &BigUint::from(1_893_456_000u64),
-                1,
-                &bad_addr,
-            ),
+            fee.eip712_signing_hash(1, &bad_addr),
             Err(crate::error::FyndError::Protocol(_))
         ));
     }

@@ -69,9 +69,9 @@ export interface ClientFeeParams {
   /** Maximum subsidy from the client's vault balance. */
   maxContribution: bigint;
   /** Unix timestamp after which the signature is invalid. */
-  deadline: bigint;
-  /** 65-byte EIP-712 ECDSA signature by `receiver`. */
-  signature: Hex;
+  deadline: number;
+  /** 65-byte EIP-712 ECDSA signature by `receiver`. Set after signing. */
+  signature?: Hex;
 }
 
 /** Controls how the solver encodes the settlement transaction. */

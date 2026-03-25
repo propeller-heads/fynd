@@ -158,9 +158,8 @@ pub struct ClientFeeParams {
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "0"))]
     max_contribution: BigUint,
     /// Unix timestamp after which the signature is invalid.
-    #[serde_as(as = "DisplayFromStr")]
-    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "1893456000"))]
-    deadline: BigUint,
+    #[cfg_attr(feature = "openapi", schema(example = 1893456000))]
+    deadline: u64,
     /// 65-byte EIP-712 ECDSA signature by `receiver` (hex-encoded).
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "0xabcd..."))]
     signature: Bytes,
@@ -172,7 +171,7 @@ impl ClientFeeParams {
         bps: u16,
         receiver: Bytes,
         max_contribution: BigUint,
-        deadline: BigUint,
+        deadline: u64,
         signature: Bytes,
     ) -> Self {
         Self { bps, receiver, max_contribution, deadline, signature }
@@ -194,8 +193,8 @@ impl ClientFeeParams {
     }
 
     /// Signature deadline timestamp.
-    pub fn deadline(&self) -> &BigUint {
-        &self.deadline
+    pub fn deadline(&self) -> u64 {
+        self.deadline
     }
 
     /// EIP-712 signature by the receiver.
@@ -1342,13 +1341,13 @@ mod conversions {
                 200,
                 TychoBytes::from(make_address(0xBB).as_ref()),
                 BigUint::from(1_000_000u64),
-                BigUint::from(1_893_456_000u64),
+                1_893_456_000u64,
                 TychoBytes::from(vec![0xAB; 65]),
             );
             let core: fynd_core::ClientFeeParams = dto.into();
             assert_eq!(core.bps(), 200);
             assert_eq!(*core.max_contribution(), BigUint::from(1_000_000u64));
-            assert_eq!(*core.deadline(), BigUint::from(1_893_456_000u64));
+            assert_eq!(core.deadline(), 1_893_456_000u64);
             assert_eq!(core.signature().len(), 65);
         }
 
@@ -1360,7 +1359,7 @@ mod conversions {
                 100,
                 TychoBytes::from(make_address(0xCC).as_ref()),
                 BigUint::from(500u64),
-                BigUint::from(9_999u64),
+                9_999u64,
                 TychoBytes::from(vec![0xDE; 65]),
             );
             let dto = EncodingOptions::new(0.005).with_client_fee_params(fee);
@@ -1380,12 +1379,12 @@ mod conversions {
                 150,
                 TychoBytes::from(make_address(0xDD).as_ref()),
                 BigUint::from(999_999u64),
-                BigUint::from(1_700_000_000u64),
+                1_700_000_000u64,
                 TychoBytes::from(vec![0xFF; 65]),
             );
             let json = serde_json::to_string(&fee).unwrap();
             assert!(json.contains(r#""max_contribution":"999999""#));
-            assert!(json.contains(r#""deadline":"1700000000""#));
+            assert!(json.contains(r#""deadline":1700000000"#));
 
             let deserialized: ClientFeeParams = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized.bps(), 150);

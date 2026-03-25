@@ -14,16 +14,13 @@ const CLIENT_FEE_TYPE = {
 /**
  * Computes the EIP-712 signing hash for client fee params.
  *
- * Pass the returned hash to the fee receiver's signer, then supply the
- * 65-byte signature when constructing `ClientFeeParams`.
+ * Pass the returned hash to the fee receiver's signer, then set the
+ * 65-byte signature on the `ClientFeeParams` before passing to `withClientFee`.
  *
  * `routerAddress` is the TychoRouter contract address.
  */
 export function clientFeeSigningHash(
-  bps: number,
-  receiver: Address,
-  maxContribution: bigint,
-  deadline: bigint,
+  params: ClientFeeParams,
   chainId: number,
   routerAddress: Address,
 ): Hex {
@@ -37,22 +34,25 @@ export function clientFeeSigningHash(
     types: CLIENT_FEE_TYPE,
     primaryType: 'ClientFee',
     message: {
-      clientFeeBps: bps,
-      clientFeeReceiver: receiver,
-      maxClientContribution: maxContribution,
-      deadline,
+      clientFeeBps: params.bps,
+      clientFeeReceiver: params.receiver,
+      maxClientContribution: params.maxContribution,
+      deadline: BigInt(params.deadline),
     },
   });
 }
 
 /**
  * Attach client fee configuration to encoding options.
- * Validates that signature is exactly 65 bytes (130 hex chars + '0x' prefix).
+ * Validates that signature is present and exactly 65 bytes (130 hex chars + '0x' prefix).
  */
 export function withClientFee(
   opts: EncodingOptions,
   params: ClientFeeParams,
 ): EncodingOptions {
+  if (params.signature === undefined) {
+    throw FyndError.config('Client fee signature is required');
+  }
   if (params.signature.length !== 132) {
     throw FyndError.config(
       `Client fee signature must be exactly 65 bytes (132 hex chars), got ${String(params.signature.length)} chars`

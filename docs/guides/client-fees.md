@@ -4,17 +4,30 @@ icon: coins
 
 # Client Fees
 
-The Tycho Router supports optional client fees — a percentage of the swap output charged on behalf of an integrator.
+Fynd supports optional client fees — a percentage of the swap output charged on behalf of an integrator.
 Fees are configured per-request via `ClientFeeParams` in the encoding options.
 
 ## How it works
 
-1. The integrator chooses a fee in basis points (e.g. `50` = 0.5%) and a receiver address.
+1. The integrator chooses a fee in basis points (e.g. `50` = 0.5%), a receiver address, and a `maxClientContribution`.
 2. The fee receiver signs an EIP-712 `ClientFee` message authorizing the fee parameters.
 3. The signed params are attached to the quote request via `EncodingOptions.clientFeeParams`.
-4. The router verifies the signature on-chain and deducts the fee from the swap output.
+4. The router contract verifies the signature on-chain and deducts the fee from the swap output. Fees are credited to
+   the receiver's vault balance (not transferred directly).
 
 When no `ClientFeeParams` are provided, no client fee is charged.
+
+### maxClientContribution
+
+`maxClientContribution` is the maximum amount (in output token units) the client is willing to subsidize from their
+vault balance if slippage causes the swap output to fall below `minAmountOut`. If the shortfall exceeds this limit, the
+transaction reverts.
+
+Set to `0` if you don't want to subsidize slippage. This is the common case — the client collects fees but doesn't cover
+losses.
+
+See [Tycho encoding docs](https://docs.propellerheads.xyz/tycho/for-solvers/execution/encoding#encode) for more details
+on the vault mechanism.
 
 ## EIP-712 signing
 
@@ -42,55 +55,49 @@ Both the Rust and TypeScript clients provide helper functions to compute the sig
 
 {% tabs %}
 {% tab title="Rust" %}
+
 ```rust
-    // Compute the EIP-712 signing hash for the client fee.
-    let hash = ClientFeeParams::eip712_signing_hash(
+    // Build the fee params (without signature).
+    let fee = ClientFeeParams::new(
         FEE_BPS,
-        &fee_receiver_bytes,
-        &max_contribution,
-        &deadline,
-        1, // chainId = Ethereum mainnet
-        &router_address,
-    )?;
+        Bytes::copy_from_slice(fee_receiver.as_slice()),
+        BigUint::ZERO,
+        u64::MAX,
+    );
 
-    // Sign the hash with the fee receiver's key.
-    let sig = signer
-        .sign_hash(&alloy::primitives::B256::from(hash))
+    // Compute the EIP-712 signing hash and sign it with the fee receiver's key.
+    let hash = fee.eip712_signing_hash(1, &router_address)?; // chainId = Ethereum mainnet
+    let sig = fee_signer
+        .sign_hash(&B256::from(hash))
         .await?;
-    let signature = Bytes::copy_from_slice(&sig.as_bytes()[..]);
 
-    // Build encoding options with the client fee attached.
-    let fee =
-        ClientFeeParams::new(FEE_BPS, fee_receiver_bytes, max_contribution, deadline, signature);
+    // Attach the signature and wire it into encoding options.
+    let fee = fee.with_signature(Bytes::copy_from_slice(&sig.as_bytes()[..]));
     let encoding_options = EncodingOptions::new(SLIPPAGE).with_client_fee(fee);
 ```
 
-See the full working example: [`clients/rust/examples/swap_client_fee.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/swap_client_fee.rs)
+See the full working
+example: [`clients/rust/examples/swap_client_fee.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/swap_client_fee.rs)
 {% endtab %}
 
 {% tab title="TypeScript" %}
+
 ```typescript
-  // Compute the EIP-712 hash
-  const hash = clientFeeSigningHash(
-    50,             // 0.5% fee
-    feeReceiver,    // address
-    0n,             // no vault subsidy
-    1893456000n,    // deadline
-    1,              // chain ID
-    routerAddress,  // TychoRouter address
-  );
+// Build fee params (without signature).
+const feeParams: ClientFeeParams = {
+  bps: 50,              // 0.5% fee
+  receiver: feeReceiver,
+  maxContribution: 0n,  // no vault subsidy
+  deadline: 1893456000, // Unix timestamp
+};
 
-  // Sign with the fee receiver's wallet
-  const signature = await account.signMessage({ message: { raw: hash } });
+// Compute the EIP-712 hash and sign with the fee receiver's wallet.
+const hash = clientFeeSigningHash(feeParams, 1, routerAddress);
+const signature = await account.signMessage({ message: { raw: hash } });
 
-  // Attach to encoding options
-  const opts = withClientFee(encodingOptions(0.005), {
-    bps: 50,
-    receiver: feeReceiver,
-    maxContribution: 0n,
-    deadline: 1893456000n,
-    signature,
-  });
+// Attach signature and wire into encoding options.
+const opts = withClientFee(encodingOptions(0.005), { ...feeParams, signature });
 ```
+
 {% endtab %}
 {% endtabs %}

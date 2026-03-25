@@ -149,8 +149,7 @@ pub struct ClientFeeParams {
     #[serde_as(as = "DisplayFromStr")]
     max_contribution: BigUint,
     /// Unix timestamp after which the signature is invalid.
-    #[serde_as(as = "DisplayFromStr")]
-    deadline: BigUint,
+    deadline: u64,
     /// 65-byte EIP-712 ECDSA signature by `receiver`.
     signature: Bytes,
 }
@@ -161,7 +160,7 @@ impl ClientFeeParams {
         bps: u16,
         receiver: Bytes,
         max_contribution: BigUint,
-        deadline: BigUint,
+        deadline: u64,
         signature: Bytes,
     ) -> Self {
         Self { bps, receiver, max_contribution, deadline, signature }
@@ -183,8 +182,8 @@ impl ClientFeeParams {
     }
 
     /// Signature deadline timestamp.
-    pub fn deadline(&self) -> &BigUint {
-        &self.deadline
+    pub fn deadline(&self) -> u64 {
+        self.deadline
     }
 
     /// EIP-712 signature by the receiver.
@@ -1565,7 +1564,7 @@ mod tests {
             100,
             Bytes::from(make_address(0xBB).as_ref()),
             BigUint::from(500_000u64),
-            BigUint::from(1_893_456_000u64),
+            1_893_456_000u64,
             Bytes::from(vec![0xAB; 65]),
         )
     }
@@ -1576,12 +1575,12 @@ mod tests {
         let json = serde_json::to_string(&fee).unwrap();
 
         assert!(json.contains(r#""max_contribution":"500000""#));
-        assert!(json.contains(r#""deadline":"1893456000""#));
+        assert!(json.contains(r#""deadline":1893456000"#));
 
         let deserialized: ClientFeeParams = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.bps(), fee.bps());
         assert_eq!(*deserialized.max_contribution(), *fee.max_contribution());
-        assert_eq!(*deserialized.deadline(), *fee.deadline());
+        assert_eq!(deserialized.deadline(), fee.deadline());
     }
 
     #[test]

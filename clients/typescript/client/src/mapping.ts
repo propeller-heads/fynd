@@ -141,8 +141,8 @@ function toWireClientFeeParams(p: ClientFeeParams): WireClientFeeParams {
         bps: p.bps,
         receiver: p.receiver,
         max_contribution: p.maxContribution.toString(),
-        deadline: p.deadline.toString(),
-        signature: p.signature,
+        deadline: p.deadline,
+        signature: p.signature ?? '',
     };
 }
 

@@ -95,10 +95,11 @@ export interface components {
              */
             bps: number;
             /**
+             * Format: int64
              * @description Unix timestamp after which the signature is invalid.
              * @example 1893456000
              */
-            deadline: string;
+            deadline: number;
             /**
              * @description Maximum subsidy from the client's vault balance.
              * @example 0
