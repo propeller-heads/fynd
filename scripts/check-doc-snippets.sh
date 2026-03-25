@@ -8,8 +8,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Format: "source_file:anchor_name:doc_file"
 SNIPPETS=(
-    "clients/rust/examples/quote.rs:quote-rust:docs/get-started/quickstart.md"
-    "clients/typescript/examples/tutorial/main.ts:quote-typescript:docs/get-started/quickstart.md"
+    "clients/rust/examples/quote.rs:quote-rust:docs/get-started/quickstart/README.md"
+    "clients/typescript/examples/tutorial/main.ts:quote-typescript:docs/get-started/quickstart/README.md"
     "fynd-core/examples/custom_algorithm.rs:custom-algo-impl:docs/guides/custom-algorithm.md"
     "fynd-core/examples/custom_algorithm.rs:custom-algo-wire:docs/guides/custom-algorithm.md"
 )
