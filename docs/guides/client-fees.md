@@ -109,7 +109,7 @@ The fee receiver signs a typed data hash:
     );
 
     // Compute the EIP-712 signing hash and sign it with the fee receiver's key.
-    let hash = fee.eip712_signing_hash(1, &router_address)?; // chainId = Ethereum mainnet
+    let hash = fee.eip712_signing_hash(chain_id, &router_address)?;
     let sig = fee_signer
         .sign_hash(&B256::from(hash))
         .await?;

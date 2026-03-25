@@ -51,28 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    // TODO: fix this after the router address is exposed
-    // First, get a quote without fees to discover the router address.
-    let discovery_quote = client
-        .quote(QuoteParams::new(
-            Order::new(
-                Bytes::copy_from_slice(sell_token.as_slice()),
-                Bytes::copy_from_slice(buy_token.as_slice()),
-                BigUint::from(SELL_AMOUNT),
-                OrderSide::Sell,
-                Bytes::copy_from_slice(sender.as_slice()),
-                None,
-            ),
-            QuoteOptions::default()
-                .with_timeout_ms(5_000)
-                .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
-        ))
-        .await?;
-
-    let router_address = discovery_quote
-        .transaction()
-        .map(|tx| Bytes::copy_from_slice(tx.to().as_ref()))
-        .ok_or("discovery quote has no calldata")?;
+    let info = client.info().await?;
+    let router_address = info.router_address().clone();
+    let chain_id = info.chain_id();
 
     // [doc:start client-fee-rust]
     // Build the fee params (without signature).
@@ -84,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Compute the EIP-712 signing hash and sign it with the fee receiver's key.
-    let hash = fee.eip712_signing_hash(1, &router_address)?; // chainId = Ethereum mainnet
+    let hash = fee.eip712_signing_hash(chain_id, &router_address)?;
     let sig = fee_signer
         .sign_hash(&B256::from(hash))
         .await?;
@@ -114,11 +95,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("amount_in:  {}", quote.amount_in());
     println!("amount_out: {}", quote.amount_out());
 
-    let tx = quote
-        .transaction()
-        .ok_or("no calldata in quote")?;
-    let router = Address::from_slice(tx.to().as_ref());
-
     // Sign the order.
     let payload = client
         .swap_payload(quote, &SigningHints::default())
@@ -139,7 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     overrides.insert(
         token_key,
-        Bytes::copy_from_slice(&nested_mapping_slot(sender, router, USDC_ALLOWANCE_SLOT).0),
+        Bytes::copy_from_slice(
+            &nested_mapping_slot(sender, Address::from_slice(&router_address), USDC_ALLOWANCE_SLOT)
+                .0,
+        ),
         max,
     );
 
