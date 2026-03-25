@@ -1,3 +1,10 @@
+## [0.27.0](https://github.com/propeller-heads/fynd/compare/0.26.1...0.27.0) (2026-03-25)
+
+
+### Features
+
+* support Router v3 (tycho-execution=0.167.0) ([b46414d](https://github.com/propeller-heads/fynd/commit/b46414d301fe4c8d160f89d60d2348a162ef0185))
+
 ## [0.26.1](https://github.com/propeller-heads/fynd/compare/0.26.0...0.26.1) (2026-03-25)
 
 
