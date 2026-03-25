@@ -11,6 +11,20 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Maximum age of price data before it is considered stale.
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
+/// Maps wrapped on-chain token symbols to their offchain exchange equivalents.
+///
+/// On-chain tokens like WETH, WBTC are listed as ETH, BTC on offchain exchanges.
+pub fn normalize_symbol(symbol: &str) -> &str {
+    match symbol.to_uppercase().as_str() {
+        "WETH" => "ETH",
+        "WBTC" => "BTC",
+        "WBNB" => "BNB",
+        "WMATIC" => "MATIC",
+        "WAVAX" => "AVAX",
+        _ => symbol,
+    }
+}
+
 /// Resolves an on-chain address to a (symbol, decimals) pair via the
 /// [`SharedMarketData`](crate::feed::market_data::SharedMarketData) token registry.
 pub async fn resolve_token(
@@ -106,6 +120,17 @@ mod tests {
         let amount_in = BigUint::from(10u64).pow(27); // 1e9 PEPE in raw
         let result = expected_out_from_price(&amount_in, 8e-11, 18, 8);
         assert_eq!(result, BigUint::from(8_000_000u64));
+    }
+
+    #[test]
+    fn normalize_wrapped_symbols() {
+        assert_eq!(normalize_symbol("WETH"), "ETH");
+        assert_eq!(normalize_symbol("WBTC"), "BTC");
+        assert_eq!(normalize_symbol("WBNB"), "BNB");
+        assert_eq!(normalize_symbol("USDC"), "USDC");
+        assert_eq!(normalize_symbol("LINK"), "LINK");
+        // Case-insensitive matching
+        assert_eq!(normalize_symbol("weth"), "ETH");
     }
 
     #[test]
