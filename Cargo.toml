@@ -63,7 +63,14 @@ bytes = { workspace = true }
 fynd-client = { workspace = true }
 
 [workspace]
-members = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "clients/rust", "tools/benchmark", "tools/fynd-swap-cli"]
+members = [
+    "fynd-core",
+    "fynd-rpc",
+    "fynd-rpc-types",
+    "clients/rust",
+    "tools/benchmark",
+    "tools/fynd-swap-cli",
+]
 resolver = "2"
 
 [workspace.dependencies]
@@ -113,8 +120,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.250.0"
-tycho-execution = { version = ">=0.165.0", features = ["evm"] }
+
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", rev = "5df47fb37e5f3a7cc2025a9dc8380006d04ad560" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho-execution.git", rev = "3e768a0e1b1075a487ba5cfebaea17627006255e" }
 typetag = "0.2"
 
 # Graph algorithms
