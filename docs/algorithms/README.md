@@ -32,4 +32,4 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 | **Strengths** | Fast; good at common, high-liquidity pairs | Finds non-obvious routes; no heuristic blind spots |
 | **Weaknesses** | Path count explodes at high hop counts; heuristic can misjudge | Slower per request; benefits less from pre-scoring |
 | **Default config** | 2-3 hops, 5+3 workers (see `worker_pools.toml`) | 5 hops, 3 workers |
-| **Derived data needs** | Spot prices + pool depths (required for scoring) | Token gas prices (optional, for gas-aware mode) |
+| **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode) |
