@@ -1,3 +1,14 @@
+## [0.26.1](https://github.com/propeller-heads/fynd/compare/0.26.0...0.26.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* **client:** map all known server error codes to typed ErrorCode variants ([f45071e](https://github.com/propeller-heads/fynd/commit/f45071ef794498ffb562c48c877294a61b051c56))
+* **fynd-client:** mark ErrorCode as non_exhaustive ([facc5da](https://github.com/propeller-heads/fynd/commit/facc5da6b18555866e35c66e9d08a7d5759426fc))
+* **rpc:** always return JSON bodies, including on extractor errors ([ae6ba4f](https://github.com/propeller-heads/fynd/commit/ae6ba4f0c02f3ab90f62b115af9601782aeeeaa1))
+* **rpc:** return 503 for MarketDataStale, add missing test coverage ([0432dec](https://github.com/propeller-heads/fynd/commit/0432dec56ef7d60e1c34b7ff8bf5dfab159de5b4))
+* **rpc:** return 503 for solver timeout instead of 504 ([95cc60d](https://github.com/propeller-heads/fynd/commit/95cc60d7c9177b664fb72e29a489b18849a5407e))
+
 ## [0.26.0](https://github.com/propeller-heads/fynd/compare/0.25.2...0.26.0) (2026-03-25)
 
 
