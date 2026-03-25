@@ -388,13 +388,13 @@ mod tests {
         let mut store = DerivedData::new();
         store.set_token_prices(
             Default::default(),
-            vec![failed(&key_str, FailedItemError::SpotPriceComputationFailed("sim error".into()))],
+            vec![failed(&key_str, FailedItemError::SimulationFailed("sim error".into()))],
             42,
             true,
         );
         assert_eq!(
             store.token_price_failure(&token_addr),
-            Some((42, &FailedItemError::SpotPriceComputationFailed("sim error".into())))
+            Some((42, &FailedItemError::SimulationFailed("sim error".into())))
         );
         assert_eq!(store.token_price_failure(&addr(0xcd)), None);
     }
@@ -406,13 +406,13 @@ mod tests {
         let mut store = DerivedData::new();
         store.set_spot_prices(
             Default::default(),
-            vec![failed(&key_str, FailedItemError::SpotPriceComputationFailed("sim error".into()))],
+            vec![failed(&key_str, FailedItemError::SimulationFailed("sim error".into()))],
             10,
             true,
         );
         assert_eq!(
             store.spot_price_failure(&key),
-            Some((10, &FailedItemError::SpotPriceComputationFailed("sim error".into())))
+            Some((10, &FailedItemError::SimulationFailed("sim error".into())))
         );
         assert_eq!(store.spot_price_failure(&pair_key("pool1", 0x01, 0x03)), None);
     }
@@ -426,14 +426,14 @@ mod tests {
             Default::default(),
             vec![failed(
                 &key_str,
-                FailedItemError::PoolDepthComputationFailed("depth error".into()),
+                FailedItemError::SimulationFailed("depth error".into()),
             )],
             7,
             true,
         );
         assert_eq!(
             store.pool_depth_failure(&key),
-            Some((7, &FailedItemError::PoolDepthComputationFailed("depth error".into())))
+            Some((7, &FailedItemError::SimulationFailed("depth error".into())))
         );
         assert_eq!(store.pool_depth_failure(&pair_key("pool2", 0x01, 0x02)), None);
     }

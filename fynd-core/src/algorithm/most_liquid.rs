@@ -111,7 +111,7 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
             .pool_depths()
             .and_then(|d| d.get(&key))
         {
-            Some(d) => d.to_f64()?,
+            Some(d) => d.to_f64().unwrap_or(0.0),
             None => {
                 trace!(component_id = %component_id, "pool depth failed, using zero weight");
                 return Some(Self { spot_price: 0.0, depth: 0.0 });
@@ -777,7 +777,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::SpotPriceComputationFailed("sim error".into()),
+                error: FailedItemError::SimulationFailed("sim error".into()),
             }],
             10,
             true,
@@ -812,7 +812,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::PoolDepthComputationFailed("depth error".into()),
+                error: FailedItemError::SimulationFailed("depth error".into()),
             }],
             10,
             true,
@@ -841,7 +841,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str.clone(),
-                error: FailedItemError::SpotPriceComputationFailed("spot error".into()),
+                error: FailedItemError::SimulationFailed("spot error".into()),
             }],
             10,
             true,
@@ -850,7 +850,7 @@ mod tests {
             Default::default(),
             vec![FailedItem {
                 key: key_str,
-                error: FailedItemError::PoolDepthComputationFailed("depth error".into()),
+                error: FailedItemError::SimulationFailed("depth error".into()),
             }],
             10,
             true,

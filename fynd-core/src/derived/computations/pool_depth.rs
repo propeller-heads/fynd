@@ -316,7 +316,7 @@ impl DerivedComputation for PoolDepthComputation {
                                 "{}/{}/{}",
                                 component_id, token_in.address, token_out.address
                             ),
-                            error: FailedItemError::PoolDepthComputationFailed(format!(
+                            error: FailedItemError::SimulationFailed(format!(
                                 "{e}: {probe_info}, {limits_info}"
                             )),
                         });
@@ -882,8 +882,8 @@ mod tests {
                 .failed_items
                 .iter()
                 .any(|item| item.key.starts_with("pool/") &&
-                    matches!(&item.error, FailedItemError::PoolDepthComputationFailed(_))),
-            "should have PoolDepthComputation failure, got: {:?}",
+                    matches!(&item.error, FailedItemError::SimulationFailed(_))),
+            "should have ComputationFailed failure, got: {:?}",
             output.failed_items
         );
     }
