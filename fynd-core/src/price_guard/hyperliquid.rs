@@ -91,7 +91,7 @@ impl HyperliquidProvider {
         let info = cache
             .get(address)
             .ok_or_else(|| PriceProviderError::TokenNotFound { address: address.to_string() })?;
-        let symbol = normalize_symbol(&info.symbol).to_string();
+        let symbol = normalize_symbol(&info.symbol);
         Ok((symbol, info.decimals))
     }
 }
