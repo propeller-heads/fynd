@@ -2881,9 +2881,9 @@ dependencies = [
 
 [[package]]
 name = "ekubo_sdk"
-version = "2.1.2"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c776f792b440944a399fb8c8b46b35be0451ced35ba30c2a628f2f61c3ca4899"
+checksum = "5aa1080f5ab48d30a0221e764e51bb7de756251834b639fa1bbd187a60c04608"
 dependencies = [
  "alloy-primitives 0.6.4",
  "alloy-primitives 1.5.7",
@@ -7568,9 +7568,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.250.0"
+version = "0.251.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "423a95c347f85f550301095169174b4bef084a32027ac0e2e7409e81657926f8"
+checksum = "b00857ca975c4c63f4bfa8c3ba7ef034b1a91979650867d5da03cb92cb101a7e"
 dependencies = [
  "alloy",
  "alloy-chains",
