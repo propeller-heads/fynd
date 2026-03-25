@@ -16,6 +16,12 @@
 * [Benchmarking](guides/benchmarking.md)
 * [Custom Algorithm](guides/custom-algorithm.md)
 
+## Algorithms
+
+* [Overview](algorithms/README.md)
+* [Most Liquid](algorithms/most-liquid.md)
+* [Bellman-Ford](algorithms/bellman-ford.md)
+
 ## Reference
 
 * [Architecture](ARCHITECTURE.md)
