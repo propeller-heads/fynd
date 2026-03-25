@@ -29,7 +29,7 @@ use num_bigint::BigUint;
 const DEFAULT_FYND_URL: &str = "http://localhost:3000";
 const DEFAULT_RPC_URL: &str = "http://localhost:8545";
 // Matches the key funded by scripts/dev-env.sh. Override with PRIVATE_KEY env var.
-const DEV_PRIVATE_KEY: &str = "0x912a64d0474cbddb4afd9b1aa2e800c433a3e975fa858395e6134220cf2b4cd5";
+const DEV_PRIVATE_KEY: &str = "0x02d483ff876e4d1d55ddc829a22df2707bd2574ba18d0d870ef9c9edd3c0fe29";
 // 1000 USDC → WETH on Ethereum mainnet
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";

@@ -11,7 +11,8 @@ FORK_RPC_URL="${FORK_RPC_URL:-https://reth-ethereum.ithaca.xyz/rpc}"
 ANVIL_RPC_URL="http://localhost:8545"
 FYND_URL="http://localhost:3000"
 
-_PRIVATE_KEY="0x912a64d0474cbddb4afd9b1aa2e800c433a3e975fa858395e6134220cf2b4cd5"
+_MNEMONIC="undo about satisfy liberty crime forget extra erode fever peasant ability cotton"
+_PRIVATE_KEY="0x02d483ff876e4d1d55ddc829a22df2707bd2574ba18d0d870ef9c9edd3c0fe29"
 _WETH="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 _ANVIL_PID=""
 _FYND_PID=""
@@ -43,7 +44,7 @@ start_anvil() {
     anvil \
         --fork-url "$FORK_RPC_URL" \
         --port 8545 \
-        --private-keys "$_PRIVATE_KEY" \
+        --mnemonic "$_MNEMONIC" \
         --balance 10000 \
         --silent &
     _ANVIL_PID=$!
