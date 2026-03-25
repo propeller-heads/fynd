@@ -1,6 +1,6 @@
 {
-  "uid": "tycho-solver",
-  "title": "Tycho Solver",
+  "uid": "fynd",
+  "title": "Fynd",
   "editable": true,
   "time": { "from": "now-15m", "to": "now" },
   "refresh": "5s",
