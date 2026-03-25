@@ -1,3 +1,10 @@
+## [0.25.2](https://github.com/propeller-heads/fynd/compare/0.25.1...0.25.2) (2026-03-25)
+
+
+### Bug Fixes
+
+* update doc snippet checker for quickstart folder move ([a2770de](https://github.com/propeller-heads/fynd/commit/a2770de5f4e3e9928e2ba44ad44528424ffe5f76))
+
 ## [0.25.1](https://github.com/propeller-heads/fynd/compare/0.25.0...0.25.1) (2026-03-24)
 
 
