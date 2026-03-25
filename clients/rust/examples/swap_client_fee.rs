@@ -19,7 +19,7 @@ use alloy::{
 use bytes::Bytes;
 use fynd_client::{
     ClientFeeParams, EncodingOptions, ExecutionOptions, FyndClientBuilder, Order, OrderSide,
-    QuoteOptions, QuoteParams, SignedOrder, SigningHints, StorageOverrides,
+    QuoteOptions, QuoteParams, SignedSwap, SigningHints, StorageOverrides,
 };
 use num_bigint::BigUint;
 
@@ -121,12 +121,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sign the order.
     let payload = client
-        .signable_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default())
         .await?;
     let tx_sig = sender_signer
         .sign_hash(&payload.signing_hash())
         .await?;
-    let signed = SignedOrder::assemble(payload, tx_sig);
+    let signed = SignedSwap::assemble(payload, tx_sig);
 
     // Dry-run: inject a synthetic ERC-20 balance and router allowance via state overrides.
     let max = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
@@ -144,7 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let result = client
-        .execute(signed, &ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) })
+        .execute_swap(
+            signed,
+            &ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) },
+        )
         .await?
         .await?;
 

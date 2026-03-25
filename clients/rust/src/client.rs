@@ -280,7 +280,7 @@ impl ApprovalParams {
     ///
     /// `UserTransferType::TransferFrom` → router (default).
     /// `UserTransferType::TransferFromPermit2` → Permit2.
-    /// `UserTransferType::None` → [`FyndClient::approval`] returns `None` immediately.
+    /// `UserTransferType::UseVaultsFunds` → [`FyndClient::approval`] returns `None` immediately.
     pub fn with_transfer_type(mut self, transfer_type: UserTransferType) -> Self {
         self.transfer_type = transfer_type;
         self
@@ -803,10 +803,6 @@ where
     ) -> Result<Option<ApprovalPayload>, FyndError> {
         use alloy::sol_types::SolCall;
 
-        if params.transfer_type == UserTransferType::None {
-            return Ok(None);
-        }
-
         let info = self.info().await?;
         let spender_addr = match params.transfer_type {
             UserTransferType::TransferFrom => {
@@ -815,7 +811,7 @@ where
             UserTransferType::TransferFromPermit2 => {
                 mapping::bytes_to_alloy_address(info.permit2_address())?
             }
-            UserTransferType::None => unreachable!(),
+            UserTransferType::UseVaultsFunds => return Ok(None),
         };
 
         let sender = hints
