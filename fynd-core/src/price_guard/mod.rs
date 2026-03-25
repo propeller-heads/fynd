@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod guard;
+pub mod hyperliquid;
 pub mod provider;
 pub mod provider_registry;
 pub mod utils;

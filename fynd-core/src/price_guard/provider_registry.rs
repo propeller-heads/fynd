@@ -3,7 +3,10 @@
 use num_bigint::BigUint;
 use tycho_simulation::tycho_common::models::Address;
 
-use super::provider::{ExternalPrice, PriceProvider, PriceProviderError};
+use super::{
+    hyperliquid::HyperliquidProvider,
+    provider::{ExternalPrice, PriceProvider, PriceProviderError},
+};
 
 /// Manages multiple [`PriceProvider`]s and queries them.
 pub struct PriceProviderRegistry {
@@ -23,9 +26,8 @@ impl PriceProviderRegistry {
 
     /// Registers the built-in providers (Hyperliquid + Binance).
     pub fn with_default_providers(self) -> Self {
-        // TODO: register HyperliquidProvider and BinanceWsProvider here
-        // once they are implemented (ENG-5604, ENG-5605).
-        self
+        // TODO: register BinanceWsProvider here once implemented (ENG-5605).
+        self.register(Box::new(HyperliquidProvider::default()))
     }
 
     /// Returns `true` if no providers are registered.
