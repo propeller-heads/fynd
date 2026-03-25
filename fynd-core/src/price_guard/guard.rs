@@ -2,6 +2,7 @@
 
 use num_bigint::BigUint;
 use num_traits::Zero;
+use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -10,6 +11,14 @@ use super::{
     config::PriceGuardConfig, provider::ExternalPrice, provider_registry::PriceProviderRegistry,
 };
 use crate::types::{OrderQuote, QuoteStatus};
+
+/// Errors returned by [`PriceGuard::validate`].
+#[derive(Error, Debug)]
+pub enum PriceGuardError {
+    /// Price guard is enabled but no providers are registered.
+    #[error("price guard is enabled but no providers are registered")]
+    NoProviders,
+}
 
 /// Validates solver outputs against external price sources.
 ///
@@ -49,13 +58,13 @@ impl PriceGuard {
         &self,
         mut quotes: Vec<OrderQuote>,
         config: &PriceGuardConfig,
-    ) -> Vec<OrderQuote> {
+    ) -> Result<Vec<OrderQuote>, PriceGuardError> {
         if !config.enabled() {
-            return quotes;
+            return Ok(quotes);
         }
 
         if self.registry.is_empty() {
-            warn!("price guard is enabled but no providers are registered");
+            return Err(PriceGuardError::NoProviders);
         }
 
         for quote in &mut quotes {
@@ -72,7 +81,7 @@ impl PriceGuard {
             }
         }
 
-        quotes
+        Ok(quotes)
     }
 
     /// Checks that a successful quote has a route with input/output tokens.
@@ -177,7 +186,7 @@ mod tests {
         tycho_core::{models::token::Token, Bytes},
     };
 
-    use super::PriceGuard;
+    use super::{PriceGuard, PriceGuardError};
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
         feed::market_data::SharedMarketDataRef,
@@ -310,7 +319,7 @@ mod tests {
             .with_upper_tolerance_bps(upper_bps);
         let guard = price_guard(vec![mock_provider(provider_amount)]);
 
-        let result = guard.validate(vec![make_quote(fynd_amount)], &config);
+        let result = guard.validate(vec![make_quote(fynd_amount)], &config).unwrap();
 
         let expected_status =
             if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
@@ -325,7 +334,7 @@ mod tests {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(allow_on_error);
         let guard = price_guard(vec![Box::new(FailingProvider), Box::new(FailingProvider)]);
 
-        let result = guard.validate(vec![make_quote(500)], &config);
+        let result = guard.validate(vec![make_quote(500)], &config).unwrap();
 
         let want = if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
         assert_eq!(result[0].status(), want);
@@ -339,7 +348,7 @@ mod tests {
         // because the provider is never called.
         let guard = price_guard(vec![mock_provider(10_000)]);
 
-        let result = guard.validate(vec![make_quote(50)], &config);
+        let result = guard.validate(vec![make_quote(50)], &config).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::Success);
@@ -355,7 +364,7 @@ mod tests {
         // but passes with the second.
         let guard = price_guard(vec![mock_provider(1000), mock_provider(970)]);
 
-        let result = guard.validate(vec![make_quote(960)], &config);
+        let result = guard.validate(vec![make_quote(960)], &config).unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
@@ -365,7 +374,7 @@ mod tests {
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![Box::new(FailingProvider), mock_provider(1000)]);
 
-        let result = guard.validate(vec![make_quote(980)], &config);
+        let result = guard.validate(vec![make_quote(980)], &config).unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
@@ -379,9 +388,19 @@ mod tests {
         let mut quote = make_quote(1);
         quote.set_status(QuoteStatus::NoRouteFound);
 
-        let result = guard.validate(vec![quote], &config);
+        let result = guard.validate(vec![quote], &config).unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+    }
+
+    #[test]
+    fn test_no_providers_returns_error() {
+        let config = PriceGuardConfig::default();
+        let guard = price_guard(vec![]);
+
+        let result = guard.validate(vec![make_quote(1000)], &config);
+
+        assert!(matches!(result, Err(PriceGuardError::NoProviders)));
     }
 
     #[test]
@@ -391,7 +410,7 @@ mod tests {
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![mock_provider(1000)]);
 
-        let result = guard.validate(vec![make_quote(980), make_quote(500)], &config);
+        let result = guard.validate(vec![make_quote(980), make_quote(500)], &config).unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
         assert_eq!(result[1].status(), QuoteStatus::PriceCheckFailed);
