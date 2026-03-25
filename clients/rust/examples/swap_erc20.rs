@@ -3,10 +3,16 @@
 //! An ephemeral key is used and ERC-20 storage overrides inject a synthetic
 //! balance so no real funds are required.
 //!
-//! Run against a local Fynd instance:
+//! Run with the local dev environment:
 //!
 //! ```sh
-//! cargo run --example swap_erc20 -p fynd-client
+//! ./scripts/run-example.sh swap_erc20
+//! ```
+//!
+//! Or manually after starting `./scripts/dev-env.sh`:
+//!
+//! ```sh
+//! RPC_URL=http://localhost:8545 cargo run --example swap_erc20 -p fynd-client
 //! ```
 
 use alloy::{
@@ -20,8 +26,8 @@ use fynd_client::{
 };
 use num_bigint::BigUint;
 
-const FYND_URL: &str = "http://localhost:3000";
-const RPC_URL: &str = "https://eth.llamarpc.com";
+const DEFAULT_FYND_URL: &str = "http://localhost:3000";
+const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 // 1000 USDC → WETH on Ethereum mainnet
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
@@ -33,16 +39,26 @@ const USDC_ALLOWANCE_SLOT: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fynd_url = std::env::var("FYND_URL").unwrap_or_else(|_| DEFAULT_FYND_URL.to_owned());
+    let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_owned());
+
     // Ephemeral key — storage overrides inject a synthetic balance so no real funds are needed.
     let signer = PrivateKeySigner::random();
     let sender = signer.address();
     let sell_token: Address = USDC.parse()?;
     let buy_token: Address = WETH.parse()?;
 
-    let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
+    let client = FyndClientBuilder::new(&fynd_url, &rpc_url)
         .with_sender(sender)
         .build()
-        .await?;
+        .await
+        .map_err(|e| {
+            format!(
+                "{e}\n\nFynd not running at {fynd_url}. \
+            Start the dev environment:\n  ./scripts/run-example.sh {}",
+                env!("CARGO_BIN_NAME")
+            )
+        })?;
 
     // Check whether a router approval is needed and sign it if so.
     // In this dry-run example the broadcast is skipped — storage overrides inject the allowance

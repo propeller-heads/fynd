@@ -6,10 +6,16 @@
 //! Two ephemeral keys are used: one for the sender and one for the fee receiver.
 //! ERC-20 storage overrides inject a synthetic balance so no real funds are needed.
 //!
-//! Run against a local Fynd instance:
+//! Run with the local dev environment:
 //!
 //! ```sh
-//! cargo run --example swap_client_fee -p fynd-client
+//! ./scripts/run-example.sh swap_client_fee
+//! ```
+//!
+//! Or manually after starting `./scripts/dev-env.sh`:
+//!
+//! ```sh
+//! RPC_URL=http://localhost:8545 cargo run --example swap_client_fee -p fynd-client
 //! ```
 
 use alloy::{
@@ -23,8 +29,8 @@ use fynd_client::{
 };
 use num_bigint::BigUint;
 
-const FYND_URL: &str = "http://localhost:3000";
-const RPC_URL: &str = "https://eth.llamarpc.com";
+const DEFAULT_FYND_URL: &str = "http://localhost:3000";
+const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const SELL_AMOUNT: u128 = 1_000_000_000; // 1000 USDC (6 decimals)
@@ -37,6 +43,9 @@ const USDC_ALLOWANCE_SLOT: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fynd_url = std::env::var("FYND_URL").unwrap_or_else(|_| DEFAULT_FYND_URL.to_owned());
+    let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_owned());
+
     let sender_signer = PrivateKeySigner::random();
     let sender = sender_signer.address();
     let sell_token: Address = USDC.parse()?;
@@ -46,10 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fee_signer = PrivateKeySigner::random();
     let fee_receiver = fee_signer.address();
 
-    let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
+    let client = FyndClientBuilder::new(&fynd_url, &rpc_url)
         .with_sender(sender)
         .build()
-        .await?;
+        .await
+        .map_err(|e| {
+            format!(
+                "{e}\n\nFynd not running at {fynd_url}. \
+            Start the dev environment:\n  ./scripts/run-example.sh {}",
+                env!("CARGO_BIN_NAME")
+            )
+        })?;
 
     let info = client.info().await?;
     let router_address = info.router_address().clone();
