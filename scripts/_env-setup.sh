@@ -46,6 +46,7 @@ start_anvil() {
         --port 8545 \
         --mnemonic "$_MNEMONIC" \
         --balance 10000 \
+        --steps-tracing \
         --silent &
     _ANVIL_PID=$!
 
@@ -75,8 +76,8 @@ start_fynd() {
     local tycho_args=()
     [[ -n "${TYCHO_URL:-}" ]] && tycho_args+=(--tycho-url "$TYCHO_URL")
     echo "==> Building and starting fynd serve (RPC: $ANVIL_RPC_URL${TYCHO_URL:+, TYCHO_URL: $TYCHO_URL})..."
-    RUST_LOG="${RUST_LOG:-info}" cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --release --quiet -- \
-        serve --rpc-url "$ANVIL_RPC_URL" "${tycho_args[@]}" &
+    RUST_LOG="${RUST_LOG:-error}" cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --release --quiet -- \
+        serve --rpc-url "$ANVIL_RPC_URL" --protocols uniswap_v3,uniswap_v2 --min-tvl 200 "${tycho_args[@]}" &
     _FYND_PID=$!
 
     echo "    Waiting for fynd to be healthy (this may take a minute on first run)..."

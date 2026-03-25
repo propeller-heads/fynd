@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sign and execute.
     let payload = client
-        .swap_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default().with_simulate(true))
         .await?;
     let tx_sig = sender_signer
         .sign_hash(&payload.signing_hash())
