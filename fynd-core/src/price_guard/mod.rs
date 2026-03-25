@@ -14,6 +14,8 @@
 //! - **config**: [`PriceGuardConfig`](crate::price_guard::config::PriceGuardConfig) for tolerance
 //!   thresholds and fail-open behavior
 
+/// Binance price provider implementation
+pub mod binance_ws;
 /// Tolerance thresholds and fail-open configuration for the price guard.
 pub mod config;
 /// Orchestrates validation of solver solutions against external prices.

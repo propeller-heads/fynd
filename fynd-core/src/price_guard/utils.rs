@@ -11,6 +11,22 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Maximum age of price data before it is considered stale.
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
+/// Maps wrapped on-chain token symbols to their uppercase offchain exchange
+/// equivalents.
+///
+/// On-chain tokens like WETH, WBTC are listed as ETH, BTC on offchain
+/// exchanges. Non-wrapped symbols are uppercased to match exchange conventions.
+pub fn normalize_symbol(symbol: &str) -> String {
+    match symbol.to_uppercase().as_str() {
+        "WETH" => "ETH".to_string(),
+        "WBTC" => "BTC".to_string(),
+        "WBNB" => "BNB".to_string(),
+        "WMATIC" => "MATIC".to_string(),
+        "WAVAX" => "AVAX".to_string(),
+        _ => symbol.to_uppercase(),
+    }
+}
+
 /// Resolves an on-chain address to a (symbol, decimals) pair via the
 /// [`SharedMarketData`](crate::feed::market_data::SharedMarketData) token registry.
 pub async fn resolve_token(
