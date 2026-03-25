@@ -14,7 +14,7 @@
 //!
 //! - **builder**: `FyndRPCBuilder` for assembling and configuring the HTTP server
 //! - **api**: HTTP endpoint handlers (`/v1/quote`, `/v1/health`) and OpenAPI documentation
-//! - **config**: Configuration types for pools, algorithms, and blacklists
+//! - **config**: Configuration types for pools and algorithms
 
 // Public modules
 pub mod api;
