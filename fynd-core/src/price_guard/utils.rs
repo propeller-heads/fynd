@@ -14,14 +14,14 @@ pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 /// Maps wrapped on-chain token symbols to their offchain exchange equivalents.
 ///
 /// On-chain tokens like WETH, WBTC are listed as ETH, BTC on offchain exchanges.
-pub fn normalize_symbol(symbol: &str) -> &str {
+pub fn normalize_symbol(symbol: &str) -> String {
     match symbol.to_uppercase().as_str() {
-        "WETH" => "ETH",
-        "WBTC" => "BTC",
-        "WBNB" => "BNB",
-        "WMATIC" => "MATIC",
-        "WAVAX" => "AVAX",
-        _ => symbol,
+        "WETH" => "ETH".to_string(),
+        "WBTC" => "BTC".to_string(),
+        "WBNB" => "BNB".to_string(),
+        "WMATIC" => "MATIC".to_string(),
+        "WAVAX" => "AVAX".to_string(),
+        _ => symbol.to_uppercase(),
     }
 }
 
@@ -131,6 +131,8 @@ mod tests {
         assert_eq!(normalize_symbol("LINK"), "LINK");
         // Case-insensitive matching
         assert_eq!(normalize_symbol("weth"), "ETH");
+        // Fallthrough uppercases unknown symbols
+        assert_eq!(normalize_symbol("link"), "LINK");
     }
 
     #[test]
