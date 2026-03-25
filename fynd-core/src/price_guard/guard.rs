@@ -1,6 +1,7 @@
 //! PriceGuard: validates solver outputs against external price sources.
 
 use num_bigint::BigUint;
+use num_traits::Zero;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -127,6 +128,13 @@ impl PriceGuard {
         provider_price: &ExternalPrice,
         config: &PriceGuardConfig,
     ) -> bool {
+        if provider_price
+            .expected_amount_out()
+            .is_zero()
+        {
+            return false;
+        }
+
         let provider_amount_out = provider_price.expected_amount_out();
         let fynd_amount_out = quote.amount_out();
 
