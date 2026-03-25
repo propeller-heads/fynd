@@ -12,6 +12,7 @@
 //! - **[`config`]**: [`PriceGuardConfig`](config::PriceGuardConfig) for tolerance thresholds and
 //!   fail-open behavior
 
+pub mod binance_ws;
 pub mod config;
 pub mod guard;
 pub mod hyperliquid;

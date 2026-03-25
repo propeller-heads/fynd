@@ -11,9 +11,11 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// Maximum age of price data before it is considered stale.
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
-/// Maps wrapped on-chain token symbols to their offchain exchange equivalents.
+/// Maps wrapped on-chain token symbols to their uppercase offchain exchange
+/// equivalents.
 ///
-/// On-chain tokens like WETH, WBTC are listed as ETH, BTC on offchain exchanges.
+/// On-chain tokens like WETH, WBTC are listed as ETH, BTC on offchain
+/// exchanges. Non-wrapped symbols are uppercased to match exchange conventions.
 pub fn normalize_symbol(symbol: &str) -> String {
     match symbol.to_uppercase().as_str() {
         "WETH" => "ETH".to_string(),
@@ -131,8 +133,9 @@ mod tests {
         assert_eq!(normalize_symbol("LINK"), "LINK");
         // Case-insensitive matching
         assert_eq!(normalize_symbol("weth"), "ETH");
-        // Fallthrough uppercases unknown symbols
+        // Non-wrapped symbols are uppercased
         assert_eq!(normalize_symbol("link"), "LINK");
+        assert_eq!(normalize_symbol("usdc"), "USDC");
     }
 
     #[test]
