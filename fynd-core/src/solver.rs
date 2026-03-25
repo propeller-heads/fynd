@@ -88,25 +88,111 @@ fn default_algo_timeout_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     /// Algorithm name for this pool (e.g., `"most_liquid"`).
-    pub algorithm: String,
+    algorithm: String,
     /// Number of worker threads for this pool.
     #[serde(default = "num_cpus::get")]
-    pub num_workers: usize,
+    num_workers: usize,
     /// Task queue capacity for this pool.
     #[serde(default = "default_task_queue_capacity")]
-    pub task_queue_capacity: usize,
+    task_queue_capacity: usize,
     /// Minimum hops to search (must be >= 1).
     #[serde(default = "default_min_hops")]
-    pub min_hops: usize,
+    min_hops: usize,
     /// Maximum hops to search.
     #[serde(default = "default_max_hops")]
-    pub max_hops: usize,
+    max_hops: usize,
     /// Timeout for solving in milliseconds.
     #[serde(default = "default_algo_timeout_ms")]
-    pub timeout_ms: u64,
+    timeout_ms: u64,
     /// Maximum number of paths to simulate per solve. `None` simulates all scored paths.
     #[serde(default)]
-    pub max_routes: Option<usize>,
+    max_routes: Option<usize>,
+}
+
+impl PoolConfig {
+    /// Creates a new pool config with the given algorithm name and defaults for all other fields.
+    pub fn new(algorithm: impl Into<String>) -> Self {
+        Self {
+            algorithm: algorithm.into(),
+            num_workers: num_cpus::get(),
+            task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
+            min_hops: defaults::POOL_MIN_HOPS,
+            max_hops: defaults::POOL_MAX_HOPS,
+            timeout_ms: defaults::POOL_TIMEOUT_MS,
+            max_routes: None,
+        }
+    }
+
+    /// Returns the algorithm name.
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
+    }
+
+    /// Returns the number of worker threads.
+    pub fn num_workers(&self) -> usize {
+        self.num_workers
+    }
+
+    /// Sets the number of worker threads.
+    pub fn with_num_workers(mut self, num_workers: usize) -> Self {
+        self.num_workers = num_workers;
+        self
+    }
+
+    /// Sets the task queue capacity.
+    pub fn with_task_queue_capacity(mut self, task_queue_capacity: usize) -> Self {
+        self.task_queue_capacity = task_queue_capacity;
+        self
+    }
+
+    /// Sets the minimum hops.
+    pub fn with_min_hops(mut self, min_hops: usize) -> Self {
+        self.min_hops = min_hops;
+        self
+    }
+
+    /// Sets the maximum hops.
+    pub fn with_max_hops(mut self, max_hops: usize) -> Self {
+        self.max_hops = max_hops;
+        self
+    }
+
+    /// Sets the timeout in milliseconds.
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Sets the maximum number of routes to simulate.
+    pub fn with_max_routes(mut self, max_routes: Option<usize>) -> Self {
+        self.max_routes = max_routes;
+        self
+    }
+
+    /// Returns the task queue capacity.
+    pub fn task_queue_capacity(&self) -> usize {
+        self.task_queue_capacity
+    }
+
+    /// Returns the minimum hops.
+    pub fn min_hops(&self) -> usize {
+        self.min_hops
+    }
+
+    /// Returns the maximum hops.
+    pub fn max_hops(&self) -> usize {
+        self.max_hops
+    }
+
+    /// Returns the timeout in milliseconds.
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    /// Returns the maximum number of routes to simulate.
+    pub fn max_routes(&self) -> Option<usize> {
+        self.max_routes
+    }
 }
 
 /// Error returned by [`Solver::wait_until_ready`].
@@ -117,6 +203,7 @@ pub struct WaitReadyError {
 }
 
 /// Error returned by [`FyndBuilder::build`].
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SolverBuildError {
     /// The Ethereum RPC client could not be created (e.g. malformed URL).
@@ -171,7 +258,7 @@ struct CustomPoolEntry {
 }
 
 /// Builder for assembling the full solver pipeline.
-///
+#[must_use = "a builder does nothing until .build() is called"]
 /// Configures the Tycho market-data feed, gas price fetcher, derived-data
 /// computation manager, one or more worker pools, encoder, and router.
 pub struct FyndBuilder {
@@ -347,13 +434,13 @@ impl FyndBuilder {
     pub fn add_pool(mut self, name: impl Into<String>, config: &PoolConfig) -> Self {
         self.pools.push(PoolEntry::BuiltIn {
             name: name.into(),
-            algorithm: config.algorithm.clone(),
-            num_workers: config.num_workers,
-            task_queue_capacity: config.task_queue_capacity,
-            min_hops: config.min_hops,
-            max_hops: config.max_hops,
-            timeout_ms: config.timeout_ms,
-            max_routes: config.max_routes,
+            algorithm: config.algorithm().to_string(),
+            num_workers: config.num_workers(),
+            task_queue_capacity: config.task_queue_capacity(),
+            min_hops: config.min_hops(),
+            max_hops: config.max_hops(),
+            timeout_ms: config.timeout_ms(),
+            max_routes: config.max_routes(),
         });
         self
     }
@@ -629,19 +716,67 @@ impl Solver {
 /// Obtained via [`Solver::into_parts`].
 pub struct SolverParts {
     /// Routes quote requests across worker pools.
-    pub router: WorkerPoolRouter,
+    router: WorkerPoolRouter,
     /// One [`WorkerPool`] per configured algorithm pool.
-    pub worker_pools: Vec<WorkerPool>,
+    worker_pools: Vec<WorkerPool>,
     /// Live market snapshot shared across all components.
-    pub market_data: SharedMarketDataRef,
+    market_data: SharedMarketDataRef,
     /// Derived on-chain data (spot prices, depths, gas costs) shared across all components.
-    pub derived_data: SharedDerivedDataRef,
+    derived_data: SharedDerivedDataRef,
     /// Background task running the Tycho market-data feed.
-    pub feed_handle: JoinHandle<()>,
+    feed_handle: JoinHandle<()>,
     /// Background task polling the RPC node for gas prices.
-    pub gas_price_handle: JoinHandle<()>,
+    gas_price_handle: JoinHandle<()>,
     /// Background task running the computation manager.
-    pub computation_handle: JoinHandle<()>,
+    computation_handle: JoinHandle<()>,
     /// Send a unit value on this channel to trigger a graceful computation-manager shutdown.
-    pub computation_shutdown_tx: broadcast::Sender<()>,
+    computation_shutdown_tx: broadcast::Sender<()>,
+}
+
+impl SolverParts {
+    /// Returns a reference to the worker pools.
+    pub fn worker_pools(&self) -> &[WorkerPool] {
+        &self.worker_pools
+    }
+
+    /// Returns a reference to the shared market data.
+    pub fn market_data(&self) -> &SharedMarketDataRef {
+        &self.market_data
+    }
+
+    /// Returns a reference to the shared derived data.
+    pub fn derived_data(&self) -> &SharedDerivedDataRef {
+        &self.derived_data
+    }
+
+    /// Consumes the parts and returns the router.
+    pub fn into_router(self) -> WorkerPoolRouter {
+        self.router
+    }
+
+    /// Consumes the parts, returning all owned components.
+    #[allow(clippy::type_complexity)]
+    pub fn into_components(
+        self,
+    ) -> (
+        WorkerPoolRouter,
+        Vec<WorkerPool>,
+        SharedMarketDataRef,
+        SharedDerivedDataRef,
+        JoinHandle<()>,
+        JoinHandle<()>,
+        JoinHandle<()>,
+        broadcast::Sender<()>,
+    ) {
+        (
+            self.router,
+            self.worker_pools,
+            self.market_data,
+            self.derived_data,
+            self.feed_handle,
+            self.gas_price_handle,
+            self.computation_handle,
+            self.computation_shutdown_tx,
+        )
+    }
 }

@@ -55,13 +55,12 @@ pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;
 pub struct TokenPriceEntry {
     /// The computed mid-price relative to gas token.
     pub price: Price,
-    /// Components (pool IDs) used in the selected path.
+    /// Components (pool IDs) from all candidate paths considered for this token.
     ///
     /// Used for invalidation: if any of these components change,
-    /// this token's price needs recomputation.
-    /// TODO: Currently, for optimization, we only consider in path_components the path used to
-    /// calculate the best price. If another path that affects this token suddenly becomes the best
-    /// we will not know until the Solver restarts.
+    /// this token's price needs recomputation. Includes pools from all discovered
+    /// paths, not just the selected best path, so a change in any competing pool
+    /// triggers recomputation.
     pub path_components: HashSet<ComponentId>,
 }
 

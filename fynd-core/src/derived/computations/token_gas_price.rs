@@ -297,27 +297,103 @@ impl TokenGasPriceComputation {
     }
 
     /// Core simulation logic: discovers paths, runs round-robin simulation,
-    /// returns best prices with dependency tracking.
+    /// returns best prices with dependency tracking and block number.
     ///
-    /// If `filter_tokens` is `Some`, only simulates those tokens (incremental mode).
-    /// If `None`, simulates all discovered tokens (full mode).
+    /// Takes two brief read locks on market:
+    /// 1. Clone topology + gas_price + block (cheap)
+    /// 2. `extract_subset` with only the components on candidate paths
+    ///
+    /// Path discovery (cheap DFS) runs twice to avoid holding borrows across await
+    /// points. The expensive part — EVM simulation — runs lock-free on the subset.
+    ///
+    /// # Arguments
+    ///
+    /// * `market`: The market data to simulate token prices on.
+    /// * `spot_prices`: The spot prices to use for the simulation.
+    /// * `filter_tokens`: An optional set of tokens to filter the simulation by. If None, all
+    ///   tokens are simulated.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the best prices and the block number.
     #[allow(clippy::type_complexity)]
-    fn simulate_token_prices(
+    async fn simulate_token_prices(
         &self,
-        market: &SharedMarketData,
+        market: &SharedMarketDataRef,
         spot_prices: &SpotPrices,
-        gas_price: &BigUint,
         filter_tokens: Option<&HashSet<Address>>,
-    ) -> Result<HashMap<Address, (f64, Price, HashSet<ComponentId>)>, ComputationError> {
-        let mut graph_manager = PetgraphStableDiGraphManager::new();
-        graph_manager.initialize_graph(&market.component_topology());
+    ) -> Result<(HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64), ComputationError> {
+        // Brief lock 1: topology + gas_price + block (all cheap clones)
+        let (topology, gas_price, block) = {
+            let guard = market.read().await;
+            let topology = guard.component_topology();
+            let block = guard
+                .last_updated()
+                .map(|b| b.number())
+                .unwrap_or(0);
+            let gas_price = guard
+                .gas_price()
+                .ok_or(ComputationError::MissingDependency("gas_price"))?
+                .effective_gas_price();
+            (topology, gas_price, block)
+        };
 
+        // Discover paths to find which components candidate paths need (cheap DFS)
+        let needed_component_ids = {
+            let mut graph_manager = PetgraphStableDiGraphManager::new();
+            graph_manager.initialize_graph(&topology);
+            let mut paths = self.discover_paths(&graph_manager, spot_prices)?;
+            if let Some(tokens) = filter_tokens {
+                paths.retain(|token, _| tokens.contains(token));
+            }
+            paths
+                .values()
+                .flatten()
+                .flat_map(|c| {
+                    c.path
+                        .edge_data
+                        .iter()
+                        .map(|e| e.component_id.clone())
+                })
+                .collect::<HashSet<ComponentId>>()
+        };
+
+        // Brief lock 2: extract only the simulation states we need
+        let subset = {
+            market
+                .read()
+                .await
+                .extract_subset(&needed_component_ids)
+        };
+
+        // Rediscover paths from subset + simulate (no lock, expensive EVM simulation)
+        let mut graph_manager = PetgraphStableDiGraphManager::new();
+        graph_manager.initialize_graph(&subset.component_topology());
         let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
 
         // Optionally filter to only requested tokens
         if let Some(tokens) = filter_tokens {
             paths_by_token.retain(|token, _| tokens.contains(token));
         }
+
+        // Collect all component IDs from every candidate path per token.
+        // This ensures path_components captures any pool that could flip which path is best,
+        // not just pools on the currently-selected path.
+        let all_candidate_components: HashMap<Address, HashSet<ComponentId>> = paths_by_token
+            .iter()
+            .map(|(token, candidates)| {
+                let components = candidates
+                    .iter()
+                    .flat_map(|c| {
+                        c.path
+                            .edge_data
+                            .iter()
+                            .map(|e| e.component_id.clone())
+                    })
+                    .collect::<HashSet<_>>();
+                (token.clone(), components)
+            })
+            .collect();
 
         // Sort each token's paths: lowest spread last (for popping)
         for paths in paths_by_token.values_mut() {
@@ -337,7 +413,7 @@ impl TokenGasPriceComputation {
                 };
                 candidates_exhausted = false;
 
-                match self.compute_spread_and_mid_price(candidate.path, market, gas_price) {
+                match self.compute_spread_and_mid_price(candidate.path, &subset, &gas_price) {
                     Ok((spread, price, components)) => {
                         let is_better = best_prices
                             .get(token)
@@ -357,7 +433,15 @@ impl TokenGasPriceComputation {
             }
         }
 
-        Ok(best_prices)
+        // Extend each token's path_components with all candidate path components so
+        // incremental recomputation fires when any competing path's pool changes.
+        for (token, (_, _, components)) in best_prices.iter_mut() {
+            if let Some(all_comps) = all_candidate_components.get(token) {
+                components.extend(all_comps.iter().cloned());
+            }
+        }
+
+        Ok((best_prices, block))
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -372,19 +456,28 @@ impl TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Option<TokenGasPrices>, ComputationError> {
-        let store_guard = store.read().await;
+        // Read all needed data from store in a single lock acquisition.
+        let (existing_deps, existing_prices, spot_prices) = {
+            let store_guard = store.read().await;
 
-        // Need existing deps to do incremental computation
-        let Some(existing_deps) = store_guard.token_prices_deps() else {
-            return Ok(None); // No deps stored yet, need full compute
-        };
-        let Some(existing_prices) = store_guard.token_prices() else {
-            return Ok(None);
+            // Need existing deps to do incremental computation.
+            let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
+                return Ok(None); // No deps stored yet, need full compute
+            };
+            let Some(existing_prices) = store_guard.token_prices().cloned() else {
+                return Ok(None);
+            };
+            let spot_prices = store_guard
+                .spot_prices()
+                .ok_or(ComputationError::MissingDependency("spot_prices"))?
+                .clone();
+
+            (existing_deps, existing_prices, spot_prices)
         };
 
         let changed_components = changed.all_changed_ids();
 
-        // Find tokens whose paths intersect with changed components
+        // Find tokens whose paths intersect with changed components.
         let tokens_to_recompute: HashSet<Address> = existing_deps
             .iter()
             .filter(|(_, entry)| {
@@ -396,12 +489,8 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(existing_prices.clone()));
+            return Ok(Some(existing_prices));
         }
-
-        let existing_prices = existing_prices.clone();
-        let existing_deps = existing_deps.clone();
-        drop(store_guard);
 
         debug!(
             affected_tokens = tokens_to_recompute.len(),
@@ -409,30 +498,9 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let market = market.read().await;
-        let block = market
-            .last_updated()
-            .map(|b| b.number())
-            .unwrap_or(0);
-
-        let store_guard = store.read().await;
-        let spot_prices = store_guard
-            .spot_prices()
-            .ok_or(ComputationError::MissingDependency("spot_prices"))?
-            .clone();
-        drop(store_guard);
-
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
-
-        let best_prices = self.simulate_token_prices(
-            &market,
-            &spot_prices,
-            &gas_price,
-            Some(&tokens_to_recompute),
-        )?;
+        let (best_prices, block) = self
+            .simulate_token_prices(market, &spot_prices, Some(&tokens_to_recompute))
+            .await?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
@@ -487,26 +555,17 @@ impl DerivedComputation for TokenGasPriceComputation {
             // Fall through to full compute if incremental is not possible
         }
 
-        let market = market.read().await;
-        let store_guard = store.read().await;
-
-        let block = market
-            .last_updated()
-            .map(|b| b.number())
-            .unwrap_or(0);
-
-        let spot_prices = store_guard
+        // Read spot prices from store (independent of market lock).
+        let spot_prices = store
+            .read()
+            .await
             .spot_prices()
             .ok_or(ComputationError::MissingDependency("spot_prices"))?
             .clone();
-        drop(store_guard);
 
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
-
-        let best_prices = self.simulate_token_prices(&market, &spot_prices, &gas_price, None)?;
+        let (best_prices, block) = self
+            .simulate_token_prices(market, &spot_prices, None)
+            .await?;
 
         // Build token prices with dependencies for incremental computation
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
@@ -1039,6 +1098,134 @@ mod tests {
         assert_eq!(
             eth_price.numerator, eth_price.denominator,
             "gas token must have exact 1:1 price"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_path_components_includes_all_candidate_paths() {
+        // Diamond topology: two paths to token_a
+        //
+        //   pool_direct: ETH → token_a  (fee-free, ratio=2, lower spread → selected)
+        //   pool_indirect_1 + pool_indirect_2: ETH → token_b → token_a (higher spread)
+        //
+        // After full compute, token_a's path_components must include all three pool IDs
+        // even though only pool_direct is on the best path.
+        let eth = token(0, "ETH");
+        let token_a = token(1, "A");
+        let token_b = token(2, "B");
+
+        let (market, derived) = setup_test_env(vec![
+            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            (
+                "pool_indirect_1",
+                &eth,
+                &token_b,
+                MockProtocolSim::new(3.0)
+                    .with_fee(0.1)
+                    .with_gas(0),
+            ),
+            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+        ])
+        .await;
+        let changed = ChangedComponents::default();
+
+        let computation = computation_for(&eth.address);
+        computation
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        // Inspect stored deps to verify path_components
+        let store = derived.read().await;
+        let deps = store
+            .token_prices_deps()
+            .expect("deps should be stored");
+        let entry = deps
+            .get(&token_a.address)
+            .expect("token_a should have deps");
+
+        assert!(
+            entry
+                .path_components
+                .contains("pool_direct"),
+            "path_components should contain pool_direct (best path)"
+        );
+        assert!(
+            entry
+                .path_components
+                .contains("pool_indirect_1"),
+            "path_components should contain pool_indirect_1 (competing path)"
+        );
+        assert!(
+            entry
+                .path_components
+                .contains("pool_indirect_2"),
+            "path_components should contain pool_indirect_2 (competing path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incremental_recompute_triggered_by_competing_path_pool() {
+        // Same diamond topology as above.
+        // After full compute, changing pool_indirect_1 (not on best path) must
+        // put token_a in tokens_to_recompute because it's now in path_components.
+        let eth = token(0, "ETH");
+        let token_a = token(1, "A");
+        let token_b = token(2, "B");
+
+        let (market, derived) = setup_test_env(vec![
+            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            (
+                "pool_indirect_1",
+                &eth,
+                &token_b,
+                MockProtocolSim::new(3.0)
+                    .with_fee(0.1)
+                    .with_gas(0),
+            ),
+            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+        ])
+        .await;
+
+        // Full compute to store deps
+        let full_changed = ChangedComponents::default();
+        let computation = computation_for(&eth.address);
+        computation
+            .compute(&market, &derived, &full_changed)
+            .await
+            .unwrap();
+
+        // Incremental change: only pool_indirect_1 updated
+        let incremental_changed = ChangedComponents {
+            added: HashMap::new(),
+            removed: vec![],
+            updated: vec!["pool_indirect_1".to_string()],
+            is_full_recompute: false,
+        };
+
+        let store = derived.read().await;
+        let deps = store
+            .token_prices_deps()
+            .expect("deps should be stored");
+        let changed_ids = incremental_changed.all_changed_ids();
+
+        let tokens_to_recompute: HashSet<Address> = deps
+            .iter()
+            .filter(|(_, entry)| {
+                !entry
+                    .path_components
+                    .is_disjoint(&changed_ids)
+            })
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        assert!(
+            tokens_to_recompute.contains(&token_a.address),
+            "token_a should be scheduled for recomputation when pool_indirect_1 changes"
+        );
+        assert!(
+            tokens_to_recompute.contains(&token_b.address),
+            "token_b should be scheduled for recomputation when pool_indirect_1 changes"
         );
     }
 

@@ -3,8 +3,10 @@
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use fynd_core::SolveError;
 pub use fynd_rpc_types::ErrorResponse;
+use tracing::warn;
 
 /// API error type that converts to HTTP responses.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// Invalid request format or parameters.
@@ -25,6 +27,7 @@ pub enum ApiError {
 
     /// Market data is stale.
     #[error("market data stale: last update {age_ms}ms ago")]
+    #[non_exhaustive]
     StaleData { age_ms: u64 },
 }
 
@@ -57,14 +60,17 @@ impl ResponseError for ApiError {
                 SolveError::Internal(_) => "INTERNAL_ERROR",
                 SolveError::NotReady(_) => "NOT_READY",
                 SolveError::FailedEncoding(_) => "FAILED_ENCODING",
+                other => {
+                    warn!(?other, "unhandled SolveError variant");
+                    "INTERNAL_ERROR"
+                }
             },
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::Internal(_) => "INTERNAL_ERROR",
             ApiError::StaleData { .. } => "STALE_DATA",
         };
 
-        let response =
-            ErrorResponse { error: self.to_string(), code: code.to_string(), details: None };
+        let response = ErrorResponse::new(self.to_string(), code.to_string());
 
         HttpResponse::build(self.status_code()).json(response)
     }

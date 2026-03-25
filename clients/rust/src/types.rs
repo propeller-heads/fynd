@@ -565,6 +565,7 @@ pub struct Quote {
     amount_in: BigUint,
     amount_out: BigUint,
     gas_estimate: BigUint,
+    amount_out_net_gas: BigUint,
     price_impact_bps: Option<i32>,
     block: BlockInfo,
     /// Output token address from the original order (20 raw bytes).
@@ -618,6 +619,14 @@ impl Quote {
         &self.gas_estimate
     }
 
+    /// Amount out minus estimated gas cost, expressed in output token units.
+    ///
+    /// Computed server-side using the current gas price and the quote's implied
+    /// exchange rate. This is the primary metric the solver uses to rank routes.
+    pub fn amount_out_net_gas(&self) -> &BigUint {
+        &self.amount_out_net_gas
+    }
+
     /// Price impact in basis points (1 bps = 0.01%). May be `None` for quotes without a route.
     pub fn price_impact_bps(&self) -> Option<i32> {
         self.price_impact_bps
@@ -669,6 +678,7 @@ impl Quote {
         amount_in: BigUint,
         amount_out: BigUint,
         gas_estimate: BigUint,
+        amount_out_net_gas: BigUint,
         price_impact_bps: Option<i32>,
         block: BlockInfo,
         token_out: Bytes,
@@ -683,6 +693,7 @@ impl Quote {
             amount_in,
             amount_out,
             gas_estimate,
+            amount_out_net_gas,
             price_impact_bps,
             block,
             token_out,

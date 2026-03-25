@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.13.0"
+    "version": "0.22.0"
   },
   "paths": {
     "/v1/health": {
@@ -482,7 +482,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/EncodingOptions"
+                "$ref": "#/components/schemas/EncodingOptions",
+                "description": "Options during encoding. If None, quote will be returned without calldata."
               }
             ]
           },

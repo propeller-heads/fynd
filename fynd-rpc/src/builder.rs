@@ -15,6 +15,7 @@ use crate::{
 /// Builder that assembles Fynd and returns a running server handle.
 ///
 /// Wraps [`FyndBuilder`] for all solver configuration and adds HTTP server concerns on top.
+#[must_use]
 pub struct FyndRPCBuilder {
     fynd_builder: FyndBuilder,
     http_host: String,
@@ -141,7 +142,7 @@ impl FyndRPCBuilder {
     pub fn blacklist(mut self, blacklist: BlacklistConfig) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blacklisted_components(blacklist.components);
+            .blacklisted_components(blacklist.into_components());
         self
     }
 
@@ -157,7 +158,7 @@ impl FyndRPCBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Fynd> {
+    pub fn build(self) -> Result<FyndRPC> {
         info!(
             host = %self.http_host,
             port = self.http_port,
@@ -173,7 +174,7 @@ impl FyndRPCBuilder {
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .into_parts();
 
-        for pool in &parts.worker_pools {
+        for pool in parts.worker_pools() {
             info!(
                 name = %pool.name(),
                 algorithm = %pool.algorithm(),
@@ -183,7 +184,7 @@ impl FyndRPCBuilder {
         }
 
         let health_tracker =
-            HealthTracker::new(Arc::clone(&parts.market_data), Arc::clone(&parts.derived_data))
+            HealthTracker::new(Arc::clone(parts.market_data()), Arc::clone(parts.derived_data()))
                 .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
 
         #[cfg(feature = "experimental")]
@@ -192,11 +193,22 @@ impl FyndRPCBuilder {
             native_token(&chain).context("gas token not configured for chain")?
         };
 
+        let (
+            router,
+            worker_pools,
+            _market_data,
+            _derived_data,
+            feed_handle,
+            gas_price_handle,
+            computation_handle,
+            computation_shutdown_tx,
+        ) = parts.into_components();
+
         let app_state = AppState::new(
-            parts.router,
+            router,
             health_tracker,
             #[cfg(feature = "experimental")]
-            Arc::clone(&parts.derived_data),
+            Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
         );
@@ -217,20 +229,21 @@ impl FyndRPCBuilder {
             }
         });
 
-        Ok(Fynd {
+        Ok(FyndRPC {
             server_handle,
             server_task,
-            worker_pools: parts.worker_pools,
-            feed_handle: parts.feed_handle,
-            gas_price_worker_handle: parts.gas_price_handle,
-            computation_manager_handle: parts.computation_handle,
-            computation_shutdown_tx: parts.computation_shutdown_tx,
+            worker_pools,
+            feed_handle,
+            gas_price_worker_handle: gas_price_handle,
+            computation_manager_handle: computation_handle,
+            computation_shutdown_tx,
         })
     }
 }
 
-/// Running Fynd. Call `run` to block until shutdown and perform cleanup.
-pub struct Fynd {
+/// Running Fynd RPC server. Call `run` to block until shutdown and perform cleanup.
+#[must_use]
+pub struct FyndRPC {
     server_handle: ServerHandle,
     server_task: JoinHandle<()>,
     worker_pools: Vec<WorkerPool>,
@@ -240,7 +253,7 @@ pub struct Fynd {
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
-impl Fynd {
+impl FyndRPC {
     /// Returns a handle to the HTTP server for graceful shutdown.
     pub fn server_handle(&self) -> ServerHandle {
         self.server_handle.clone()
@@ -248,7 +261,7 @@ impl Fynd {
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
-        let Fynd {
+        let FyndRPC {
             server_handle,
             mut server_task,
             worker_pools,

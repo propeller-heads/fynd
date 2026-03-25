@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_client::FyndClientBuilder;
 use fynd_rpc::{
-    builder::{parse_chain, Fynd, FyndRPCBuilder},
+    builder::{parse_chain, FyndRPC, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
 };
 use serde::Serialize;
@@ -147,14 +147,14 @@ fn parse_worker_counts(s: &str) -> Result<Vec<usize>> {
 }
 
 fn validate_single_pool(config: &WorkerPoolsConfig) -> Result<(String, PoolConfig)> {
-    if config.pools.is_empty() {
+    if config.pools().is_empty() {
         bail!("base config has no pools; exactly one pool is required");
     }
-    if config.pools.len() > 1 {
-        bail!("base config has {} pools; exactly one pool is required", config.pools.len());
+    if config.pools().len() > 1 {
+        bail!("base config has {} pools; exactly one pool is required", config.pools().len());
     }
     let (name, pool) = config
-        .pools
+        .pools()
         .iter()
         .next()
         .expect("checked non-empty");
@@ -166,7 +166,7 @@ fn build_solver(
     pool_name: &str,
     pool_config: &PoolConfig,
     workers: usize,
-) -> Result<Fynd> {
+) -> Result<FyndRPC> {
     let chain = parse_chain(&args.chain)?;
     let protocols: Vec<String> = args
         .protocols
@@ -178,8 +178,9 @@ fn build_solver(
         .clone()
         .unwrap_or_else(|| fynd_rpc::config::defaults::DEFAULT_RPC_URL.to_string());
 
-    let mut pool = pool_config.clone();
-    pool.num_workers = workers;
+    let pool = pool_config
+        .clone()
+        .with_num_workers(workers);
 
     let pools = HashMap::from([(pool_name.to_string(), pool)]);
 
@@ -277,7 +278,7 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("failed to load base config: {}", args.base_config.display()))?;
     let (pool_name, pool_config) = validate_single_pool(&pools_config)?;
 
-    info!("Pool: {} (algorithm: {})", pool_name, pool_config.algorithm);
+    info!("Pool: {} (algorithm: {})", pool_name, pool_config.algorithm());
     info!("Worker counts: {:?}", worker_counts);
     info!("Requests per run: {}", args.num_requests);
 
@@ -322,7 +323,7 @@ pub async fn run(args: Args) -> Result<()> {
         bail!("all iterations failed; no results to report");
     }
 
-    print_summary(&pool_name, &pool_config.algorithm, &args, &points);
+    print_summary(&pool_name, pool_config.algorithm(), &args, &points);
 
     if let Some(ref path) = args.output_file {
         let results = ScaleResults {
@@ -333,7 +334,7 @@ pub async fn run(args: Args) -> Result<()> {
                 parallelization_mode: args.parallelization_mode.clone(),
                 warmup_secs: args.warmup_secs,
                 pool_name: pool_name.clone(),
-                algorithm: pool_config.algorithm.clone(),
+                algorithm: pool_config.algorithm().to_string(),
             },
             points,
         };
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn validate_single_pool_empty() {
-        let config = WorkerPoolsConfig { pools: HashMap::new() };
+        let config = WorkerPoolsConfig::new(HashMap::new());
         let err = validate_single_pool(&config).unwrap_err();
         assert!(err.to_string().contains("no pools"));
     }
@@ -441,21 +442,18 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "test_pool".to_string(),
-            PoolConfig {
-                algorithm: "most_liquid".to_string(),
-                num_workers: 4,
-                task_queue_capacity: 1000,
-                min_hops: 1,
-                max_hops: 3,
-                timeout_ms: 100,
-                max_routes: None,
-            },
+            PoolConfig::new("most_liquid")
+                .with_num_workers(4)
+                .with_task_queue_capacity(1000)
+                .with_min_hops(1)
+                .with_max_hops(3)
+                .with_timeout_ms(100),
         );
-        let config = WorkerPoolsConfig { pools };
+        let config = WorkerPoolsConfig::new(pools);
         let (name, pool) = validate_single_pool(&config).unwrap();
         assert_eq!(name, "test_pool");
-        assert_eq!(pool.algorithm, "most_liquid");
-        assert_eq!(pool.num_workers, 4);
+        assert_eq!(pool.algorithm(), "most_liquid");
+        assert_eq!(pool.num_workers(), 4);
     }
 
     #[test]
@@ -463,29 +461,24 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "a".to_string(),
-            PoolConfig {
-                algorithm: "most_liquid".to_string(),
-                num_workers: 4,
-                task_queue_capacity: 1000,
-                min_hops: 1,
-                max_hops: 3,
-                timeout_ms: 100,
-                max_routes: None,
-            },
+            PoolConfig::new("most_liquid")
+                .with_num_workers(4)
+                .with_task_queue_capacity(1000)
+                .with_min_hops(1)
+                .with_max_hops(3)
+                .with_timeout_ms(100),
         );
         pools.insert(
             "b".to_string(),
-            PoolConfig {
-                algorithm: "dijkstra".to_string(),
-                num_workers: 2,
-                task_queue_capacity: 500,
-                min_hops: 1,
-                max_hops: 2,
-                timeout_ms: 200,
-                max_routes: Some(10),
-            },
+            PoolConfig::new("dijkstra")
+                .with_num_workers(2)
+                .with_task_queue_capacity(500)
+                .with_min_hops(1)
+                .with_max_hops(2)
+                .with_timeout_ms(200)
+                .with_max_routes(Some(10)),
         );
-        let config = WorkerPoolsConfig { pools };
+        let config = WorkerPoolsConfig::new(pools);
         let err = validate_single_pool(&config).unwrap_err();
         assert!(err.to_string().contains("2 pools"));
     }

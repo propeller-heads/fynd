@@ -152,90 +152,37 @@ cargo run -p fynd-benchmark --release -- compare \
 | `--url-b` | `http://localhost:3001` | Solver B (candidate) URL |
 | `--label-a` | `main` | Label for solver A in output |
 | `--label-b` | `branch` | Label for solver B in output |
-| `-n` | `100` | Number of requests to send |
+| `-n` | `500` | Number of requests to send |
 | `--requests-file` | _(none)_ | Path to JSON file with custom requests |
 | `--output` | `comparison_results.json` | Path for full results JSON |
 | `--timeout-ms` | `15000` | Per-request timeout in milliseconds |
 | `--seed` | `42` | Random seed for reproducibility |
 
-### Output
+### Net-of-Gas Comparison
 
-Prints a summary table to stdout showing win/loss counts and bps differences. Writes detailed per-request results to the output JSON file. Positive bps diffs mean solver B returned more output than solver A.
-
----
-
-## CPU Scaling
-
-Measures how solver throughput (req/s) scales with worker thread count. The tool builds a solver in-process for each worker count, runs a load test, shuts down, and repeats.
-
-```bash
-cargo run -p fynd-benchmark --release -- scale [OPTIONS]
-```
-
-{% hint style="warning" %}
-Requires a `worker_pools.toml` with exactly **one** pool defined.
-{% endhint %}
-
-### Options
-
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--base-config` | `worker_pools.toml` | Single-pool TOML config |
-| `--worker-counts` | _(required)_ | Comma-separated worker counts (e.g. `1,2,4,8,16`) |
-| `--protocols` | _(required)_ | Comma-separated protocols for solver |
-| `--tycho-url` | `localhost:4242` | Tycho WebSocket URL |
-| `--tycho-api-key` | _(none)_ | Tycho API key |
-| `--disable-tls` | `false` | Disable TLS for Tycho connection |
-| `--rpc-url` | _(none)_ | Node RPC URL |
-| `--chain` | `ethereum` | Chain name |
-| `--http-port` | `3000` | Solver HTTP port |
-| `-n` | `100` | Requests per iteration |
-| `-m` | `fixed:8` | Parallelization mode |
-| `--requests-file` | _(none)_ | Custom request templates |
-| `--warmup-secs` | `30` | Seconds to wait after health before benchmarking |
-| `--health-timeout-secs` | `300` | Max seconds to wait for solver health |
-| `--output-file` | _(none)_ | JSON output file |
-
-### Example
-
-```bash
-cargo run -p fynd-benchmark --release -- scale \
-  --base-config single_pool.toml \
-  --worker-counts 1,2,4,8,16 \
-  --protocols uniswap_v2,uniswap_v3 \
-  --tycho-url wss://tycho.example.com \
-  --tycho-api-key $TYCHO_API_KEY \
-  -n 200 \
-  -m fixed:8 \
-  --output-file scale_results.json
-```
+The compare tool uses the server-computed `amount_out_net_gas` field for net-of-gas output comparison. This value represents the output amount minus gas cost denominated in the output token, calculated by the solver. It works for all token pairs.
 
 ### Output
 
-The tool prints a summary table showing throughput, latency, and per-worker efficiency at each worker count:
-
-```
-=== CPU Scaling Results ===
-
-Pool: most_liquid_2_hops_fast (algorithm: most_liquid)
-Requests per run: 200, Mode: fixed:8
-
- Workers | Throughput (req/s) | Median RT (ms) | P99 RT (ms) | RPS/Worker
----------+--------------------+----------------+-------------+-----------
-       1 |               8.50 |             95 |          142 |      8.50
-       2 |              16.20 |             50 |           98 |      8.10
-       4 |              30.10 |             28 |           65 |      7.53
-       8 |              48.90 |             18 |           52 |      6.11
-      16 |              62.30 |             15 |           48 |      3.89
-```
-
-Pass `--output-file` to export the full results as JSON for further analysis.
+Prints a summary table to stdout showing win/loss counts and bps differences (both gross and net-of-gas). Writes detailed per-request results to the output JSON file. Positive bps diffs mean solver B returned more output than solver A.
 
 ---
 
-## Custom Request Templates
+## Request Data
 
-By default, the load test uses a single WETH→USDC swap and the compare tool generates random requests from a built-in set of token pairs. Both commands accept `--requests-file` to supply custom requests.
+By default, the load test uses a single WETH→USDC swap and the compare tool samples from a built-in set of 50 real aggregator trades. Both commands accept `--requests-file` to supply custom requests.
+
+### Downloading the Full Dataset
+
+For broader coverage, download the full 10k aggregator trade dataset:
+
+```bash
+cargo run -p fynd-benchmark --release -- download-trades
+```
+
+Then use it with either command via `--requests-file aggregator_trades_10k.json`.
+
+### Custom Request Format
 
 The file should be a JSON array of quote request bodies:
 

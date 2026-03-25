@@ -144,6 +144,19 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
     ) -> Option<Self>;
 }
 
+/// Trivial implementation for algorithms that don't use edge weights (e.g., Bellman-Ford).
+impl EdgeWeightFromSimAndDerived for () {
+    fn from_sim_and_derived(
+        _sim: &dyn ProtocolSim,
+        _component_id: &ComponentId,
+        _token_in: &Token,
+        _token_out: &Token,
+        _derived: &DerivedData,
+    ) -> Option<Self> {
+        Some(())
+    }
+}
+
 /// Trait for graph managers that support edge weight updates with derived data.
 pub trait EdgeWeightUpdaterWithDerived {
     /// Updates edge weights using simulation states and pre-computed derived data.

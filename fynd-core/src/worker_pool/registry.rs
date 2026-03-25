@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::{
-    algorithm::{AlgorithmConfig, MostLiquidAlgorithm},
+    algorithm::{AlgorithmConfig, BellmanFordAlgorithm, MostLiquidAlgorithm},
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::SharedMarketDataRef},
     types::internal::SolveTask,
@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// List of available built-in algorithm names (for registry-based dispatch).
-pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid"];
+pub(crate) const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid", "bellman_ford"];
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
@@ -60,7 +60,14 @@ pub(crate) struct SpawnWorkersParams {
 #[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
 pub struct UnknownAlgorithmError {
     /// The algorithm name that was not found.
-    pub name: String,
+    pub(crate) name: String,
+}
+
+impl UnknownAlgorithmError {
+    /// Returns the algorithm name that was not found.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Determines how a worker pool spawns its workers.
@@ -101,6 +108,7 @@ impl AlgorithmSpawner {
         match self {
             Self::Registry { algorithm } => match algorithm.as_str() {
                 "most_liquid" => Ok(spawn_most_liquid_workers(params)),
+                "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 _ => Err(UnknownAlgorithmError { name: algorithm }),
             },
             Self::Custom { spawner, .. } => Ok(spawner(params)),
@@ -187,6 +195,15 @@ fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> 
     let factory = |config: AlgorithmConfig| {
         MostLiquidAlgorithm::with_config(config)
             .expect("invalid worker configuration for MostLiquidAlgorithm")
+    };
+    spawn_workers_generic(params, &factory)
+}
+
+/// Spawns workers for the BellmanFord algorithm.
+fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+    let factory = |config: AlgorithmConfig| {
+        BellmanFordAlgorithm::with_config(config)
+            .expect("invalid worker configuration for BellmanFordAlgorithm")
     };
     spawn_workers_generic(params, &factory)
 }

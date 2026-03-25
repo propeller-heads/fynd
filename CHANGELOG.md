@@ -1,3 +1,79 @@
+## [0.25.2](https://github.com/propeller-heads/fynd/compare/0.25.1...0.25.2) (2026-03-25)
+
+
+### Bug Fixes
+
+* update doc snippet checker for quickstart folder move ([a2770de](https://github.com/propeller-heads/fynd/commit/a2770de5f4e3e9928e2ba44ad44528424ffe5f76))
+
+## [0.25.1](https://github.com/propeller-heads/fynd/compare/0.25.0...0.25.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* fix after incorrect rebase ([200abcb](https://github.com/propeller-heads/fynd/commit/200abcbdf5cf2a07e92b0343e7bc7aac54a88fd6))
+* track all candidate path pools in path_components for incremental invalidation ([5badb5c](https://github.com/propeller-heads/fynd/commit/5badb5c29fe33887e5a03907ac97587ee2f3cf94))
+* update the path to the relevant docs ([a423bd0](https://github.com/propeller-heads/fynd/commit/a423bd029de7b9ac7b64707ee88dc3ec6e2b0a9c))
+
+## [0.25.0](https://github.com/propeller-heads/fynd/compare/0.24.3...0.25.0) (2026-03-23)
+
+
+### Features
+
+* **benchmark:** improve compare tool with parallel requests, net-of-gas, timing ([a82e6af](https://github.com/propeller-heads/fynd/commit/a82e6af2eff980a5f05e8fe75941f3535a6daaca))
+
+
+### Bug Fixes
+
+* **benchmark:** add missing reqwest dep and apply formatting ([f4cc24e](https://github.com/propeller-heads/fynd/commit/f4cc24edae5d8aaf42b71df5c275d5289b4ff358))
+* **benchmark:** clean up unused deps, naming, and API surface ([0bd89bc](https://github.com/propeller-heads/fynd/commit/0bd89bcd2032c61abcb48cfe55b1062649213e9a))
+* **benchmark:** use server-side amount_out_net_gas and real aggregator trades ([a5080af](https://github.com/propeller-heads/fynd/commit/a5080af7ef1ae67088972dd22c3ef9a839967954))
+
+
+### Reverts
+
+* Revert "Replace committed Dune dataset with download-trades subcommand" ([7c580fe](https://github.com/propeller-heads/fynd/commit/7c580fe7c4af0b85b9dd0d93584feef4884a3434))
+
+## [0.24.3](https://github.com/propeller-heads/fynd/compare/0.24.2...0.24.3) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove unused SharedMarketData import ([824092b](https://github.com/propeller-heads/fynd/commit/824092bcc33bc2d88c73515b092e6b11176d4b72))
+* update rustls-webpki to 0.103.10 for RUSTSEC-2026-0049 ([1aa85c2](https://github.com/propeller-heads/fynd/commit/1aa85c2706b7991fbc6c647fc49b85c87047ac14))
+
+## [0.24.2](https://github.com/propeller-heads/fynd/compare/0.24.1...0.24.2) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove accidentally committed .env and add to .gitignore ([bdcb25e](https://github.com/propeller-heads/fynd/commit/bdcb25e4da0d6a36db43a299a069c15c053f7039))
+
+## [0.24.1](https://github.com/propeller-heads/fynd/compare/0.24.0...0.24.1) (2026-03-23)
+
+
+### Bug Fixes
+
+* **deps:** update rustls-webpki to 0.103.10 for RUSTSEC-2026-0049 ([73c4bd5](https://github.com/propeller-heads/fynd/commit/73c4bd5902c58b4e5880439208a62b28ad614036))
+* **most_liquid:** use per-component state overrides in simulate_path ([62ae7b8](https://github.com/propeller-heads/fynd/commit/62ae7b8f95f5247d14b53d67d1ebfad938ef48d0))
+
+## [0.24.0](https://github.com/propeller-heads/fynd/compare/0.23.1...0.24.0) (2026-03-20)
+
+
+### Features
+
+* PriceProvider skeleton + helpers ([c8f1e1d](https://github.com/propeller-heads/fynd/commit/c8f1e1dd8189ee538389eb229f521062a1dac006))
+
+## [0.23.1](https://github.com/propeller-heads/fynd/compare/0.23.0...0.23.1) (2026-03-20)
+
+## [0.23.0](https://github.com/propeller-heads/fynd/compare/0.22.1...0.23.0) (2026-03-20)
+
+
+### Features
+
+* **fynd-rpc-types:** harden public API surface ([b6b1539](https://github.com/propeller-heads/fynd/commit/b6b153956d429180bda5b819a6555dbfea75ba4a))
+
+## [0.22.1](https://github.com/propeller-heads/fynd/compare/0.22.0...0.22.1) (2026-03-20)
+
 ## [0.22.0](https://github.com/propeller-heads/fynd/compare/0.21.1...0.22.0) (2026-03-19)
 
 

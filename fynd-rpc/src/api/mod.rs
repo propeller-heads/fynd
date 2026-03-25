@@ -68,7 +68,7 @@ pub struct ExperimentalApiDoc;
 /// Reads the last update timestamp from SharedMarketData to determine how fresh the market data is,
 /// and checks derived data overall readiness.
 #[derive(Clone)]
-pub struct HealthTracker {
+pub(crate) struct HealthTracker {
     market_data: SharedMarketDataRef,
     derived_data: SharedDerivedDataRef,
     gas_price_stale_threshold: Option<Duration>,
@@ -77,7 +77,10 @@ pub struct HealthTracker {
 
 impl HealthTracker {
     /// Creates a new health tracker.
-    pub fn new(market_data: SharedMarketDataRef, derived_data: SharedDerivedDataRef) -> Self {
+    pub(crate) fn new(
+        market_data: SharedMarketDataRef,
+        derived_data: SharedDerivedDataRef,
+    ) -> Self {
         Self {
             market_data,
             derived_data,
@@ -87,13 +90,13 @@ impl HealthTracker {
     }
 
     /// Sets the gas price staleness threshold. Health returns 503 when exceeded.
-    pub fn with_gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
+    pub(crate) fn with_gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
         self.gas_price_stale_threshold = threshold;
         self
     }
 
     /// Returns milliseconds since the last market data update.
-    pub async fn age_ms(&self) -> u64 {
+    pub(crate) async fn age_ms(&self) -> u64 {
         let data = self.market_data.read().await;
         match data.last_updated() {
             Some(block_info) => {
@@ -110,7 +113,7 @@ impl HealthTracker {
     }
 
     /// Returns milliseconds since the last gas price update, if available.
-    pub async fn gas_price_age_ms(&self) -> Option<u64> {
+    pub(crate) async fn gas_price_age_ms(&self) -> Option<u64> {
         let data = self.market_data.read().await;
         let gas_price = data.gas_price()?;
         let now_ms = SystemTime::now()
@@ -127,7 +130,7 @@ impl HealthTracker {
     ///
     /// During startup (before `threshold` has elapsed), a missing gas price is not
     /// considered stale — the first fetch may not have completed yet.
-    pub async fn gas_price_stale(&self) -> bool {
+    pub(crate) async fn gas_price_stale(&self) -> bool {
         let Some(threshold) = self.gas_price_stale_threshold else { return false };
         match self.gas_price_age_ms().await {
             Some(age_ms) => age_ms > threshold.as_millis() as u64,
@@ -140,7 +143,7 @@ impl HealthTracker {
     /// This checks overall readiness (has any computation cycle completed), not per-block
     /// freshness. Algorithms that require fresh derived data are ready to receive orders but
     /// will wait for per-block recomputation before solving.
-    pub async fn derived_data_ready(&self) -> bool {
+    pub(crate) async fn derived_data_ready(&self) -> bool {
         self.derived_data
             .read()
             .await
@@ -152,21 +155,17 @@ impl HealthTracker {
 /// Shared application state for HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// WorkerPoolRouter for solving requests across multiple solver pools.
-    pub worker_router: Arc<WorkerPoolRouter>,
-    /// Health tracker for monitoring data freshness.
-    pub health_tracker: HealthTracker,
-    /// Shared derived data (token prices, spot prices, pool depths).
+    worker_router: Arc<WorkerPoolRouter>,
+    health_tracker: HealthTracker,
     #[cfg(feature = "experimental")]
-    pub derived_data: SharedDerivedDataRef,
-    /// Gas token address for this chain (e.g. WETH).
+    pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
-    pub gas_token: Address,
+    pub(crate) gas_token: Address,
 }
 
 impl AppState {
     /// Creates new application state.
-    pub fn new(
+    pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
@@ -181,10 +180,18 @@ impl AppState {
             gas_token,
         }
     }
+
+    pub(crate) fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
+        &self.worker_router
+    }
+
+    pub(crate) fn health_tracker(&self) -> &HealthTracker {
+        &self.health_tracker
+    }
 }
 
 /// Configures the Actix Web application with routes and state.
-pub fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
+pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
     #[allow(unused_mut)]
     let mut openapi = ApiDoc::openapi();
     #[cfg(feature = "experimental")]

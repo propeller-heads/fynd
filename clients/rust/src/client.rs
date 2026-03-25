@@ -509,7 +509,7 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_quote: fynd_rpc_types::Quote = response.json().await?;
-        let solve_time_ms = dto_quote.solve_time_ms;
+        let solve_time_ms = dto_quote.solve_time_ms();
         let batch_quote = dto_to_batch_quote(dto_quote, token_out, receiver)?;
 
         let mut quote = batch_quote
@@ -832,6 +832,7 @@ mod tests {
             BigUint::from(1_000_000u64),
             BigUint::from(990_000u64),
             BigUint::from(50_000u64),
+            BigUint::from(940_000u64),
             Some(10),
             BlockInfo::new(1_234_567, "0xabcdef".to_string(), 1_700_000_000),
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
@@ -1399,6 +1400,7 @@ mod tests {
             num_bigint::BigUint::from(1_000u64),
             num_bigint::BigUint::from(990u64),
             num_bigint::BigUint::from(50_000u64),
+            num_bigint::BigUint::from(940u64),
             None,
             BlockInfo::new(1, "0xabc".to_string(), 0),
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
