@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 60
     env:
       TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
-      FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
+      FORK_RPC_URL: ${{ secrets.ETH_RPC_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
