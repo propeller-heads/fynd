@@ -1,3 +1,10 @@
+## [0.26.0](https://github.com/propeller-heads/fynd/compare/0.25.2...0.26.0) (2026-03-25)
+
+
+### Features
+
+* update tycho-simulation dependency ([b0a7647](https://github.com/propeller-heads/fynd/commit/b0a76478888ca3e37ebaa22f91a7a0d6c81f383f))
+
 ## [0.25.2](https://github.com/propeller-heads/fynd/compare/0.25.1...0.25.2) (2026-03-25)
 
 
