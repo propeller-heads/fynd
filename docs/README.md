@@ -25,6 +25,12 @@ layout:
 
 Fynd is a DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). It finds optimal swap routes across DeFi protocols in real-time and returns solutions you can encode and execute on-chain.
 
+{% hint style="danger" %}
+**Alpha Software — Unaudited Contracts**
+
+Fynd's smart contracts ([TychoRouter V3,](https://docs.propellerheads.xyz/tycho/for-solvers/execution) Vault, Executors) are still undergoing a security audit. Funds stored in the router (including vault deposits) might be lost. Use at your own discretion.
+{% endhint %}
+
 ## Own Your Routing <a href="#own-your-dex-routing" id="own-your-dex-routing"></a>
 
 Route APIs are simple, but the tradeoffs are painful: rate limits, network overhead, no transparency, unreliable uptime, and unexplainable slippage. And you can't fix any of it.
@@ -43,6 +49,10 @@ Fynd puts you in control:
 * **Algorithm-agnostic**: Built around a pluggable `Algorithm` trait. Different algorithms use different graph representations and strategies. Multiple algorithms compete in parallel; the best result wins.
 * **Performance-first**: CPU-bound route finding runs on dedicated OS threads (not the async runtime). Each worker pool has its own task queue for independent backpressure and scaling.
 * **Observability built-in**: Prometheus metrics, structured logging via `tracing`, and health endpoints are first-class citizens.
+
+### Order Types
+
+Fynd currently supports **sell orders** only (exact input amount). You specify the amount of the input token, and Fynd finds the best output. Buy orders (exact output) are not yet supported.
 
 ### Supported Chains
 
