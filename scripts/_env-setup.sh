@@ -75,7 +75,7 @@ build_ts() {
     echo "==> Building TypeScript packages..."
     pnpm --dir "$REPO_ROOT/clients/typescript" install --frozen-lockfile --silent
     pnpm --dir "$REPO_ROOT/clients/typescript" --filter @fynd/autogen --silent run build
-    pnpm --dir "$REPO_ROOT/clients/typescript" --filter @fynd/client --silent run build
+    pnpm --dir "$REPO_ROOT/clients/typescript" --filter @kayibal/fynd-client --silent run build
     echo "    Done"
 }
 

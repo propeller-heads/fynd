@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fynd/client": "workspace:*",
+    "@kayibal/fynd-client": "workspace:*",
     "viem": "2.46.3"
   },
   "devDependencies": {

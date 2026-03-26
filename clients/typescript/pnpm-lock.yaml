@@ -27,7 +27,7 @@ importers:
 
   examples/tutorial:
     dependencies:
-      '@fynd/client':
+      '@kayibal/fynd-client':
         specifier: workspace:*
         version: link:../../client
       viem:
