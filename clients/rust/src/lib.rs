@@ -1,14 +1,16 @@
 #![deny(missing_docs)]
-//! Rust client for the [Fynd](https://fynd.exchange) DEX router.
+//! Rust client for the [Fynd](https://fynd.xyz) DEX router.
 //!
 //! `fynd-client` lets you request swap quotes, build signable transaction payloads, and
 //! broadcast signed orders through the Fynd RPC API — all from a single typed interface.
 //!
+//! For guides, API reference, and setup instructions see **<https://docs.fynd.xyz/>**.
+//!
 //! # Workflow
 //!
 //! A complete swap runs in three steps: **quote → approve → sign and execute**.
-//! See `clients/rust/examples/swap_erc20.rs` for a full walkthrough, or run it against a
-//! local Fynd instance with `./scripts/run-example.sh swap_erc20`.
+//! See `clients/rust/examples/swap_erc20.rs` for a full walkthrough, or follow the
+//! [quickstart](https://docs.fynd.xyz/get-started/quickstart) to run a local Fynd instance.
 //!
 //! # Constructing a client
 //!
@@ -17,9 +19,10 @@
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Fynd default: http://localhost:3000  RPC default (Anvil): http://localhost:8545
 //! let client = FyndClientBuilder::new(
-//!     "https://rpc.fynd.exchange",
-//!     "https://mainnet.infura.io/v3/YOUR_KEY",
+//!     "http://localhost:3000",
+//!     "http://localhost:8545",
 //! )
 //! .build()
 //! .await?;
@@ -31,7 +34,7 @@
 //!
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
-//! let client = FyndClientBuilder::new("https://rpc.fynd.exchange", "https://rpc.fynd.exchange")
+//! let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
 //!     .build_quote_only()?;
 //! ```
 //!
@@ -42,7 +45,7 @@
 //! # use bytes::Bytes;
 //! # use num_bigint::BigUint;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let client = FyndClientBuilder::new("https://rpc.fynd.exchange", "https://rpc.fynd.exchange")
+//! # let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
 //! #     .build_quote_only()?;
 //! // WETH → USDC on mainnet (Vitalik's address as sender).
 //! let weth = Bytes::copy_from_slice(
