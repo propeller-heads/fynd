@@ -98,8 +98,7 @@ Full example: [`clients/rust/examples/swap_erc20.rs`](../../../clients/rust/exam
 Add the [`fynd-client`](https://crates.io/crates/fynd-client) crate to your `Cargo.toml`:
 
 ```toml
-[dependencies]
-fynd-client = "0.31"
+cargo add fynd-client
 ```
 
 ```rust
