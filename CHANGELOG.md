@@ -1,3 +1,32 @@
+## [0.31.0](https://github.com/propeller-heads/fynd/compare/0.30.0...0.31.0) (2026-03-26)
+
+
+### Features
+
+* **ci:** add Examples workflow to run all Rust client examples ([194c241](https://github.com/propeller-heads/fynd/commit/194c2411b6c35020dd6363343ea9afe7d9ec3287))
+* **dev-env:** show fynd logs via RUST_LOG=info ([8221587](https://github.com/propeller-heads/fynd/commit/82215872fa47e0e9be52d0b7756bcf2f0c43dd68))
+* **examples:** add dev-env scripts and self-documenting error messages ([48b4bc2](https://github.com/propeller-heads/fynd/commit/48b4bc29113d6ab0e69b629c4e6d9be230a63a65))
+* **examples:** increase swap_client_fee slippage to 1%, add to CI ([114b650](https://github.com/propeller-heads/fynd/commit/114b65004b3140a4d3a381027c60eaef1c563b59))
+* **examples:** simulate swap before signing to surface revert reason ([3c00541](https://github.com/propeller-heads/fynd/commit/3c005412bff373644452fb550012f4f48a26edd5))
+* **rust-client:** add approval flow with info(), approval(), and submit() ([22cb236](https://github.com/propeller-heads/fynd/commit/22cb236e2e88918d7bac915abd1f85219306bc01))
+* **rust-client:** return error with revert reason when tx reverts on-chain ([792548e](https://github.com/propeller-heads/fynd/commit/792548e0139be05dde119ab0c11933a0f36a6acb))
+* **rust-client:** use eth_estimateGas by default for swap and approval ([6dcf39f](https://github.com/propeller-heads/fynd/commit/6dcf39f9430ff8cfa899d3157343f2c5b4b85eea))
+
+
+### Bug Fixes
+
+* **ci:** pre-build fynd release binary before running examples ([3f79da8](https://github.com/propeller-heads/fynd/commit/3f79da8cb1d2502a7772fbe81c3213d8c90fecd9))
+* **ci:** run only swap_erc20 example, enable info logs for fynd serve ([b20291c](https://github.com/propeller-heads/fynd/commit/b20291c0825a4c347bbc0927f21784e701aa0469))
+* **dev-env:** pass TYCHO_URL to fynd serve, quote TYCHO_URL var ([a9fc96b](https://github.com/propeller-heads/fynd/commit/a9fc96b72488d1a6284ba4cadb3987a1da95a841))
+* **dev-env:** RUST_LOG=warn locally, info on CI ([b3795fa](https://github.com/propeller-heads/fynd/commit/b3795fa65adcd80efcf176bed506de7bfe39ddb9))
+* **dev-env:** use mnemonic to fund dev account, update private key ([26d36fa](https://github.com/propeller-heads/fynd/commit/26d36faee1c4aed1f9e4fd7e21e7d97a7032c0c5))
+* **examples:** explicitly set RPC_URL and FYND_URL when running examples ([c3e9918](https://github.com/propeller-heads/fynd/commit/c3e9918b78c0a4f6f6cef55bf6c151bf212712b6))
+* **rust-client:** add 200k gas buffer for cold storage on forked chains ([11937da](https://github.com/propeller-heads/fynd/commit/11937dab0cb7b0d50d30b2d6f1f49def2e7b3014))
+* **rust-client:** include raw hex in revert message when decoding fails ([8dbda82](https://github.com/propeller-heads/fynd/commit/8dbda8224d068c9af3ae551efb9f6af0d113b880))
+* **rust-client:** make InstanceInfo fields private, fix direct field access, add missing test ([4ca4cbd](https://github.com/propeller-heads/fynd/commit/4ca4cbdc59daacdcab4b7cc1452e7725d59287f3))
+* **rust-client:** resolve post-rebase API drift ([9861e64](https://github.com/propeller-heads/fynd/commit/9861e6479f5f16140ff0358a067c44c366b152b2))
+* update broken intra-doc links to renamed methods ([3512d78](https://github.com/propeller-heads/fynd/commit/3512d7844d7467cb3c3ffe8bcec6bc42ab91c563))
+
 ## [0.30.0](https://github.com/propeller-heads/fynd/compare/0.29.0...0.30.0) (2026-03-26)
 
 
