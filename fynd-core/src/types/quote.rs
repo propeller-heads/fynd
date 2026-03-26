@@ -598,6 +598,7 @@ impl Order {
 /// Specifies the side of an order: sell (exact input) or buy (exact output).
 ///
 /// Currently only `Sell` is supported. `Buy` will be added in a future version.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderSide {
