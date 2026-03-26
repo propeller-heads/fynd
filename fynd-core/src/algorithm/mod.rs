@@ -257,6 +257,7 @@ pub enum AlgorithmError {
 }
 
 /// Reason why no path was found between tokens.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoPathReason {
     /// Source token not present in the routing graph.
