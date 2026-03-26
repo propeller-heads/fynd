@@ -36,7 +36,7 @@ const DEV_PRIVATE_KEY: &str = "0x02d483ff876e4d1d55ddc829a22df2707bd2574ba18d0d8
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const SELL_AMOUNT: u128 = 1_000_000_000_000_000_000; // 1 WETH (18 decimals)
-const SLIPPAGE: f64 = 0.005; // 0.5%
+const SLIPPAGE: f64 = 0.01; // 1%
 const FEE_BPS: u16 = 50; // 0.5% client fee
 
 #[tokio::main]
