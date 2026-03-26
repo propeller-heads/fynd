@@ -1,3 +1,10 @@
+## [0.33.1](https://github.com/propeller-heads/fynd/compare/0.33.0...0.33.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* **ci:** move --silent before run in pnpm build commands ([48a64e3](https://github.com/propeller-heads/fynd/commit/48a64e395ff54fd1e88eb6ac68a8ea1de37e3775))
+
 ## [0.33.0](https://github.com/propeller-heads/fynd/compare/0.32.0...0.33.0) (2026-03-26)
 
 
