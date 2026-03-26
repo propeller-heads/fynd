@@ -658,13 +658,15 @@ where
                 }
             };
 
-        // Resolve gas limit.
+        // Resolve gas limit. Add a 200_000 fixed buffer on top of the server estimate to
+        // account for cold storage slots on forked chains (EIP-2929). TODO: fix server-side.
         let gas_limit = match hints.gas_limit() {
             Some(g) => g,
             None => quote
                 .gas_estimate()
                 .to_u64()
-                .ok_or_else(|| FyndError::Protocol("gas estimate exceeds u64".into()))?,
+                .ok_or_else(|| FyndError::Protocol("gas estimate exceeds u64".into()))?
+                .saturating_add(200_000),
         };
 
         let tx_data = quote.transaction().ok_or_else(|| {
@@ -690,7 +692,10 @@ where
 
         // Optionally simulate the transaction.
         if hints.simulate() {
-            let req: alloy::rpc::types::TransactionRequest = tx_eip1559.clone().into();
+            let req = alloy::rpc::types::TransactionRequest::from_transaction_with_sender(
+                tx_eip1559.clone(),
+                sender,
+            );
             self.provider
                 .call(req)
                 .await

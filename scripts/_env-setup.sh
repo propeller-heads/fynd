@@ -46,8 +46,7 @@ start_anvil() {
         --port 8545 \
         --mnemonic "$_MNEMONIC" \
         --balance 10000 \
-        --steps-tracing \
-        --silent &
+        --enable-trace-printing &
     _ANVIL_PID=$!
 
     local i

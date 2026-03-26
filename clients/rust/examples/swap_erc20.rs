@@ -74,11 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sig = signer
             .sign_hash(&approval_payload.signing_hash())
             .await?;
-        client
+        let tx = client
             .execute_approval(SignedApproval::assemble(approval_payload, sig))
             .await?
             .await?;
-        println!("Approved.");
+        println!("Approved {}.", tx.tx_hash());
     }
 
     // Request a quote: sell 1 WETH for USDC.
@@ -114,6 +114,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("settled:    {:?} USDC", result.settled_amount());
-    println!("gas:        {}", result.gas_cost());
+    println!("gas cost:   {}", result.gas_cost());
     Ok(())
 }

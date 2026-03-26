@@ -145,6 +145,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("settled:    {:?} USDC", result.settled_amount());
-    println!("gas:        {}", result.gas_cost());
+    println!("gas cost:   {}", result.gas_cost());
     Ok(())
 }
