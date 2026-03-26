@@ -240,7 +240,6 @@ fn bytes_to_b256(b: &Bytes) -> Result<B256, FyndError> {
 // ============================================================================
 
 /// Options controlling the behaviour of [`FyndClient::execute_swap`].
-#[derive(Default)]
 pub struct ExecutionOptions {
     /// When `true`, simulate the transaction via `eth_call` and `estimate_gas` instead of
     /// broadcasting it. The returned [`ExecutionReceipt`] resolves immediately with the
@@ -250,6 +249,17 @@ pub struct ExecutionOptions {
     /// Storage slot overrides to apply during dry-run simulation. Ignored when `dry_run` is
     /// `false`.
     pub storage_overrides: Option<StorageOverrides>,
+    /// When `true` (default), a reverted transaction triggers a `debug_traceTransaction` call
+    /// to retrieve the revert reason, falling back to `eth_call` if the node does not support
+    /// the debug API. Set to `false` to skip the extra round-trip and return a bare
+    /// [`FyndError::TransactionReverted`] with only the transaction hash.
+    pub fetch_revert_reason: bool,
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self { dry_run: false, storage_overrides: None, fetch_revert_reason: true }
+    }
 }
 
 // ============================================================================
@@ -747,12 +757,24 @@ where
         }
 
         let tx_hash = self
-            .send_raw(tx_eip1559, signature)
+            .send_raw(tx_eip1559.clone(), signature)
             .await?;
 
         let token_out_addr = mapping::bytes_to_alloy_address(quote.token_out())?;
         let receiver_addr = mapping::bytes_to_alloy_address(quote.receiver())?;
         let provider = self.submit_provider.clone();
+        let fetch_revert = options.fetch_revert_reason;
+        // Pre-build the eth_call fallback request from the original transaction.
+        // `from` is omitted — eth_call does not require it and `sender` is not
+        // available in the outer execute_swap context.
+        let fallback_to = match tx_eip1559.to {
+            TxKind::Call(addr) => addr,
+            TxKind::Create => Address::ZERO,
+        };
+        let fallback_req = TransactionRequest::default()
+            .to(fallback_to)
+            .value(tx_eip1559.value)
+            .input(tx_eip1559.input.clone().into());
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move {
             loop {
@@ -762,6 +784,47 @@ where
                     .map_err(FyndError::Provider)?
                 {
                     Some(receipt) => {
+                        if !receipt.status() {
+                            let reason = if fetch_revert {
+                                // Inline the revert_reason logic (no self available here).
+                                let trace: Result<serde_json::Value, _> = provider
+                                    .raw_request(
+                                        std::borrow::Cow::Borrowed("debug_traceTransaction"),
+                                        (tx_hash, serde_json::json!({})),
+                                    )
+                                    .await;
+                                match trace {
+                                    Ok(t) => {
+                                        let hex_str = t
+                                            .get("returnValue")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        match alloy::primitives::hex::decode(
+                                            hex_str.trim_start_matches("0x"),
+                                        ) {
+                                            Ok(b) => decode_revert_bytes(&b),
+                                            Err(_) => format!("{tx_hash:#x} reverted"),
+                                        }
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            tx = ?tx_hash,
+                                            "debug_traceTransaction unavailable; replaying via \
+                                             eth_call — block state may differ"
+                                        );
+                                        match provider.call(fallback_req).await {
+                                            Err(e) => e.to_string(),
+                                            Ok(_) => {
+                                                format!("{tx_hash:#x} reverted (no reason)")
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                format!("{tx_hash:#x}")
+                            };
+                            return Err(FyndError::TransactionReverted(reason));
+                        }
                         let settled_amount =
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
                         let gas_cost = BigUint::from(receipt.gas_used) *
@@ -926,6 +989,9 @@ where
     /// and has no built-in timeout; wrap with [`tokio::time::timeout`] to bound the wait.
     pub async fn execute_approval(&self, approval: SignedApproval) -> Result<TxReceipt, FyndError> {
         let (payload, signature) = approval.into_parts();
+        let fallback_req = TransactionRequest::default()
+            .to(mapping::bytes_to_alloy_address(&payload.token)?)
+            .input(payload.tx.input.clone().into());
         let tx_hash = self
             .send_raw(payload.tx, signature)
             .await?;
@@ -939,6 +1005,40 @@ where
                     .map_err(FyndError::Provider)?
                 {
                     Some(receipt) => {
+                        if !receipt.status() {
+                            let trace: Result<serde_json::Value, _> = provider
+                                .raw_request(
+                                    std::borrow::Cow::Borrowed("debug_traceTransaction"),
+                                    (tx_hash, serde_json::json!({})),
+                                )
+                                .await;
+                            let reason = match trace {
+                                Ok(t) => {
+                                    let hex_str = t
+                                        .get("returnValue")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    match alloy::primitives::hex::decode(
+                                        hex_str.trim_start_matches("0x"),
+                                    ) {
+                                        Ok(b) => decode_revert_bytes(&b),
+                                        Err(_) => format!("{tx_hash:#x} reverted"),
+                                    }
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        tx = ?tx_hash,
+                                        "debug_traceTransaction unavailable; replaying via \
+                                         eth_call — block state may differ"
+                                    );
+                                    match provider.call(fallback_req).await {
+                                        Err(e) => e.to_string(),
+                                        Ok(_) => format!("{tx_hash:#x} reverted (no reason)"),
+                                    }
+                                }
+                            };
+                            return Err(FyndError::TransactionReverted(reason));
+                        }
                         let gas_cost = BigUint::from(receipt.gas_used) *
                             BigUint::from(receipt.effective_gas_price);
                         return Ok(MinedTx::new(tx_hash, gas_cost));
@@ -1006,6 +1106,32 @@ where
         let settled = SettledOrder::new(settled_amount, gas_cost);
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move { Ok(settled) })))
+    }
+}
+
+/// Decode a standard Solidity `Error(string)` revert payload.
+///
+/// Returns the decoded string for `0x08c379a0`-prefixed data, or a hex dump
+/// for unrecognised payloads.
+fn decode_revert_bytes(data: &[u8]) -> String {
+    // Error(string): selector(4) + offset(32) + length(32) + string_bytes
+    const SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
+    if data.len() >= 68 && data[..4] == SELECTOR {
+        let str_len = u64::from_be_bytes(
+            data[60..68]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        ) as usize;
+        if data.len() >= 68 + str_len {
+            if let Ok(s) = std::str::from_utf8(&data[68..68 + str_len]) {
+                return s.to_owned();
+            }
+        }
+    }
+    if data.is_empty() {
+        "empty revert data".to_owned()
+    } else {
+        format!("0x{}", alloy::primitives::hex::encode(data))
     }
 }
 
@@ -1557,7 +1683,8 @@ mod tests {
         asserter.push_success(&50_000u64); // estimate_gas response
 
         let order = make_signed_swap();
-        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let opts =
+            ExecutionOptions { dry_run: true, storage_overrides: None, fetch_revert_reason: false };
         let receipt = client
             .execute_swap(order, &opts)
             .await
@@ -1591,7 +1718,11 @@ mod tests {
         asserter.push_success(&21_000u64);
 
         let order = make_signed_swap();
-        let opts = ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) };
+        let opts = ExecutionOptions {
+            dry_run: true,
+            storage_overrides: Some(overrides),
+            fetch_revert_reason: false,
+        };
         let receipt = client
             .execute_swap(order, &opts)
             .await
@@ -1608,7 +1739,8 @@ mod tests {
         asserter.push_failure_msg("execution reverted");
 
         let order = make_signed_swap();
-        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let opts =
+            ExecutionOptions { dry_run: true, storage_overrides: None, fetch_revert_reason: false };
         let result = client.execute_swap(order, &opts).await;
         let err = match result {
             Err(e) => e,
@@ -1631,7 +1763,8 @@ mod tests {
         asserter.push_success(&21_000u64);
 
         let order = make_signed_swap();
-        let opts = ExecutionOptions { dry_run: true, storage_overrides: None };
+        let opts =
+            ExecutionOptions { dry_run: true, storage_overrides: None, fetch_revert_reason: false };
         let receipt = client
             .execute_swap(order, &opts)
             .await

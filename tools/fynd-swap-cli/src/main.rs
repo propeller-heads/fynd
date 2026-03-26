@@ -574,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
             TransferType::UseVaultsFunds => None,
         };
         info!("Submitting dry-run execution...");
-        ExecutionOptions { dry_run: true, storage_overrides: overrides }
+        ExecutionOptions { dry_run: true, storage_overrides: overrides, fetch_revert_reason: true }
     };
 
     // ── Execute ───────────────────────────────────────────────────────────────
