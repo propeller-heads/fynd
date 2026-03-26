@@ -5,6 +5,8 @@ version = "0.34.3"
 name = "fynd"
 version.workspace = true
 edition = "2021"
+description = "High-performance DeFi route-finding engine — embeddable library and CLI"
+license = "MIT"
 
 [dependencies]
 fynd-rpc = { workspace = true }
