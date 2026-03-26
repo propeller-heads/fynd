@@ -401,7 +401,7 @@ impl FyndClientBuilder {
             default_sender: self.sender,
             provider,
             submit_provider,
-            info_cache: std::sync::OnceLock::new(),
+            info_cache: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -458,7 +458,7 @@ impl FyndClientBuilder {
             default_sender: self.sender,
             provider,
             submit_provider,
-            info_cache: std::sync::OnceLock::new(),
+            info_cache: tokio::sync::OnceCell::new(),
         })
     }
 }
@@ -484,7 +484,7 @@ where
     default_sender: Option<Address>,
     provider: P,
     submit_provider: P,
-    info_cache: std::sync::OnceLock<InstanceInfo>,
+    info_cache: tokio::sync::OnceCell<InstanceInfo>,
 }
 
 impl<P> FyndClient<P>
@@ -513,7 +513,7 @@ where
             default_sender,
             provider,
             submit_provider,
-            info_cache: std::sync::OnceLock::new(),
+            info_cache: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -649,13 +649,13 @@ where
         let (max_fee_per_gas, max_priority_fee_per_gas) =
             match (hints.max_fee_per_gas(), hints.max_priority_fee_per_gas()) {
                 (Some(mf), Some(mp)) => (mf, mp),
-                _ => {
+                (mf, mp) => {
                     let est = self
                         .provider
                         .estimate_eip1559_fees()
                         .await
                         .map_err(FyndError::Provider)?;
-                    (est.max_fee_per_gas, est.max_priority_fee_per_gas)
+                    (mf.unwrap_or(est.max_fee_per_gas), mp.unwrap_or(est.max_priority_fee_per_gas))
                 }
             };
 
@@ -779,12 +779,9 @@ where
     /// The result is fetched at most once per [`FyndClient`] instance; subsequent calls return the
     /// cached value without making a network request.
     pub async fn info(&self) -> Result<&InstanceInfo, FyndError> {
-        if let Some(cached) = self.info_cache.get() {
-            return Ok(cached);
-        }
-        let fetched = self.fetch_info().await?;
-        let _ = self.info_cache.set(fetched);
-        Ok(self.info_cache.get().expect("just set"))
+        self.info_cache
+            .get_or_try_init(|| self.fetch_info())
+            .await
     }
 
     async fn fetch_info(&self) -> Result<InstanceInfo, FyndError> {
@@ -795,7 +792,7 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_info: fynd_rpc_types::InstanceInfo = response.json().await?;
-        mapping::dto_to_instance_info(dto_info)
+        dto_info.try_into()
     }
 
     /// Build an unsigned EIP-1559 `approve(spender, amount)` transaction for the given token,
@@ -873,13 +870,13 @@ where
         let (max_fee_per_gas, max_priority_fee_per_gas) =
             match (hints.max_fee_per_gas(), hints.max_priority_fee_per_gas()) {
                 (Some(mf), Some(mp)) => (mf, mp),
-                _ => {
+                (mf, mp) => {
                     let est = self
                         .provider
                         .estimate_eip1559_fees()
                         .await
                         .map_err(FyndError::Provider)?;
-                    (est.max_fee_per_gas, est.max_priority_fee_per_gas)
+                    (mf.unwrap_or(est.max_fee_per_gas), mp.unwrap_or(est.max_priority_fee_per_gas))
                 }
             };
 

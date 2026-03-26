@@ -297,24 +297,26 @@ impl From<dto::BlockInfo> for BlockInfo {
     }
 }
 
-pub(crate) fn dto_to_instance_info(
-    dto: fynd_rpc_types::InstanceInfo,
-) -> Result<crate::types::InstanceInfo, FyndError> {
-    let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
-    let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
-    if router.len() != 20 {
-        return Err(FyndError::Protocol(format!(
-            "router_address must be 20 bytes, got {}",
-            router.len()
-        )));
+impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
+    type Error = FyndError;
+
+    fn try_from(dto: fynd_rpc_types::InstanceInfo) -> Result<Self, Self::Error> {
+        let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
+        let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
+        if router.len() != 20 {
+            return Err(FyndError::Protocol(format!(
+                "router_address must be 20 bytes, got {}",
+                router.len()
+            )));
+        }
+        if permit2.len() != 20 {
+            return Err(FyndError::Protocol(format!(
+                "permit2_address must be 20 bytes, got {}",
+                permit2.len()
+            )));
+        }
+        Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
     }
-    if permit2.len() != 20 {
-        return Err(FyndError::Protocol(format!(
-            "permit2_address must be 20 bytes, got {}",
-            permit2.len()
-        )));
-    }
-    Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
 }
 
 impl From<dto::HealthStatus> for HealthStatus {
