@@ -97,8 +97,8 @@ impl TryFrom<&OrderQuote> for Solution {
             .collect();
 
         Ok(Solution::new(
-            quote.sender.clone(),
-            quote.receiver.clone(),
+            quote.sender().clone(),
+            quote.receiver().clone(),
             Bytes::from(token_in.as_ref()),
             Bytes::from(token_out.as_ref()),
             quote.amount_in().clone(),
@@ -207,8 +207,8 @@ impl Encoder {
         {
             let (transaction, fee_breakdown) =
                 self.encode_tycho_router_call(encoded_solution, &solution, &encoding_options)?;
-            quotes[idx].transaction = Some(transaction);
-            quotes[idx].fee_breakdown = Some(fee_breakdown);
+            quotes[idx].set_transaction(transaction);
+            quotes[idx].set_fee_breakdown(fee_breakdown);
         }
 
         Ok(quotes)

@@ -668,14 +668,14 @@ pub struct OrderQuote {
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
-    pub(crate) transaction: Option<Transaction>,
+    transaction: Option<Transaction>,
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fee_breakdown: Option<FeeBreakdown>,
+    fee_breakdown: Option<FeeBreakdown>,
     /// Address of the sender.
-    pub(crate) sender: Bytes,
+    sender: Bytes,
     /// Address of the receiver.
-    pub(crate) receiver: Bytes,
+    receiver: Bytes,
 }
 
 impl OrderQuote {
@@ -730,11 +730,9 @@ impl OrderQuote {
         self
     }
 
-    /// Sets the encoded EVM transaction.
-    #[allow(dead_code)]
-    pub(crate) fn with_transaction(mut self, transaction: Transaction) -> Self {
+    /// Sets the encoded EVM transaction in place.
+    pub fn set_transaction(&mut self, transaction: Transaction) {
         self.transaction = Some(transaction);
-        self
     }
 
     /// Returns the order ID.
@@ -807,11 +805,9 @@ impl OrderQuote {
         self.fee_breakdown.as_ref()
     }
 
-    /// Sets the fee breakdown.
-    #[allow(dead_code)]
-    pub(crate) fn with_fee_breakdown(mut self, fb: FeeBreakdown) -> Self {
+    /// Sets the fee breakdown in place.
+    pub fn set_fee_breakdown(&mut self, fb: FeeBreakdown) {
         self.fee_breakdown = Some(fb);
-        self
     }
 
     /// Returns the sender address.
