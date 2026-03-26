@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Rust client for the [Fynd](https://fynd.exchange) DEX router.
 //!
 //! `fynd-client` lets you request swap quotes, build signable transaction payloads, and
