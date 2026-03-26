@@ -19,10 +19,15 @@ use tycho_execution::encoding::{
 };
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
-use crate::{EncodingOptions, OrderQuote, QuoteStatus, SolveError, Transaction};
+use crate::{EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction};
 
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+/// Router fee on swap output amount: 10 basis points (0.1%).
+const ROUTER_FEE_ON_OUTPUT_BPS: u64 = 10;
+/// Router's share of the client fee: 2000 basis points (20%).
+const ROUTER_FEE_ON_CLIENT_FEE_BPS: u64 = 2000;
 
 /// Encodes solution into tycho compatible transactions.
 ///
@@ -38,18 +43,18 @@ pub struct Encoder {
     /// Dedicated multi-threaded runtime so that swap encoders using
     /// `block_in_place` (e.g. Bebop RFQ) work even when the caller
     /// runs on a current-thread runtime (actix-web workers).
-    encoding_rt: Arc<tokio::runtime::Runtime>,
+    encoding_rt: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // If dropped from within a tokio runtime (e.g. test teardown),
-        // move the runtime to a background thread so its shutdown doesn't
-        // panic with "cannot drop a runtime in a context where blocking
-        // is not allowed".
-        if tokio::runtime::Handle::try_current().is_ok() {
-            let rt = Arc::clone(&self.encoding_rt);
-            std::thread::spawn(move || drop(rt));
+        // Take ownership so the field auto-drop is a no-op.
+        // If inside an async context, move shutdown to a background
+        // thread to avoid the "cannot drop a runtime" panic.
+        if let Some(rt) = self.encoding_rt.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || drop(rt));
+            }
         }
     }
 }
@@ -92,8 +97,8 @@ impl TryFrom<&OrderQuote> for Solution {
             .collect();
 
         Ok(Solution::new(
-            quote.sender.clone(),
-            quote.receiver.clone(),
+            quote.sender().clone(),
+            quote.receiver().clone(),
             Bytes::from(token_in.as_ref()),
             Bytes::from(token_out.as_ref()),
             quote.amount_in().clone(),
@@ -133,7 +138,7 @@ impl Encoder {
                 .build()?,
             chain,
             router_address,
-            encoding_rt: Arc::new(encoding_rt),
+            encoding_rt: Some(Arc::new(encoding_rt)),
         })
     }
 
@@ -180,10 +185,14 @@ impl Encoder {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
+        let rt = self
+            .encoding_rt
+            .as_ref()
+            .ok_or_else(|| SolveError::FailedEncoding("encoding runtime was dropped".into()))?;
         let encoded_solutions = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    self.encoding_rt.block_on(async {
+                    rt.block_on(async {
                         self.tycho_encoder
                             .encode_solutions(solutions)
                     })
@@ -196,9 +205,10 @@ impl Encoder {
             .into_iter()
             .zip(to_encode)
         {
-            let transaction =
+            let (transaction, fee_breakdown) =
                 self.encode_tycho_router_call(encoded_solution, &solution, &encoding_options)?;
-            quotes[idx].transaction = Some(transaction);
+            quotes[idx].set_transaction(transaction);
+            quotes[idx].set_fee_breakdown(fee_breakdown);
         }
 
         Ok(quotes)
@@ -209,19 +219,25 @@ impl Encoder {
     /// Selects the appropriate router function based on the function signature in
     /// `encoded_solution` (single/sequential/split, with optional Permit2 or Vault variants),
     /// prepends the 4-byte selector, and returns a `Transaction` ready for submission.
+    ///
+    /// Fee calculation mirrors the on-chain `FeeCalculator.calculateFee` using identical
+    /// integer arithmetic so `min_amount_out` passes the router's post-fee check.
     fn encode_tycho_router_call(
         &self,
         encoded_solution: EncodedSolution,
         solution: &Solution,
         encoding_options: &EncodingOptions,
-    ) -> Result<Transaction, EncodingError> {
+    ) -> Result<(Transaction, FeeBreakdown), EncodingError> {
         let amount_in = biguint_to_u256(solution.amount_in());
-        let precision = BigUint::from(1_000_000u64);
-        let slippage_amount = solution.min_amount_out().clone() *
-            BigUint::from((encoding_options.slippage() * 1_000_000.0) as u64) /
-            &precision;
-        let min_amount_out =
-            biguint_to_u256(&(solution.min_amount_out().clone() - slippage_amount));
+        let swap_output = solution.min_amount_out();
+        let fee_breakdown = Self::calculate_fee_breakdown(
+            swap_output,
+            encoding_options
+                .client_fee_params()
+                .map_or(0, |f| f.bps()),
+            encoding_options.slippage(),
+        );
+        let min_amount_out = biguint_to_u256(fee_breakdown.min_amount_received());
         let token_in = bytes_to_address(solution.token_in())?;
         let token_out = bytes_to_address(solution.token_out())?;
         let receiver = bytes_to_address(solution.receiver())?;
@@ -325,13 +341,14 @@ impl Encoder {
         } else {
             BigUint::ZERO
         };
-        Ok(Transaction::new(
+        let transaction = Transaction::new(
             encoded_solution
                 .interacting_with()
                 .clone(),
             value,
             contract_interaction,
-        ))
+        );
+        Ok((transaction, fee_breakdown))
     }
 
     /// Prepends the 4-byte Keccak selector for `selector` to the ABI-encoded args.
@@ -354,6 +371,43 @@ impl Encoder {
         }
         call_data.extend(encoded_args);
         call_data
+    }
+
+    /// Mirrors the on-chain `FeeCalculator.calculateFee` using identical integer arithmetic.
+    ///
+    /// Given the raw swap output, client fee in bps, and slippage tolerance, computes
+    /// the exact fee amounts and the minimum amount the user will receive.
+    fn calculate_fee_breakdown(
+        swap_output: &BigUint,
+        client_fee_bps: u16,
+        slippage: f64,
+    ) -> FeeBreakdown {
+        let client_bps = client_fee_bps as u64;
+
+        let mut router_fee_on_client = BigUint::ZERO;
+        let mut client_portion = BigUint::ZERO;
+
+        if client_bps > 0 {
+            let fee_numerator = swap_output * client_bps;
+            let total_client_fee = &fee_numerator / 10_000u64;
+
+            router_fee_on_client = &fee_numerator * ROUTER_FEE_ON_CLIENT_FEE_BPS / 100_000_000u64;
+
+            client_portion = total_client_fee - &router_fee_on_client;
+        }
+
+        let router_fee_on_output = swap_output * ROUTER_FEE_ON_OUTPUT_BPS / 10_000u64;
+        let total_router_fee = router_fee_on_client + router_fee_on_output;
+
+        let amount_after_fees = swap_output - &client_portion - &total_router_fee;
+
+        let precision = BigUint::from(1_000_000u64);
+        let slippage_amount =
+            &amount_after_fees * BigUint::from((slippage * 1_000_000.0) as u64) / &precision;
+
+        let min_amount_received = &amount_after_fees - &slippage_amount;
+
+        FeeBreakdown::new(total_router_fee, client_portion, slippage_amount, min_amount_received)
     }
 }
 
@@ -448,13 +502,13 @@ mod tests {
             tycho_encoder: Box::new(MockTychoEncoder),
             chain,
             router_address: Bytes::from([0u8; 20].as_ref()),
-            encoding_rt: Arc::new(
+            encoding_rt: Some(Arc::new(
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap(),
-            ),
+            )),
         }
     }
 

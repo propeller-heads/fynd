@@ -10,9 +10,9 @@ use tycho_simulation::tycho_common::models::Address as TychoAddress;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, EncodingOptions, HealthStatus, Order, OrderSide,
-        PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, Swap,
-        Transaction, UserTransferType,
+        BackendKind, BatchQuote, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus, Order,
+        OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus,
+        Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -197,6 +197,14 @@ pub(crate) fn dto_to_quote(
         .transaction()
         .cloned()
         .map(Transaction::from);
+    let fee_breakdown = ds.fee_breakdown().map(|fb| {
+        FeeBreakdown::new(
+            fb.router_fee().clone(),
+            fb.client_fee().clone(),
+            fb.max_slippage().clone(),
+            fb.min_amount_received().clone(),
+        )
+    });
     Ok(Quote::new(
         ds.order_id().to_string(),
         status,
@@ -211,6 +219,7 @@ pub(crate) fn dto_to_quote(
         token_out,
         receiver,
         transaction,
+        fee_breakdown,
     ))
 }
 

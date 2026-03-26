@@ -139,6 +139,18 @@ export interface Route {
   swaps: Swap[];
 }
 
+/** Breakdown of fees applied to the swap output by the on-chain FeeCalculator. */
+export interface FeeBreakdown {
+  /** Router protocol fee (fee on output + router's share of client fee). */
+  routerFee: bigint;
+  /** Client's portion of the fee (after the router takes its share). */
+  clientFee: bigint;
+  /** Maximum slippage: (amountOut - routerFee - clientFee) * slippage. */
+  maxSlippage: bigint;
+  /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
+  minAmountReceived: bigint;
+}
+
 /** A solver quote containing the best route, amounts, and optional encoded transaction. */
 export interface Quote {
   orderId: string;
@@ -157,6 +169,8 @@ export interface Quote {
   receiver: Address;
   /** Encoded transaction; present only when `encodingOptions` was set in the quote request. */
   transaction?: Transaction;
+  /** Fee breakdown; present only when `encodingOptions` was set in the quote request. */
+  feeBreakdown?: FeeBreakdown;
 }
 
 /** Solver health status and readiness information. */

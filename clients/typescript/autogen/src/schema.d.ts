@@ -158,6 +158,34 @@ export interface components {
             /** @example bad request: no orders provided */
             error: string;
         };
+        /**
+         * @description Breakdown of fees applied to the swap output by the on-chain FeeCalculator.
+         *
+         *     All amounts are absolute values in output token units.
+         */
+        FeeBreakdown: {
+            /**
+             * @description Client's portion of the fee (after the router takes its share).
+             * @example 2800000
+             */
+            client_fee: string;
+            /**
+             * @description Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+             * @example 3496850
+             */
+            max_slippage: string;
+            /**
+             * @description Minimum amount the user receives on-chain.
+             *     Equal to amount_out - router_fee - client_fee - max_slippage.
+             * @example 3493353150
+             */
+            min_amount_received: string;
+            /**
+             * @description Router protocol fee (fee on output + router's share of client fee).
+             * @example 350000
+             */
+            router_fee: string;
+        };
         /** @description Health check response. */
         HealthStatus: {
             /**
@@ -272,6 +300,7 @@ export interface components {
             amount_out_net_gas: string;
             /** @description Block at which this quote was computed. */
             block: components["schemas"]["BlockInfo"];
+            fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
             /**
              * @description Estimated gas cost for executing this route (as decimal string).
              * @example 150000
