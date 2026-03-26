@@ -1,3 +1,16 @@
+## [0.30.0](https://github.com/propeller-heads/fynd/compare/0.29.0...0.30.0) (2026-03-26)
+
+
+### Features
+
+* account for router and client fees in min_amount_out ([12777c7](https://github.com/propeller-heads/fynd/commit/12777c7daa815d4b263c3cf896e36f903eff0dce))
+
+
+### Bug Fixes
+
+* Fix multi-threaded runtime panic and add RFQ attributes to Solution ([638f33b](https://github.com/propeller-heads/fynd/commit/638f33b0aa736e099b140581918e018401e61ea0))
+* prevent race in Encoder runtime drop ([14f98f7](https://github.com/propeller-heads/fynd/commit/14f98f74c07ed17c21216c04e1867347e8653f8d))
+
 ## [0.29.0](https://github.com/propeller-heads/fynd/compare/0.28.0...0.29.0) (2026-03-25)
 
 
