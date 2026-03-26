@@ -1,3 +1,10 @@
+## [0.34.2](https://github.com/propeller-heads/fynd/compare/0.34.1...0.34.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* add repository field to package.json and rename cargo secret ([ce35e0b](https://github.com/propeller-heads/fynd/commit/ce35e0b0d43cf0ef6887a33be7d09f2f91eedd55))
+
 ## [0.34.1](https://github.com/propeller-heads/fynd/compare/0.34.0...0.34.1) (2026-03-26)
 
 
