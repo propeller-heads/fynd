@@ -318,6 +318,18 @@ impl ComputationManager {
                         computation_id: SpotPriceComputation::ID,
                         block,
                     });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
