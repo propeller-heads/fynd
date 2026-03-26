@@ -306,6 +306,17 @@ where
                 return Ok(());
             }
 
+            // Check if blocked before waiting for a notification that may never come
+            if self
+                .readiness_tracker
+                .is_blocked_for_current_block()
+            {
+                return Err(SolveError::ComputationFailed(format!(
+                    "required computation failed for current block: {:?}",
+                    self.readiness_tracker.missing()
+                )));
+            }
+
             // Calculate remaining time
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -779,6 +790,46 @@ mod tests {
             .wait_until_ready(Duration::from_secs(5))
             .await;
         notifier.await.unwrap();
+
+        match result {
+            Err(SolveError::ComputationFailed(msg)) => {
+                assert!(
+                    msg.contains("required computation failed"),
+                    "expected 'required computation failed' message, got: {msg}"
+                );
+            }
+            other => panic!("Expected ComputationFailed error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_blocked_when_failure_already_processed() {
+        let (market, _) = setup_market(vec![]);
+        let derived = DerivedData::new_shared();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Mark the current block and record a failure for spot_prices
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::NewBlock { block: 1 });
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            });
+
+        // Do NOT spawn a notifier — the failure was already processed
+        // before wait_until_ready starts. Without the is_blocked_for_current_block() check in the
+        // loop body, this hangs for 1 second and returns NotReady.
+        let result = worker
+            .wait_until_ready(Duration::from_secs(1))
+            .await;
 
         match result {
             Err(SolveError::ComputationFailed(msg)) => {
