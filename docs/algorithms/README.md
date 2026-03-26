@@ -16,6 +16,8 @@ Three properties make this harder than classical shortest-path routing:
 
 These properties rule out off-the-shelf graph algorithms that rely on precomputed, additive, size-independent edge weights. Both of Fynd's algorithms handle this by simulating the actual swap math at every step.
 
+> **Note:** Fynd currently finds the single best path for each order. Order splitting across parallel paths is planned and will improve output for large trades where a single path exhausts pool liquidity.
+
 ## How Fynd uses algorithms
 
 Each algorithm runs inside a **worker pool**: a group of dedicated OS threads that process quote requests. Multiple worker pools can run in parallel with different algorithms and configurations (e.g., a fast 2-hop Most Liquid pool alongside a deeper 5-hop Bellman-Ford pool). The **WorkerPoolRouter** fans out each request to all pools and returns the best result.

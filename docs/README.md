@@ -54,6 +54,16 @@ Fynd puts you in control:
 
 Fynd currently supports **sell orders** only (exact input amount). You specify the amount of the input token, and Fynd finds the best output. Buy orders (exact output) are not yet supported.
 
+### Known Limitations
+
+{% hint style="warning" %}
+**Large trades — split swaps coming soon**
+
+Fynd currently routes each order through a single path. For large trades (e.g. >$100k), this can result in significant price impact compared to aggregators that split orders across multiple pools in parallel. Split swap support is on the roadmap and will substantially improve pricing for high-volume orders.
+
+For the best results today, test with trade sizes typical for your use case rather than extreme values.
+{% endhint %}
+
 ### Supported Chains
 
 * Ethereum Mainnet
