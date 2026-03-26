@@ -198,12 +198,22 @@ pub enum AlgorithmError {
     /// Invalid algorithm configuration (programmer error).
     #[non_exhaustive]
     #[error("invalid configuration: {reason}")]
-    InvalidConfiguration { reason: String },
+    InvalidConfiguration {
+        /// Human-readable description of the invalid configuration.
+        reason: String,
+    },
 
     /// No path exists between the tokens.
     #[non_exhaustive]
     #[error("no path from {from:?} to {to:?}: {reason}")]
-    NoPath { from: Address, to: Address, reason: NoPathReason },
+    NoPath {
+        /// Input token address.
+        from: Address,
+        /// Output token address.
+        to: Address,
+        /// Detailed reason why no path was found.
+        reason: NoPathReason,
+    },
 
     /// Paths exist but none have sufficient liquidity.
     #[error("insufficient liquidity on all paths")]
@@ -212,7 +222,10 @@ pub enum AlgorithmError {
     /// Route finding timed out.
     #[non_exhaustive]
     #[error("timeout after {elapsed_ms}ms")]
-    Timeout { elapsed_ms: u64 },
+    Timeout {
+        /// Elapsed time in milliseconds when the timeout fired.
+        elapsed_ms: u64,
+    },
 
     /// Exact-out not supported by this algorithm.
     #[error("exact-out orders not supported")]
@@ -221,12 +234,22 @@ pub enum AlgorithmError {
     /// Simulation failed for a specific component.
     #[non_exhaustive]
     #[error("simulation failed for {component_id}: {error}")]
-    SimulationFailed { component_id: String, error: String },
+    SimulationFailed {
+        /// ID of the pool component that failed.
+        component_id: String,
+        /// Underlying simulation error message.
+        error: String,
+    },
 
     /// Required data not found in market.
     #[non_exhaustive]
     #[error("{kind} not found{}", id.as_ref().map(|i| format!(": {i}")).unwrap_or_default())]
-    DataNotFound { kind: &'static str, id: Option<String> },
+    DataNotFound {
+        /// Category of the missing data (e.g. `"token"`, `"component"`).
+        kind: &'static str,
+        /// Optional identifier of the missing item.
+        id: Option<String>,
+    },
 
     /// Other algorithm-specific error.
     #[error("{0}")]

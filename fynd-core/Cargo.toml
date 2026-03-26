@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 description = "Core solving logic for Fynd DEX router"
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 tycho-simulation.workspace = true

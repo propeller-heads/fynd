@@ -50,15 +50,26 @@ use crate::{
 pub mod defaults {
     use std::time::Duration;
 
+    /// Minimum token quality score required for a token to be included in routing.
     pub const MIN_TOKEN_QUALITY: i32 = 100;
+    /// Maximum age (in days) of trading history required for a token to be considered liquid.
     pub const TRADED_N_DAYS_AGO: u64 = 3;
+    /// Multiplier applied to a pool's TVL when estimating available liquidity.
     pub const TVL_BUFFER_RATIO: f64 = 1.1;
+    /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+    /// Delay before reconnecting to the Tycho feed after a disconnect.
     pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
+    /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
+    /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
+    /// Minimum number of hops allowed in a route.
     pub const POOL_MIN_HOPS: usize = 1;
+    /// Maximum number of hops allowed in a route.
     pub const POOL_MAX_HOPS: usize = 3;
+    /// Per-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
 }
 
@@ -314,6 +325,7 @@ impl FyndBuilder {
         }
     }
 
+    /// The blockchain this builder is configured for.
     pub fn chain(&self) -> Chain {
         self.chain
     }

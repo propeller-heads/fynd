@@ -47,46 +47,56 @@ impl Default for PriceGuardConfig {
 }
 
 impl PriceGuardConfig {
+    /// Maximum allowed negative deviation in basis points (user gets less than expected).
     pub fn lower_tolerance_bps(&self) -> u32 {
         self.lower_tolerance_bps
     }
 
+    /// Maximum allowed positive deviation in basis points (output exceeds expectation).
     pub fn upper_tolerance_bps(&self) -> u32 {
         self.upper_tolerance_bps
     }
 
+    /// Whether solutions pass through when all providers are unreachable.
     pub fn allow_on_provider_error(&self) -> bool {
         self.allow_on_provider_error
     }
 
+    /// Whether solutions pass through when no provider has a price for the pair.
     pub fn allow_on_token_price_not_found(&self) -> bool {
         self.allow_on_token_price_not_found
     }
 
+    /// Whether price-guard validation is enabled.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Set the lower tolerance threshold in basis points.
     pub fn with_lower_tolerance_bps(mut self, bps: u32) -> Self {
         self.lower_tolerance_bps = bps;
         self
     }
 
+    /// Set the upper tolerance threshold in basis points.
     pub fn with_upper_tolerance_bps(mut self, bps: u32) -> Self {
         self.upper_tolerance_bps = bps;
         self
     }
 
+    /// Set whether solutions pass through when all providers error.
     pub fn with_allow_on_provider_error(mut self, allow: bool) -> Self {
         self.allow_on_provider_error = allow;
         self
     }
 
+    /// Set whether solutions pass through when no provider has a price.
     pub fn with_allow_on_token_price_not_found(mut self, allow: bool) -> Self {
         self.allow_on_token_price_not_found = allow;
         self
     }
 
+    /// Enable or disable price-guard validation.
     pub fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
