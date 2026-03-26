@@ -71,17 +71,6 @@ impl<'a, D> Path<'a, D> {
             .zip(self.edge_data.iter())
             .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
     }
-
-    /// Creates a new reversed Path from the current one.
-    pub fn reversed(self) -> Self {
-        let reversed_tokens = self.tokens.into_iter().rev().collect();
-        let reversed_edge_data = self
-            .edge_data
-            .into_iter()
-            .rev()
-            .collect();
-        Self { tokens: reversed_tokens, edge_data: reversed_edge_data }
-    }
 }
 
 #[derive(Error, Debug)]

@@ -19,6 +19,8 @@
 //! 3. Register it in `registry.rs`
 
 pub mod bellman_ford;
+pub mod bellman_ford_pricing;
+pub(crate) mod bf_helpers;
 pub mod most_liquid;
 
 #[cfg(test)]

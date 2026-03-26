@@ -1,71 +1,55 @@
-//! Computes the `mid_price` of tokens relative to a gas token (e.g., ETH), selecting paths
-//! by the lowest spread (the most reliable price) derived from full simulation of both buy and sell
-//! directions.
+//! Computes the `mid_price` of tokens relative to a gas token (e.g., ETH), using
+//! Bellman-Ford SPFA to find the optimal path per token and full simulation of both
+//! buy and sell directions to derive spread and mid-price.
 //!
 //! # Algorithm
 //!
-//! 1. **Path Discovery (DFS)**: Enumerate all paths from gas_token to each reachable token, scoring
-//!    by spot-price spread: `|forward_spot - 1/reverse_spot|`. Lower spread = better score.
+//! 1. **BF Forward Pass (one-to-all)**: Run SPFA from gas_token with a probe amount. Each token's
+//!    distance = the best amount reachable via simulation during relaxation. This replaces DFS path
+//!    enumeration AND spot-price scoring in a single pass.
 //!
-//! 2. **Sort**: Order paths per token by spread score (lowest spread first).
-//!
-//! 3. **Round-Robin Simulation**: For each token, simulate paths in ranked order and compute their
-//!    spread and mid_price by simulating both directions on the same path. Pick the path with the
-//!    tightest spread for each token, as this indicates the most reliable/liquid route, and provide
-//!    its mid_price as the token's price.
+//! 2. **Reverse Simulation**: For each priced token, reverse the winning path and simulate the sell
+//!    direction. Compute spread and mid_price from forward + reverse amounts.
 //!
 //! # Price Formulas
 //!
 //! For a path P from gas_token to target:
-//! - `buy_out` = simulate(P, probe_amount) → tokens received
-//! - `sell_out` = simulate(reverse(P), buy_out) → gas_token received back
+//! - `buy_out` = simulate(P, probe_amount) -> tokens received
+//! - `sell_out` = simulate(reverse(P), buy_out) -> gas_token received back
 //! - `buy_price` = buy_out / (probe_amount + gas_cost)
 //! - `sell_price` = buy_out / (sell_out - gas_cost)
 //! - `mid_price` = (buy_price + sell_price) / 2
 //! - `spread` = |sell_price - buy_price|
-//!
-//! # Dependencies
-//!
-//! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
-//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
-//! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use petgraph::graph::NodeIndex;
 use tracing::{debug, instrument, trace, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
 
 use crate::{
+    algorithm::bellman_ford_pricing::{resimulate_path, solve_one_to_all, SpfaAllResult},
     derived::{
         computation::{ComputationId, DerivedComputation},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
-        types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
+        types::{TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::{SharedMarketData, SharedMarketDataRef},
-    graph::{GraphManager, Path, PetgraphStableDiGraphManager},
+    graph::{GraphManager, PetgraphStableDiGraphManager},
     types::ComponentId,
-    MostLiquidAlgorithm,
 };
 
-/// A path with its score
-#[derive(Clone)]
-struct CandidatePath<'a> {
-    path: Path<'a, ()>,
-    score: f64,
-}
-
-/// Computes token prices relative to the gas token. Returns the buy price for the path
-/// with the lowest spread (most reliable) that we managed to find.
+/// Computes token prices relative to the gas token using Bellman-Ford SPFA.
 ///
-/// Uses DFS to discover paths, spot prices for ranking, and full simulation
-/// for accurate output amounts and spread calculation.
+/// Runs a single BF forward pass to find the optimal path per token, then
+/// simulates the reverse direction on each winning path to compute spread
+/// and mid-price.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
     /// The gas token address (e.g., ETH).
@@ -102,99 +86,7 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// DFS to discover all paths from gas_token, scored by spot-price spread.
-    fn discover_paths<'a>(
-        &self,
-        graph_manager: &'a PetgraphStableDiGraphManager<()>,
-        spot_prices: &SpotPrices,
-    ) -> Result<HashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
-        let graph = graph_manager.graph();
-
-        // If gas token has no pools, it won't be in the graph → no paths to discover
-        let Ok(entry_node) = graph_manager.find_node(&self.gas_token) else {
-            return Ok(HashMap::new());
-        };
-
-        let mut paths_by_token: HashMap<Address, Vec<CandidatePath>> = HashMap::new();
-
-        // DFS state
-        struct DfsFrame<'a> {
-            token_node: NodeIndex,
-            path: Path<'a, ()>,
-            forward_spot: f64,
-            reverse_spot: f64,
-        }
-
-        let mut stack = vec![DfsFrame {
-            token_node: entry_node,
-            path: Path::new(),
-            forward_spot: 1.0,
-            reverse_spot: 1.0,
-        }];
-
-        while let Some(frame) = stack.pop() {
-            // Token that we reached in this frame
-            let token_reached = &graph[frame.token_node];
-
-            // Record non-empty paths (skip the starting node's empty path)
-            if !frame.path.is_empty() {
-                // Compute spread from spot prices:
-                // buy_price = forward_spot (target per gas when buying)
-                // sell_price = 1/reverse_spot (target per gas when selling)
-                // spread = |buy_price - sell_price|
-                // Score = spread directly (lower = better, 0 for symmetric pools)
-                let buy_price = frame.forward_spot;
-                let sell_price = 1.0 / frame.reverse_spot;
-                let spot_spread = (buy_price - sell_price).abs();
-
-                paths_by_token
-                    .entry(token_reached.clone())
-                    .or_default()
-                    .push(CandidatePath { path: frame.path.clone(), score: spot_spread });
-            }
-
-            // Stop exploring further if max depth reached
-            if frame.path.len() >= self.max_hops {
-                continue;
-            }
-
-            // Explore neighbors
-            for edge in graph.edges(frame.token_node) {
-                let next_node = edge.target();
-                let next_token = &graph[next_node];
-
-                let mut new_path = frame.path.clone();
-                new_path.add_hop(token_reached, edge.weight(), next_token);
-
-                let component_id = edge.weight().component_id.clone();
-
-                // Look up spot prices for this edge
-                let fwd_key: SpotPriceKey =
-                    (component_id.clone(), token_reached.clone(), next_token.clone());
-                let rev_key: SpotPriceKey =
-                    (component_id.clone(), next_token.clone(), token_reached.clone());
-
-                // Skip edges with missing spot prices (pool may have failed spot price computation)
-                let Some(&fwd_spot) = spot_prices.get(&fwd_key) else {
-                    continue;
-                };
-                let Some(&rev_spot) = spot_prices.get(&rev_key) else {
-                    continue;
-                };
-
-                stack.push(DfsFrame {
-                    token_node: next_node,
-                    path: new_path,
-                    forward_spot: frame.forward_spot * fwd_spot,
-                    reverse_spot: frame.reverse_spot * rev_spot,
-                });
-            }
-        }
-
-        Ok(paths_by_token)
-    }
-
-    /// Compute the spread and mid_price for a given path by simulating both directions.
+    /// Computes spread and mid_price for a given BF path by simulating both directions.
     ///
     /// Returns (spread_ratio, mid_price, path_components) where:
     /// - spread_ratio: |sell - buy|, lower = more reliable
@@ -202,53 +94,39 @@ impl TokenGasPriceComputation {
     /// - path_components: component IDs used in this path (for incremental invalidation)
     fn compute_spread_and_mid_price(
         &self,
-        path: Path<()>,
+        forward_path: &[(NodeIndex, NodeIndex, ComponentId)],
         market: &SharedMarketData,
         gas_price: &BigUint,
+        spfa_result: &SpfaAllResult,
     ) -> Result<(f64, Price, HashSet<ComponentId>), ComputationError> {
-        // Extract component IDs from path edges for dependency tracking
-        let path_components: HashSet<ComponentId> = path
-            .edge_data
+        let path_components: HashSet<ComponentId> = forward_path
             .iter()
-            .map(|edge| edge.component_id.clone())
+            .map(|(_, _, cid)| cid.clone())
             .collect();
-        // Forward: gas_token → target_token
-        let buy_result =
-            MostLiquidAlgorithm::simulate_path(&path, market, None, self.simulation_amount.clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
-                })?;
-        let buy_gas_units = buy_result.route().total_gas();
-        let buy_gas_cost = &buy_gas_units * gas_price; // Convert gas units to actual cost
-        let buy_out = buy_result
-            .into_route()
-            .into_swaps()
-            .into_iter()
-            .last()
-            .ok_or(ComputationError::Internal("no output from buy simulation".into()))?
-            .amount_out()
-            .clone();
 
-        // Reverse: target_token → gas_token
-        let reversed_path = path.reversed();
+        let token_map = spfa_result.token_map();
 
-        let sell_result =
-            MostLiquidAlgorithm::simulate_path(&reversed_path, market, None, buy_out.clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
-                })?;
-        let sell_gas_units = sell_result.route().total_gas();
-        let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
-        let sell_out = sell_result
-            .into_route()
-            .into_swaps()
-            .into_iter()
-            .last()
-            .ok_or(ComputationError::Internal("no output from sell simulation".into()))?
-            .amount_out()
-            .clone();
+        // Forward: gas_token -> target_token
+        let (forward_route, buy_out) =
+            resimulate_path(forward_path, &self.simulation_amount, market, token_map).map_err(
+                |e| ComputationError::SimulationFailed(format!("buy simulation failed: {}", e)),
+            )?;
+        let buy_gas_cost = forward_route.total_gas() * gas_price;
 
-        // Convert to f64 for mid_price calculation
+        // Reverse: target_token -> gas_token
+        let reversed_path: Vec<_> = forward_path
+            .iter()
+            .rev()
+            .map(|(from, to, cid)| (*to, *from, cid.clone()))
+            .collect();
+
+        let (reverse_route, sell_out) =
+            resimulate_path(&reversed_path, &buy_out, market, token_map).map_err(|e| {
+                ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
+            })?;
+        let sell_gas_cost = reverse_route.total_gas() * gas_price;
+
+        // Convert to f64 for spread calculation
         let buy_out_f = buy_out
             .to_f64()
             .ok_or(ComputationError::Internal("overflow computing buy_out".into()))?;
@@ -282,8 +160,6 @@ impl TokenGasPriceComputation {
         let spread = (sell_price - buy_price).abs();
 
         // Compute mid_price in numerator/denominator form (precise BigUint arithmetic)
-        // numerator = buy_out * (sell_out - sell_gas_cost) + buy_out * (sim_amount + buy_gas_cost)
-        // denominator = 2 * (sim_amount + buy_gas_cost) * (sell_out - sell_gas_cost)
         let sell_out_net = &sell_out - &sell_gas_cost; // Safe: checked above
         let buy_price_precise = Price {
             numerator: &buy_out * &sell_out_net +
@@ -296,152 +172,86 @@ impl TokenGasPriceComputation {
         Ok((spread, buy_price_precise, path_components))
     }
 
-    /// Core simulation logic: discovers paths, runs round-robin simulation,
-    /// returns best prices with dependency tracking and block number.
+    /// Core pricing logic: runs BF forward pass, then reverse-simulates each winning path.
     ///
-    /// Takes two brief read locks on market:
-    /// 1. Clone topology + gas_price + block (cheap)
-    /// 2. `extract_subset` with only the components on candidate paths
-    ///
-    /// Path discovery (cheap DFS) runs twice to avoid holding borrows across await
-    /// points. The expensive part — EVM simulation — runs lock-free on the subset.
-    ///
-    /// # Arguments
-    ///
-    /// * `market`: The market data to simulate token prices on.
-    /// * `spot_prices`: The spot prices to use for the simulation.
-    /// * `filter_tokens`: An optional set of tokens to filter the simulation by. If None, all
-    ///   tokens are simulated.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the best prices and the block number.
+    /// If `filter_tokens` is `Some`, only prices those tokens (incremental mode).
+    /// If `None`, prices all reachable tokens (full mode).
     #[allow(clippy::type_complexity)]
-    async fn simulate_token_prices(
+    fn simulate_token_prices(
         &self,
-        market: &SharedMarketDataRef,
-        spot_prices: &SpotPrices,
+        market: &SharedMarketData,
+        gas_price: &BigUint,
         filter_tokens: Option<&HashSet<Address>>,
-    ) -> Result<(HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64), ComputationError> {
-        // Brief lock 1: topology + gas_price + block (all cheap clones)
-        let (topology, gas_price, block) = {
-            let guard = market.read().await;
-            let topology = guard.component_topology();
-            let block = guard
-                .last_updated()
-                .map(|b| b.number())
-                .unwrap_or(0);
-            let gas_price = guard
-                .gas_price()
-                .ok_or(ComputationError::MissingDependency("gas_price"))?
-                .effective_gas_price();
-            (topology, gas_price, block)
-        };
-
-        // Discover paths to find which components candidate paths need (cheap DFS)
-        let needed_component_ids = {
-            let mut graph_manager = PetgraphStableDiGraphManager::new();
-            graph_manager.initialize_graph(&topology);
-            let mut paths = self.discover_paths(&graph_manager, spot_prices)?;
-            if let Some(tokens) = filter_tokens {
-                paths.retain(|token, _| tokens.contains(token));
-            }
-            paths
-                .values()
-                .flatten()
-                .flat_map(|c| {
-                    c.path
-                        .edge_data
-                        .iter()
-                        .map(|e| e.component_id.clone())
-                })
-                .collect::<HashSet<ComponentId>>()
-        };
-
-        // Brief lock 2: extract only the simulation states we need
-        let subset = {
-            market
-                .read()
-                .await
-                .extract_subset(&needed_component_ids)
-        };
-
-        // Rediscover paths from subset + simulate (no lock, expensive EVM simulation)
+    ) -> Result<HashMap<Address, (f64, Price, HashSet<ComponentId>)>, ComputationError> {
         let mut graph_manager = PetgraphStableDiGraphManager::new();
-        graph_manager.initialize_graph(&subset.component_topology());
-        let mut paths_by_token = self.discover_paths(&graph_manager, spot_prices)?;
+        graph_manager.initialize_graph(&market.component_topology());
+        let graph = graph_manager.graph();
 
-        // Optionally filter to only requested tokens
-        if let Some(tokens) = filter_tokens {
-            paths_by_token.retain(|token, _| tokens.contains(token));
-        }
+        // If gas token has no pools, it won't be in the graph
+        let Ok(source_node) = graph_manager.find_node(&self.gas_token) else {
+            return Ok(HashMap::new());
+        };
 
-        // Collect all component IDs from every candidate path per token.
-        // This ensures path_components captures any pool that could flip which path is best,
-        // not just pools on the currently-selected path.
-        let all_candidate_components: HashMap<Address, HashSet<ComponentId>> = paths_by_token
-            .iter()
-            .map(|(token, candidates)| {
-                let components = candidates
-                    .iter()
-                    .flat_map(|c| {
-                        c.path
-                            .edge_data
-                            .iter()
-                            .map(|e| e.component_id.clone())
-                    })
-                    .collect::<HashSet<_>>();
-                (token.clone(), components)
-            })
-            .collect();
+        // BF forward pass: prices all tokens in one traversal
+        let spfa_result = solve_one_to_all(
+            source_node,
+            self.simulation_amount.clone(),
+            self.max_hops,
+            graph,
+            market,
+        );
 
-        // Sort each token's paths: lowest spread last (for popping)
-        for paths in paths_by_token.values_mut() {
-            paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        }
-
-        // Round-robin: pop one candidate per token each round, keep best by spread
+        let token_map = spfa_result.token_map();
         let mut best_prices: HashMap<Address, (f64, Price, HashSet<ComponentId>)> = HashMap::new();
-        let mut candidates_exhausted = false;
 
-        while !candidates_exhausted {
-            candidates_exhausted = true;
+        for (&node, token) in token_map {
+            // Skip source token and unreachable tokens
+            if token.address == self.gas_token || !spfa_result.is_reachable(node) {
+                continue;
+            }
 
-            for (token, candidate_paths) in paths_by_token.iter_mut() {
-                let Some(candidate) = candidate_paths.pop() else {
+            // Optionally filter to only requested tokens
+            if let Some(filter) = filter_tokens {
+                if !filter.contains(&token.address) {
                     continue;
-                };
-                candidates_exhausted = false;
+                }
+            }
 
-                match self.compute_spread_and_mid_price(candidate.path, &subset, &gas_price) {
-                    Ok((spread, price, components)) => {
-                        let is_better = best_prices
-                            .get(token)
-                            .map(|(existing_spread, _, _)| spread < *existing_spread)
-                            .unwrap_or(true);
-                        if is_better {
-                            trace!(
-                                token = ?token,
-                                spread_ratio = spread,
-                                "found better price (lower spread)"
-                            );
-                            best_prices.insert(token.clone(), (spread, price, components));
-                        }
-                    }
-                    Err(_) => continue,
+            // Reconstruct the winning forward path
+            let forward_path = match spfa_result.reconstruct_path(node) {
+                Ok(p) => p,
+                Err(e) => {
+                    trace!(
+                        token = ?token.address,
+                        error = %e,
+                        "failed to reconstruct path, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // Compute spread and mid-price via forward + reverse simulation
+            match self.compute_spread_and_mid_price(&forward_path, market, gas_price, &spfa_result)
+            {
+                Ok((spread, price, components)) => {
+                    trace!(
+                        token = ?token.address,
+                        spread_ratio = spread,
+                        "computed token price"
+                    );
+                    best_prices.insert(token.address.clone(), (spread, price, components));
+                }
+                Err(e) => {
+                    trace!(
+                        token = ?token.address,
+                        error = %e,
+                        "price computation failed, skipping"
+                    );
                 }
             }
         }
 
-        // Extend each token's path_components with all candidate path components so
-        // incremental recomputation fires when any competing path's pool changes.
-        for (token, (_, _, components)) in best_prices.iter_mut() {
-            if let Some(all_comps) = all_candidate_components.get(token) {
-                components.extend(all_comps.iter().cloned());
-            }
-        }
-
-        Ok((best_prices, block))
+        Ok(best_prices)
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -456,28 +266,19 @@ impl TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Option<TokenGasPrices>, ComputationError> {
-        // Read all needed data from store in a single lock acquisition.
-        let (existing_deps, existing_prices, spot_prices) = {
-            let store_guard = store.read().await;
+        let store_guard = store.read().await;
 
-            // Need existing deps to do incremental computation.
-            let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
-                return Ok(None); // No deps stored yet, need full compute
-            };
-            let Some(existing_prices) = store_guard.token_prices().cloned() else {
-                return Ok(None);
-            };
-            let spot_prices = store_guard
-                .spot_prices()
-                .ok_or(ComputationError::MissingDependency("spot_prices"))?
-                .clone();
-
-            (existing_deps, existing_prices, spot_prices)
+        // Need existing deps to do incremental computation
+        let Some(existing_deps) = store_guard.token_prices_deps() else {
+            return Ok(None); // No deps stored yet, need full compute
+        };
+        let Some(existing_prices) = store_guard.token_prices() else {
+            return Ok(None);
         };
 
         let changed_components = changed.all_changed_ids();
 
-        // Find tokens whose paths intersect with changed components.
+        // Find tokens whose paths intersect with changed components
         let tokens_to_recompute: HashSet<Address> = existing_deps
             .iter()
             .filter(|(_, entry)| {
@@ -489,8 +290,12 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(existing_prices));
+            return Ok(Some(existing_prices.clone()));
         }
+
+        let existing_prices = existing_prices.clone();
+        let existing_deps = existing_deps.clone();
+        drop(store_guard);
 
         debug!(
             affected_tokens = tokens_to_recompute.len(),
@@ -498,9 +303,19 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let (best_prices, block) = self
-            .simulate_token_prices(market, &spot_prices, Some(&tokens_to_recompute))
-            .await?;
+        let market = market.read().await;
+        let block = market
+            .last_updated()
+            .map(|b| b.number())
+            .unwrap_or(0);
+
+        let gas_price = market
+            .gas_price()
+            .ok_or(ComputationError::MissingDependency("gas_price"))?
+            .effective_gas_price();
+
+        let best_prices =
+            self.simulate_token_prices(&market, &gas_price, Some(&tokens_to_recompute))?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
@@ -545,27 +360,27 @@ impl DerivedComputation for TokenGasPriceComputation {
         // For topology changes or full recompute, do a full computation
         // For state-only changes, use incremental computation
         if !changed.is_full_recompute && !changed.is_topology_change() {
-            // Try incremental computation if we have existing path dependencies
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
                 .await?
             {
                 return Ok(result);
             }
-            // Fall through to full compute if incremental is not possible
         }
 
-        // Read spot prices from store (independent of market lock).
-        let spot_prices = store
-            .read()
-            .await
-            .spot_prices()
-            .ok_or(ComputationError::MissingDependency("spot_prices"))?
-            .clone();
+        let market = market.read().await;
 
-        let (best_prices, block) = self
-            .simulate_token_prices(market, &spot_prices, None)
-            .await?;
+        let block = market
+            .last_updated()
+            .map(|b| b.number())
+            .unwrap_or(0);
+
+        let gas_price = market
+            .gas_price()
+            .ok_or(ComputationError::MissingDependency("gas_price"))?
+            .effective_gas_price();
+
+        let best_prices = self.simulate_token_prices(&market, &gas_price, None)?;
 
         // Build token prices with dependencies for incremental computation
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
@@ -608,7 +423,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, market_read, setup_market, token, MockProtocolSim},
-        derived::{computations::spot_price::SpotPriceComputation, store::DerivedData},
+        derived::store::DerivedData,
     };
     // ==================== Constants ====================
 
@@ -620,201 +435,19 @@ mod tests {
 
     // ==================== Test Helpers ====================
 
-    /// Sets up a complete test environment: market with pools + precomputed spot prices.
+    /// Sets up a complete test environment: market with pools.
     /// Returns (market_guard, store) ready for computation.
     async fn setup_test_env(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (SharedMarketDataRef, SharedDerivedDataRef) {
-        let (wrapped_market, _) = setup_market(pools.clone());
-
+        let (wrapped_market, _) = setup_market(pools);
         let wrapped_store = DerivedData::new_shared();
-        let spot_comp = SpotPriceComputation::new();
-        let changed = ChangedComponents {
-            added: pools
-                .iter()
-                .map(|(id, t1, t2, _)| {
-                    (id.to_string(), vec![t1.address.clone(), t2.address.clone()])
-                })
-                .collect(),
-            removed: vec![],
-            updated: vec![],
-            is_full_recompute: true,
-        };
-        let spot_prices = spot_comp
-            .compute(&wrapped_market, &wrapped_store, &changed)
-            .await
-            .expect("spot price computation should succeed");
-        wrapped_store
-            .try_write()
-            .unwrap()
-            .set_spot_prices(spot_prices, 0);
-
         (wrapped_market, wrapped_store)
-    }
-
-    async fn setup_graph_and_spot_prices(
-        pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-    ) -> (PetgraphStableDiGraphManager<()>, SpotPrices) {
-        let (market, derived) = setup_test_env(pools).await;
-        let market = market_read(&market);
-
-        let mut graph = PetgraphStableDiGraphManager::new();
-        graph.initialize_graph(&market.component_topology());
-
-        let spot_prices = derived
-            .try_write()
-            .unwrap()
-            .spot_prices()
-            .unwrap()
-            .clone();
-        (graph, spot_prices)
     }
 
     /// Creates a computation configured for the given gas token with standard settings.
     fn computation_for(gas_token: &Address) -> TokenGasPriceComputation {
         TokenGasPriceComputation::new(gas_token.clone(), 2, BigUint::from(SIM_AMOUNT))
-    }
-
-    // ==================== discover_paths tests ====================
-
-    #[tokio::test]
-    async fn test_discover_paths_single_hop() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-
-        let (graph_manager, spot_prices) =
-            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))])
-                .await;
-
-        let computation = computation_for(&eth.address);
-        let paths = computation
-            .discover_paths(&graph_manager, &spot_prices)
-            .unwrap();
-
-        // Exactly 1 path to USDC (single hop via "pool")
-        let usdc_paths = &paths[&usdc.address];
-        assert_eq!(usdc_paths.len(), 1, "should have exactly 1 path to USDC");
-
-        let path = &usdc_paths[0];
-        assert_eq!(path.path.len(), 1, "path should be single hop");
-        assert_eq!(path.path.edge_data[0].component_id, "pool");
-
-        // For a symmetric pool, spread = 0
-        assert_eq!(path.score, 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_discover_paths_multi_hop() {
-        let eth = token(0, "ETH");
-        let mid = token(2, "MID");
-        let target = token(3, "TARGET");
-
-        let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("hop1", &eth, &mid, MockProtocolSim::new(2.0)),
-            ("hop2", &mid, &target, MockProtocolSim::new(3.0)),
-        ])
-        .await;
-
-        let computation = computation_for(&eth.address);
-        let paths = computation
-            .discover_paths(&graph, &spot_prices)
-            .unwrap();
-
-        // MID: exactly 1 path (1-hop via hop1)
-        let mid_paths = &paths[&mid.address];
-        assert_eq!(mid_paths.len(), 1, "should have exactly 1 path to MID");
-        assert_eq!(mid_paths[0].path.len(), 1, "MID path should be 1 hop");
-        assert_eq!(mid_paths[0].path.edge_data[0].component_id, "hop1");
-        assert_eq!(mid_paths[0].score, 0.0);
-
-        // TARGET: exactly 1 path (2-hop via hop1 → hop2)
-        let target_paths = &paths[&target.address];
-        assert_eq!(target_paths.len(), 1, "should have exactly 1 path to TARGET");
-        assert_eq!(target_paths[0].path.len(), 2, "TARGET path should be 2 hops");
-        assert_eq!(target_paths[0].path.edge_data[0].component_id, "hop1");
-        assert_eq!(target_paths[0].path.edge_data[1].component_id, "hop2");
-        assert_eq!(target_paths[0].score, 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_discover_paths_respects_max_hops() {
-        let eth = token(0, "ETH");
-        let a = token(2, "A");
-        let b = token(3, "B");
-        let c = token(4, "C");
-
-        let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
-            ("a_b", &a, &b, MockProtocolSim::new(2.0)),
-            ("b_c", &b, &c, MockProtocolSim::new(2.0)),
-        ])
-        .await;
-
-        // max_hops = 2
-        let computation = computation_for(&eth.address);
-        let paths = computation
-            .discover_paths(&graph, &spot_prices)
-            .unwrap();
-
-        // A: exactly 1 path (1 hop via eth_a)
-        let a_paths = &paths[&a.address];
-        assert_eq!(a_paths.len(), 1, "should have exactly 1 path to A");
-        assert_eq!(a_paths[0].path.len(), 1, "A path should be 1 hop");
-        assert_eq!(a_paths[0].path.edge_data[0].component_id, "eth_a");
-        assert_eq!(a_paths[0].score, 0.0);
-
-        // B: exactly 1 path (2 hops via eth_a → a_b)
-        let b_paths = &paths[&b.address];
-        assert_eq!(b_paths.len(), 1, "should have exactly 1 path to B");
-        assert_eq!(b_paths[0].path.len(), 2, "B path should be 2 hops");
-        assert_eq!(b_paths[0].path.edge_data[0].component_id, "eth_a");
-        assert_eq!(b_paths[0].path.edge_data[1].component_id, "a_b");
-        assert_eq!(b_paths[0].score, 0.0);
-
-        // C: not reachable (would require 3 hops, exceeds max_hops=2)
-        assert!(!paths.contains_key(&c.address), "C should NOT be reachable (3 hops)");
-    }
-
-    #[tokio::test]
-    async fn test_discover_paths_returns_multiple_candidates() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-
-        // Two pools with different spot prices
-        let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
-            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
-        ])
-        .await;
-
-        let computation = computation_for(&eth.address);
-        let paths = computation
-            .discover_paths(&graph, &spot_prices)
-            .unwrap();
-
-        // Exactly 2 paths to USDC (one via each pool)
-        let usdc_paths = &paths[&usdc.address];
-        assert_eq!(usdc_paths.len(), 2, "should have exactly 2 paths to USDC");
-
-        // MockProtocolSim's spot_price is symmetric: forward_spot = 1/reverse_spot,
-        // so spread = |forward - 1/reverse| = 0 for all pools.
-        // TODO: Test with asymmetric simulation component to verify non-zero spread ranking.
-        for path in usdc_paths {
-            assert_eq!(path.path.len(), 1, "path should be single hop");
-            assert_eq!(path.score, 0.0, "symmetric mock produces zero spread");
-        }
-
-        // Verify both pools are discovered (order is arbitrary when scores are equal)
-        let component_ids: Vec<_> = usdc_paths
-            .iter()
-            .map(|p| {
-                p.path.edge_data[0]
-                    .component_id
-                    .as_str()
-            })
-            .collect();
-        assert!(component_ids.contains(&"pool_low"));
-        assert!(component_ids.contains(&"pool_high"));
     }
 
     // ==================== compute_spread_and_mid_price tests ====================
@@ -827,22 +460,22 @@ mod tests {
         // Non-trivial setup: 10% fee + significant gas (10% of sim_amount)
         // gas_units = 1e15, gas_cost = 1e15 * 100 = 1e17 (10% of 1e18)
         //
-        // Forward (ETH→USDC):
+        // Forward (ETH->USDC):
         //   buy_out = 1e18 * 2000 * 0.9 = 1.8e21
         //   buy_gas_cost = 1e17
         //
-        // Reverse (USDC→ETH):
+        // Reverse (USDC->ETH):
         //   sell_out = 1.8e21 / 2000 * 0.9 = 8.1e17
         //   sell_gas_cost = 1e17
         //
         // buy_price = buy_out / (sim_amount + buy_gas_cost)
-        //           = 1.8e21 / (1e18 + 1e17) = 1.8e21 / 1.1e18 = 18000/11 ≈ 1636.36
+        //           = 1.8e21 / (1e18 + 1e17) = 1.8e21 / 1.1e18 = 18000/11
         //
         // sell_price = buy_out / (sell_out - sell_gas_cost)
-        //            = 1.8e21 / (8.1e17 - 1e17) = 1.8e21 / 7.1e17 = 180000/71 ≈ 2535.21
+        //            = 1.8e21 / (8.1e17 - 1e17) = 1.8e21 / 7.1e17 = 180000/71
         //
-        // spread = |sell_price - buy_price| = 180000/71 - 18000/11 = 702000/781 ≈ 898.85
-        // mid_price = (buy_price + sell_price) / 2 ≈ 2085.79
+        // spread = |sell_price - buy_price| = 180000/71 - 18000/11
+        // mid_price = (buy_price + sell_price) / 2
         let gas_units: u64 = 1_000_000_000_000_000; // 1e15
         let (market, _) = setup_test_env(vec![(
             "pool",
@@ -855,22 +488,27 @@ mod tests {
         .await;
         let market = market_read(&market);
 
-        // Build path manually using graph
-        let mut graph = PetgraphStableDiGraphManager::new();
-        graph.initialize_graph(&market.component_topology());
+        // Build graph and run BF forward pass
+        let mut graph_manager = PetgraphStableDiGraphManager::new();
+        graph_manager.initialize_graph(&market.component_topology());
+        let graph = graph_manager.graph();
+        let source = graph_manager
+            .find_node(&eth.address)
+            .unwrap();
 
-        let eth_node = graph.find_node(&eth.address).unwrap();
-        let path_edges: Vec<_> = graph.graph().edges(eth_node).collect();
-        assert_eq!(path_edges.len(), 1);
+        let spfa_result = solve_one_to_all(source, BigUint::from(SIM_AMOUNT), 2, graph, &market);
 
-        let edge = path_edges[0].weight();
-        let mut path = Path::new();
-        path.add_hop(&eth.address, edge, &usdc.address);
+        let dest = graph_manager
+            .find_node(&usdc.address)
+            .unwrap();
+        let forward_path = spfa_result
+            .reconstruct_path(dest)
+            .unwrap();
 
         let gas_price = BigUint::from(GAS_PRICE);
         let computation = computation_for(&eth.address);
         let (spread, mid_price, _path_components) = computation
-            .compute_spread_and_mid_price(path, &market, &gas_price)
+            .compute_spread_and_mid_price(&forward_path, &market, &gas_price, &spfa_result)
             .unwrap();
 
         // Expected values from exact fractions
@@ -944,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_selects_best_path_by_spread() {
+    async fn test_compute_selects_best_path_by_output() {
         // Diamond topology: two paths to C
         //
         //     A (10% fee on eth_a)
@@ -956,19 +594,18 @@ mod tests {
         // Only first hops have fees; second hops (a_c, b_c) are fee-free.
         // Gas = 0 to simplify calculations.
         //
-        // Path via A (eth_a=10% fee, a_c=0% fee):
-        //   Forward: 1e18 * 2 * 0.9 * 5 = 9e18
-        //   Reverse: 9e18 / 5 / 2 * 0.9 = 0.81e18
+        // BF picks by highest forward output:
+        //
+        // Path via A: 1e18 * 2 * 0.9 * 5 = 9e18  (higher output)
+        // Path via B: 1e18 * 3 * 0.95 * 2 = 5.7e18
+        //
+        // BF selects path via A for C.
+        //
+        // C via A:
+        //   buy_out = 9e18
+        //   sell: C->A (9e18/5 = 1.8e18) -> A->ETH (1.8e18*0.9/2 = 0.81e18)
         //   buy_price = 9, sell_price = 9/0.81 = 100/9
-        //   spread_A = |100/9 - 9| = 19/9 ≈ 2.11
-        //
-        // Path via B (eth_b=5% fee, b_c=0% fee):
-        //   Forward: 1e18 * 3 * 0.95 * 2 = 5.7e18 = (57/10)e18
-        //   Reverse: 5.7e18 / 2 / 3 * 0.95 = 0.9025e18 = (361/400)e18
-        //   buy_price = 57/10, sell_price = (57/10)/(361/400) = 2280/361
-        //   spread_B = |2280/361 - 57/10| = 2223/3610 ≈ 0.62
-        //
-        // spread_B < spread_A → Path via B selected.
+        //   mid_price = (81+100)/18 = 181/18
         let eth = token(0, "ETH");
         let a = token(2, "A");
         let b = token(3, "B");
@@ -1006,10 +643,10 @@ mod tests {
         assert_eq!(prices.len(), 4, "should have prices for ETH, A, B, C");
 
         // A: 1-hop from ETH with 10% fee
-        // buy_out = 1e18 * 2 * 0.9 = 1.8e18 = (9/5)e18
-        // sell_out = 1.8e18 / 2 * 0.9 = 0.81e18 = (81/100)e18
-        // buy_price = 9/5, sell_price = (9/5)/(81/100) = 9*100/(5*81) = 20/9
-        // mid_price = (9/5 + 20/9) / 2 = (81 + 100) / 90 = 181/90
+        // buy_out = 1e18 * 2 * 0.9 = 1.8e18
+        // sell_out = 1.8e18 / 2 * 0.9 = 0.81e18
+        // buy_price = 9/5, sell_price = (9/5)/(81/100) = 20/9
+        // mid_price = (9/5 + 20/9) / 2 = 181/90
         let a_price = prices
             .get(&a.address)
             .expect("A should have price");
@@ -1021,11 +658,10 @@ mod tests {
         );
 
         // B: 1-hop from ETH with 5% fee
-        // buy_out = 1e18 * 3 * 0.95 = 2.85e18 = (57/20)e18
-        // sell_out = 2.85e18 / 3 * 0.95 = 0.9025e18 = (361/400)e18
-        // buy_price = 57/20, sell_price = (57/20)/(361/400) = 57*400/(20*361) = 1140/361
-        // mid_price = (57/20 + 1140/361) / 2 = (57*361 + 1140*20) / (2*20*361)
-        //           = (20577 + 22800) / 14440 = 43377/14440
+        // buy_out = 1e18 * 3 * 0.95 = 2.85e18
+        // sell_out = 2.85e18 / 3 * 0.95 = 0.9025e18
+        // buy_price = 57/20, sell_price = 1140/361
+        // mid_price = 43377/14440
         let b_price = prices
             .get(&b.address)
             .expect("B should have price");
@@ -1036,40 +672,19 @@ mod tests {
             "B mid_price should be 43377/14440 = {expected_b}, got {b_ratio}"
         );
 
-        // C: Path via B selected (lower spread)
-        // buy_out = 1e18 * 3 * 0.95 * 2 = 5.7e18 = (57/10)e18
-        // sell_out = 5.7e18 / 2 / 3 * 0.95 = 0.9025e18 = (361/400)e18
-        // buy_price = 57/10, sell_price = (57/10)/(361/400) = 2280/361
-        // mid_price = (57/10 + 2280/361) / 2 = (20577 + 22800) / 7220 = 43377/7220
+        // C: BF selects path via A (higher output: 9e18 > 5.7e18)
+        // buy_out = 9e18
+        // sell_out = 0.81e18
+        // buy_price = 9, sell_price = 100/9
+        // mid_price = 181/18
         let c_price = prices
             .get(&c.address)
             .expect("C should have price");
         let c_ratio = c_price.numerator.to_f64().unwrap() / c_price.denominator.to_f64().unwrap();
-        let expected_c = 43377.0 / 7220.0;
+        let expected_c = 181.0 / 18.0;
         assert!(
             (c_ratio - expected_c).abs() < 1e-10,
-            "C mid_price should be 43377/7220 = {expected_c} (via B), got {c_ratio}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_compute_missing_spot_prices_returns_error() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-
-        // Create market without spot prices set
-        let (market, _) = setup_market(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
-        let derived = DerivedData::new_shared(); // No spot prices
-        let changed = ChangedComponents::default();
-
-        let computation = computation_for(&eth.address);
-        let result = computation
-            .compute(&market, &derived, &changed)
-            .await;
-
-        assert!(
-            matches!(result, Err(ComputationError::MissingDependency("spot_prices"))),
-            "should return MissingDependency for spot_prices"
+            "C mid_price should be 181/18 = {expected_c} (via A, highest output), got {c_ratio}"
         );
     }
 
@@ -1102,134 +717,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_path_components_includes_all_candidate_paths() {
-        // Diamond topology: two paths to token_a
-        //
-        //   pool_direct: ETH → token_a  (fee-free, ratio=2, lower spread → selected)
-        //   pool_indirect_1 + pool_indirect_2: ETH → token_b → token_a (higher spread)
-        //
-        // After full compute, token_a's path_components must include all three pool IDs
-        // even though only pool_direct is on the best path.
-        let eth = token(0, "ETH");
-        let token_a = token(1, "A");
-        let token_b = token(2, "B");
-
-        let (market, derived) = setup_test_env(vec![
-            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
-            (
-                "pool_indirect_1",
-                &eth,
-                &token_b,
-                MockProtocolSim::new(3.0)
-                    .with_fee(0.1)
-                    .with_gas(0),
-            ),
-            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
-        ])
-        .await;
-        let changed = ChangedComponents::default();
-
-        let computation = computation_for(&eth.address);
-        computation
-            .compute(&market, &derived, &changed)
-            .await
-            .unwrap();
-
-        // Inspect stored deps to verify path_components
-        let store = derived.read().await;
-        let deps = store
-            .token_prices_deps()
-            .expect("deps should be stored");
-        let entry = deps
-            .get(&token_a.address)
-            .expect("token_a should have deps");
-
-        assert!(
-            entry
-                .path_components
-                .contains("pool_direct"),
-            "path_components should contain pool_direct (best path)"
-        );
-        assert!(
-            entry
-                .path_components
-                .contains("pool_indirect_1"),
-            "path_components should contain pool_indirect_1 (competing path)"
-        );
-        assert!(
-            entry
-                .path_components
-                .contains("pool_indirect_2"),
-            "path_components should contain pool_indirect_2 (competing path)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_incremental_recompute_triggered_by_competing_path_pool() {
-        // Same diamond topology as above.
-        // After full compute, changing pool_indirect_1 (not on best path) must
-        // put token_a in tokens_to_recompute because it's now in path_components.
-        let eth = token(0, "ETH");
-        let token_a = token(1, "A");
-        let token_b = token(2, "B");
-
-        let (market, derived) = setup_test_env(vec![
-            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
-            (
-                "pool_indirect_1",
-                &eth,
-                &token_b,
-                MockProtocolSim::new(3.0)
-                    .with_fee(0.1)
-                    .with_gas(0),
-            ),
-            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
-        ])
-        .await;
-
-        // Full compute to store deps
-        let full_changed = ChangedComponents::default();
-        let computation = computation_for(&eth.address);
-        computation
-            .compute(&market, &derived, &full_changed)
-            .await
-            .unwrap();
-
-        // Incremental change: only pool_indirect_1 updated
-        let incremental_changed = ChangedComponents {
-            added: HashMap::new(),
-            removed: vec![],
-            updated: vec!["pool_indirect_1".to_string()],
-            is_full_recompute: false,
-        };
-
-        let store = derived.read().await;
-        let deps = store
-            .token_prices_deps()
-            .expect("deps should be stored");
-        let changed_ids = incremental_changed.all_changed_ids();
-
-        let tokens_to_recompute: HashSet<Address> = deps
-            .iter()
-            .filter(|(_, entry)| {
-                !entry
-                    .path_components
-                    .is_disjoint(&changed_ids)
-            })
-            .map(|(addr, _)| addr.clone())
-            .collect();
-
-        assert!(
-            tokens_to_recompute.contains(&token_a.address),
-            "token_a should be scheduled for recomputation when pool_indirect_1 changes"
-        );
-        assert!(
-            tokens_to_recompute.contains(&token_b.address),
-            "token_b should be scheduled for recomputation when pool_indirect_1 changes"
-        );
-    }
-
-    #[tokio::test]
     async fn test_compute_missing_gas_price_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
@@ -1242,7 +729,6 @@ mod tests {
         market.upsert_tokens([eth.clone(), usdc.clone()]);
         let market = SharedMarketData::new_shared();
 
-        // Compute spot prices
         let derived = DerivedData::new_shared();
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
@@ -1254,16 +740,6 @@ mod tests {
             is_full_recompute: true,
         };
 
-        let spot_comp = SpotPriceComputation::new();
-        let spot_prices = spot_comp
-            .compute(&market, &derived, &changed)
-            .await
-            .unwrap();
-        derived
-            .try_write()
-            .unwrap()
-            .set_spot_prices(spot_prices, 0);
-
         let computation = computation_for(&eth.address);
         let result = computation
             .compute(&market, &derived, &changed)
@@ -1272,6 +748,65 @@ mod tests {
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("gas_price"))),
             "should return MissingDependency for gas_price"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_respects_max_hops() {
+        let eth = token(0, "ETH");
+        let a = token(2, "A");
+        let b = token(3, "B");
+        let c = token(4, "C");
+
+        let (market, derived) = setup_test_env(vec![
+            ("eth_a", &eth, &a, MockProtocolSim::new(2.0)),
+            ("a_b", &a, &b, MockProtocolSim::new(2.0)),
+            ("b_c", &b, &c, MockProtocolSim::new(2.0)),
+        ])
+        .await;
+        let changed = ChangedComponents::default();
+
+        // max_hops = 2
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        // A (1 hop) and B (2 hops) should be priced, C (3 hops) should not
+        assert!(prices.contains_key(&a.address), "A should be priced (1 hop)");
+        assert!(prices.contains_key(&b.address), "B should be priced (2 hops)");
+        assert!(!prices.contains_key(&c.address), "C should NOT be priced (3 hops)");
+    }
+
+    #[tokio::test]
+    async fn test_compute_multiple_pools_same_pair() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        // Two pools with different spot prices; BF picks higher output
+        let (market, derived) = setup_test_env(vec![
+            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
+            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
+        ])
+        .await;
+        let changed = ChangedComponents::default();
+
+        let computation = computation_for(&eth.address);
+        let prices = computation
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        // BF picks pool_high (higher output: 2000 > 1000)
+        let usdc_price = prices
+            .get(&usdc.address)
+            .expect("USDC should have price");
+        let ratio =
+            usdc_price.numerator.to_f64().unwrap() / usdc_price.denominator.to_f64().unwrap();
+        assert!(
+            (ratio - 2000.0).abs() < 1e-6,
+            "mid-price should be ~2000 (via pool_high), got {ratio}"
         );
     }
 }

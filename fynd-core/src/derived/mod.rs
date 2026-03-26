@@ -18,14 +18,15 @@
 //!
 //! ```text
 //!                 SpotPriceComputation
-//!                    /           \
-//!                   v             v
+//!                    /
+//!                   v
 //!    PoolDepthComputation    TokenGasPriceComputation
 //! ```
 //!
 //! - **SpotPriceComputation**: No dependencies, computes spot prices for all pools
 //! - **PoolDepthComputation**: Depends on `spot_prices`
-//! - **TokenGasPriceComputation**: Depends on `spot_prices` and `gas_price` (from market data)
+//! - **TokenGasPriceComputation**: Depends on `gas_price` (from market data); uses Bellman-Ford
+//!   SPFA
 //!
 //! # Example
 //!

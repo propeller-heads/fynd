@@ -27,7 +27,7 @@ use tycho_simulation::{
     tycho_core::{models::token::Token, simulation::protocol_sim::Price},
 };
 
-use super::{Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
+use super::{bf_helpers, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
 use crate::{
     derived::{
         computation::ComputationRequirements,
@@ -138,68 +138,6 @@ impl BellmanFordAlgorithm {
         }
 
         None
-    }
-
-    /// Checks whether the target node or pool conflicts with the existing path to `from`.
-    /// Walks the predecessor chain once, checking both conditions simultaneously.
-    fn path_has_conflict(
-        from: NodeIndex,
-        target_node: NodeIndex,
-        target_pool: &ComponentId,
-        predecessor: &[Option<(NodeIndex, ComponentId)>],
-    ) -> bool {
-        let mut current = from;
-        loop {
-            if current == target_node {
-                return true;
-            }
-            match &predecessor[current.index()] {
-                Some((prev, cid)) => {
-                    if cid == target_pool {
-                        return true;
-                    }
-                    current = *prev;
-                }
-                None => return false,
-            }
-        }
-    }
-
-    /// Reconstructs the path from token_out back to token_in by walking the predecessor
-    /// array.
-    fn reconstruct_path(
-        token_out: NodeIndex,
-        token_in: NodeIndex,
-        predecessor: &[Option<(NodeIndex, ComponentId)>],
-    ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
-        let mut path = Vec::new();
-        let mut current = token_out;
-        let mut visited = HashSet::new();
-
-        while current != token_in {
-            if !visited.insert(current) {
-                return Err(AlgorithmError::Other("cycle in predecessor chain".to_string()));
-            }
-
-            let idx = current.index();
-            match &predecessor
-                .get(idx)
-                .and_then(|p| p.as_ref())
-            {
-                Some((prev_node, component_id)) => {
-                    path.push((*prev_node, current, component_id.clone()));
-                    current = *prev_node;
-                }
-                None => {
-                    return Err(AlgorithmError::Other(format!(
-                        "broken predecessor chain at node {idx}"
-                    )));
-                }
-            }
-        }
-
-        path.reverse();
-        Ok(path)
     }
 
     /// Extracts the subgraph reachable from `token_in_node` within `max_hops` via BFS.
@@ -455,7 +393,7 @@ impl Algorithm for BellmanFordAlgorithm {
                     let v_idx = v.index();
 
                     // Single predecessor walk: skip if target token or pool already in path
-                    if Self::path_has_conflict(u, *v, component_id, &predecessor) {
+                    if bf_helpers::path_has_conflict(u, *v, component_id, &predecessor) {
                         continue;
                     }
 
@@ -541,7 +479,7 @@ impl Algorithm for BellmanFordAlgorithm {
         // Reconstruct path and build route directly from stored distances/gas
         // (no re-simulation needed since forbid-revisits guarantees relaxation
         // amounts match sequential execution).
-        let path_edges = Self::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
+        let path_edges = bf_helpers::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
 
         let mut swaps = Vec::with_capacity(path_edges.len());
         for (from_node, to_node, component_id) in &path_edges {
@@ -1284,20 +1222,20 @@ mod tests {
         pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
 
         // Node conflicts: node 0 is in path, node 3 is not
-        assert!(BellmanFordAlgorithm::path_has_conflict(
+        assert!(bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(0),
             &"any".into(),
             &pred
         ));
-        assert!(!BellmanFordAlgorithm::path_has_conflict(
+        assert!(!bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"any".into(),
             &pred
         ));
         // Self-check: node 2 is itself in the "path from 2"
-        assert!(BellmanFordAlgorithm::path_has_conflict(
+        assert!(bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(2),
             &"any".into(),
@@ -1305,19 +1243,19 @@ mod tests {
         ));
 
         // Pool conflicts: pool_a and pool_b are used, pool_c is not
-        assert!(BellmanFordAlgorithm::path_has_conflict(
+        assert!(bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_a".into(),
             &pred
         ));
-        assert!(BellmanFordAlgorithm::path_has_conflict(
+        assert!(bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_b".into(),
             &pred
         ));
-        assert!(!BellmanFordAlgorithm::path_has_conflict(
+        assert!(!bf_helpers::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_c".into(),
