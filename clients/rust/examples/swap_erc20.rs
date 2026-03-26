@@ -3,16 +3,21 @@
 //! Approves the Fynd router to spend WETH (if needed), then executes
 //! a real swap via the local Anvil fork started by the dev environment.
 //!
-//! Run with the local dev environment:
+//! ## Run with Anvil (mocked accounts)
+//!
+//! Requires `TYCHO_API_KEY` and `TYCHO_URL` env vars to be set:
 //!
 //! ```sh
 //! ./scripts/run-example.sh swap_erc20
 //! ```
 //!
-//! Or manually after starting `./scripts/dev-env.sh`:
+//! ## Run with a real wallet
+//!
+//! Requires a Fynd server running in the background. Set `PRIVATE_KEY` to
+//! a funded wallet's private key:
 //!
 //! ```sh
-//! cargo run --example swap_erc20 -p fynd-client
+//! PRIVATE_KEY=0x... cargo run --example swap_erc20 -p fynd-client
 //! ```
 
 use alloy::{

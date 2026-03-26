@@ -98,6 +98,25 @@ The fee receiver signs a typed data hash:
 ## Code examples
 
 {% tabs %}
+{% tab title="TypeScript" %}
+```typescript
+// Build fee params (without signature).
+const feeParams: ClientFeeParams = {
+    bps: 50,              // 0.5% fee
+    receiver: feeReceiver,
+    maxContribution: 0n,  // no vault subsidy
+    deadline: 1893456000, // Unix timestamp
+};
+
+// Compute the EIP-712 hash and sign with the fee receiver's wallet.
+const hash = clientFeeSigningHash(feeParams, 1, routerAddress);
+const signature = await account.signMessage({message: {raw: hash}});
+
+// Attach signature and wire into encoding options.
+const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
+```
+{% endtab %}
+
 {% tab title="Rust" %}
 ```rust
     // Build the fee params (without signature).
@@ -120,24 +139,5 @@ The fee receiver signs a typed data hash:
 ```
 
 See the full working example: [`clients/rust/examples/swap_client_fee.rs`](../../clients/rust/examples/swap_client_fee.rs)
-{% endtab %}
-
-{% tab title="TypeScript" %}
-```typescript
-// Build fee params (without signature).
-const feeParams: ClientFeeParams = {
-    bps: 50,              // 0.5% fee
-    receiver: feeReceiver,
-    maxContribution: 0n,  // no vault subsidy
-    deadline: 1893456000, // Unix timestamp
-};
-
-// Compute the EIP-712 hash and sign with the fee receiver's wallet.
-const hash = clientFeeSigningHash(feeParams, 1, routerAddress);
-const signature = await account.signMessage({message: {raw: hash}});
-
-// Attach signature and wire into encoding options.
-const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
-```
 {% endtab %}
 {% endtabs %}

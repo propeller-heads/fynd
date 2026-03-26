@@ -4,13 +4,17 @@
 //! `http://localhost:3000`. Only quote retrieval is exercised; no transactions
 //! are formed.
 //!
-//! Run with the local dev environment:
+//! ## Run with Anvil (mocked accounts)
+//!
+//! Requires `TYCHO_API_KEY` and `TYCHO_URL` env vars to be set:
 //!
 //! ```sh
 //! ./scripts/run-example.sh quote
 //! ```
 //!
-//! Or manually after starting `./scripts/dev-env.sh`:
+//! ## Run directly
+//!
+//! Requires a Fynd server running in the background.
 //!
 //! ```sh
 //! cargo run --example quote -p fynd-client

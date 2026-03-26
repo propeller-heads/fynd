@@ -45,6 +45,8 @@ cargo run --release -- serve
 
 ## Step 2 — Execute a swap
 
+The following examples showcase how to integrate Fynd in your application. To interact with live quotes directly, use the [swap CLI](../../guides/swap-cli.md).
+
 {% hint style="info" %}
 Fynd currently only supports **sell orders** (exact input). Set `"side": "sell"` in your order. Buy orders (exact output) are not yet supported.
 {% endhint %}
@@ -153,7 +155,6 @@ let receipt = client
 println!("gas: {}", receipt.gas_cost());
 ```
 
-Run with: `cargo run --example swap_erc20 -p fynd-client`
 {% endtab %}
 
 {% tab title="curl" %}

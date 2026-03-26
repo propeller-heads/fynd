@@ -4,16 +4,21 @@
 //! Permit2 EIP-712 message, then executes a real swap via the local
 //! Anvil fork started by the dev environment.
 //!
-//! Run with the local dev environment:
+//! ## Run with Anvil (mocked accounts)
+//!
+//! Requires `TYCHO_API_KEY` and `TYCHO_URL` env vars to be set:
 //!
 //! ```sh
 //! ./scripts/run-example.sh swap_permit2
 //! ```
 //!
-//! Or manually after starting `./scripts/dev-env.sh`:
+//! ## Run with a real wallet
+//!
+//! Requires a Fynd server running in the background. Set `PRIVATE_KEY` to
+//! a funded wallet's private key:
 //!
 //! ```sh
-//! cargo run --example swap_permit2 -p fynd-client
+//! PRIVATE_KEY=0x... cargo run --example swap_permit2 -p fynd-client
 //! ```
 
 use alloy::{

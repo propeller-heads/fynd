@@ -1,5 +1,6 @@
 ---
 description: Specifications to interact with Fynd server
+icon: plug
 ---
 
 # API Specifications
