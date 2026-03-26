@@ -17,7 +17,8 @@ use crate::api::prices::{
 pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
     let scope = web::scope("/v1")
         .route("/quote", web::post().to(quote))
-        .route("/health", web::get().to(health));
+        .route("/health", web::get().to(health))
+        .route("/info", web::get().to(info));
     #[cfg(feature = "experimental")]
     let scope = scope.route("/prices", web::get().to(get_prices));
     cfg.service(scope);
@@ -33,7 +34,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// - 400 Bad Request: Invalid request format
 /// - 422 Unprocessable Entity: No routes found
 /// - 503 Service Unavailable: Queue full or service overloaded
-/// - 504 Gateway Timeout: Quote timeout
+/// - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
 #[utoipa::path(
     post,
     path = "/v1/quote",
@@ -44,7 +45,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 400, description = "Invalid request", body = ErrorResponse),
         (status = 422, description = "No route found", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
-        (status = 504, description = "Quote timeout", body = ErrorResponse),
+        (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
 #[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
@@ -128,6 +129,24 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
     } else {
         HttpResponse::ServiceUnavailable().json(status)
     }
+}
+
+/// GET /v1/info - Return static metadata about this Fynd instance.
+#[utoipa::path(
+    get,
+    path = "/v1/info",
+    tag = "solver",
+    responses(
+        (status = 200, description = "Instance info", body = dto::InstanceInfo),
+    )
+)]
+pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
+    let body = dto::InstanceInfo::new(
+        state.chain_id(),
+        state.router_address().clone(),
+        state.permit2_address().clone(),
+    );
+    HttpResponse::Ok().json(body)
 }
 
 #[cfg(feature = "experimental")]
@@ -268,5 +287,300 @@ pub async fn get_prices(
 
 #[cfg(test)]
 mod tests {
-    // TODO: Add integration tests for handlers
+    use std::sync::Arc;
+
+    use actix_web::{test, web, App, HttpResponse};
+    use fynd_core::{
+        derived::SharedDerivedDataRef,
+        encoding::encoder::Encoder,
+        feed::market_data::{SharedMarketData, SharedMarketDataRef},
+        worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
+    };
+    use serde_json::Value;
+    use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+    use tycho_simulation::tycho_common::{models::Chain, Bytes};
+
+    use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
+
+    /// Minimal handler that mirrors the real quote handler's JSON extraction.
+    /// The body deserialization error happens before this is called.
+    async fn echo_quote(_req: web::Json<QuoteRequest>) -> HttpResponse {
+        HttpResponse::Ok().finish()
+    }
+
+    /// Creates a test service that mirrors `configure_app`'s extractor setup.
+    /// This intentionally matches the real server's `configure_app` call so that
+    /// fixes to the app config are reflected here.
+    macro_rules! make_test_app {
+        () => {
+            test::init_service(
+                App::new()
+                    .configure(crate::api::configure_error_handlers)
+                    .route("/v1/quote", web::post().to(echo_quote)),
+            )
+            .await
+        };
+    }
+
+    async fn body_json(resp: actix_web::dev::ServiceResponse) -> Value {
+        let bytes = test::read_body(resp).await;
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    fn make_test_state() -> AppState {
+        let market_data: SharedMarketDataRef =
+            Arc::new(tokio::sync::RwLock::new(SharedMarketData::new()));
+        let derived_data: SharedDerivedDataRef =
+            Arc::new(tokio::sync::RwLock::new(Default::default()));
+
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .expect("default encoders should always succeed");
+        let encoder = Encoder::new(Chain::Ethereum, registry).expect("encoder should build");
+
+        let router = WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), encoder);
+        let health_tracker =
+            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
+
+        let router_address =
+            Bytes::from(hex::decode("fD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap());
+        let permit2_address =
+            Bytes::from(hex::decode("000000000022D473030F116dDEE9F6B43aC78BA3").unwrap());
+
+        AppState::new(
+            router,
+            health_tracker,
+            1,
+            router_address,
+            permit2_address,
+            #[cfg(feature = "experimental")]
+            derived_data,
+            #[cfg(feature = "experimental")]
+            tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
+        )
+    }
+
+    // ── Unknown route (default_service) ────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_unknown_route_returns_json_404() {
+        use crate::api::error::ErrorResponse;
+
+        let app = test::init_service(
+            App::new()
+                .configure(crate::api::configure_error_handlers)
+                .route("/v1/quote", web::post().to(echo_quote))
+                .default_service(web::to(|| async {
+                    let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
+                    HttpResponse::NotFound().json(body)
+                })),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/does-not-exist")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "NOT_FOUND", "body was: {body}");
+    }
+
+    // ── JSON body errors ────────────────────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_malformed_json_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{not valid json}")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_empty_body_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_wrong_content_type_returns_json_error() {
+        let app = make_test_app!();
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "text/plain"))
+            .set_payload(r#"{"orders":[]}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    // ── Query-string errors (QueryConfig) ──────────────────────────────────
+    //
+    // The prices endpoint uses `web::Query<PricesQuery>` to extract URL query
+    // params like `?limit=100&include=depths`. This is completely separate from
+    // the JSON body: `JsonConfig` only applies to `web::Json<T>` (request body),
+    // while `QueryConfig` applies to `web::Query<T>` (URL query string).
+    //
+    // Without `QueryConfig`, a request like `?limit=not-a-number` would trigger
+    // actix-web's default `QueryPayloadError` handler which returns plain text.
+
+    #[actix_web::test]
+    async fn test_invalid_query_param_returns_json_error() {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            #[allow(dead_code)]
+            limit: usize,
+        }
+
+        async fn handler(_: web::Query<Params>) -> HttpResponse {
+            HttpResponse::Ok().finish()
+        }
+
+        let app = test::init_service(
+            App::new()
+                .configure(crate::api::configure_error_handlers)
+                .route("/v1/prices", web::get().to(handler)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/prices?limit=not-a-number")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_invalid_field_type_returns_json_error() {
+        let app = make_test_app!();
+        // `orders` must be an array, not a string
+        let req = test::TestRequest::post()
+            .uri("/v1/quote")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"orders": "not-an-array"}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+        assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    // ── /v1/info endpoint ──────────────────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_info_returns_200_with_chain_id() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn test_info_response_has_required_fields() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(body["chain_id"], 1);
+        assert!(body["router_address"].is_string(), "router_address must be a string");
+        assert!(body["permit2_address"].is_string(), "permit2_address must be a string");
+    }
+
+    #[actix_web::test]
+    async fn test_info_returns_correct_permit2_address() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        let addr = body["permit2_address"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(
+            addr.contains("000000000022d473030f116ddee9f6b43ac78ba3"),
+            "expected canonical Permit2 address, got {addr}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_info_returns_correct_router_address() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        let addr = body["router_address"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(
+            addr.contains("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
+            "expected Ethereum Tycho Router address, got {addr}"
+        );
+    }
 }

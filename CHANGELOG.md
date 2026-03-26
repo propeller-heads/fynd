@@ -1,3 +1,175 @@
+## [0.35.0](https://github.com/propeller-heads/fynd/compare/0.34.3...0.35.0) (2026-03-26)
+
+
+### Features
+
+* add Docker build and publish pipeline ([c1bdcc9](https://github.com/propeller-heads/fynd/commit/c1bdcc93cb6ad97ce90f0e65683e40b409bd22c4))
+* publish fynd crate as an embeddable library ([559625e](https://github.com/propeller-heads/fynd/commit/559625e282eb92ebb2595d6967ccaf59db9825c9))
+
+
+### Bug Fixes
+
+* **docker:** restore workspace member stubs in rebuild stage ([c277f63](https://github.com/propeller-heads/fynd/commit/c277f63995ddb23c9b4655f10e1e979cb8d26e6e))
+* restore fynd_core as core and fynd_rpc as rpc re-export aliases ([6cc7de0](https://github.com/propeller-heads/fynd/commit/6cc7de01eacf77047a3a2c3f94dc66504b7ad6fa))
+
+## [0.34.3](https://github.com/propeller-heads/fynd/compare/0.34.2...0.34.3) (2026-03-26)
+
+
+### Bug Fixes
+
+* add versions to workspace dep entries for crates.io publish ([fec4cab](https://github.com/propeller-heads/fynd/commit/fec4cab9e99577efdc81cc54a9b764762d735d41))
+* update Cargo.lock for internal crates after version bump ([b6aaef6](https://github.com/propeller-heads/fynd/commit/b6aaef65fc8977b2e3ee5b53daaeb1071303eb69))
+
+## [0.34.2](https://github.com/propeller-heads/fynd/compare/0.34.1...0.34.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* add repository field to package.json and rename cargo secret ([ce35e0b](https://github.com/propeller-heads/fynd/commit/ce35e0b0d43cf0ef6887a33be7d09f2f91eedd55))
+
+## [0.34.1](https://github.com/propeller-heads/fynd/compare/0.34.0...0.34.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* **benchmark:** wire scale subcommand and add shutdown tracing ([ea0e9e0](https://github.com/propeller-heads/fynd/commit/ea0e9e0206295fe030632a82811af1527d7fa46a))
+* inject CARGO_REGISTRY_TOKEN into release publish job ([5e13325](https://github.com/propeller-heads/fynd/commit/5e133258082f829051faaf1738b2ab796f83cdb4))
+
+## [0.34.0](https://github.com/propeller-heads/fynd/compare/0.33.2...0.34.0) (2026-03-26)
+
+
+### Features
+
+* add @kayibal/fynd-client TypeScript package ([f50eef4](https://github.com/propeller-heads/fynd/commit/f50eef4744add3eb2fce030f6fd90dfa00effe47))
+
+
+### Bug Fixes
+
+* **ts-client:** update example and build script to use @kayibal/fynd-client ([5755c37](https://github.com/propeller-heads/fynd/commit/5755c370749b59097107336de05388e3e2c146dd))
+
+## [0.33.2](https://github.com/propeller-heads/fynd/compare/0.33.1...0.33.2) (2026-03-26)
+
+## [0.33.1](https://github.com/propeller-heads/fynd/compare/0.33.0...0.33.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* **ci:** move --silent before run in pnpm build commands ([48a64e3](https://github.com/propeller-heads/fynd/commit/48a64e395ff54fd1e88eb6ac68a8ea1de37e3775))
+
+## [0.33.0](https://github.com/propeller-heads/fynd/compare/0.32.0...0.33.0) (2026-03-26)
+
+
+### Features
+
+* **ci:** add TypeScript examples to run-all-examples.sh ([496c06b](https://github.com/propeller-heads/fynd/commit/496c06b2a897fbcf11cef4183108c1292fe71954))
+* **ts-client:** add approval flow with info(), approval(), and submit() ([c125b63](https://github.com/propeller-heads/fynd/commit/c125b634121a9f0e7922a25bd0fc7167a86a4168))
+* **ts-client:** add gas estimation, signing fix, and revert reason fetching ([3f75d16](https://github.com/propeller-heads/fynd/commit/3f75d16f791251f04fcb26878413155e665f8e32))
+
+
+### Bug Fixes
+
+* **ci:** fix doc snippet anchor and add pnpm to examples workflow ([135078b](https://github.com/propeller-heads/fynd/commit/135078b672d8a43a3ca999853667a2562b937258))
+
+## [0.32.0](https://github.com/propeller-heads/fynd/compare/0.31.0...0.32.0) (2026-03-26)
+
+
+### Features
+
+* Add support for ekubo_v3 exchange in protocol registry ([db945b3](https://github.com/propeller-heads/fynd/commit/db945b3112ba66e0cc50d177796e1ddbdd1d7c17))
+
+## [0.31.0](https://github.com/propeller-heads/fynd/compare/0.30.0...0.31.0) (2026-03-26)
+
+
+### Features
+
+* **ci:** add Examples workflow to run all Rust client examples ([194c241](https://github.com/propeller-heads/fynd/commit/194c2411b6c35020dd6363343ea9afe7d9ec3287))
+* **dev-env:** show fynd logs via RUST_LOG=info ([8221587](https://github.com/propeller-heads/fynd/commit/82215872fa47e0e9be52d0b7756bcf2f0c43dd68))
+* **examples:** add dev-env scripts and self-documenting error messages ([48b4bc2](https://github.com/propeller-heads/fynd/commit/48b4bc29113d6ab0e69b629c4e6d9be230a63a65))
+* **examples:** increase swap_client_fee slippage to 1%, add to CI ([114b650](https://github.com/propeller-heads/fynd/commit/114b65004b3140a4d3a381027c60eaef1c563b59))
+* **examples:** simulate swap before signing to surface revert reason ([3c00541](https://github.com/propeller-heads/fynd/commit/3c005412bff373644452fb550012f4f48a26edd5))
+* **rust-client:** add approval flow with info(), approval(), and submit() ([22cb236](https://github.com/propeller-heads/fynd/commit/22cb236e2e88918d7bac915abd1f85219306bc01))
+* **rust-client:** return error with revert reason when tx reverts on-chain ([792548e](https://github.com/propeller-heads/fynd/commit/792548e0139be05dde119ab0c11933a0f36a6acb))
+* **rust-client:** use eth_estimateGas by default for swap and approval ([6dcf39f](https://github.com/propeller-heads/fynd/commit/6dcf39f9430ff8cfa899d3157343f2c5b4b85eea))
+
+
+### Bug Fixes
+
+* **ci:** pre-build fynd release binary before running examples ([3f79da8](https://github.com/propeller-heads/fynd/commit/3f79da8cb1d2502a7772fbe81c3213d8c90fecd9))
+* **ci:** run only swap_erc20 example, enable info logs for fynd serve ([b20291c](https://github.com/propeller-heads/fynd/commit/b20291c0825a4c347bbc0927f21784e701aa0469))
+* **dev-env:** pass TYCHO_URL to fynd serve, quote TYCHO_URL var ([a9fc96b](https://github.com/propeller-heads/fynd/commit/a9fc96b72488d1a6284ba4cadb3987a1da95a841))
+* **dev-env:** RUST_LOG=warn locally, info on CI ([b3795fa](https://github.com/propeller-heads/fynd/commit/b3795fa65adcd80efcf176bed506de7bfe39ddb9))
+* **dev-env:** use mnemonic to fund dev account, update private key ([26d36fa](https://github.com/propeller-heads/fynd/commit/26d36faee1c4aed1f9e4fd7e21e7d97a7032c0c5))
+* **examples:** explicitly set RPC_URL and FYND_URL when running examples ([c3e9918](https://github.com/propeller-heads/fynd/commit/c3e9918b78c0a4f6f6cef55bf6c151bf212712b6))
+* **rust-client:** add 200k gas buffer for cold storage on forked chains ([11937da](https://github.com/propeller-heads/fynd/commit/11937dab0cb7b0d50d30b2d6f1f49def2e7b3014))
+* **rust-client:** include raw hex in revert message when decoding fails ([8dbda82](https://github.com/propeller-heads/fynd/commit/8dbda8224d068c9af3ae551efb9f6af0d113b880))
+* **rust-client:** make InstanceInfo fields private, fix direct field access, add missing test ([4ca4cbd](https://github.com/propeller-heads/fynd/commit/4ca4cbdc59daacdcab4b7cc1452e7725d59287f3))
+* **rust-client:** resolve post-rebase API drift ([9861e64](https://github.com/propeller-heads/fynd/commit/9861e6479f5f16140ff0358a067c44c366b152b2))
+* update broken intra-doc links to renamed methods ([3512d78](https://github.com/propeller-heads/fynd/commit/3512d7844d7467cb3c3ffe8bcec6bc42ab91c563))
+
+## [0.30.0](https://github.com/propeller-heads/fynd/compare/0.29.0...0.30.0) (2026-03-26)
+
+
+### Features
+
+* account for router and client fees in min_amount_out ([12777c7](https://github.com/propeller-heads/fynd/commit/12777c7daa815d4b263c3cf896e36f903eff0dce))
+
+
+### Bug Fixes
+
+* Fix multi-threaded runtime panic and add RFQ attributes to Solution ([638f33b](https://github.com/propeller-heads/fynd/commit/638f33b0aa736e099b140581918e018401e61ea0))
+* prevent race in Encoder runtime drop ([14f98f7](https://github.com/propeller-heads/fynd/commit/14f98f74c07ed17c21216c04e1867347e8653f8d))
+
+## [0.29.0](https://github.com/propeller-heads/fynd/compare/0.28.0...0.29.0) (2026-03-25)
+
+
+### Features
+
+* Update tycho-execution to use the new routers ([03e5ef8](https://github.com/propeller-heads/fynd/commit/03e5ef8f1dd56b2669f035bb5dd28620c2e0ac37))
+
+## [0.28.0](https://github.com/propeller-heads/fynd/compare/0.27.0...0.28.0) (2026-03-25)
+
+
+### Features
+
+* **rpc:** add GET /v1/info endpoint ([a502dfd](https://github.com/propeller-heads/fynd/commit/a502dfdc65a3c19171a314f4eeee1855addb9cb5))
+
+
+### Bug Fixes
+
+* **rpc:** remove dead into_components_with_info, add missing tests ([fda01c0](https://github.com/propeller-heads/fynd/commit/fda01c0fba1a0c0f07d7d691e3156ee249bd6421))
+
+## [0.27.0](https://github.com/propeller-heads/fynd/compare/0.26.1...0.27.0) (2026-03-25)
+
+
+### Features
+
+* support Router v3 (tycho-execution=0.167.0) ([b46414d](https://github.com/propeller-heads/fynd/commit/b46414d301fe4c8d160f89d60d2348a162ef0185))
+
+## [0.26.1](https://github.com/propeller-heads/fynd/compare/0.26.0...0.26.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* **client:** map all known server error codes to typed ErrorCode variants ([f45071e](https://github.com/propeller-heads/fynd/commit/f45071ef794498ffb562c48c877294a61b051c56))
+* **fynd-client:** mark ErrorCode as non_exhaustive ([facc5da](https://github.com/propeller-heads/fynd/commit/facc5da6b18555866e35c66e9d08a7d5759426fc))
+* **rpc:** always return JSON bodies, including on extractor errors ([ae6ba4f](https://github.com/propeller-heads/fynd/commit/ae6ba4f0c02f3ab90f62b115af9601782aeeeaa1))
+* **rpc:** return 503 for MarketDataStale, add missing test coverage ([0432dec](https://github.com/propeller-heads/fynd/commit/0432dec56ef7d60e1c34b7ff8bf5dfab159de5b4))
+* **rpc:** return 503 for solver timeout instead of 504 ([95cc60d](https://github.com/propeller-heads/fynd/commit/95cc60d7c9177b664fb72e29a489b18849a5407e))
+
+## [0.26.0](https://github.com/propeller-heads/fynd/compare/0.25.2...0.26.0) (2026-03-25)
+
+
+### Features
+
+* update tycho-simulation dependency ([b0a7647](https://github.com/propeller-heads/fynd/commit/b0a76478888ca3e37ebaa22f91a7a0d6c81f383f))
+
+## [0.25.2](https://github.com/propeller-heads/fynd/compare/0.25.1...0.25.2) (2026-03-25)
+
+
+### Bug Fixes
+
+* update doc snippet checker for quickstart folder move ([a2770de](https://github.com/propeller-heads/fynd/commit/a2770de5f4e3e9928e2ba44ad44528424ffe5f76))
+
 ## [0.25.1](https://github.com/propeller-heads/fynd/compare/0.25.0...0.25.1) (2026-03-24)
 
 

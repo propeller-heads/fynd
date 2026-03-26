@@ -1,0 +1,8 @@
+# Single-pool config for CPU scaling benchmark (Bellman-Ford, 2-hop)
+[pools.bellman_ford_2_hops]
+algorithm = "bellman_ford"
+num_workers = 1
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 5000
+max_routes = 50

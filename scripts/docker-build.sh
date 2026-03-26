@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="tycho-solver"
+IMAGE="fynd"
 TAG="latest"
 PLATFORM=""
 PUSH=false
@@ -10,10 +10,10 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Build the tycho-solver Docker image.
+Build the fynd Docker image.
 
 Options:
-  -i, --image NAME     Image name (default: tycho-solver)
+  -i, --image NAME     Image name (default: fynd)
   -t, --tag TAG        Image tag (default: latest)
   -p, --platform PLAT  Target platform, e.g. linux/amd64, linux/arm64
                        (default: host platform)

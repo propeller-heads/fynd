@@ -28,7 +28,7 @@ use clap::Parser;
 use fynd_client::{
     EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus, Order,
     OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
-    QuoteParams, SignedOrder, SigningHints, StorageOverrides,
+    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
 };
 use fynd_rpc::{
     builder::{parse_chain, FyndRPCBuilder},
@@ -52,6 +52,8 @@ enum TransferType {
     TransferFrom,
     /// Permit2 off-chain signature flow.
     TransferFromPermit2,
+    /// Use funds already deposited in the Tycho Router vault.
+    UseVaultsFunds,
 }
 
 /// fynd-swap-cli — quote and execute token swaps via the Fynd solver.
@@ -466,6 +468,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         }
+        TransferType::UseVaultsFunds => EncodingOptions::new(slippage).with_vault_funds(),
     };
 
     // ── Quote ─────────────────────────────────────────────────────────────────
@@ -540,12 +543,12 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sign order payload ────────────────────────────────────────────────────
     let payload = client
-        .signable_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default())
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
         .await?;
-    let signed = SignedOrder::assemble(payload, order_sig);
+    let signed = SignedSwap::assemble(payload, order_sig);
 
     // ── Build execution options ───────────────────────────────────────────────
     let exec_options = if cli.execute {
@@ -555,18 +558,28 @@ async fn main() -> anyhow::Result<()> {
         // Dry-run: the spender for the allowance slot depends on the flow.
         // TransferFrom: spender is the Fynd router (from quote).
         // TransferFromPermit2: spender is the Permit2 contract (router authorised via EIP-712).
-        let spender = match cli.transfer_type {
-            TransferType::TransferFrom => router_from_quote,
-            TransferType::TransferFromPermit2 => permit2_addr,
+        // UseVaultsFunds: no allowance needed — funds are in the router vault.
+        let overrides = match cli.transfer_type {
+            TransferType::TransferFrom => {
+                let overrides =
+                    build_dry_run_overrides(&provider, sell_token, sender, router_from_quote)
+                        .await?;
+                Some(overrides)
+            }
+            TransferType::TransferFromPermit2 => {
+                let overrides =
+                    build_dry_run_overrides(&provider, sell_token, sender, permit2_addr).await?;
+                Some(overrides)
+            }
+            TransferType::UseVaultsFunds => None,
         };
-        let overrides = build_dry_run_overrides(&provider, sell_token, sender, spender).await?;
         info!("Submitting dry-run execution...");
-        ExecutionOptions { dry_run: true, storage_overrides: Some(overrides) }
+        ExecutionOptions { dry_run: true, storage_overrides: overrides, fetch_revert_reason: true }
     };
 
     // ── Execute ───────────────────────────────────────────────────────────────
     let receipt = client
-        .execute(signed, &exec_options)
+        .execute_swap(signed, &exec_options)
         .await?;
     let settled = if cli.execute {
         tokio::time::timeout(Duration::from_secs(120), receipt)

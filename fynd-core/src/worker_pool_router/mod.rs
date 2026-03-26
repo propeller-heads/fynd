@@ -335,8 +335,8 @@ impl WorkerPoolRouter {
                 BigUint::ZERO,
                 any_q.block().clone(),
                 String::new(),
-                any_q.sender.clone(),
-                any_q.receiver.clone(),
+                any_q.sender().clone(),
+                any_q.receiver().clone(),
             )
         } else {
             // No responses at all - determine status from failure types

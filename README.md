@@ -3,6 +3,12 @@
 A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
 routes across multiple DeFi protocols in real-time.
 
+> [!CAUTION]
+  > **Alpha Software — Unaudited Contracts**
+  >
+  > Fynd's smart contracts ([TychoRouter V3](https://docs.propellerheads.xyz/tycho/for-solvers/execution#security-and-audits), Vault, Executors) are still undergoing a security audit. Funds stored in the router (including vault deposits) may be lost. Use at your own
+   discretion.
+
 ## Features
 
 - **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve,
@@ -42,7 +48,7 @@ cargo build --release
 
 # Set required environment variables
 export TYCHO_API_KEY=your-api-key
-export RUST_LOG=info
+export RUST_LOG=fynd=info
 
 # Run
 cargo run --release serve
@@ -136,6 +142,7 @@ Submit one or more swap orders and receive optimal routes.
 | `options.encoding_options.transfer_type` | string | No | Input token transfer method: `transfer_from` (default) or `transfer_from_permit2`                             |
 | `options.encoding_options.permit` | object | No | Permit2 single-token authorization. Required when using `transfer_from_permit2`                               |
 | `options.encoding_options.permit2_signature` | string | No | Permit2 signature (hex-encoded). Required when `permit` is set                                                |
+| `options.encoding_options.client_fee_params` | object | No | Client fee configuration. See [Client Fees](docs/guides/client-fees.md)                                       |
 
 **Response:**
 
@@ -173,6 +180,12 @@ Submit one or more swap orders and receive optimal routes.
         "to": "0x...",
         "value": "0",
         "data": "0x..."
+      },
+      "fee_breakdown": {
+        "router_fee": "320000",
+        "client_fee": "0",
+        "max_slippage": "31996800",
+        "min_amount_received": "3167683200"
       }
     }
   ],

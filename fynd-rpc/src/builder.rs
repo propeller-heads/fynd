@@ -165,9 +165,6 @@ impl FyndRPCBuilder {
             "starting fynd"
         );
 
-        #[cfg(feature = "experimental")]
-        let chain = self.fynd_builder.chain();
-
         let parts = self
             .fynd_builder
             .build()
@@ -182,6 +179,19 @@ impl FyndRPCBuilder {
                 "worker pool started"
             );
         }
+
+        let chain = parts.chain();
+        let chain_id = chain.id();
+        let router_address = parts.router_address().clone();
+        let permit2_address = {
+            use fynd_core::encoding::encoder::PERMIT2_ADDRESS;
+            let hex = PERMIT2_ADDRESS
+                .strip_prefix("0x")
+                .unwrap_or(PERMIT2_ADDRESS);
+            hex::decode(hex)
+                .context("failed to decode PERMIT2_ADDRESS")?
+                .into()
+        };
 
         let health_tracker =
             HealthTracker::new(Arc::clone(parts.market_data()), Arc::clone(parts.derived_data()))
@@ -207,6 +217,9 @@ impl FyndRPCBuilder {
         let app_state = AppState::new(
             router,
             health_tracker,
+            chain_id,
+            router_address,
+            permit2_address,
             #[cfg(feature = "experimental")]
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
@@ -280,7 +293,7 @@ impl FyndRPC {
                 if let Err(e) = server_result {
                     error!(error = %e, "Server task error");
                 }
-                info!("shutting down...");
+                info!("shutting down: HTTP server stopped, aborting feed and computation");
                 feed_handle.abort();
                 gas_price_worker_handle.abort();
                 let _ = computation_shutdown_tx.send(());
@@ -294,7 +307,7 @@ impl FyndRPC {
                 gas_price_worker_handle.abort();
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
-                info!("shutting down...");
+                info!("shutting down: feed error path");
             }
             _ = &mut gas_price_worker_handle => {
                 // Gas price worker completed, which means it errored
@@ -304,7 +317,7 @@ impl FyndRPC {
                 feed_handle.abort();
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
-                info!("shutting down...");
+                info!("shutting down: gas price error path");
             }
             _ = &mut computation_manager_handle => {
                 // Computation manager completed unexpectedly
@@ -313,8 +326,12 @@ impl FyndRPC {
             }
         }
 
+        info!("shutting down worker pools");
         for pool in worker_pools {
+            let name = pool.name().to_owned();
+            info!(name, "shutting down pool");
             pool.shutdown();
+            info!(name, "pool shut down");
         }
 
         info!("shutdown complete");

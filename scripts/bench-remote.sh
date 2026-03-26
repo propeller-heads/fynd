@@ -19,6 +19,8 @@ TYCHO_API_KEY="${TYCHO_API_KEY:?TYCHO_API_KEY must be set}"
 HTTP_PORT="${HTTP_PORT:-3456}"
 POOL_CONFIG="${POOL_CONFIG:-single_pool.toml}"
 REQUESTS_FILE="${REQUESTS_FILE:-tools/benchmark/requests_set.json}"
+OUTPUT_FILE="${OUTPUT_FILE:-scale_results_remote.json}"
+RPC_URL="${RPC_URL:-}"
 VOLUME_SIZE="${VOLUME_SIZE:-60}" # GB, needs space for Rust toolchain + build
 KEY_NAME="bench-remote-$$"
 SG_NAME="bench-remote-sg-$$"
@@ -214,7 +216,7 @@ set -euo pipefail
 source "\$HOME/.cargo/env"
 cd ~/fynd
 
-RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
+RPC_URL="${RPC_URL}" RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --base-config "${POOL_CONFIG}" \\
     --worker-counts "${WORKER_COUNTS}" \\
     --protocols "${PROTOCOLS}" \\
@@ -226,15 +228,15 @@ RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --requests-file "${REQUESTS_FILE}" \\
     --warmup-secs ${WARMUP_SECS} \\
     --health-timeout-secs ${HEALTH_TIMEOUT} \\
-    --output-file scale_results_remote.json 2>&1
+    --output-file "${OUTPUT_FILE}" 2>&1
 BENCH_EOF
 
 # ---------- fetch results ----------
 echo ""
 echo "=== Fetching results ==="
-$SCP "ec2-user@${PUBLIC_IP}:${REMOTE_DIR}/scale_results_remote.json" \
-	"${REPO_ROOT}/scale_results_remote.json"
-echo "Results saved to: ${REPO_ROOT}/scale_results_remote.json"
+$SCP "ec2-user@${PUBLIC_IP}:${REMOTE_DIR}/${OUTPUT_FILE}" \
+	"${REPO_ROOT}/${OUTPUT_FILE}"
+echo "Results saved to: ${REPO_ROOT}/${OUTPUT_FILE}"
 
 echo ""
 echo "=== Done ==="

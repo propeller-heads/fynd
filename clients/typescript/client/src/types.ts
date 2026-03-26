@@ -33,7 +33,7 @@ export interface Order {
 }
 
 /** How the router pulls input tokens from the sender. */
-export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'none';
+export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds' | 'none';
 
 /** Uniswap Permit2 allowance details for a single token. */
 export interface PermitDetails {
@@ -55,6 +55,25 @@ export interface PermitSingle {
   sigDeadline: bigint;
 }
 
+/** Client fee configuration for the Tycho Router.
+ *
+ * When provided, the router charges a fee in basis points on the swap output.
+ * The `signature` must be an EIP-712 signature by the `receiver` over the
+ * `ClientFee` typed data — compute the hash with `clientFeeSigningHash`.
+ */
+export interface ClientFeeParams {
+  /** Fee in basis points (0–10,000). 100 = 1%. */
+  bps: number;
+  /** Address that receives the fee (also the required EIP-712 signer). */
+  receiver: Address;
+  /** Maximum subsidy from the client's vault balance. */
+  maxContribution: bigint;
+  /** Unix timestamp after which the signature is invalid. */
+  deadline: number;
+  /** 65-byte EIP-712 ECDSA signature by `receiver`. Set after signing. */
+  signature?: Hex;
+}
+
 /** Controls how the solver encodes the settlement transaction. */
 export interface EncodingOptions {
   /** Maximum acceptable slippage as a fraction (e.g. 0.01 for 1%). */
@@ -65,6 +84,8 @@ export interface EncodingOptions {
   permit?: PermitSingle;
   /** 65-byte Permit2 signature over the permit; required with `permit`. */
   permit2Signature?: Hex;
+  /** Client fee configuration. When absent, no fee is charged. */
+  clientFeeParams?: ClientFeeParams;
 }
 
 /** An encoded on-chain transaction returned by the solver. */
@@ -118,6 +139,18 @@ export interface Route {
   swaps: Swap[];
 }
 
+/** Breakdown of fees applied to the swap output by the on-chain FeeCalculator. */
+export interface FeeBreakdown {
+  /** Router protocol fee (fee on output + router's share of client fee). */
+  routerFee: bigint;
+  /** Client's portion of the fee (after the router takes its share). */
+  clientFee: bigint;
+  /** Maximum slippage: (amountOut - routerFee - clientFee) * slippage. */
+  maxSlippage: bigint;
+  /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
+  minAmountReceived: bigint;
+}
+
 /** A solver quote containing the best route, amounts, and optional encoded transaction. */
 export interface Quote {
   orderId: string;
@@ -136,6 +169,8 @@ export interface Quote {
   receiver: Address;
   /** Encoded transaction; present only when `encodingOptions` was set in the quote request. */
   transaction?: Transaction;
+  /** Fee breakdown; present only when `encodingOptions` was set in the quote request. */
+  feeBreakdown?: FeeBreakdown;
 }
 
 /** Solver health status and readiness information. */
@@ -146,4 +181,34 @@ export interface HealthStatus {
   /** Number of liquidity pools tracked by the solver. */
   numSolverPools: number;
   gasPriceAgeMs?: number;
+}
+
+/** Static metadata about a Fynd server instance. */
+export interface InstanceInfo {
+  routerAddress: Address;
+  permit2Address: Address;
+  chainId: number;
+}
+
+/** Parameters for {@link FyndClient.approval}. */
+export interface ApprovalParams {
+  /** ERC-20 token to approve. */
+  token: Address;
+  /** Amount to approve (in token base units). */
+  amount: bigint;
+  /**
+   * Which contract to approve as spender.
+   *
+   * `'transfer_from'` → router contract (default).
+   * `'transfer_from_permit2'` → Permit2 contract.
+   * `'none'` → {@link FyndClient.approval} returns `null` immediately.
+   */
+  transferType?: UserTransferType;
+  /**
+   * When `true`, read on-chain allowance before building the transaction.
+   *
+   * If the allowance is already sufficient, {@link FyndClient.approval} returns `null`.
+   * Requires `provider.readAllowance` to be implemented.
+   */
+  checkAllowance?: boolean;
 }

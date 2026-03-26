@@ -86,8 +86,9 @@ export function withPermit2(
 }
 
 /**
- * Set transfer type to 'none' (funds already in router).
+ * Set transfer type to 'use_vaults_funds' (funds already in router vault).
  */
-export function withNoTransfer(opts: EncodingOptions): EncodingOptions {
-  return { ...opts, transferType: 'none' };
+export function withVaultFunds(opts: EncodingOptions): EncodingOptions {
+  return { ...opts, transferType: 'use_vaults_funds' };
 }
+

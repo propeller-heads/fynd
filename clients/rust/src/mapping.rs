@@ -10,9 +10,9 @@ use tycho_simulation::tycho_common::models::Address as TychoAddress;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, EncodingOptions, HealthStatus, Order, OrderSide,
-        PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, Swap,
-        Transaction, UserTransferType,
+        BackendKind, BatchQuote, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus, Order,
+        OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus,
+        Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -133,6 +133,15 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
         ) {
             dto_opts = dto_opts.with_permit2(permit, sig);
         }
+        if let Some(fee) = opts.client_fee_params {
+            dto_opts = dto_opts.with_client_fee_params(dto::ClientFeeParams::new(
+                fee.bps,
+                TychoBytes::from(fee.receiver),
+                fee.max_contribution,
+                fee.deadline,
+                TychoBytes::from(fee.signature.unwrap_or_default()),
+            ));
+        }
         Ok(dto_opts)
     }
 }
@@ -163,7 +172,7 @@ impl From<UserTransferType> for dto::UserTransferType {
         match t {
             UserTransferType::TransferFrom => dto::UserTransferType::TransferFrom,
             UserTransferType::TransferFromPermit2 => dto::UserTransferType::TransferFromPermit2,
-            UserTransferType::None => dto::UserTransferType::None,
+            UserTransferType::UseVaultsFunds => dto::UserTransferType::UseVaultsFunds,
         }
     }
 }
@@ -188,6 +197,14 @@ pub(crate) fn dto_to_quote(
         .transaction()
         .cloned()
         .map(Transaction::from);
+    let fee_breakdown = ds.fee_breakdown().map(|fb| {
+        FeeBreakdown::new(
+            fb.router_fee().clone(),
+            fb.client_fee().clone(),
+            fb.max_slippage().clone(),
+            fb.min_amount_received().clone(),
+        )
+    });
     Ok(Quote::new(
         ds.order_id().to_string(),
         status,
@@ -202,6 +219,7 @@ pub(crate) fn dto_to_quote(
         token_out,
         receiver,
         transaction,
+        fee_breakdown,
     ))
 }
 
@@ -276,6 +294,28 @@ impl TryFrom<dto::Swap> for Swap {
 impl From<dto::BlockInfo> for BlockInfo {
     fn from(db: dto::BlockInfo) -> Self {
         BlockInfo::new(db.number(), db.hash().to_string(), db.timestamp())
+    }
+}
+
+impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
+    type Error = FyndError;
+
+    fn try_from(dto: fynd_rpc_types::InstanceInfo) -> Result<Self, Self::Error> {
+        let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
+        let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
+        if router.len() != 20 {
+            return Err(FyndError::Protocol(format!(
+                "router_address must be 20 bytes, got {}",
+                router.len()
+            )));
+        }
+        if permit2.len() != 20 {
+            return Err(FyndError::Protocol(format!(
+                "permit2_address must be 20 bytes, got {}",
+                permit2.len()
+            )));
+        }
+        Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
     }
 }
 
@@ -534,9 +574,9 @@ mod tests {
     }
 
     #[test]
-    fn user_transfer_type_none_maps_correctly() {
-        let result = dto::UserTransferType::from(UserTransferType::None);
-        assert!(matches!(result, dto::UserTransferType::None));
+    fn user_transfer_type_vault_funds_maps_correctly() {
+        let result = dto::UserTransferType::from(UserTransferType::UseVaultsFunds);
+        assert!(matches!(result, dto::UserTransferType::UseVaultsFunds));
     }
 
     // -----------------------------------------------------------------------
@@ -626,5 +666,40 @@ mod tests {
                 .as_ref(),
             sig.as_ref()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EncodingOptions TryFrom with client fee
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoding_options_try_from_with_client_fee() {
+        use crate::types::{ClientFeeParams, EncodingOptions};
+
+        let fee = ClientFeeParams::new(
+            100,
+            Bytes::copy_from_slice(&[0x44; 20]),
+            BigUint::from(500_000u64),
+            1_893_456_000u64,
+        )
+        .with_signature(Bytes::copy_from_slice(&[0xAB; 65]));
+        let opts = EncodingOptions::new(0.01).with_client_fee(fee);
+
+        let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
+        assert!(dto_opts.client_fee_params().is_some());
+        let dto_fee = dto_opts.client_fee_params().unwrap();
+        assert_eq!(dto_fee.bps(), 100);
+        assert_eq!(*dto_fee.max_contribution(), BigUint::from(500_000u64));
+        assert_eq!(dto_fee.deadline(), 1_893_456_000u64);
+        assert_eq!(dto_fee.signature().len(), 65);
+    }
+
+    #[test]
+    fn encoding_options_try_from_without_client_fee() {
+        use crate::types::EncodingOptions;
+
+        let opts = EncodingOptions::new(0.005);
+        let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
+        assert!(dto_opts.client_fee_params().is_none());
     }
 }

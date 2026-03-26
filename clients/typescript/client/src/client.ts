@@ -1,21 +1,31 @@
-import { keccak256, serializeTransaction, toHex } from 'viem';
-import { createFyndClient, type FyndClient as AutogenClient } from "@fynd/autogen";
-import type { components } from "@fynd/autogen";
+import { decodeAbiParameters, encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
+import { createFyndClient, type FyndClient as AutogenClient } from "./autogen.js";
+import type { components } from "./autogen.js";
 import { FyndError } from "./error.js";
 import * as mapping from "./mapping.js";
 import {
   DEFAULT_SETTLE_TIMEOUT_MS,
+  type ApprovalPayload,
   type Eip1559Transaction,
   type ExecutionReceipt,
   type FyndPayload,
   type SettledOrder,
   type SettleOptions,
-  type SignablePayload,
-  type SignedOrder,
+  type SignedApproval,
+  type SignedSwap,
+  type SwapPayload,
+  type TxReceipt,
 } from "./signing.js";
-import type { Address, Hex, HealthStatus, Quote, QuoteParams } from "./types.js";
+import type { Address, ApprovalParams, Hex, HealthStatus, InstanceInfo, Quote, QuoteParams } from "./types.js";
 
 type WireErrorResponse = components["schemas"]["ErrorResponse"];
+
+const ERC20_APPROVE_ABI = [{
+  name: 'approve', type: 'function' as const,
+  inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+  outputs: [{ type: 'bool' }],
+  stateMutability: 'nonpayable' as const,
+}] as const;
 
 // ERC-20 Transfer(address,address,uint256)
 const ERC20_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,uint256)'));
@@ -25,6 +35,8 @@ const ERC6909_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,address
 /** Minimal transaction receipt, compatible with viem and ethers receipts. */
 export interface MinimalReceipt {
   transactionHash: Hex;
+  /** 1 = success, 0 = reverted. */
+  status: number;
   gasUsed: bigint;
   effectiveGasPrice: bigint;
   logs: Array<{ address: Address; topics: readonly Hex[]; data: Hex }>;
@@ -42,6 +54,9 @@ export interface EthProvider {
   estimateGas(tx: Eip1559Transaction): Promise<bigint>;
   sendRawTransaction(rawTx: Hex): Promise<Hex>;
   getTransactionReceipt(args: { hash: Hex }): Promise<MinimalReceipt | null>;
+  readAllowance?(token: Address, owner: Address, spender: Address): Promise<bigint>;
+  /** Replay a mined transaction in its original block context to extract the revert reason. */
+  debugTraceTransaction?(hash: Hex): Promise<{ output: Hex }>;
 }
 
 /** Configuration for exponential backoff retry on transient quote errors. */
@@ -54,7 +69,7 @@ export interface RetryConfig {
   maxBackoffMs?: number;
 }
 
-/** Overrides for transaction parameters when building a signable payload. */
+/** Overrides for transaction parameters when building a swap or approval payload. */
 export interface SigningHints {
   /** Override the sender address (defaults to {@link FyndClientOptions.sender}). */
   sender?: Address;
@@ -64,13 +79,13 @@ export interface SigningHints {
   maxFeePerGas?: bigint;
   /** Override `maxPriorityFeePerGas` (defaults to provider estimate). */
   maxPriorityFeePerGas?: bigint;
-  /** Override gas limit (defaults to `quote.gasEstimate`). */
+  /** Override gas limit (defaults to `eth_estimateGas`). */
   gasLimit?: bigint;
   /** When `true`, simulate the transaction via `eth_call` before returning. */
   simulate?: boolean;
 }
 
-/** Options for {@link FyndClient.execute}. */
+/** Options for {@link FyndClient.executeSwap}. */
 export interface ExecutionOptions {
   /** When `true`, simulate execution without broadcasting a transaction. */
   dryRun?: boolean;
@@ -91,6 +106,12 @@ export interface FyndClientOptions {
   provider?: EthProvider;
   /** Separate provider for broadcasting transactions; falls back to `provider`. */
   submitProvider?: EthProvider;
+  /**
+   * When `true` (default), fetch the revert reason when a transaction reverts.
+   * Tries `debug_traceTransaction` first; falls back to `eth_call` with a warning.
+   * Set to `false` to skip the extra RPC call and throw a generic revert error.
+   */
+  fetchRevertReason?: boolean;
 }
 
 /**
@@ -105,6 +126,7 @@ export interface FyndClientOptions {
 export class FyndClient {
   private readonly http: AutogenClient;
   private readonly options: FyndClientOptions;
+  private infoPromise: Promise<InstanceInfo> | undefined = undefined;
 
   constructor(options: FyndClientOptions) {
     this.http = createFyndClient(options.baseUrl);
@@ -185,7 +207,9 @@ export class FyndClient {
   async health(): Promise<HealthStatus> {
     const { data, error } = await this.http.GET("/v1/health");
     if (error !== undefined) {
-      throw FyndError.fromWireError(error as WireErrorResponse);
+      // GET /v1/health has no error schema, so openapi-fetch types error as the success shape;
+      // route through unknown to satisfy the type checker.
+      throw FyndError.fromWireError(error as unknown as WireErrorResponse);
     }
     if (data === undefined) {
       throw FyndError.config("server returned no data for health response");
@@ -194,10 +218,41 @@ export class FyndClient {
   }
 
   /**
+   * Fetches and caches static instance metadata from `GET /v1/info`.
+   *
+   * The result is cached for the lifetime of the client. On failure, the cache
+   * is cleared so the next call retries.
+   *
+   * @throws {FyndError} With a server error code on non-OK responses.
+   * @throws {FyndError} With code `HTTP` on network-level failures.
+   */
+  async info(): Promise<InstanceInfo> {
+    this.infoPromise ??= this.fetchInfo().catch((err: unknown) => {
+      this.infoPromise = undefined;
+      throw err;
+    });
+    return this.infoPromise;
+  }
+
+  private async fetchInfo(): Promise<InstanceInfo> {
+    const timeoutMs = this.options.timeoutMs ?? 30_000;
+    const { data, error } = await this.http.GET("/v1/info", {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (error !== undefined) {
+      throw FyndError.fromWireError(error as WireErrorResponse);
+    }
+    if (data === undefined) {
+      throw FyndError.config("server returned no data for /v1/info");
+    }
+    return mapping.fromWireInstanceInfo(data);
+  }
+
+  /**
    * Builds an unsigned EIP-1559 transaction payload from a quote, ready for wallet signing.
    *
-   * Fetches the sender's nonce and current gas fees from the provider unless
-   * overridden via {@link SigningHints}. The gas limit defaults to `quote.gasEstimate`.
+   * Fetches the sender's nonce, current gas fees, and gas estimate from the provider
+   * unless overridden via {@link SigningHints}.
    *
    * The quote must include a `transaction` field (returned when `encodingOptions`
    * is set in the quote request). The `to`, `value`, and `data` fields are read
@@ -207,19 +262,19 @@ export class FyndClient {
    * before returning. This catches reverts early but adds one RPC round-trip.
    *
    * @param quote - A quote obtained from {@link quote}. Must have `transaction` populated.
-   * @param hints - Optional overrides for nonce, gas fees, gas limit, sender, and simulation.
+   * @param hints - Optional overrides for nonce, gas fees, gas limit (defaults to `eth_estimateGas`), sender, and simulation.
    * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
    * @throws {FyndError} With code `CONFIG` if `quote.transaction` is absent (forgot `encodingOptions`).
    * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the `eth_call` reverts.
    */
-  async signablePayload(quote: Quote, hints?: SigningHints): Promise<SignablePayload> {
+  async swapPayload(quote: Quote, hints?: SigningHints): Promise<SwapPayload> {
     if (quote.backend !== 'fynd') {
       throw new Error('not implemented: Turbine backend signing');
     }
-    return this.fyndSignablePayload(quote, hints ?? {});
+    return this.fyndSwapPayload(quote, hints ?? {});
   }
 
-  private async fyndSignablePayload(quote: Quote, hints: SigningHints): Promise<SignablePayload> {
+  private async fyndSwapPayload(quote: Quote, hints: SigningHints): Promise<SwapPayload> {
     const senderOpt = hints.sender ?? this.options.sender;
     if (senderOpt === undefined) {
       throw FyndError.config(
@@ -230,7 +285,7 @@ export class FyndClient {
 
     const provider = this.options.provider;
     if (provider === undefined) {
-      throw FyndError.config("provider is required for signablePayload");
+      throw FyndError.config("provider is required for swapPayload");
     }
 
     const nonce = hints.nonce !== undefined
@@ -242,8 +297,6 @@ export class FyndClient {
         ? { maxFeePerGas: hints.maxFeePerGas, maxPriorityFeePerGas: hints.maxPriorityFeePerGas }
         : await provider.estimateFeesPerGas();
 
-    const gas = hints.gasLimit ?? quote.gasEstimate;
-
     const txData = quote.transaction;
     if (txData === undefined) {
       throw FyndError.config(
@@ -251,16 +304,21 @@ export class FyndClient {
       );
     }
 
-    const tx: Eip1559Transaction = {
+    const txBase = {
       chainId:              this.options.chainId,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,
-      gas,
       to:    txData.to,
       value: txData.value,
       data:  txData.data,
     };
+
+    const gas = hints.gasLimit !== undefined
+      ? hints.gasLimit
+      : await provider.estimateGas({ ...txBase, gas: 0n });
+
+    const tx: Eip1559Transaction = { ...txBase, gas };
 
     if (hints.simulate === true) {
       await provider.call(tx).catch((err: unknown) => {
@@ -289,13 +347,14 @@ export class FyndClient {
    * `eth_estimateGas` without broadcasting. The returned `settle()` resolves
    * immediately with estimated gas cost and decoded return data.
    *
-   * @param order - A signed order from {@link assembleSignedOrder}.
+   * @param order - A signed swap from {@link assembleSignedSwap}.
    * @param options - Set `dryRun: true` to simulate without broadcasting.
    * @throws {FyndError} With code `CONFIG` if no provider is configured.
    * @throws {FyndError} With code `CONFIG` if the signature has an invalid v byte.
    * @throws {FyndError} With code `SIMULATE_FAILED` when `dryRun` is `true` and the simulation reverts.
+   * @throws {FyndError} With code `EXECUTION_REVERTED` when the mined transaction reverts.
    */
-  async execute(order: SignedOrder, options?: ExecutionOptions): Promise<ExecutionReceipt> {
+  async executeSwap(order: SignedSwap, options?: ExecutionOptions): Promise<ExecutionReceipt> {
     const { payload, signature } = order;
     const tx = payload.payload.tx;
     const quote = payload.payload.quote;
@@ -306,7 +365,39 @@ export class FyndClient {
 
     const provider = this.options.submitProvider ?? this.options.provider;
     if (provider === undefined) {
-      throw FyndError.config("provider is required for execute");
+      throw FyndError.config("provider is required for executeSwap");
+    }
+
+    const txHash = await this.serializeAndBroadcast(tx, signature);
+    const tokenOut = quote.tokenOut;
+    const receiver = quote.receiver;
+
+    return {
+      settle: async (options?: SettleOptions): Promise<SettledOrder> => {
+        const timeoutMs = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
+        const receipt = await this.pollForReceipt(provider, txHash, timeoutMs);
+        if (receipt.status === 0) {
+          const reason = this.options.fetchRevertReason !== false
+            ? await this.getRevertReason(provider, tx, txHash)
+            : 'revert reason fetching disabled';
+          throw FyndError.executionReverted(`swap reverted: ${reason}`);
+        }
+        const settledAmount = computeSettledAmount(receipt, tokenOut, receiver);
+        const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
+        // exactOptionalPropertyTypes: spread optional fields only when defined
+        return {
+          txHash,
+          gasCost,
+          ...(settledAmount !== undefined ? { settledAmount } : {}),
+        };
+      },
+    };
+  }
+
+  private async serializeAndBroadcast(tx: Eip1559Transaction, signature: Hex): Promise<Hex> {
+    const provider = this.options.submitProvider ?? this.options.provider;
+    if (provider === undefined) {
+      throw FyndError.config("provider is required for broadcast");
     }
 
     // Parse r, s, yParity from the 65-byte hex signature: r[32] + s[32] + v[1]
@@ -336,35 +427,147 @@ export class FyndClient {
       { r, s, yParity },
     ) as Hex;
 
-    const txHash = await provider.sendRawTransaction(rawTx);
-    const tokenOut = quote.tokenOut;
-    const receiver = quote.receiver;
+    return provider.sendRawTransaction(rawTx);
+  }
 
-    return {
-      settle: async (options?: SettleOptions): Promise<SettledOrder> => {
-        const timeout = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
-        const deadline = Date.now() + timeout;
-        for (;;) {
-          const receipt = await provider.getTransactionReceipt({ hash: txHash });
-          if (receipt !== null) {
-            const settledAmount = computeSettledAmount(receipt, tokenOut, receiver);
-            const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
-            // exactOptionalPropertyTypes: spread optional fields only when defined
-            return {
-              txHash,
-              gasCost,
-              ...(settledAmount !== undefined ? { settledAmount } : {}),
-            };
-          }
-          if (Date.now() >= deadline) {
-            throw FyndError.timeout(
-              `transaction ${txHash} did not settle within ${timeout}ms`,
-            );
-          }
-          await sleep(2_000);
-        }
-      },
+  private async getRevertReason(
+    provider: EthProvider,
+    tx: Eip1559Transaction,
+    txHash: Hex,
+  ): Promise<string> {
+    if (provider.debugTraceTransaction !== undefined) {
+      try {
+        const trace = await provider.debugTraceTransaction(txHash);
+        return decodeRevertData(trace.output);
+      } catch { /* fall through to eth_call */ }
+    }
+    console.warn(
+      '[fynd] debug_traceTransaction unavailable; replaying via eth_call — ' +
+      'revert reason may differ if block state has changed since execution',
+    );
+    return provider.call(tx).then(
+      () => 'transaction reverted with no revert data',
+      (err: unknown) => String(err),
+    );
+  }
+
+  private async pollForReceipt(
+    provider: EthProvider,
+    txHash: Hex,
+    timeoutMs: number,
+  ): Promise<MinimalReceipt> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const receipt = await provider.getTransactionReceipt({ hash: txHash });
+      if (receipt !== null) {
+        return receipt;
+      }
+      if (Date.now() >= deadline) {
+        throw FyndError.timeout(
+          `transaction ${txHash} did not settle within ${timeoutMs}ms`,
+        );
+      }
+      await sleep(2_000);
+    }
+  }
+
+  /**
+   * Builds an unsigned EIP-1559 `approve(spender, amount)` transaction for the given token,
+   * or `null` if the approval is not needed.
+   *
+   * Returns `null` immediately when `params.transferType` is `'none'`.
+   * When `params.checkAllowance` is `true`, reads the on-chain allowance first and returns
+   * `null` if it is already sufficient (skipping nonce and fee resolution).
+   *
+   * Fetches the spender address from `GET /v1/info` (cached after first call):
+   * `'transfer_from'` → router, `'transfer_from_permit2'` → Permit2.
+   * Reads nonce and gas fees from `provider` unless overridden via `hints`.
+   * Gas defaults to `hints.gasLimit ?? 65_000n`.
+   *
+   * @param params - Token, amount, transfer type, and optional allowance-check flag.
+   * @param hints - Optional overrides for sender, nonce, gas fees, and gas limit.
+   * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
+   * @throws {FyndError} With code `CONFIG` if `params.checkAllowance` is `true` and `provider.readAllowance` is absent.
+   */
+  async approval(params: ApprovalParams, hints?: SigningHints): Promise<ApprovalPayload | null> {
+    if (params.transferType === 'none') return null;
+
+    const info = await this.info();
+    const spender = params.transferType === 'transfer_from_permit2'
+      ? info.permit2Address
+      : info.routerAddress;
+
+    const provider = this.options.provider;
+    if (provider === undefined) throw FyndError.config("provider is required for approval");
+
+    const senderOpt = hints?.sender ?? this.options.sender;
+    if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
+    const sender: Address = senderOpt;
+
+    const { token, amount } = params;
+
+    if (params.checkAllowance === true) {
+      if (provider.readAllowance === undefined) {
+        throw FyndError.config("provider.readAllowance is required when checkAllowance is true");
+      }
+      const current = await provider.readAllowance(token, sender, spender);
+      if (current >= amount) return null;
+    }
+
+    const nonce = hints?.nonce !== undefined
+      ? hints.nonce
+      : await provider.getTransactionCount({ address: sender });
+
+    const { maxFeePerGas, maxPriorityFeePerGas } =
+      hints?.maxFeePerGas !== undefined && hints?.maxPriorityFeePerGas !== undefined
+        ? { maxFeePerGas: hints.maxFeePerGas, maxPriorityFeePerGas: hints.maxPriorityFeePerGas }
+        : await provider.estimateFeesPerGas();
+
+    const gas = hints?.gasLimit ?? 65_000n;
+
+    const data = encodeFunctionData({
+      abi: ERC20_APPROVE_ABI,
+      functionName: 'approve',
+      args: [spender, amount],
+    }) as Hex;
+
+    const tx: Eip1559Transaction = {
+      chainId: this.options.chainId,
+      nonce,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      gas,
+      to: token,
+      value: 0n,
+      data,
     };
+
+    return { tx, token, spender, amount };
+  }
+
+  /**
+   * Broadcasts a signed ERC-20 approval and polls for inclusion.
+   *
+   * @param signedApproval - Signed approval from {@link approval} + wallet signature.
+   * @param options - Optional poll timeout (defaults to {@link DEFAULT_SETTLE_TIMEOUT_MS}).
+   * @throws {FyndError} With code `CONFIG` if no provider is configured.
+   * @throws {FyndError} With code `SETTLE_TIMEOUT` if the transaction does not confirm in time.
+   * @throws {FyndError} With code `EXECUTION_REVERTED` when the mined transaction reverts.
+   */
+  async executeApproval(signedApproval: SignedApproval, options?: SettleOptions): Promise<TxReceipt> {
+    const provider = this.options.submitProvider ?? this.options.provider;
+    if (provider === undefined) throw FyndError.config("provider is required for executeApproval");
+    const txHash = await this.serializeAndBroadcast(signedApproval.tx, signedApproval.signature);
+    const receipt = await this.pollForReceipt(
+      provider, txHash, options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS,
+    );
+    if (receipt.status === 0) {
+      const reason = this.options.fetchRevertReason !== false
+        ? await this.getRevertReason(provider, signedApproval.tx, txHash)
+        : 'revert reason fetching disabled';
+      throw FyndError.executionReverted(`approval reverted: ${reason}`);
+    }
+    return { txHash, gasCost: receipt.gasUsed * receipt.effectiveGasPrice };
   }
 
   private async dryRunExecute(tx: Eip1559Transaction, quote: Quote): Promise<ExecutionReceipt> {
@@ -449,4 +652,25 @@ function computeSettledAmount(
   }
 
   return found ? total : undefined;
+}
+
+const ERROR_SELECTOR = '0x08c379a0';
+const PANIC_SELECTOR  = '0x4e487b71';
+
+/** Decode a Solidity revert payload into a human-readable string. */
+function decodeRevertData(output: Hex): string {
+  if (output === '0x') return 'empty revert data';
+  if (output.startsWith(ERROR_SELECTOR) && output.length > 10) {
+    try {
+      const [msg] = decodeAbiParameters([{ type: 'string' }], `0x${output.slice(10)}` as Hex);
+      return msg;
+    } catch { /* fall through */ }
+  }
+  if (output.startsWith(PANIC_SELECTOR) && output.length > 10) {
+    try {
+      const [code] = decodeAbiParameters([{ type: 'uint256' }], `0x${output.slice(10)}` as Hex);
+      return `Panic(${code})`;
+    } catch { /* fall through */ }
+  }
+  return `revert data: ${output}`;
 }

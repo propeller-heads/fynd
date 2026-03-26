@@ -1,8 +1,11 @@
 {
-  "name": "@fynd/client",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@kayibal/fynd-client",
+  "version": "0.35.0",
   "description": "TypeScript client for the Fynd DEX router",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/propeller-heads/fynd"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -10,20 +13,22 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build":     "tsc",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "lint":      "oxlint src/",
-    "test":      "vitest run"
+    "lint": "oxlint src/",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@fynd/autogen": "workspace:*",
+    "openapi-fetch": "0.17.0",
     "viem": "2.46.3"
   },
   "devDependencies": {
+    "oxlint": "1.51.0",
     "typescript": "5.8.2",
-    "oxlint":     "1.51.0",
-    "vitest":     "4.0.18"
+    "vitest": "4.0.18"
   }
 }

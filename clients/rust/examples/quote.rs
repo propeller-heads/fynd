@@ -4,15 +4,27 @@
 //! `http://localhost:3000`. Only quote retrieval is exercised; no transactions
 //! are formed.
 //!
+//! ## Run with Anvil (mocked accounts)
+//!
+//! Requires `TYCHO_API_KEY` and `TYCHO_URL` env vars to be set:
+//!
+//! ```sh
+//! ./scripts/run-example.sh quote
 //! ```
-//! cargo run --example quote
+//!
+//! ## Run directly
+//!
+//! Requires a Fynd server running in the background.
+//!
+//! ```sh
+//! cargo run --example quote -p fynd-client
 //! ```
 
 use bytes::Bytes;
 use fynd_client::{FyndClientBuilder, Order, OrderSide, QuoteOptions, QuoteParams, QuoteStatus};
 use num_bigint::BigUint;
 
-const FYND_URL: &str = "http://localhost:3000";
+const DEFAULT_FYND_URL: &str = "http://localhost:3000";
 
 // Mainnet token addresses.
 const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
@@ -37,10 +49,18 @@ fn one_usdc() -> BigUint {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fynd_url = std::env::var("FYND_URL").unwrap_or_else(|_| DEFAULT_FYND_URL.to_owned());
+
     // [doc:start quote-rust]
-    let client = FyndClientBuilder::new(FYND_URL, FYND_URL)
+    let client = FyndClientBuilder::new(&fynd_url, &fynd_url)
         .build_quote_only()
-        .expect("valid URL");
+        .map_err(|e| {
+            format!(
+                "{e}\n\nFynd not running at {fynd_url}. \
+            Start the dev environment:\n  ./scripts/run-example.sh {}",
+                env!("CARGO_BIN_NAME")
+            )
+        })?;
 
     // -----------------------------------------------------------------------
     // Health check

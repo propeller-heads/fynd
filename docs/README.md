@@ -25,6 +25,12 @@ layout:
 
 Fynd is a DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). It finds optimal swap routes across DeFi protocols in real-time and returns solutions you can encode and execute on-chain.
 
+{% hint style="danger" %}
+**Alpha Software — Unaudited Contracts**
+
+Fynd's smart contracts ([TychoRouter V3,](https://docs.propellerheads.xyz/tycho/for-solvers/execution) Vault, Executors) are still undergoing a security audit. Funds stored in the router (including vault deposits) might be lost. Use at your own discretion.
+{% endhint %}
+
 ## Own Your Routing <a href="#own-your-dex-routing" id="own-your-dex-routing"></a>
 
 Route APIs are simple, but the tradeoffs are painful: rate limits, network overhead, no transparency, unreliable uptime, and unexplainable slippage. And you can't fix any of it.
@@ -44,6 +50,20 @@ Fynd puts you in control:
 * **Performance-first**: CPU-bound route finding runs on dedicated OS threads (not the async runtime). Each worker pool has its own task queue for independent backpressure and scaling.
 * **Observability built-in**: Prometheus metrics, structured logging via `tracing`, and health endpoints are first-class citizens.
 
+### Order Types
+
+Fynd currently supports **sell orders** only (exact input amount). You specify the amount of the input token, and Fynd finds the best output. Buy orders (exact output) are not yet supported.
+
+### Known Limitations
+
+{% hint style="warning" %}
+**Large trades — split swaps coming soon**
+
+Fynd currently routes each order through a single path. For large trades (e.g. >$100k), this can result in significant price impact compared to aggregators that split orders across multiple pools in parallel. Split swap support is on the roadmap and will substantially improve pricing for high-volume orders.
+
+For the best results today, test with trade sizes typical for your use case rather than extreme values.
+{% endhint %}
+
 ### Supported Chains
 
 * Ethereum Mainnet
@@ -60,10 +80,10 @@ Fynd works with any protocol Tycho supports. See the [list of supported protocol
 
 1. **TychoFeed** connects to **Tycho Streams** ([on-chain protocols](https://docs.propellerheads.xyz/tycho/for-solvers/simulation#streaming-protocol-states) and [RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#stream-real-time-price-updates)) and processes market updates (added/removed components and state changes) every block.
 2. **SharedMarketData** stores all component states, tokens, and gas prices in a single shared structure.
-3. When a **quote request** arrives via HTTP, the **WorkerPoolRouter** fans it out to all worker pools in parallel.
+3. When a **quote request** arrives via HTTP, the **OrderManager** fans it out to all worker pools in parallel.
 4. Each **Worker Pool** runs a specific algorithm. Workers compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
-5. The **WorkerPoolRouter** collects results, picks the best solution by `amount_out_net_gas`, optionally encodes it into an on-chain transaction, and returns it.
+5. The **OrderManager** collects results, picks the best solution by `amount_out_net_gas`, optionally encodes it for execution against the `TychoRouter`, and returns it.
 
 ## Try it out
 
-Head to the [quickstart.md](get-started/quickstart.md "mention") to get Fynd running.
+Head to the [quickstart](get-started/quickstart/ "mention") to get Fynd running.

@@ -5,6 +5,7 @@ use thiserror::Error;
 /// Mapped from the raw string `code` field in
 /// [`fynd_rpc_types::ErrorResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// The request was malformed or contained invalid parameters.
     ///
@@ -32,7 +33,17 @@ pub enum ErrorCode {
     /// Server codes: `QUEUE_FULL`, `SERVICE_OVERLOADED`, `STALE_DATA`, `NOT_READY`.
     ServiceUnavailable,
 
-    /// An unrecognised server error code. The raw string is preserved for debugging.
+    /// The server encountered an internal error processing the request. Not retryable.
+    ///
+    /// Server codes: `ALGORITHM_ERROR`, `INTERNAL_ERROR`, `FAILED_ENCODING`.
+    ServerError,
+
+    /// The requested endpoint does not exist. Indicates a client misconfiguration.
+    ///
+    /// Server code: `NOT_FOUND`.
+    NotFound,
+
+    /// A truly unrecognised server error code. The raw string is preserved for debugging.
     Unknown(String),
 }
 
@@ -49,6 +60,8 @@ impl ErrorCode {
             "QUEUE_FULL" | "SERVICE_OVERLOADED" | "STALE_DATA" | "NOT_READY" => {
                 Self::ServiceUnavailable
             }
+            "ALGORITHM_ERROR" | "INTERNAL_ERROR" | "FAILED_ENCODING" => Self::ServerError,
+            "NOT_FOUND" => Self::NotFound,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -92,6 +105,11 @@ pub enum FyndError {
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
+    /// An on-chain transaction was mined but reverted. The message contains the revert reason
+    /// decoded from replaying the transaction via `eth_call`.
+    #[error("transaction reverted: {0}")]
+    TransactionReverted(String),
+
     /// Invalid client configuration (e.g. unparseable URL, missing sender address).
     #[error("configuration error: {0}")]
     Config(String),
@@ -108,6 +126,11 @@ impl FyndError {
             Self::Api { code, .. } => code.is_retryable(),
             _ => false,
         }
+    }
+
+    /// Returns `true` if this error represents an on-chain transaction revert.
+    pub fn is_revert(&self) -> bool {
+        matches!(self, Self::TransactionReverted(_))
     }
 }
 
@@ -135,10 +158,21 @@ mod tests {
     }
 
     #[test]
+    fn error_code_server_error_for_server_fault_codes() {
+        assert_eq!(ErrorCode::from_server_code("ALGORITHM_ERROR"), ErrorCode::ServerError);
+        assert_eq!(ErrorCode::from_server_code("INTERNAL_ERROR"), ErrorCode::ServerError);
+        assert_eq!(ErrorCode::from_server_code("FAILED_ENCODING"), ErrorCode::ServerError);
+    }
+
+    #[test]
+    fn error_code_not_found_for_not_found_code() {
+        assert_eq!(ErrorCode::from_server_code("NOT_FOUND"), ErrorCode::NotFound);
+    }
+
+    #[test]
     fn error_code_unknown_for_unrecognised_codes() {
-        assert!(matches!(ErrorCode::from_server_code("ALGORITHM_ERROR"), ErrorCode::Unknown(_)));
-        assert!(matches!(ErrorCode::from_server_code("INTERNAL_ERROR"), ErrorCode::Unknown(_)));
         assert!(matches!(ErrorCode::from_server_code("WHATEVER"), ErrorCode::Unknown(_)));
+        assert!(matches!(ErrorCode::from_server_code("SOME_FUTURE_CODE"), ErrorCode::Unknown(_)));
     }
 
     #[test]

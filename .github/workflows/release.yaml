@@ -12,10 +12,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish-dry-run:
-    name: Publish Crates (dry-run)
+  publish-crates:
+    name: Publish Crates
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -28,17 +30,56 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Publish in dependency order. --dry-run validates packaging
-      # without uploading. Remove --dry-run once the repo is public
-      # and CRATESIO_REGISTRY_TOKEN is configured.
       - name: Publish fynd-core
-        run: cargo publish --dry-run --locked --verbose --package fynd-core
+        run: cargo publish --locked --verbose --package fynd-core
 
       - name: Publish fynd-rpc-types
-        run: cargo publish --dry-run --locked --verbose --package fynd-rpc-types
+        run: cargo publish --locked --verbose --package fynd-rpc-types
 
       - name: Publish fynd-client
-        run: cargo publish --dry-run --locked --verbose --package fynd-client
+        run: cargo publish --locked --verbose --package fynd-client
 
       - name: Publish fynd-rpc
-        run: cargo publish --dry-run --locked --verbose --package fynd-rpc
+        run: cargo publish --locked --verbose --package fynd-rpc
+
+      - name: Publish fynd
+        run: cargo publish --locked --verbose --package fynd
+
+  publish-npm:
+    name: Publish TypeScript packages to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: "10.30.3"
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
+          cache-dependency-path: clients/typescript/pnpm-lock.yaml
+
+      - name: Update npm (trusted publisher requires >=11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm --dir clients/typescript install --frozen-lockfile
+
+      - name: Build client
+        run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run build
+
+      - name: Publish client
+        run: npm publish --provenance --access public
+        working-directory: clients/typescript/client

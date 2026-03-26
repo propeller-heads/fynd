@@ -1,0 +1,8 @@
+# Single-pool config for CPU scaling benchmark (MostLiquid, 2-hop)
+[pools.most_liquid_2_hops]
+algorithm = "most_liquid"
+num_workers = 1
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 5000
+max_routes = 50

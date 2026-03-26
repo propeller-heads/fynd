@@ -211,7 +211,7 @@ impl DerivedComputation for PoolDepthComputation {
                 let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
 
                 if numerator.is_zero() {
-                    warn!(
+                    debug!(
                         component_id,
                         token_in = %token_in.address,
                         token_out = %token_out.address,
