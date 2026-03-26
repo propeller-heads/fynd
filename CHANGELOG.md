@@ -1,3 +1,15 @@
+## [0.34.0](https://github.com/propeller-heads/fynd/compare/0.33.2...0.34.0) (2026-03-26)
+
+
+### Features
+
+* add @kayibal/fynd-client TypeScript package ([f50eef4](https://github.com/propeller-heads/fynd/commit/f50eef4744add3eb2fce030f6fd90dfa00effe47))
+
+
+### Bug Fixes
+
+* **ts-client:** update example and build script to use @kayibal/fynd-client ([5755c37](https://github.com/propeller-heads/fynd/commit/5755c370749b59097107336de05388e3e2c146dd))
+
 ## [0.33.2](https://github.com/propeller-heads/fynd/compare/0.33.1...0.33.2) (2026-03-26)
 
 ## [0.33.1](https://github.com/propeller-heads/fynd/compare/0.33.0...0.33.1) (2026-03-26)
