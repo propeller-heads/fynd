@@ -1,11 +1,16 @@
-//! Data Transfer Objects (DTOs) for the Fynd RPC HTTP API.
+#![deny(missing_docs)]
+//! Wire-format types for the [Fynd](https://fynd.xyz) RPC HTTP API.
 //!
-//! This crate contains only the wire-format types shared between the Fynd RPC server
+//! This crate contains only the serialisation types shared between the Fynd RPC server
 //! (`fynd-rpc`) and its clients (`fynd-client`). It has no server-side infrastructure
 //! dependencies (no actix-web, no server logic).
 //!
-//! Enable the `openapi` feature to derive `utoipa::ToSchema` on all types for use in
-//! API documentation generation.
+//! For documentation and API reference see **<https://docs.fynd.xyz/>**.
+//!
+//! ## Features
+//!
+//! - **`openapi`** — derives `utoipa::ToSchema` on all types for OpenAPI spec generation.
+//! - **`core`** — enables `Into` conversions between wire DTOs and `fynd-core` domain types.
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
