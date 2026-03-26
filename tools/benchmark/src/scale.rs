@@ -306,10 +306,13 @@ pub async fn run(args: Args) -> Result<()> {
             }
         };
 
+        info!(workers, "stopping solver (graceful)");
         handle.stop(true).await;
+        info!(workers, "solver stopped, awaiting server task");
         if let Err(e) = server_task.await {
             tracing::warn!("Server task join error: {e}");
         }
+        info!(workers, "server task complete");
 
         match result {
             Ok(point) => points.push(point),

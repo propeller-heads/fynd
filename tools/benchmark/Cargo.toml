@@ -6,6 +6,7 @@ description = "Benchmark and comparison tooling for Fynd solvers"
 
 [dependencies]
 fynd-client       = { workspace = true }
+fynd-rpc          = { workspace = true }
 tokio             = { workspace = true }
 clap              = { workspace = true }
 serde             = { workspace = true }

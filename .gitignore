@@ -4,4 +4,7 @@
 clients/typescript/client/dist/
 clients/typescript/node_modules/
 comparison_results.json
+scale_results*.json
 .env
+.claude/worktrees/
+.claude/plans/
