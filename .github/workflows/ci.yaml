@@ -108,16 +108,11 @@ jobs:
         run: npx --yes openapi-typescript@7.13.0 clients/openapi.json -o /tmp/schema.d.ts
       - name: Check autogen schema is up to date
         run: |
-          if ! diff -q clients/typescript/autogen/src/schema.d.ts /tmp/schema.d.ts > /dev/null 2>&1; then
-            echo "clients/typescript/autogen/src/schema.d.ts is out of date. Run './scripts/update-openapi.sh' and commit the changed files."
-            diff clients/typescript/autogen/src/schema.d.ts /tmp/schema.d.ts
+          if ! diff -q clients/typescript/client/src/schema.d.ts /tmp/schema.d.ts > /dev/null 2>&1; then
+            echo "clients/typescript/client/src/schema.d.ts is out of date. Run './scripts/update-openapi.sh' and commit the changed files."
+            diff clients/typescript/client/src/schema.d.ts /tmp/schema.d.ts
             exit 1
           fi
-      - name: Typecheck autogen package
-        run: |
-          cd clients/typescript/autogen
-          npm ci
-          npx tsc --noEmit
 
   docs_snippet_drift:
     name: Check doc snippet drift
@@ -143,7 +138,6 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: clients/typescript/pnpm-lock.yaml
       - run: pnpm --dir clients/typescript install --frozen-lockfile
-      - run: pnpm --dir clients/typescript --filter @fynd/autogen run build
       - run: pnpm --dir clients/typescript --filter @fynd/client run typecheck
       - run: pnpm --dir clients/typescript --filter @fynd/client run lint
       - run: pnpm --dir clients/typescript --filter @fynd/client run test

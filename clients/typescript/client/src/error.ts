@@ -1,4 +1,4 @@
-import type { components } from "@fynd/autogen";
+import type { components } from "./autogen.js";
 
 type WireErrorResponse = components["schemas"]["ErrorResponse"];
 

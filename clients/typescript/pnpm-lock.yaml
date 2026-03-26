@@ -6,21 +6,11 @@ settings:
 
 importers:
 
-  autogen:
+  client:
     dependencies:
       openapi-fetch:
         specifier: 0.17.0
         version: 0.17.0
-    devDependencies:
-      typescript:
-        specifier: 5.8.2
-        version: 5.8.2
-
-  client:
-    dependencies:
-      '@fynd/autogen':
-        specifier: workspace:*
-        version: link:../autogen
       viem:
         specifier: 2.46.3
         version: 2.46.3(typescript@5.8.2)
