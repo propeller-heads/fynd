@@ -19,6 +19,7 @@ jobs:
     env:
       TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
       FORK_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+      RUST_LOG: info
     steps:
       - name: Checkout
         uses: actions/checkout@v4

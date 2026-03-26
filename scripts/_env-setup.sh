@@ -75,7 +75,7 @@ start_fynd() {
     local tycho_args=()
     [[ -n "${TYCHO_URL:-}" ]] && tycho_args+=(--tycho-url "$TYCHO_URL")
     echo "==> Building and starting fynd serve (RPC: $ANVIL_RPC_URL${TYCHO_URL:+, TYCHO_URL: $TYCHO_URL})..."
-    RUST_LOG="${RUST_LOG:-info}" cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --release --quiet -- \
+    RUST_LOG="${RUST_LOG:-warn}" cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --release --quiet -- \
         serve --rpc-url "$ANVIL_RPC_URL" --protocols uniswap_v2,uniswap_v3 --min-tvl 200 "${tycho_args[@]}" &
     _FYND_PID=$!
 
