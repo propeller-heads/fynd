@@ -29,7 +29,7 @@ echo ""
 failed=()
 for example in "${EXAMPLES[@]}"; do
     echo "==> Running: $example"
-    if cargo run \
+    if RPC_URL="$ANVIL_RPC_URL" FYND_URL="$FYND_URL" cargo run \
         --manifest-path "$REPO_ROOT/Cargo.toml" \
         --example "$example" \
         --package fynd-client \
