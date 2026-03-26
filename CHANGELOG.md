@@ -1,3 +1,10 @@
+## [0.32.0](https://github.com/propeller-heads/fynd/compare/0.31.0...0.32.0) (2026-03-26)
+
+
+### Features
+
+* Add support for ekubo_v3 exchange in protocol registry ([db945b3](https://github.com/propeller-heads/fynd/commit/db945b3112ba66e0cc50d177796e1ddbdd1d7c17))
+
 ## [0.31.0](https://github.com/propeller-heads/fynd/compare/0.30.0...0.31.0) (2026-03-26)
 
 
