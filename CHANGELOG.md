@@ -1,3 +1,17 @@
+## [0.33.0](https://github.com/propeller-heads/fynd/compare/0.32.0...0.33.0) (2026-03-26)
+
+
+### Features
+
+* **ci:** add TypeScript examples to run-all-examples.sh ([496c06b](https://github.com/propeller-heads/fynd/commit/496c06b2a897fbcf11cef4183108c1292fe71954))
+* **ts-client:** add approval flow with info(), approval(), and submit() ([c125b63](https://github.com/propeller-heads/fynd/commit/c125b634121a9f0e7922a25bd0fc7167a86a4168))
+* **ts-client:** add gas estimation, signing fix, and revert reason fetching ([3f75d16](https://github.com/propeller-heads/fynd/commit/3f75d16f791251f04fcb26878413155e665f8e32))
+
+
+### Bug Fixes
+
+* **ci:** fix doc snippet anchor and add pnpm to examples workflow ([135078b](https://github.com/propeller-heads/fynd/commit/135078b672d8a43a3ca999853667a2562b937258))
+
 ## [0.32.0](https://github.com/propeller-heads/fynd/compare/0.31.0...0.32.0) (2026-03-26)
 
 
