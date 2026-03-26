@@ -3,6 +3,12 @@
 A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
 routes across multiple DeFi protocols in real-time.
 
+> [!CAUTION]
+  > **Alpha Software — Unaudited Contracts**
+  >
+  > Fynd's smart contracts ([TychoRouter V3](https://docs.propellerheads.xyz/tycho/for-solvers/execution#security-and-audits), Vault, Executors) are still undergoing a security audit. Funds stored in the router (including vault deposits) may be lost. Use at your own
+   discretion.
+
 ## Features
 
 - **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve,
