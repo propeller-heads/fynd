@@ -424,10 +424,7 @@ mod tests {
         let mut store = DerivedData::new();
         store.set_pool_depths(
             Default::default(),
-            vec![failed(
-                &key_str,
-                FailedItemError::SimulationFailed("depth error".into()),
-            )],
+            vec![failed(&key_str, FailedItemError::SimulationFailed("depth error".into()))],
             7,
             true,
         );
