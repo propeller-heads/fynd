@@ -30,5 +30,8 @@ typetag.workspace = true
 tycho-execution.workspace = true
 alloy = { workspace = true, features = ["sol-types"] }
 
+[features]
+experimental = []
+
 [dev-dependencies]
 rstest.workspace = true

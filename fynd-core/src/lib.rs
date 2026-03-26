@@ -50,3 +50,17 @@ pub use worker_pool::{
     TaskQueueHandle,
 };
 pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+
+// Experimental: graph and market event types for downstream consumers (e.g. searchers).
+// Gated behind the `experimental` feature flag — this API is unstable and may change.
+#[cfg(feature = "experimental")]
+pub mod experimental {
+    pub use crate::{
+        feed::events::{EventError, MarketEvent, MarketEventHandler},
+        graph::{
+            petgraph::{EdgeData, EdgeIndex, PetgraphStableDiGraphManager, StableDiGraph},
+            EdgeWeightFromSimAndDerived, EdgeWeightUpdaterWithDerived, GraphError, GraphManager,
+            Path,
+        },
+    };
+}
