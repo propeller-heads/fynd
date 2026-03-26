@@ -18,7 +18,7 @@ set -euo pipefail
 # shellcheck source=scripts/_env-setup.sh disable=SC1091
 source "$(dirname "$0")/_env-setup.sh"
 
-EXAMPLES=(swap_erc20 swap_permit2 swap_client_fee quote)
+EXAMPLES=(swap_erc20)
 
 check_deps
 start_anvil

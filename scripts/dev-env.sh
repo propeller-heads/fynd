@@ -38,7 +38,6 @@ echo "  Fynd      : $FYND_URL"
 echo ""
 echo "Run an example:"
 echo "  RPC_URL=$ANVIL_RPC_URL cargo run --example swap_erc20 -p fynd-client"
-echo "  ./scripts/run-example.sh swap_erc20"
 echo ""
 echo "Press Ctrl-C to stop."
 
