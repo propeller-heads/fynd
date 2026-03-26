@@ -76,25 +76,26 @@ const client = new FyndClient({
   chainId: mainnet.id,
   sender: account.address,
   provider: viemProvider(publicClient, account.address),
+  fetchRevertReason: true,
 });
 
 // 1. Quote
 const quote = await client.quote({
-  order: { tokenIn: USDC, tokenOut: WETH, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
+  order: { tokenIn: WETH, tokenOut: USDC, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
   options: { encodingOptions: encodingOptions(0.005) },
 });
 console.log(`amount_out: ${quote.amountOut}`);
 
 // 2. Approve if needed (checks on-chain allowance, skips if sufficient)
-const approvalPayload = await client.approval({ token: USDC, amount: SELL_AMOUNT, checkAllowance: true });
+const approvalPayload = await client.approval({ token: WETH, amount: SELL_AMOUNT, checkAllowance: true });
 if (approvalPayload !== null) {
-  const sig = await walletClient.signMessage({ message: { raw: approvalSigningHash(approvalPayload) } });
+  const sig = await account.sign({ hash: approvalSigningHash(approvalPayload) });
   await client.executeApproval({ tx: approvalPayload.tx, signature: sig });
 }
 
 // 3. Sign and execute swap
 const payload = await client.swapPayload(quote);
-const sig = await walletClient.signMessage({ message: { raw: swapSigningHash(payload) } });
+const sig = await account.sign({ hash: swapSigningHash(payload) });
 const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
 console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
 ```

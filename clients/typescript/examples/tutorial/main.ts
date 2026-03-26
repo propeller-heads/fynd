@@ -25,7 +25,7 @@ const rpcUrl = process.env['RPC_URL'] ?? 'https://eth.llamarpc.com';
 
 const publicClient = createPublicClient({ chain: mainnet, transport: http(rpcUrl) });
 
-// [doc:start swap-typescript]
+// [doc:start quote-typescript]
 const client = new FyndClient({
   baseUrl: FYND_URL,
   chainId: mainnet.id,
@@ -53,4 +53,4 @@ const payload = await client.swapPayload(quote);
 const sig = await account.sign({ hash: swapSigningHash(payload) });
 const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
 console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
-// [doc:end swap-typescript]
+// [doc:end quote-typescript]
