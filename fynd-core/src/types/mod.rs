@@ -6,9 +6,13 @@
 //! - [`internal`] - Internal task and error types
 //! - [`constants`] - Protocol gas costs and native token addresses
 
+/// Protocol gas costs and native token addresses per chain.
 pub mod constants;
+/// Internal task and solve-error types used between the worker pool and router.
 pub mod internal;
+/// Primitive types: `ComponentId`, `ProtocolSystem`, `GasPrice`, `TaskId`.
 pub mod primitives;
+/// Public API types: `Order`, `Quote`, `Route`, `Swap`, `QuoteRequest`, etc.
 pub mod quote;
 
 // Re-export constants

@@ -1,36 +1,46 @@
-//! Fynd Core - Pure solving logic for DEX routing
+#![deny(missing_docs)]
+//! Pure solving logic for the [Fynd](https://fynd.xyz) DEX router.
 //!
-//! This crate provides the core solving algorithms and types for finding optimal
-//! swap routes across multiple DEX protocols. It contains **no HTTP or UI dependencies**,
-//! making it suitable for standalone use in any application.
+//! This crate contains the route-finding algorithms, market-data pipeline, and encoder that
+//! powers Fynd. It has **no HTTP dependencies** and can be embedded directly in any application.
 //!
-//! # Use Cases
+//! For documentation, guides, and API reference see **<https://docs.fynd.xyz/>**.
 //!
-//! - **Standalone routing**: Integrate Fynd's routing algorithms into your own application
-//! - **Custom solvers**: Build specialized routing solutions without HTTP overhead
-//! - **Research & testing**: Experiment with routing algorithms in isolation
+//! # Use cases
 //!
-//! # Main Components
+//! - **Standalone routing** — embed Fynd's algorithms directly without running an HTTP server.
+//! - **Custom algorithms** — implement the [`Algorithm`] trait and plug in via
+//!   [`FyndBuilder::with_algorithm`](solver::FyndBuilder).
+//! - **HTTP server** — use the [`fynd-rpc`](https://crates.io/crates/fynd-rpc) crate, which wraps
+//!   this crate with Actix Web.
 //!
-//! - **algorithm**: Route-finding algorithms (e.g., `MostLiquidAlgorithm`)
-//! - **graph**: Graph management and pathfinding utilities
-//! - **derived**: Derived data computations (spot prices, pool depths, gas prices)
-//! - **types**: Core type definitions (`Order`, `Route`, `Swap`, `OrderQuote`)
-//! - **feed**: Market data structures and event handling
-//! - **encoding**: Encodes solved routes into on-chain transactions via Tycho's router contracts
-//! - **worker_pool**: Multi-threaded solver pool management with algorithm registry
-//! - **worker_pool_router**: Request orchestration across multiple solver pools
+//! # Quick start
+//!
+//! See the [Fynd quickstart](https://docs.fynd.xyz/get-started/quickstart) to run a local
+//! instance, or the [custom algorithm guide](https://docs.fynd.xyz/guides/custom-algorithm)
+//! to implement your own routing strategy.
 
-// Public modules
+/// Route-finding algorithms. Includes [`MostLiquidAlgorithm`] and the
+/// pluggable [`Algorithm`] trait.
 pub mod algorithm;
+/// Derived data computations: spot prices, pool depths, and gas prices.
 pub mod derived;
+/// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
+/// Market data feed: Tycho WebSocket integration, gas price fetching, and protocol registry.
 pub mod feed;
 pub(crate) mod graph;
+/// External price validation for quotes.
 pub mod price_guard;
+/// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
+/// [`Solver`](solver::Solver).
 pub mod solver;
+/// Core domain types: [`Order`](types::Order), [`Route`](types::Route), [`Quote`](types::Quote),
+/// etc.
 pub mod types;
+/// Multi-threaded solver pool management with pluggable algorithm registry.
 pub mod worker_pool;
+/// Request orchestration: fans out orders to all solver pools and selects the best result.
 pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience

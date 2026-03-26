@@ -191,6 +191,7 @@ pub struct WorkerPoolBuilder {
 }
 
 impl WorkerPoolBuilder {
+    /// Create a builder with default configuration values.
     pub fn new() -> Self {
         Self { config: WorkerPoolConfig::default() }
     }
