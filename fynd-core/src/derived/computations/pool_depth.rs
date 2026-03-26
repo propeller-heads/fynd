@@ -84,7 +84,7 @@ impl DerivedComputation for PoolDepthComputation {
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Self::Output, ComputationError> {
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // Read derived data from store
         let (spot_prices, mut pool_depths) = {
             let store_guard = store.read().await;

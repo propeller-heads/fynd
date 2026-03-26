@@ -52,7 +52,7 @@ impl DerivedComputation for SpotPriceComputation {
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Self::Output, ComputationError> {
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // Start with existing prices (or empty for full recompute).
         let mut spot_prices = if changed.is_full_recompute {
             SpotPrices::new()
@@ -85,7 +85,6 @@ impl DerivedComputation for SpotPriceComputation {
                 .cloned()
                 .collect()
         };
-        let num_components_to_compute = components_to_compute.len();
 
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();

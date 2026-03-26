@@ -324,8 +324,8 @@ impl TokenGasPriceComputation {
         market: &SharedMarketDataRef,
         spot_prices: &SpotPrices,
         filter_tokens: Option<&HashSet<Address>>,
-    ) -> Result<(
-        (HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64), Vec<FailedItem>),
+    ) -> Result<
+        (HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64, Vec<FailedItem>),
         ComputationError,
     > {
         // Brief lock 1: topology + gas_price + block (all cheap clones)
@@ -438,6 +438,14 @@ impl TokenGasPriceComputation {
             }
         }
 
+        // Extend each token's path_components with all candidate path components so
+        // incremental recomputation fires when any competing path's pool changes.
+        for (token, (_, _, components)) in best_prices.iter_mut() {
+            if let Some(all_comps) = all_candidate_components.get(token) {
+                components.extend(all_comps.iter().cloned());
+            }
+        }
+
         // Tokens with discovered paths but no successful simulation
         let failed_items: Vec<FailedItem> = paths_by_token
             .keys()
@@ -448,7 +456,7 @@ impl TokenGasPriceComputation {
             })
             .collect();
 
-        Ok((best_prices, failed_items))
+        Ok((best_prices, block, failed_items))
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -462,8 +470,10 @@ impl TokenGasPriceComputation {
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Option<TokenGasPrices>, ComputationError> {
-        let store_guard = store.read().await;
+    ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
+        // Read all needed data from store in a single lock acquisition.
+        let (existing_deps, existing_prices, spot_prices) = {
+            let store_guard = store.read().await;
 
             // Need existing deps to do incremental computation.
             let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
@@ -494,7 +504,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(existing_prices.clone()));
+            return Ok(Some(ComputationOutput::success(existing_prices.clone())));
         }
 
         debug!(
@@ -503,30 +513,9 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let market = market.read().await;
-        let block = market
-            .last_updated()
-            .map(|b| b.number())
-            .unwrap_or(0);
-
-        let store_guard = store.read().await;
-        let spot_prices = store_guard
-            .spot_prices()
-            .ok_or(ComputationError::MissingDependency("spot_prices"))?
-            .clone();
-        drop(store_guard);
-
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
-
-        let best_prices = self.simulate_token_prices(
-            &market,
-            &spot_prices,
-            &gas_price,
-            Some(&tokens_to_recompute),
-        )?;
+        let (best_prices, block, _) = self
+            .simulate_token_prices(market, &spot_prices, Some(&tokens_to_recompute))
+            .await?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
@@ -577,11 +566,11 @@ impl DerivedComputation for TokenGasPriceComputation {
         // For state-only changes, use incremental computation
         if !changed.is_full_recompute && !changed.is_topology_change() {
             // Try incremental computation if we have existing path dependencies
-            if let Some(output) = self
+            if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
                 .await?
             {
-                return Ok(output);
+                return Ok(result);
             }
             // Fall through to full compute if incremental is not possible
         }
@@ -593,14 +582,10 @@ impl DerivedComputation for TokenGasPriceComputation {
             .spot_prices()
             .ok_or(ComputationError::MissingDependency("spot_prices"))?
             .clone();
-        drop(store_guard);
 
-        let gas_price = market
-            .gas_price()
-            .ok_or(ComputationError::MissingDependency("gas_price"))?
-            .effective_gas_price();
-
-        let best_prices = self.simulate_token_prices(&market, &spot_prices, &gas_price, None)?;
+        let (best_prices, block, failed_items) = self
+            .simulate_token_prices(market, &spot_prices, None)
+            .await?;
 
         // Build token prices with dependencies for incremental computation
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
