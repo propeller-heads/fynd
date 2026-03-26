@@ -11,9 +11,9 @@
 //! Then use the re-exported crates directly:
 //!
 //! ```rust,ignore
-//! use fynd::fynd_rpc::builder::FyndRPCBuilder;
-//! use fynd::fynd_core::algorithm::Algorithm;
+//! use fynd::rpc::builder::FyndRPCBuilder;
+//! use fynd::core::algorithm::Algorithm;
 //! ```
 
-pub use fynd_core;
-pub use fynd_rpc;
+pub use fynd_core as core;
+pub use fynd_rpc as rpc;
