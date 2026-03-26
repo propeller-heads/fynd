@@ -1,6 +1,6 @@
 import { decodeAbiParameters, encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
-import { createFyndClient, type FyndClient as AutogenClient } from "@fynd/autogen";
-import type { components } from "@fynd/autogen";
+import { createFyndClient, type FyndClient as AutogenClient } from "./autogen.js";
+import type { components } from "./autogen.js";
 import { FyndError } from "./error.js";
 import * as mapping from "./mapping.js";
 import {
@@ -207,7 +207,9 @@ export class FyndClient {
   async health(): Promise<HealthStatus> {
     const { data, error } = await this.http.GET("/v1/health");
     if (error !== undefined) {
-      throw FyndError.fromWireError(error as WireErrorResponse);
+      // GET /v1/health has no error schema, so openapi-fetch types error as the success shape;
+      // route through unknown to satisfy the type checker.
+      throw FyndError.fromWireError(error as unknown as WireErrorResponse);
     }
     if (data === undefined) {
       throw FyndError.config("server returned no data for health response");
