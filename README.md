@@ -48,7 +48,7 @@ cargo build --release
 
 # Set required environment variables
 export TYCHO_API_KEY=your-api-key
-export RUST_LOG=info
+export RUST_LOG=fynd=info
 
 # Run
 cargo run --release serve
