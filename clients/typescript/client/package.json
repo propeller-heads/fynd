@@ -2,6 +2,10 @@
   "name": "@kayibal/fynd-client",
   "version": "0.34.1",
   "description": "TypeScript client for the Fynd DEX router",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/propeller-heads/fynd"
+  },
   "type": "module",
   "exports": {
     ".": {
