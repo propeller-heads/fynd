@@ -40,6 +40,10 @@ const config = {
                     'echo "NEXT_RELEASE_VERSION=${nextRelease.version}" >> $GITHUB_OUTPUT',
                 prepareCmd: [
                     "toml set --toml-path Cargo.toml workspace.package.version ${nextRelease.version}",
+                    "toml set --toml-path Cargo.toml workspace.dependencies.fynd-core.version ${nextRelease.version}",
+                    "toml set --toml-path Cargo.toml workspace.dependencies.fynd-rpc.version ${nextRelease.version}",
+                    "toml set --toml-path Cargo.toml workspace.dependencies.fynd-rpc-types.version ${nextRelease.version}",
+                    "toml set --toml-path Cargo.toml workspace.dependencies.fynd-client.version ${nextRelease.version}",
                     "cargo update -p fynd",
                     "npm pkg set version=${nextRelease.version} --prefix clients/typescript/client",
                 ].join(" && "),
