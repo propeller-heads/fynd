@@ -333,6 +333,12 @@ Our algorithm handles all three by simulating the actual swap at each step inste
 
 ***
 
+## Acknowledgements
+
+The Bellman-Ford routing approach in Fynd was inspired by the work of [János Tapolcai](http://lendulet.tmit.bme.hu/tapolcai) ([@jtapolcai](https://twitter.com/jtapolcai)), Full Professor at the Department of Telecommunications and Artificial Intelligence, Budapest University of Technology and Economics (BME). His [tycho-searcher](https://github.com/jtapolcai/tycho-searcher) project demonstrates a modified Bellman-Ford algorithm for DEX arbitrage detection built on Tycho.
+
+---
+
 ## Source Reference
 
 | File                                      | Purpose                                         |
