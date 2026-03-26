@@ -1,4 +1,8 @@
-# How the Most Liquid Router Works
+---
+icon: droplet
+---
+
+# Most Liquid
 
 The Most Liquid algorithm finds swap routes by enumerating candidate paths, scoring them with a cheap heuristic, then simulating only the most promising ones. It trades completeness for speed: it won't evaluate every possible route, but it finds good routes fast.
 
@@ -23,8 +27,8 @@ The result is a list of all simple paths (no repeated tokens) from source to des
 
 Each path is scored without simulation using two derived data values per edge:
 
-- **Spot price**: the marginal exchange rate at zero trade size (includes pool fees)
-- **Depth**: the pool's available liquidity in USD terms
+* **Spot price**: the marginal exchange rate at zero trade size (includes pool fees)
+* **Depth**: the pool's available liquidity in USD terms
 
 The score for a path is:
 
@@ -42,10 +46,10 @@ Paths are sorted by score descending. If `max_routes` is configured, only the to
 
 Each surviving path is simulated end-to-end. For every hop, the algorithm calls `get_amount_out()` on the actual pool state with the running amount from the previous hop. This accounts for:
 
-- Price impact at the exact trade size
-- The pool's fee structure
-- Tick crossings (Uniswap V3) or other non-linear mechanics
-- Reserve state as of the latest block
+* Price impact at the exact trade size
+* The pool's fee structure
+* Tick crossings (Uniswap V3) or other non-linear mechanics
+* Reserve state as of the latest block
 
 If a simulation fails (e.g., insufficient liquidity in a pool), the path is discarded. Otherwise, the final output amount is recorded.
 
@@ -63,21 +67,21 @@ The path with the highest `net_output` wins.
 
 ## When it works well
 
-- **Common pairs** (WETH/USDC, WETH/WBTC): a few high-liquidity pools dominate, and the heuristic reliably ranks them correctly.
-- **Low hop counts** (2-3): the path space is small enough to enumerate exhaustively, so the heuristic filter drops very little.
-- **High-frequency quoting**: the algorithm is fast enough to serve latency-sensitive integrators.
+* **Common pairs** (WETH/USDC, WETH/WBTC): a few high-liquidity pools dominate, and the heuristic reliably ranks them correctly.
+* **Low hop counts** (2-3): the path space is small enough to enumerate exhaustively, so the heuristic filter drops very little.
+* **High-frequency quoting**: the algorithm is fast enough to serve latency-sensitive integrators.
 
 ## When it struggles
 
-- **High hop counts** (4+): the number of candidate paths grows exponentially. Even with `max_routes` capping simulation, the heuristic may not surface the best path.
-- **Exotic pairs**: tokens with thin liquidity often have non-obvious routes where the spot price heuristic misjudges the actual output. The Bellman-Ford algorithm, which simulates every edge without a heuristic filter, handles these better.
+* **High hop counts** (4+): the number of candidate paths grows exponentially. Even with `max_routes` capping simulation, the heuristic may not surface the best path.
+* **Exotic pairs**: tokens with thin liquidity often have non-obvious routes where the spot price heuristic misjudges the actual output. The Bellman-Ford algorithm, which simulates every edge without a heuristic filter, handles these better.
 
 ## Source reference
 
-| File | Purpose |
-|---|---|
-| `fynd-core/src/algorithm/most_liquid.rs` | Algorithm implementation |
-| `fynd-core/src/algorithm/mod.rs` | `Algorithm` trait definition |
-| `fynd-core/src/graph/petgraph.rs` | Graph implementation (petgraph::StableDiGraph) |
-| `fynd-core/src/worker_pool/registry.rs` | Maps `"most_liquid"` to `MostLiquidAlgorithm` |
-| `worker_pools.toml` | Worker pool configuration |
+| File                                     | Purpose                                        |
+| ---------------------------------------- | ---------------------------------------------- |
+| `fynd-core/src/algorithm/most_liquid.rs` | Algorithm implementation                       |
+| `fynd-core/src/algorithm/mod.rs`         | `Algorithm` trait definition                   |
+| `fynd-core/src/graph/petgraph.rs`        | Graph implementation (petgraph::StableDiGraph) |
+| `fynd-core/src/worker_pool/registry.rs`  | Maps `"most_liquid"` to `MostLiquidAlgorithm`  |
+| `worker_pools.toml`                      | Worker pool configuration                      |
