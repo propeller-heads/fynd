@@ -838,6 +838,7 @@ mod tests {
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
             bytes::Bytes::copy_from_slice(&[0xcc; 20]),
             Some(tx),
+            None,
         )
     }
 
@@ -1405,6 +1406,7 @@ mod tests {
             BlockInfo::new(1, "0xabc".to_string(), 0),
             bytes::Bytes::copy_from_slice(&[0xbb; 20]),
             bytes::Bytes::copy_from_slice(&[0xcc; 20]),
+            None,
             None,
         );
         let hints = SigningHints {

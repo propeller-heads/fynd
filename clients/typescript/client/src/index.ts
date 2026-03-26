@@ -4,6 +4,7 @@ export type {
   BlockInfo,
   ClientFeeParams,
   EncodingOptions,
+  FeeBreakdown,
   Hex,
   HealthStatus,
   Order,

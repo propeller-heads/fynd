@@ -136,6 +136,7 @@ Submit one or more swap orders and receive optimal routes.
 | `options.encoding_options.transfer_type` | string | No | Input token transfer method: `transfer_from` (default) or `transfer_from_permit2`                             |
 | `options.encoding_options.permit` | object | No | Permit2 single-token authorization. Required when using `transfer_from_permit2`                               |
 | `options.encoding_options.permit2_signature` | string | No | Permit2 signature (hex-encoded). Required when `permit` is set                                                |
+| `options.encoding_options.client_fee_params` | object | No | Client fee configuration. See [Client Fees](docs/guides/client-fees.md)                                       |
 
 **Response:**
 
@@ -173,6 +174,12 @@ Submit one or more swap orders and receive optimal routes.
         "to": "0x...",
         "value": "0",
         "data": "0x..."
+      },
+      "fee_breakdown": {
+        "router_fee": "320000",
+        "client_fee": "0",
+        "max_slippage": "31996800",
+        "min_amount_received": "3167683200"
       }
     }
   ],

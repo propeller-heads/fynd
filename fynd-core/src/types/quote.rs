@@ -192,6 +192,60 @@ impl ClientFeeParams {
     }
 }
 
+/// Breakdown of fees applied to the swap output by the on-chain FeeCalculator.
+///
+/// All amounts are absolute values in output token units.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeBreakdown {
+    /// Router protocol fee (fee on output + router's share of client fee).
+    #[serde_as(as = "DisplayFromStr")]
+    router_fee: BigUint,
+    /// Client's portion of the fee (after the router takes its share).
+    #[serde_as(as = "DisplayFromStr")]
+    client_fee: BigUint,
+    /// Maximum slippage amount: (amount_out - router_fee - client_fee) * slippage.
+    #[serde_as(as = "DisplayFromStr")]
+    max_slippage: BigUint,
+    /// Minimum amount the user receives on-chain.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    /// This is the value encoded as min_amount_out in the transaction.
+    #[serde_as(as = "DisplayFromStr")]
+    min_amount_received: BigUint,
+}
+
+impl FeeBreakdown {
+    /// Creates a new fee breakdown.
+    pub fn new(
+        router_fee: BigUint,
+        client_fee: BigUint,
+        max_slippage: BigUint,
+        min_amount_received: BigUint,
+    ) -> Self {
+        Self { router_fee, client_fee, max_slippage, min_amount_received }
+    }
+
+    /// Router protocol fee amount.
+    pub fn router_fee(&self) -> &BigUint {
+        &self.router_fee
+    }
+
+    /// Client fee amount.
+    pub fn client_fee(&self) -> &BigUint {
+        &self.client_fee
+    }
+
+    /// Maximum slippage amount.
+    pub fn max_slippage(&self) -> &BigUint {
+        &self.max_slippage
+    }
+
+    /// Minimum amount the user receives on-chain.
+    pub fn min_amount_received(&self) -> &BigUint {
+        &self.min_amount_received
+    }
+}
+
 /// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +669,9 @@ pub struct OrderQuote {
     gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
     pub(crate) transaction: Option<Transaction>,
+    /// Fee breakdown (populated when encoding options are provided).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fee_breakdown: Option<FeeBreakdown>,
     /// Address of the sender.
     pub(crate) sender: Bytes,
     /// Address of the receiver.
@@ -648,6 +705,7 @@ impl OrderQuote {
             algorithm,
             gas_price: None,
             transaction: None,
+            fee_breakdown: None,
             sender,
             receiver,
         }
@@ -742,6 +800,18 @@ impl OrderQuote {
     /// Returns the encoded EVM transaction, if available.
     pub fn transaction(&self) -> Option<&Transaction> {
         self.transaction.as_ref()
+    }
+
+    /// Returns the fee breakdown, if encoding was requested.
+    pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
+        self.fee_breakdown.as_ref()
+    }
+
+    /// Sets the fee breakdown.
+    #[allow(dead_code)]
+    pub(crate) fn with_fee_breakdown(mut self, fb: FeeBreakdown) -> Self {
+        self.fee_breakdown = Some(fb);
+        self
     }
 
     /// Returns the sender address.

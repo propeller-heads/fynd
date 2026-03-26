@@ -39,10 +39,10 @@ pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgori
 pub use derived::computation::ComputationRequirements;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 pub use types::{
-    BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, Order, OrderQuote, OrderSide,
-    OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError, SolveResult, Swap,
-    TaskId, Transaction, UserTransferType,
+    BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
+    OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
+    QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
+    SolveResult, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

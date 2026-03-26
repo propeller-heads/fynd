@@ -647,6 +647,49 @@ impl Route {
     }
 }
 
+/// Breakdown of fees applied to the swap output by the on-chain FeeCalculator.
+///
+/// All amounts are absolute values in output token units.
+#[derive(Debug, Clone)]
+pub struct FeeBreakdown {
+    router_fee: BigUint,
+    client_fee: BigUint,
+    max_slippage: BigUint,
+    min_amount_received: BigUint,
+}
+
+impl FeeBreakdown {
+    pub(crate) fn new(
+        router_fee: BigUint,
+        client_fee: BigUint,
+        max_slippage: BigUint,
+        min_amount_received: BigUint,
+    ) -> Self {
+        Self { router_fee, client_fee, max_slippage, min_amount_received }
+    }
+
+    /// Router protocol fee (fee on output + router's share of client fee).
+    pub fn router_fee(&self) -> &BigUint {
+        &self.router_fee
+    }
+
+    /// Client's portion of the fee (after the router takes its share).
+    pub fn client_fee(&self) -> &BigUint {
+        &self.client_fee
+    }
+
+    /// Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+    pub fn max_slippage(&self) -> &BigUint {
+        &self.max_slippage
+    }
+
+    /// Minimum amount the user receives on-chain.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    pub fn min_amount_received(&self) -> &BigUint {
+        &self.min_amount_received
+    }
+}
+
 /// The solver's response for a single order.
 #[derive(Debug, Clone)]
 pub struct Quote {
@@ -670,6 +713,8 @@ pub struct Quote {
     /// ABI-encoded on-chain transaction. Present only when [`EncodingOptions`] was set in the
     /// request via [`QuoteOptions::with_encoding_options`].
     transaction: Option<Transaction>,
+    /// Fee breakdown. Present only when [`EncodingOptions`] was set in the request.
+    fee_breakdown: Option<FeeBreakdown>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -754,6 +799,14 @@ impl Quote {
         self.transaction.as_ref()
     }
 
+    /// Fee breakdown, present when [`EncodingOptions`] was set in the request.
+    ///
+    /// Contains router fee, client fee, max slippage, and the minimum amount the user
+    /// will receive on-chain (the value used as `min_amount_out` in the transaction).
+    pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
+        self.fee_breakdown.as_ref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -776,6 +829,7 @@ impl Quote {
         token_out: Bytes,
         receiver: Bytes,
         transaction: Option<Transaction>,
+        fee_breakdown: Option<FeeBreakdown>,
     ) -> Self {
         Self {
             order_id,
@@ -791,6 +845,7 @@ impl Quote {
             token_out,
             receiver,
             transaction,
+            fee_breakdown,
             solve_time_ms: 0,
         }
     }

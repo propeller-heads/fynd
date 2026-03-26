@@ -5,6 +5,7 @@ import type {
     BlockInfo,
     ClientFeeParams,
     EncodingOptions,
+    FeeBreakdown,
     HealthStatus,
     Hex,
     PermitDetails,
@@ -29,6 +30,7 @@ type WireTransaction = components["schemas"]["Transaction"];
 type WirePermitSingle = components["schemas"]["PermitSingle"];
 type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
+type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -80,6 +82,9 @@ export function fromWireQuote(
         ? fromWireTransaction(orderSolution.transaction)
         : undefined;
     const priceImpactBps = orderSolution.price_impact_bps ?? undefined;
+    const feeBreakdown = orderSolution.fee_breakdown != null
+        ? fromWireFeeBreakdown(orderSolution.fee_breakdown)
+        : undefined;
     return {
         orderId: orderSolution.order_id,
         status: orderSolution.status,
@@ -94,6 +99,7 @@ export function fromWireQuote(
         ...(route !== undefined ? {route} : {}),
         ...(transaction !== undefined ? {transaction} : {}),
         ...(priceImpactBps !== undefined ? {priceImpactBps} : {}),
+        ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
     };
 }
 
@@ -160,6 +166,15 @@ function toWirePermitDetails(d: PermitDetails): WirePermitDetails {
         amount: d.amount.toString(),
         expiration: d.expiration.toString(),
         nonce: d.nonce.toString(),
+    };
+}
+
+function fromWireFeeBreakdown(wire: WireFeeBreakdown): FeeBreakdown {
+    return {
+        routerFee: BigInt(wire.router_fee),
+        clientFee: BigInt(wire.client_fee),
+        maxSlippage: BigInt(wire.max_slippage),
+        minAmountReceived: BigInt(wire.min_amount_received),
     };
 }
 
