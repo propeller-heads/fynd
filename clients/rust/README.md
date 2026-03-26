@@ -26,7 +26,7 @@ use num_bigint::BigUint;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start a local Fynd instance first: https://docs.fynd.xyz/get-started/quickstart
-    let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:8545")
+    let client = FyndClientBuilder::new("http://localhost:3000", "https://reth-ethereum.ithaca.xyz/rpc")
         .build()
         .await?;
 
