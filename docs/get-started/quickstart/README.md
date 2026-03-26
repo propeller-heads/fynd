@@ -28,6 +28,13 @@ Execute a swap with Fynd in three steps.
 * **Tycho API key** (set as `TYCHO_API_KEY`, [get one here](https://t.me/fynd_portal_bot))
 * **Rust 1.92+** ([install via rustup](https://rustup.rs/))
 
+## Step 0 — Clone the repo
+
+```bash
+git clone https://github.com/propeller-heads/fynd.git
+cd fynd
+```
+
 ## Step 1 — Start Fynd
 
 ```bash
@@ -38,38 +45,19 @@ cargo run --release -- serve
 
 ## Step 2 — Execute a swap
 
+{% hint style="info" %}
+Fynd currently only supports **sell orders** (exact input). Set `"side": "sell"` in your order. Buy orders (exact output) are not yet supported.
+{% endhint %}
+
 {% tabs %}
-{% tab title="curl" %}
-```bash
-# Wait until healthy
-curl http://localhost:3000/v1/health
-# → {"healthy":true,...}
-
-# Request a quote — 1000 USDC → WETH
-curl -X POST http://localhost:3000/v1/quote \
-  -H "Content-Type: application/json" \
-  -d '{
-    "orders": [
-      {
-        "token_in":  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "token_out": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "amount":    "1000000000",
-        "side":      "sell",
-        "sender":    "0x0000000000000000000000000000000000000001"
-      }
-    ],
-    "options": {
-      "timeout_ms": 5000,
-      "min_responses": 1
-    }
-  }'
-```
-
-This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
-{% endtab %}
-
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/tutorial/main.ts`](../../../clients/typescript/examples/tutorial/main.ts):
+Full example: [`clients/typescript/examples/tutorial/main.ts`](../../../clients/typescript/examples/tutorial/main.ts)
+
+Install the [`@kayibal/fynd-client`](https://www.npmjs.com/package/@kayibal/fynd-client) package:
+
+```bash
+npm install @kayibal/fynd-client
+```
 
 ```typescript
 const client = new FyndClient({
@@ -103,7 +91,14 @@ console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
 {% endtab %}
 
 {% tab title="Rust" %}
-From [`clients/rust/examples/swap_erc20.rs`](../../../clients/rust/examples/swap_erc20.rs):
+Full example: [`clients/rust/examples/swap_erc20.rs`](../../../clients/rust/examples/swap_erc20.rs)
+
+Add the [`fynd-client`](https://crates.io/crates/fynd-client) crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+fynd-client = "0.31"
+```
 
 ```rust
 let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
@@ -160,10 +155,41 @@ println!("gas: {}", receipt.gas_cost());
 
 Run with: `cargo run --example swap_erc20 -p fynd-client`
 {% endtab %}
+
+{% tab title="curl" %}
+```bash
+# Wait until healthy
+curl http://localhost:3000/v1/health
+# → {"healthy":true,...}
+
+# Request a quote — 1000 USDC → WETH
+curl -X POST http://localhost:3000/v1/quote \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orders": [
+      {
+        "token_in":  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "token_out": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "amount":    "1000000000",
+        "side":      "sell",
+        "sender":    "0x0000000000000000000000000000000000000001"
+      }
+    ],
+    "options": {
+      "timeout_ms": 5000,
+      "min_responses": 1
+    }
+  }'
+```
+
+This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
+{% endtab %}
 {% endtabs %}
 
 ## Next steps
 
+* [Encoding options](../../guides/encoding-options.md) — encode quotes into ready-to-submit transactions
+* [Client fees](../../guides/client-fees.md) — charge integrator fees on swaps
 * [Server configuration](../../guides/server-configuration.md)
 * [Custom algorithm](../../guides/custom-algorithm.md)
 * [Benchmarking](../../guides/benchmarking.md)
