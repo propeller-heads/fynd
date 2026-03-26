@@ -111,6 +111,7 @@ pub type Address = Bytes;
 // ============================================================================
 
 /// Request to solve one or more swap orders.
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct QuoteRequest {
@@ -145,6 +146,7 @@ impl QuoteRequest {
 }
 
 /// Options to customize the solving behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -441,6 +443,7 @@ impl FeeBreakdown {
 }
 
 /// Options to customize the encoding behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -661,6 +664,7 @@ impl Quote {
 /// A single swap order to be solved.
 ///
 /// An order specifies an intent to swap one token for another.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1220,6 +1224,7 @@ impl InstanceInfo {
 }
 
 /// Error response body.
+#[must_use]
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorResponse {
