@@ -803,7 +803,9 @@ where
                                             hex_str.trim_start_matches("0x"),
                                         ) {
                                             Ok(b) => decode_revert_bytes(&b),
-                                            Err(_) => format!("{tx_hash:#x} reverted"),
+                                            Err(_) => format!(
+                                                "{tx_hash:#x} reverted (return value: {hex_str})"
+                                            ),
                                         }
                                     }
                                     Err(_) => {
@@ -1022,7 +1024,9 @@ where
                                         hex_str.trim_start_matches("0x"),
                                     ) {
                                         Ok(b) => decode_revert_bytes(&b),
-                                        Err(_) => format!("{tx_hash:#x} reverted"),
+                                        Err(_) => format!(
+                                            "{tx_hash:#x} reverted (return value: {hex_str})"
+                                        ),
                                     }
                                 }
                                 Err(_) => {
