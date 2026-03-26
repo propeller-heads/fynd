@@ -13,7 +13,7 @@ env:
 
 jobs:
   run_examples:
-    name: Run Rust client examples
+    name: Run client examples
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
