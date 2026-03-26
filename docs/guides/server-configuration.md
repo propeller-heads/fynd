@@ -95,7 +95,7 @@ Run `cargo run --release -- serve --help` for the full list.
 
 ## Worker pools (`worker_pools.toml`)
 
-Worker pools control solver thread count and routing strategies. The default config ships with two pools:
+Worker pools control solver thread count and routing strategies. The default config ships with three pools:
 
 ```toml
 # worker_pools.toml
@@ -105,6 +105,7 @@ num_workers = 5
 task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 100
+max_routes = 50
 
 [pools.most_liquid_3_hops]
 algorithm = "most_liquid"
@@ -113,9 +114,16 @@ task_queue_capacity = 1000
 min_hops = 2
 max_hops = 3
 timeout_ms = 5000
+
+[pools.bellman_ford_5_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 5
+timeout_ms = 500
 ```
 
-Both pools solve every incoming order in parallel. Fynd picks the best result across pools within the timeout.
+All pools solve every incoming order in parallel. Fynd picks the best result across pools within the timeout.
 
 ### Worker pool fields
 

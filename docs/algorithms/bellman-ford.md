@@ -156,7 +156,7 @@ This complements the active set. BFS removes structurally unreachable nodes befo
 
 ## 4. The Complete Algorithm
 
-Here is the full sequence, end to end. Each step maps to a specific section of `src/algorithm/bellman_ford.rs`.
+Here is the full sequence, end to end. Each step maps to a specific section of `fynd-core/src/algorithm/bellman_ford.rs`.
 
 ### Step 1: Setup
 
@@ -338,8 +338,8 @@ Our algorithm handles all three by simulating the actual swap at each step inste
 
 | File | Purpose |
 |---|---|
-| `src/algorithm/bellman_ford.rs` | Algorithm implementation |
-| `src/algorithm/mod.rs` | `Algorithm` trait definition |
-| `src/graph/petgraph.rs` | Graph implementation (petgraph::StableDiGraph) |
-| `src/worker_pool/registry.rs` | Maps `"bellman_ford"` to `BellmanFordAlgorithm` |
+| `fynd-core/src/algorithm/bellman_ford.rs` | Algorithm implementation |
+| `fynd-core/src/algorithm/mod.rs` | `Algorithm` trait definition |
+| `fynd-core/src/graph/petgraph.rs` | Graph implementation (petgraph::StableDiGraph) |
+| `fynd-core/src/worker_pool/registry.rs` | Maps `"bellman_ford"` to `BellmanFordAlgorithm` |
 | `worker_pools.toml` | Worker pool configuration |
