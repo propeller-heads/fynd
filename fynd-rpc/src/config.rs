@@ -93,10 +93,11 @@ mod tests {
         let pool = &config.pools()["basic"];
         assert_eq!(pool.algorithm(), "most_liquid");
         assert_eq!(pool.num_workers(), num_cpus::get());
-        assert_eq!(pool.task_queue_capacity(), defaults::POOL_TASK_QUEUE_CAPACITY);
-        assert_eq!(pool.min_hops(), defaults::POOL_MIN_HOPS);
-        assert_eq!(pool.max_hops(), defaults::POOL_MAX_HOPS);
-        assert_eq!(pool.timeout_ms(), defaults::POOL_TIMEOUT_MS);
+        use fynd_core::solver::defaults as core_defaults;
+        assert_eq!(pool.task_queue_capacity(), core_defaults::POOL_TASK_QUEUE_CAPACITY);
+        assert_eq!(pool.min_hops(), core_defaults::POOL_MIN_HOPS);
+        assert_eq!(pool.max_hops(), core_defaults::POOL_MAX_HOPS);
+        assert_eq!(pool.timeout_ms(), core_defaults::POOL_TIMEOUT_MS);
         assert_eq!(pool.max_routes(), None);
     }
 
@@ -128,8 +129,7 @@ mod tests {
 pub mod defaults {
     // Re-export shared defaults from fynd-core as the single source of truth.
     pub use fynd_core::solver::defaults::{
-        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, POOL_MAX_HOPS, POOL_MIN_HOPS,
-        POOL_TASK_QUEUE_CAPACITY, POOL_TIMEOUT_MS, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
+        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
         TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
     };
 
