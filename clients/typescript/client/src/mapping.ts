@@ -1,5 +1,5 @@
-import type {components} from "@fynd/autogen";
-import {FyndError} from "./error.js";
+import type { components } from "./autogen.js";
+import { FyndError } from "./error.js";
 import type {
     Address,
     BlockInfo,
@@ -133,7 +133,7 @@ function toWireEncodingOptions(opts: EncodingOptions): WireEncodingOptions {
     return {
         // Server deserializes slippage as a string despite OpenAPI declaring number.
         slippage: opts.slippage.toString() as unknown as number,
-        ...(opts.transferType !== undefined ? {transfer_type: opts.transferType} : {}),
+        ...(opts.transferType !== undefined && opts.transferType !== 'none' ? {transfer_type: opts.transferType} : {}),
         ...(opts.permit !== undefined ? {permit: toWirePermitSingle(opts.permit)} : {}),
         ...(opts.permit2Signature !== undefined
             ? {permit2_signature: opts.permit2Signature}
@@ -193,7 +193,7 @@ export function fromWireHealth(wire: WireHealthStatus): HealthStatus {
         healthy: wire.healthy,
         lastUpdateMs: wire.last_update_ms,
         numSolverPools: wire.num_solver_pools,
-        gasPriceAgeMs: wire.gas_price_age_ms ?? undefined,
+        ...(wire.gas_price_age_ms != null ? { gasPriceAgeMs: wire.gas_price_age_ms } : {}),
     };
 }
 

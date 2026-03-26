@@ -17,7 +17,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OPENAPI_JSON="$REPO_ROOT/clients/openapi.json"
-TS_SCHEMA="$REPO_ROOT/clients/typescript/autogen/src/schema.d.ts"
+TS_SCHEMA="$REPO_ROOT/clients/typescript/client/src/schema.d.ts"
 
 echo "==> Generating OpenAPI spec..."
 cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -- openapi 2>/dev/null >"$OPENAPI_JSON"

@@ -41,6 +41,7 @@ const config = {
                 prepareCmd: [
                     "toml set --toml-path Cargo.toml workspace.package.version ${nextRelease.version}",
                     "cargo update -p fynd",
+                    "npm pkg set version=${nextRelease.version} --prefix clients/typescript/client",
                 ].join(" && "),
             },
         ],
@@ -77,6 +78,7 @@ if (
                 "CHANGELOG.md",
                 "Cargo.toml",
                 "Cargo.lock",
+                "clients/typescript/client/package.json",
             ],
             message:
                 "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}",

@@ -1,7 +1,6 @@
 {
-  "name": "@fynd/client",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@kayibal/fynd-client",
+  "version": "0.1.1",
   "description": "TypeScript client for the Fynd DEX router",
   "type": "module",
   "exports": {
@@ -18,7 +17,7 @@
     "test":      "vitest run"
   },
   "dependencies": {
-    "@fynd/autogen": "workspace:*",
+    "openapi-fetch": "0.17.0",
     "viem": "2.46.3"
   },
   "devDependencies": {
