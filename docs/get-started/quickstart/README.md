@@ -20,7 +20,7 @@ layout:
 
 # Quickstart
 
-Get a quote from Fynd in three steps.
+Execute a swap with Fynd in three steps.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ export RUST_LOG=info
 cargo run --release -- serve
 ```
 
-## Step 2 — Request a quote
+## Step 2 — Execute a swap
 
 {% tabs %}
 {% tab title="curl" %}
@@ -68,74 +68,37 @@ This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
 {% endtab %}
 
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/tutorial/main.ts`](../../../clients/typescript/examples/tutorial/main.ts):
+From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/tutorial/main.ts):
 
 ```typescript
-  // FyndClient accepts a viemProvider adapter — no manual wrapping needed.
-  const fyndClient = new FyndClient({
-    baseUrl: solverUrl,
-    chainId,
-    sender: account.address,
-    provider: viemProvider(publicClient, account.address),
-  });
+const client = new FyndClient({
+  baseUrl: FYND_URL,
+  chainId: mainnet.id,
+  sender: account.address,
+  provider: viemProvider(publicClient, account.address),
+  fetchRevertReason: true,
+});
 
-  // Check solver health
-  const health = await fyndClient.health();
-  console.log(
-    `Solver: healthy=${String(health.healthy)},` +
-      ` pools=${health.numSolverPools}`
-  );
-  if (!health.healthy) {
-    throw new Error("Solver is not healthy.");
-  }
+// 1. Quote
+const quote = await client.quote({
+  order: { tokenIn: WETH, tokenOut: USDC, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
+  options: { encodingOptions: encodingOptions(0.005) },
+});
+console.log(`amount_out: ${quote.amountOut}`);
 
-  // Build Permit2 encoding options
-  const amountIn = parseUnits("100", 6); // 100 USDC
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const permit = {
-    details: {
-      token: USDC,
-      amount: amountIn,
-      expiration: deadline,
-      nonce: 0n,
-    },
-    spender: "0x0000000000000000000000000000000000000000" as Address,
-    sigDeadline: deadline,
-  };
+// 2. Approve if needed (checks on-chain allowance, skips if sufficient)
+const approvalPayload = await client.approval({ token: WETH, amount: SELL_AMOUNT, checkAllowance: true });
+if (approvalPayload !== null) {
+  const sig = await account.sign({ hash: approvalSigningHash(approvalPayload) });
+  await client.executeApproval({ tx: approvalPayload.tx, signature: sig });
+}
 
-  const permitHash = permit2SigningHash(permit, chainId, PERMIT2);
-  const permitSig = await account.signMessage({
-    message: { raw: permitHash },
-  });
-
-  const encOpts = withPermit2(
-    encodingOptions(50 / 10_000),
-    permit,
-    permitSig,
-  );
-
-  // Request a quote with server-side encoding
-  console.log("\nQuoting 100 USDC -> WETH...");
-  const quote = await fyndClient.quote({
-    order: {
-      tokenIn: USDC,
-      tokenOut: WETH,
-      amount: amountIn,
-      side: "sell",
-      sender: account.address,
-    },
-    options: { encodingOptions: encOpts },
-  });
-
-  console.log(`Status: ${quote.status}`);
-  if (quote.status !== "success") {
-    throw new Error(`Quote failed: ${quote.status}`);
-  }
-  console.log(`Amount out: ${quote.amountOut}`);
-  console.log(`Gas estimate: ${quote.gasEstimate}`);
+// 3. Sign and execute swap
+const payload = await client.swapPayload(quote);
+const sig = await account.sign({ hash: swapSigningHash(payload) });
+const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
+console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
 ```
-
-The full tutorial (signing + on-chain execution) is at `clients/typescript/examples/tutorial/main.ts`.
 {% endtab %}
 
 {% tab title="Rust" %}

@@ -1,6 +1,13 @@
 import type { Address, Hex } from './types.js';
 import type { EthProvider } from './client.js';
 
+const ERC20_ALLOWANCE_ABI = [{
+  name: 'allowance', type: 'function' as const,
+  inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+  outputs: [{ type: 'uint256' }],
+  stateMutability: 'view' as const,
+}] as const;
+
 /**
  * Minimal subset of viem's `PublicClient` used by {@link viemProvider}.
  *
@@ -41,6 +48,7 @@ export interface ViemPublicClient {
     args: { hash: Hex },
   ): Promise<{
     transactionHash: Hex;
+    status: 'success' | 'reverted';
     gasUsed: bigint;
     effectiveGasPrice: bigint;
     logs: ReadonlyArray<{
@@ -49,6 +57,14 @@ export interface ViemPublicClient {
       data: string;
     }>;
   }>;
+  readContract(args: {
+    address: Address;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+  }): Promise<unknown>;
+  /** Optional: raw RPC request, used for debug_traceTransaction. */
+  request?<T = unknown>(args: { method: string; params?: readonly unknown[] }): Promise<T>;
 }
 
 /**
@@ -111,6 +127,7 @@ export function viemProvider(
       }
       return {
         transactionHash: receipt.transactionHash,
+        status: receipt.status === 'reverted' ? 0 : 1,
         gasUsed: receipt.gasUsed,
         effectiveGasPrice: receipt.effectiveGasPrice,
         logs: receipt.logs.map((log) => ({
@@ -119,6 +136,21 @@ export function viemProvider(
           data: log.data as Hex,
         })),
       };
+    },
+    async debugTraceTransaction(hash) {
+      if (client.request === undefined) throw new Error('request not available');
+      const result = await client.request<{ output?: string }>({
+        method: 'debug_traceTransaction',
+        params: [hash, { tracer: 'callTracer' }],
+      });
+      return { output: (result.output ?? '0x') as Hex };
+    },
+    async readAllowance(token, owner, spender) {
+      const result = await client.readContract({
+        address: token, abi: ERC20_ALLOWANCE_ABI,
+        functionName: 'allowance', args: [owner, spender],
+      });
+      return result as bigint;
     },
   };
 }

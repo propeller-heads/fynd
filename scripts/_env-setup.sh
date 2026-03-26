@@ -71,6 +71,14 @@ wrap_weth() {
     echo "    Done"
 }
 
+build_ts() {
+    echo "==> Building TypeScript packages..."
+    pnpm --dir "$REPO_ROOT/clients/typescript" install --frozen-lockfile --silent
+    pnpm --dir "$REPO_ROOT/clients/typescript" --filter @fynd/autogen run build --silent
+    pnpm --dir "$REPO_ROOT/clients/typescript" --filter @fynd/client run build --silent
+    echo "    Done"
+}
+
 start_fynd() {
     local tycho_args=()
     [[ -n "${TYCHO_URL:-}" ]] && tycho_args+=(--tycho-url "$TYCHO_URL")

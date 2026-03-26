@@ -33,7 +33,7 @@ export interface Order {
 }
 
 /** How the router pulls input tokens from the sender. */
-export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds';
+export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds' | 'none';
 
 /** Uniswap Permit2 allowance details for a single token. */
 export interface PermitDetails {
@@ -181,4 +181,34 @@ export interface HealthStatus {
   /** Number of liquidity pools tracked by the solver. */
   numSolverPools: number;
   gasPriceAgeMs?: number;
+}
+
+/** Static metadata about a Fynd server instance. */
+export interface InstanceInfo {
+  routerAddress: Address;
+  permit2Address: Address;
+  chainId: number;
+}
+
+/** Parameters for {@link FyndClient.approval}. */
+export interface ApprovalParams {
+  /** ERC-20 token to approve. */
+  token: Address;
+  /** Amount to approve (in token base units). */
+  amount: bigint;
+  /**
+   * Which contract to approve as spender.
+   *
+   * `'transfer_from'` → router contract (default).
+   * `'transfer_from_permit2'` → Permit2 contract.
+   * `'none'` → {@link FyndClient.approval} returns `null` immediately.
+   */
+  transferType?: UserTransferType;
+  /**
+   * When `true`, read on-chain allowance before building the transaction.
+   *
+   * If the allowance is already sufficient, {@link FyndClient.approval} returns `null`.
+   * Requires `provider.readAllowance` to be implemented.
+   */
+  checkAllowance?: boolean;
 }

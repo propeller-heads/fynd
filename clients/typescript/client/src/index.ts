@@ -1,5 +1,6 @@
 export type {
   Address,
+  ApprovalParams,
   BackendKind,
   BlockInfo,
   ClientFeeParams,
@@ -7,6 +8,7 @@ export type {
   FeeBreakdown,
   Hex,
   HealthStatus,
+  InstanceInfo,
   Order,
   OrderSide,
   PermitDetails,
@@ -23,16 +25,19 @@ export type {
 export { FyndError } from "./error.js";
 export type { ClientErrorCode, ErrorCode, ServerErrorCode } from "./error.js";
 export type {
+  ApprovalPayload,
   Eip1559Transaction,
   ExecutionReceipt,
   FyndPayload,
   PrimitiveSignature,
   SettledOrder,
   SettleOptions,
-  SignablePayload,
-  SignedOrder,
+  SignedApproval,
+  SignedSwap,
+  SwapPayload,
+  TxReceipt,
 } from "./signing.js";
-export { assembleSignedOrder, DEFAULT_SETTLE_TIMEOUT_MS, signingHash } from "./signing.js";
+export { approvalSigningHash, assembleSignedSwap, DEFAULT_SETTLE_TIMEOUT_MS, swapSigningHash } from "./signing.js";
 export {
   permit2SigningHash,
   encodingOptions,

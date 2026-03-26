@@ -18,7 +18,7 @@ export type ServerErrorCode =
   | { kind: 'UNKNOWN'; raw: string };
 
 /** Error code originating from the client SDK itself. */
-export type ClientErrorCode = 'HTTP' | 'DESERIALIZE' | 'CONFIG' | 'SIMULATE_FAILED' | 'SETTLE_TIMEOUT';
+export type ClientErrorCode = 'HTTP' | 'DESERIALIZE' | 'CONFIG' | 'SIMULATE_FAILED' | 'SETTLE_TIMEOUT' | 'EXECUTION_REVERTED';
 
 /** Union of all error codes, covering both server and client errors. */
 export type ErrorCode = ServerErrorCode | ClientErrorCode;
@@ -103,5 +103,10 @@ export class FyndError extends Error {
   /** Creates a `SETTLE_TIMEOUT` error when transaction confirmation takes too long. */
   static timeout(message: string): FyndError {
     return new FyndError(message, 'SETTLE_TIMEOUT');
+  }
+
+  /** Creates an `EXECUTION_REVERTED` error when a mined transaction reverts. */
+  static executionReverted(reason: string): FyndError {
+    return new FyndError(reason, 'EXECUTION_REVERTED');
   }
 }

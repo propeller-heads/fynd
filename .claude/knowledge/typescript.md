@@ -41,6 +41,24 @@ pnpm --dir clients/typescript --filter @fynd/client run lint
 pnpm --dir clients/typescript --filter @fynd/client run test
 ```
 
+## Examples
+
+Examples live in `clients/typescript/examples/<name>/main.ts` and run against a local
+Anvil fork + Fynd instance.
+
+**Adding a new example:**
+1. Create `clients/typescript/examples/<name>/main.ts`
+2. Add `<name>` to the `TS_EXAMPLES` array in `scripts/run-all-examples.sh`
+
+The CI script (`scripts/run-all-examples.sh`) shares a single Anvil + Fynd instance across
+all Rust and TS examples to keep load on the Tycho service low. TS packages are built once
+upfront via `build_ts` in `scripts/_env-setup.sh` before any examples run.
+
+Run all examples locally:
+```bash
+TYCHO_API_KEY=<key> ./scripts/run-all-examples.sh
+```
+
 ## Key Conventions
 
 - ESM only (`"type": "module"`)

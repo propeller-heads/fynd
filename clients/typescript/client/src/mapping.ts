@@ -8,6 +8,7 @@ import type {
     FeeBreakdown,
     HealthStatus,
     Hex,
+    InstanceInfo,
     PermitDetails,
     PermitSingle,
     Quote,
@@ -22,6 +23,7 @@ type WireSolution = components["schemas"]["Quote"];
 type WireSolutionRequest = components["schemas"]["QuoteRequest"];
 type WireSolutionOptions = components["schemas"]["QuoteOptions"];
 type WireHealthStatus = components["schemas"]["HealthStatus"];
+type WireInstanceInfo = components["schemas"]["InstanceInfo"];
 type WireRoute = components["schemas"]["Route"];
 type WireSwap = components["schemas"]["Swap"];
 type WireBlockInfo = components["schemas"]["BlockInfo"];
@@ -193,4 +195,12 @@ export function fromWireHealth(wire: WireHealthStatus): HealthStatus {
         numSolverPools: wire.num_solver_pools,
         gasPriceAgeMs: wire.gas_price_age_ms ?? undefined,
     };
+}
+
+export function fromWireInstanceInfo(wire: WireInstanceInfo): InstanceInfo {
+  return {
+    routerAddress:  wire.router_address as Address,
+    permit2Address: wire.permit2_address as Address,
+    chainId:        wire.chain_id,
+  };
 }
