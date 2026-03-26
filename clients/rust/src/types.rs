@@ -647,6 +647,49 @@ impl Route {
     }
 }
 
+/// Breakdown of fees applied to the swap output by the on-chain FeeCalculator.
+///
+/// All amounts are absolute values in output token units.
+#[derive(Debug, Clone)]
+pub struct FeeBreakdown {
+    router_fee: BigUint,
+    client_fee: BigUint,
+    max_slippage: BigUint,
+    min_amount_received: BigUint,
+}
+
+impl FeeBreakdown {
+    pub(crate) fn new(
+        router_fee: BigUint,
+        client_fee: BigUint,
+        max_slippage: BigUint,
+        min_amount_received: BigUint,
+    ) -> Self {
+        Self { router_fee, client_fee, max_slippage, min_amount_received }
+    }
+
+    /// Router protocol fee (fee on output + router's share of client fee).
+    pub fn router_fee(&self) -> &BigUint {
+        &self.router_fee
+    }
+
+    /// Client's portion of the fee (after the router takes its share).
+    pub fn client_fee(&self) -> &BigUint {
+        &self.client_fee
+    }
+
+    /// Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+    pub fn max_slippage(&self) -> &BigUint {
+        &self.max_slippage
+    }
+
+    /// Minimum amount the user receives on-chain.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    pub fn min_amount_received(&self) -> &BigUint {
+        &self.min_amount_received
+    }
+}
+
 /// The solver's response for a single order.
 #[derive(Debug, Clone)]
 pub struct Quote {
@@ -670,6 +713,8 @@ pub struct Quote {
     /// ABI-encoded on-chain transaction. Present only when [`EncodingOptions`] was set in the
     /// request via [`QuoteOptions::with_encoding_options`].
     transaction: Option<Transaction>,
+    /// Fee breakdown. Present only when [`EncodingOptions`] was set in the request.
+    fee_breakdown: Option<FeeBreakdown>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -732,7 +777,7 @@ impl Quote {
     /// The `token_out` address from the originating [`Order`] (20 raw bytes).
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote) and used by
-    /// [`FyndClient::execute`](crate::FyndClient::execute) to parse the settlement log.
+    /// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to parse the settlement log.
     pub fn token_out(&self) -> &Bytes {
         &self.token_out
     }
@@ -741,7 +786,8 @@ impl Quote {
     ///
     /// Defaults to `sender` when the order had no explicit receiver. Populated by
     /// [`FyndClient::quote`](crate::FyndClient::quote) and used by
-    /// [`FyndClient::execute`](crate::FyndClient::execute) to verify the Transfer log recipient.
+    /// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to verify the Transfer log
+    /// recipient.
     pub fn receiver(&self) -> &Bytes {
         &self.receiver
     }
@@ -752,6 +798,14 @@ impl Quote {
     /// submit. Returns `None` when no [`EncodingOptions`] were passed in the request.
     pub fn transaction(&self) -> Option<&Transaction> {
         self.transaction.as_ref()
+    }
+
+    /// Fee breakdown, present when [`EncodingOptions`] was set in the request.
+    ///
+    /// Contains router fee, client fee, max slippage, and the minimum amount the user
+    /// will receive on-chain (the value used as `min_amount_out` in the transaction).
+    pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
+        self.fee_breakdown.as_ref()
     }
 
     /// Wall-clock time the server spent solving this request, in milliseconds.
@@ -776,6 +830,7 @@ impl Quote {
         token_out: Bytes,
         receiver: Bytes,
         transaction: Option<Transaction>,
+        fee_breakdown: Option<FeeBreakdown>,
     ) -> Self {
         Self {
             order_id,
@@ -791,6 +846,7 @@ impl Quote {
             token_out,
             receiver,
             transaction,
+            fee_breakdown,
             solve_time_ms: 0,
         }
     }
@@ -810,6 +866,41 @@ impl BatchQuote {
 
     pub(crate) fn new(quotes: Vec<Quote>) -> Self {
         Self { quotes }
+    }
+}
+
+/// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+pub struct InstanceInfo {
+    /// Router contract address (20 raw bytes).
+    router_address: bytes::Bytes,
+    /// Permit2 contract address (20 raw bytes).
+    permit2_address: bytes::Bytes,
+    /// Chain ID of the network this instance is deployed on.
+    chain_id: u64,
+}
+
+impl InstanceInfo {
+    pub(crate) fn new(
+        router_address: bytes::Bytes,
+        permit2_address: bytes::Bytes,
+        chain_id: u64,
+    ) -> Self {
+        Self { router_address, permit2_address, chain_id }
+    }
+
+    /// Router contract address (20 raw bytes).
+    pub fn router_address(&self) -> &bytes::Bytes {
+        &self.router_address
+    }
+
+    /// Permit2 contract address (20 raw bytes).
+    pub fn permit2_address(&self) -> &bytes::Bytes {
+        &self.permit2_address
+    }
+
+    /// Chain ID of the network this instance is deployed on.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 }
 

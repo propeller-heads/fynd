@@ -15,8 +15,8 @@ applications.
 | `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `PoolDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh     |
 | `graph/`              | `pub(crate)` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `EdgeWeightUpdaterWithDerived`, `Path` type                                 |
 | `price_guard/`        | Price guard: external price validation for quotes. Provider registry, config, utilities                                                                                            |
-| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants)                                                                   |
-| `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, error types                                                                         |
+| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic |
+| `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, `FeeBreakdown`, error types                                                         |
 
 ## Key Traits
 

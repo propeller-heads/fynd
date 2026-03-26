@@ -27,7 +27,8 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 ## Response Types
 
 - `Quote` — orders (Vec<OrderQuote>), total_gas_estimate, solve_time_ms
-- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction
+- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction, fee_breakdown
+- `FeeBreakdown` — router_fee, client_fee, max_slippage, min_amount_received (all absolute token-out amounts, populated when encoding_options is set)
 - `QuoteStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, NotReady
 - `Route` — Vec<Swap>
 - `Swap` — component_id, protocol, token_in/out, amount_in/out, gas_estimate, split

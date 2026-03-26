@@ -203,6 +203,54 @@ impl ClientFeeParams {
     }
 }
 
+/// Breakdown of fees applied to the swap output by the on-chain FeeCalculator.
+///
+/// All amounts are absolute values in output token units.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FeeBreakdown {
+    /// Router protocol fee (fee on output + router's share of client fee).
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "350000"))]
+    router_fee: BigUint,
+    /// Client's portion of the fee (after the router takes its share).
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "2800000"))]
+    client_fee: BigUint,
+    /// Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3496850"))]
+    max_slippage: BigUint,
+    /// Minimum amount the user receives on-chain.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    #[serde_as(as = "DisplayFromStr")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3493353150"))]
+    min_amount_received: BigUint,
+}
+
+impl FeeBreakdown {
+    /// Router protocol fee amount.
+    pub fn router_fee(&self) -> &BigUint {
+        &self.router_fee
+    }
+
+    /// Client fee amount.
+    pub fn client_fee(&self) -> &BigUint {
+        &self.client_fee
+    }
+
+    /// Maximum slippage amount.
+    pub fn max_slippage(&self) -> &BigUint {
+        &self.max_slippage
+    }
+
+    /// Minimum amount the user receives on-chain.
+    pub fn min_amount_received(&self) -> &BigUint {
+        &self.min_amount_received
+    }
+}
+
 /// Options to customize the encoding behavior.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,6 +639,9 @@ pub struct OrderQuote {
     gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
     transaction: Option<Transaction>,
+    /// Fee breakdown (populated when encoding options are provided).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee_breakdown: Option<FeeBreakdown>,
 }
 
 impl OrderQuote {
@@ -647,6 +698,11 @@ impl OrderQuote {
     /// Encoded EVM transaction, if encoding options were provided in the request.
     pub fn transaction(&self) -> Option<&Transaction> {
         self.transaction.as_ref()
+    }
+
+    /// Fee breakdown, if encoding options were provided in the request.
+    pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
+        self.fee_breakdown.as_ref()
     }
 }
 
@@ -1247,6 +1303,10 @@ mod conversions {
                 .transaction()
                 .cloned()
                 .map(Into::into);
+            let fee_breakdown = core
+                .fee_breakdown()
+                .cloned()
+                .map(Into::into);
             let route = core.into_route().map(Into::into);
             Self {
                 order_id,
@@ -1260,6 +1320,7 @@ mod conversions {
                 block,
                 gas_price,
                 transaction,
+                fee_breakdown,
             }
         }
     }
@@ -1318,6 +1379,17 @@ mod conversions {
     impl From<fynd_core::Transaction> for Transaction {
         fn from(core: fynd_core::Transaction) -> Self {
             Self { to: core.to().clone(), value: core.value().clone(), data: core.data().to_vec() }
+        }
+    }
+
+    impl From<fynd_core::FeeBreakdown> for FeeBreakdown {
+        fn from(core: fynd_core::FeeBreakdown) -> Self {
+            Self {
+                router_fee: core.router_fee().clone(),
+                client_fee: core.client_fee().clone(),
+                max_slippage: core.max_slippage().clone(),
+                min_amount_received: core.min_amount_received().clone(),
+            }
         }
     }
 

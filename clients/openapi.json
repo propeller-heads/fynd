@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.25.2"
+    "version": "0.29.0"
   },
   "paths": {
     "/v1/health": {
@@ -267,6 +267,38 @@
           }
         }
       },
+      "FeeBreakdown": {
+        "type": "object",
+        "description": "Breakdown of fees applied to the swap output by the on-chain FeeCalculator.\n\nAll amounts are absolute values in output token units.",
+        "required": [
+          "router_fee",
+          "client_fee",
+          "max_slippage",
+          "min_amount_received"
+        ],
+        "properties": {
+          "client_fee": {
+            "type": "string",
+            "description": "Client's portion of the fee (after the router takes its share).",
+            "example": "2800000"
+          },
+          "max_slippage": {
+            "type": "string",
+            "description": "Maximum slippage: (amount_out - router_fee - client_fee) * slippage.",
+            "example": "3496850"
+          },
+          "min_amount_received": {
+            "type": "string",
+            "description": "Minimum amount the user receives on-chain.\nEqual to amount_out - router_fee - client_fee - max_slippage.",
+            "example": "3493353150"
+          },
+          "router_fee": {
+            "type": "string",
+            "description": "Router protocol fee (fee on output + router's share of client fee).",
+            "example": "350000"
+          }
+        }
+      },
       "HealthStatus": {
         "type": "object",
         "description": "Health check response.",
@@ -415,6 +447,17 @@
           "block": {
             "$ref": "#/components/schemas/BlockInfo",
             "description": "Block at which this quote was computed."
+          },
+          "fee_breakdown": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeeBreakdown",
+                "description": "Fee breakdown (populated when encoding options are provided)."
+              }
+            ]
           },
           "gas_estimate": {
             "type": "string",

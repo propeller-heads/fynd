@@ -28,17 +28,14 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Publish in dependency order. --dry-run validates packaging
-      # without uploading. Remove --dry-run once the repo is public
-      # and CRATESIO_REGISTRY_TOKEN is configured.
       - name: Publish fynd-core
-        run: cargo publish --dry-run --locked --verbose --package fynd-core
+        run: cargo publish --locked --verbose --package fynd-core
 
       - name: Publish fynd-rpc-types
-        run: cargo publish --dry-run --locked --verbose --package fynd-rpc-types
+        run: cargo publish --locked --verbose --package fynd-rpc-types
 
       - name: Publish fynd-client
-        run: cargo publish --dry-run --locked --verbose --package fynd-client
+        run: cargo publish --locked --verbose --package fynd-client
 
       - name: Publish fynd-rpc
-        run: cargo publish --dry-run --locked --verbose --package fynd-rpc
+        run: cargo publish --locked --verbose --package fynd-rpc
