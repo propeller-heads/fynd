@@ -1,3 +1,11 @@
+## [0.34.1](https://github.com/propeller-heads/fynd/compare/0.34.0...0.34.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* **benchmark:** wire scale subcommand and add shutdown tracing ([ea0e9e0](https://github.com/propeller-heads/fynd/commit/ea0e9e0206295fe030632a82811af1527d7fa46a))
+* inject CARGO_REGISTRY_TOKEN into release publish job ([5e13325](https://github.com/propeller-heads/fynd/commit/5e133258082f829051faaf1738b2ab796f83cdb4))
+
 ## [0.34.0](https://github.com/propeller-heads/fynd/compare/0.33.2...0.34.0) (2026-03-26)
 
 
