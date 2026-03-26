@@ -10,7 +10,12 @@
 //! - **[`config`]**: [`PriceGuardConfig`](config::PriceGuardConfig) for tolerance thresholds and
 //!   fail-open behavior
 
+/// Tolerance thresholds and fail-open configuration for the price guard.
 pub mod config;
+/// [`PriceProvider`](provider::PriceProvider) trait and supporting error types.
 pub mod provider;
+/// Registry that manages and queries multiple [`PriceProvider`](provider::PriceProvider)s
+/// concurrently.
 pub mod provider_registry;
+/// Shared utilities: symbol normalisation, token resolution, and staleness checks.
 pub mod utils;
