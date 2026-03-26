@@ -1,3 +1,17 @@
+## [0.35.0](https://github.com/propeller-heads/fynd/compare/0.34.3...0.35.0) (2026-03-26)
+
+
+### Features
+
+* add Docker build and publish pipeline ([c1bdcc9](https://github.com/propeller-heads/fynd/commit/c1bdcc93cb6ad97ce90f0e65683e40b409bd22c4))
+* publish fynd crate as an embeddable library ([559625e](https://github.com/propeller-heads/fynd/commit/559625e282eb92ebb2595d6967ccaf59db9825c9))
+
+
+### Bug Fixes
+
+* **docker:** restore workspace member stubs in rebuild stage ([c277f63](https://github.com/propeller-heads/fynd/commit/c277f63995ddb23c9b4655f10e1e979cb8d26e6e))
+* restore fynd_core as core and fynd_rpc as rpc re-export aliases ([6cc7de0](https://github.com/propeller-heads/fynd/commit/6cc7de01eacf77047a3a2c3f94dc66504b7ad6fa))
+
 ## [0.34.3](https://github.com/propeller-heads/fynd/compare/0.34.2...0.34.3) (2026-03-26)
 
 
