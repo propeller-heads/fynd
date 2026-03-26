@@ -3,12 +3,9 @@ use std::{collections::HashSet, time::Duration};
 use tycho_simulation::tycho_common::models::Chain;
 
 pub(crate) mod events;
-/// Gas price fetching and the `GAS_PRICE_DEPENDENCY_ID` constant.
-pub mod gas;
+pub(crate) mod gas;
 /// Shared market data store (`SharedMarketData`, `SharedMarketDataRef`).
 pub mod market_data;
-
-pub use gas::GAS_PRICE_DEPENDENCY_ID;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `SharedMarketData`.
