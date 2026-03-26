@@ -30,18 +30,6 @@ Execute a swap with Fynd in two steps.
 ## Step 0 — Start Fynd
 
 {% tabs %}
-{% tab title="Docker" %}
-Requires **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/)).
-
-```bash
-docker run \
-  -e TYCHO_API_KEY=your-api-key \
-  -e RUST_LOG=fynd=info \
-  -p 3000:3000 -p 9898:9898 \
-  ghcr.io/propeller-heads/fynd
-```
-{% endtab %}
-
 {% tab title="cargo install" %}
 Requires **Rust 1.92+** ([install via rustup](https://rustup.rs/)).
 
@@ -50,6 +38,19 @@ cargo install fynd
 export TYCHO_API_KEY=your-api-key
 export RUST_LOG=fynd=info
 fynd serve
+```
+{% endtab %}
+
+{% tab title="Docker" %}
+Requires **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/)). Only available for `--platform=linux/amd64`.
+
+```bash
+docker run \
+  --platform=linux/amd64 \
+  -e TYCHO_API_KEY=your-api-key \
+  -e RUST_LOG=fynd=info \
+  -p 3000:3000 -p 9898:9898 \
+  ghcr.io/propeller-heads/fynd
 ```
 {% endtab %}
 
