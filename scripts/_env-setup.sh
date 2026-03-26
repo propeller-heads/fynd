@@ -79,9 +79,9 @@ start_fynd() {
         serve --rpc-url "$ANVIL_RPC_URL" --protocols uniswap_v2,uniswap_v3 --min-tvl 200 "${tycho_args[@]}" &
     _FYND_PID=$!
 
-    echo "    Waiting for fynd to be healthy (this may take a minute on first run)..."
+    echo "    Waiting for fynd to be healthy (Tycho sync can take a few minutes)..."
     local i
-    for i in $(seq 90); do
+    for i in $(seq 150); do
         if curl -sf "$FYND_URL/v1/health" &>/dev/null; then
             echo "    Ready at $FYND_URL"
             return
@@ -92,6 +92,6 @@ start_fynd() {
             exit 1
         fi
     done
-    echo "fynd failed to become healthy within 3 minutes"
+    echo "fynd failed to become healthy within 5 minutes"
     exit 1
 }

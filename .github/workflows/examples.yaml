@@ -37,5 +37,8 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Build fynd (release)
+        run: cargo build --release --locked --quiet
+
       - name: Run all examples
         run: ./scripts/run-all-examples.sh
