@@ -45,8 +45,12 @@ cargo run --release -- serve
 
 ## Step 2 — Execute a swap
 
+The following examples showcase how to integrate Fynd in your application. To interact with live quotes directly, use
+the [swap CLI](../../guides/swap-cli.md).
+
 {% hint style="info" %}
-Fynd currently only supports **sell orders** (exact input). Set `"side": "sell"` in your order. Buy orders (exact output) are not yet supported.
+Fynd currently only supports **sell orders** (exact input). Set `"side": "sell"` in your order. Buy orders (exact
+output) are not yet supported.
 {% endhint %}
 
 {% tabs %}
@@ -61,33 +65,34 @@ npm install @kayibal/fynd-client
 
 ```typescript
 const client = new FyndClient({
-  baseUrl: FYND_URL,
-  chainId: mainnet.id,
-  sender: account.address,
-  provider: viemProvider(publicClient, account.address),
-  fetchRevertReason: true,
+    baseUrl: FYND_URL,
+    chainId: mainnet.id,
+    sender: account.address,
+    provider: viemProvider(publicClient, account.address),
+    fetchRevertReason: true,
 });
 
 // 1. Quote
 const quote = await client.quote({
-  order: { tokenIn: WETH, tokenOut: USDC, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
-  options: { encodingOptions: encodingOptions(0.005) },
+    order: {tokenIn: WETH, tokenOut: USDC, amount: SELL_AMOUNT, side: 'sell', sender: account.address},
+    options: {encodingOptions: encodingOptions(0.005)},
 });
 console.log(`amount_out: ${quote.amountOut}`);
 
 // 2. Approve if needed (checks on-chain allowance, skips if sufficient)
-const approvalPayload = await client.approval({ token: WETH, amount: SELL_AMOUNT, checkAllowance: true });
+const approvalPayload = await client.approval({token: WETH, amount: SELL_AMOUNT, checkAllowance: true});
 if (approvalPayload !== null) {
-  const sig = await account.sign({ hash: approvalSigningHash(approvalPayload) });
-  await client.executeApproval({ tx: approvalPayload.tx, signature: sig });
+    const sig = await account.sign({hash: approvalSigningHash(approvalPayload)});
+    await client.executeApproval({tx: approvalPayload.tx, signature: sig});
 }
 
 // 3. Sign and execute swap
 const payload = await client.swapPayload(quote);
-const sig = await account.sign({ hash: swapSigningHash(payload) });
+const sig = await account.sign({hash: swapSigningHash(payload)});
 const settled = await (await client.executeSwap(assembleSignedSwap(payload, sig))).settle();
 console.log(`settled: ${settled.settledAmount}, gas: ${settled.gasCost}`);
 ```
+
 {% endtab %}
 
 {% tab title="Rust" %}
@@ -102,61 +107,61 @@ fynd-client = "0.31"
 
 ```rust
 let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
-    .with_sender(sender)
-    .build()
-    .await?;
+.with_sender(sender)
+.build()
+.await?;
 
 // 1. Quote
 let quote = client
-    .quote(QuoteParams::new(
-        Order::new(
-            Bytes::copy_from_slice(sell_token.as_slice()),
-            Bytes::copy_from_slice(buy_token.as_slice()),
-            BigUint::from(SELL_AMOUNT),
-            OrderSide::Sell,
-            Bytes::copy_from_slice(sender.as_slice()),
-            None,
-        ),
-        QuoteOptions::default()
-            .with_timeout_ms(5_000)
-            .with_encoding_options(EncodingOptions::new(SLIPPAGE)),
-    ))
-    .await?;
+.quote(QuoteParams::new(
+Order::new(
+Bytes::copy_from_slice(sell_token.as_slice()),
+Bytes::copy_from_slice(buy_token.as_slice()),
+BigUint::from(SELL_AMOUNT),
+OrderSide::Sell,
+Bytes::copy_from_slice(sender.as_slice()),
+None,
+),
+QuoteOptions::default ()
+.with_timeout_ms(5_000)
+.with_encoding_options(EncodingOptions::new(SLIPPAGE)),
+))
+.await?;
 println!("amount_out: {}", quote.amount_out());
 
 // 2. Approve if needed (checks on-chain allowance, skips if sufficient)
 if let Some(approval_payload) = client
-    .approval(
-        &ApprovalParams::new(
-            Bytes::copy_from_slice(sell_token.as_slice()),
-            BigUint::from(SELL_AMOUNT),
-            true,
-        ),
-        &SigningHints::default(),
-    )
-    .await?
+.approval(
+& ApprovalParams::new(
+Bytes::copy_from_slice(sell_token.as_slice()),
+BigUint::from(SELL_AMOUNT),
+true,
+),
+& SigningHints::default (),
+)
+.await?
 {
-    let sig = signer.sign_hash(&approval_payload.signing_hash()).await?;
-    client
-        .execute_approval(SignedApproval::assemble(approval_payload, sig))
-        .await?
-        .await?;
+let sig = signer.sign_hash( & approval_payload.signing_hash()).await ?;
+client
+.execute_approval(SignedApproval::assemble(approval_payload, sig))
+.await ?
+.await ?;
 }
 
 // 3. Sign and execute swap
-let payload = client.swap_payload(quote, &SigningHints::default()).await?;
-let sig = signer.sign_hash(&payload.signing_hash()).await?;
+let payload = client.swap_payload(quote, & SigningHints::default ()).await?;
+let sig = signer.sign_hash( & payload.signing_hash()).await?;
 let receipt = client
-    .execute_swap(SignedSwap::assemble(payload, sig), &ExecutionOptions::default())
-    .await?
-    .await?;
+.execute_swap(SignedSwap::assemble(payload, sig), & ExecutionOptions::default ())
+.await?
+.await?;
 println!("gas: {}", receipt.gas_cost());
 ```
 
-Run with: `cargo run --example swap_erc20 -p fynd-client`
 {% endtab %}
 
 {% tab title="curl" %}
+
 ```bash
 # Wait until healthy
 curl http://localhost:3000/v1/health
