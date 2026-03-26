@@ -47,7 +47,7 @@ pub struct MostLiquidAlgorithm {
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
-    /// Liquidity depth in USD (or native token terms).
+    /// Liquidity depth denominated in the chain's native token.
     pub depth: f64,
 }
 

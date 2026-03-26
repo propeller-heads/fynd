@@ -216,7 +216,8 @@ pub mod defaults {
     /// Default Ethereum JSON-RPC URL used when none is provided.
     pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 
-    /// Minimum USD TVL a pool must have to be included in routing.
+    /// Minimum TVL a pool must have to be included in routing, denominated in the chain's native
+    /// token.
     pub const MIN_TVL: f64 = 10.0;
 
     /// Worker-router timeout in milliseconds.
