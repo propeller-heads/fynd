@@ -42,6 +42,9 @@ jobs:
       - name: Publish fynd-rpc
         run: cargo publish --locked --verbose --package fynd-rpc
 
+      - name: Publish fynd
+        run: cargo publish --locked --verbose --package fynd
+
   publish-npm:
     name: Publish TypeScript packages to npm
     runs-on: ubuntu-latest
