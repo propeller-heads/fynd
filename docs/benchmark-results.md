@@ -160,8 +160,6 @@ RPC_URL="$RPC_URL" \
 
 Throughput scales near-linearly across all tested worker counts. Per-worker efficiency declines gradually from ~85 req/s at 1 worker to ~65 req/s at 8 workers. The solver does not cross 1000 req/s within the tested 8-worker range; linear extrapolation places that threshold at approximately **16 workers**.
 
-These benchmarks subscribe to 8 protocols vs. 2 for the `most_liquid` results above, significantly expanding the routing graph. Direct per-worker throughput comparisons between the two algorithms should account for this difference.
-
 **Recommendation.** For Bellman-Ford 2-hop routing at 1000 req/s sustained throughput, provision at least 16 CPU cores.
 
 ## CPU Scaling: Bellman-Ford 3-Hop
