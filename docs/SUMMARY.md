@@ -5,12 +5,12 @@
 ## Get Started
 
 * [Overview](README.md)
-  * [API Specifications](get-started/overview/api-specifications.md)
 * [Quickstart](get-started/quickstart/README.md)
 
 ## Guides
 
 * [Server Configuration](guides/server-configuration.md)
+* [Encoding Options](guides/encoding-options.md)
 * [Swap CLI](guides/swap-cli.md)
 * [Client Fees](guides/client-fees.md)
 * [Benchmarking](guides/benchmarking.md)
@@ -24,6 +24,7 @@
 
 ## Reference
 
+* [API](reference/api.md)
 * [Architecture](ARCHITECTURE.md)
 * [Performance](benchmark-results.md)
 

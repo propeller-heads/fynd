@@ -50,6 +50,10 @@ Fynd puts you in control:
 * **Performance-first**: CPU-bound route finding runs on dedicated OS threads (not the async runtime). Each worker pool has its own task queue for independent backpressure and scaling.
 * **Observability built-in**: Prometheus metrics, structured logging via `tracing`, and health endpoints are first-class citizens.
 
+### Order Types
+
+Fynd currently supports **sell orders** only (exact input amount). You specify the amount of the input token, and Fynd finds the best output. Buy orders (exact output) are not yet supported.
+
 ### Supported Chains
 
 * Ethereum Mainnet
