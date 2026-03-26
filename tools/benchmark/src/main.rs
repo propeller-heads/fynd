@@ -9,6 +9,7 @@ mod config;
 mod exporter;
 mod requests;
 mod runner;
+mod scale;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -33,6 +34,8 @@ enum Command {
     Compare(compare::Args),
     /// Download the full 10k aggregator trade dataset from GitHub Releases
     DownloadTrades(DownloadTradesArgs),
+    /// Benchmark throughput scaling across different worker counts
+    Scale(scale::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -57,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Command::DownloadTrades(args) => requests::download_trades(&args.output)
             .await
             .map_err(|e| anyhow::anyhow!("{e}")),
+        Command::Scale(args) => scale::run(args).await,
     }
 }
 
