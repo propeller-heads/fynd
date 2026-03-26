@@ -38,18 +38,18 @@ pub struct Encoder {
     /// Dedicated multi-threaded runtime so that swap encoders using
     /// `block_in_place` (e.g. Bebop RFQ) work even when the caller
     /// runs on a current-thread runtime (actix-web workers).
-    encoding_rt: Arc<tokio::runtime::Runtime>,
+    encoding_rt: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // If dropped from within a tokio runtime (e.g. test teardown),
-        // move the runtime to a background thread so its shutdown doesn't
-        // panic with "cannot drop a runtime in a context where blocking
-        // is not allowed".
-        if tokio::runtime::Handle::try_current().is_ok() {
-            let rt = Arc::clone(&self.encoding_rt);
-            std::thread::spawn(move || drop(rt));
+        // Take ownership so the field auto-drop is a no-op.
+        // If inside an async context, move shutdown to a background
+        // thread to avoid the "cannot drop a runtime" panic.
+        if let Some(rt) = self.encoding_rt.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || drop(rt));
+            }
         }
     }
 }
@@ -133,7 +133,7 @@ impl Encoder {
                 .build()?,
             chain,
             router_address,
-            encoding_rt: Arc::new(encoding_rt),
+            encoding_rt: Some(Arc::new(encoding_rt)),
         })
     }
 
@@ -180,10 +180,14 @@ impl Encoder {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
+        let rt = self
+            .encoding_rt
+            .as_ref()
+            .ok_or_else(|| SolveError::FailedEncoding("encoding runtime was dropped".into()))?;
         let encoded_solutions = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    self.encoding_rt.block_on(async {
+                    rt.block_on(async {
                         self.tycho_encoder
                             .encode_solutions(solutions)
                     })
@@ -448,13 +452,13 @@ mod tests {
             tycho_encoder: Box::new(MockTychoEncoder),
             chain,
             router_address: Bytes::from([0u8; 20].as_ref()),
-            encoding_rt: Arc::new(
+            encoding_rt: Some(Arc::new(
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap(),
-            ),
+            )),
         }
     }
 
