@@ -681,8 +681,7 @@ impl Solver {
                 .derived_data
                 .read()
                 .await
-                .last_block()
-                .is_some();
+                .derived_data_ready();
 
             if market_ready && derived_ready {
                 return Ok(());
