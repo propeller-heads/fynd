@@ -94,27 +94,27 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
     ) -> Option<Self> {
         let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
-        // Use pre-computed spot price; fall back to zero-weight on failure.
+        // Use pre-computed spot price; skip edge if unavailable.
         let spot_price = match derived
             .spot_prices()
             .and_then(|p| p.get(&key).copied())
         {
             Some(p) => p,
             None => {
-                trace!(component_id = %component_id, "spot price failed, using zero weight");
-                return Some(Self { spot_price: 0.0, depth: 0.0 });
+                trace!(component_id = %component_id, "spot price not found, skipping edge");
+                return None;
             }
         };
 
-        // Look up pre-computed depth; fall back to zero-weight on failure.
+        // Look up pre-computed depth; skip edge if unavailable.
         let depth = match derived
             .pool_depths()
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64().unwrap_or(0.0),
             None => {
-                trace!(component_id = %component_id, "pool depth failed, using zero weight");
-                return Some(Self { spot_price: 0.0, depth: 0.0 });
+                trace!(component_id = %component_id, "pool depth not found, skipping edge");
+                return None;
             }
         };
 
@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_sim_and_derived_failed_spot_price_returns_zero_weight() {
+    fn test_from_sim_and_derived_failed_spot_price_returns_none() {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = pair_key_str("pool1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
@@ -790,13 +790,11 @@ mod tests {
                 &sim, &key.0, &tok_in, &tok_out, &derived,
             );
 
-        let val = result.unwrap();
-        assert_eq!(val.spot_price, 0.0);
-        assert_eq!(val.depth, 0.0);
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_from_sim_and_derived_failed_pool_depth_returns_zero_weight() {
+    fn test_from_sim_and_derived_failed_pool_depth_returns_none() {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = pair_key_str("pool1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
@@ -824,13 +822,11 @@ mod tests {
                 &sim, &key.0, &tok_in, &tok_out, &derived,
             );
 
-        let val = result.unwrap();
-        assert_eq!(val.spot_price, 0.0);
-        assert_eq!(val.depth, 0.0);
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_from_sim_and_derived_both_failed_returns_zero_weight() {
+    fn test_from_sim_and_derived_both_failed_returns_none() {
         let key = pair_key("pool1", 0x01, 0x02);
         let key_str = pair_key_str("pool1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
@@ -862,24 +858,7 @@ mod tests {
                 &sim, &key.0, &tok_in, &tok_out, &derived,
             );
 
-        let val = result.unwrap();
-        assert_eq!(val.spot_price, 0.0);
-        assert_eq!(val.depth, 0.0);
-    }
-
-    #[test]
-    fn test_try_score_path_with_zero_weight_edge_returns_zero() {
-        let (a, b, _, _) = addrs();
-        let mut m = linear_graph();
-
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(0.0, 0.0), false)
-            .unwrap();
-
-        let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &b, 1, 1).unwrap();
-        assert_eq!(paths.len(), 1);
-        let score = MostLiquidAlgorithm::try_score_path(&paths[0]);
-        assert_eq!(score, Some(0.0));
+        assert!(result.is_none());
     }
 
     // ==================== find_paths Tests ====================
