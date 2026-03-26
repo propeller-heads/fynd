@@ -1,13 +1,13 @@
-//! HTTP API layer using Actix Web.
-//!
-//! This module provides the HTTP endpoints for the solver:
-//! - POST /quote - Submit solve requests
-//! - GET /health - Health check endpoint
+//! HTTP API layer: endpoint handlers, OpenAPI docs, and shared application state.
 
+/// Re-exports of wire-format DTO types from `fynd-rpc-types`.
 pub mod dto;
+/// [`ApiError`] type with HTTP status code mapping.
 pub mod error;
+/// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
 #[cfg(feature = "experimental")]
+/// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
 
 use std::{
@@ -31,6 +31,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api::error::ErrorResponse;
 
+/// OpenAPI documentation bundle for the stable Fynd RPC endpoints.
 #[derive(OpenApi)]
 #[openapi(
     paths(handlers::quote, handlers::health, handlers::info),
@@ -53,6 +54,7 @@ use crate::api::error::ErrorResponse;
 pub struct ApiDoc;
 
 #[cfg(feature = "experimental")]
+/// OpenAPI documentation bundle for experimental endpoints (`GET /v1/prices`).
 #[derive(OpenApi)]
 #[openapi(
     paths(handlers::get_prices),

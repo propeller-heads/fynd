@@ -158,6 +158,10 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Assemble all components and return a running [`FyndRPC`] server handle.
+    ///
+    /// Starts all worker pools and binds the HTTP listener. Returns an error if any component
+    /// fails to initialise.
     pub fn build(self) -> Result<FyndRPC> {
         info!(
             host = %self.http_host,
@@ -339,6 +343,10 @@ impl FyndRPC {
     }
 }
 
+/// Parse a chain name string into a [`Chain`] value.
+///
+/// Accepts case-insensitive names like `"Ethereum"`, `"ethereum"`.
+/// Returns an error for unrecognised chains.
 pub fn parse_chain(chain: &str) -> Result<Chain> {
     let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
     serde_json::from_str::<Chain>(&candidate)
