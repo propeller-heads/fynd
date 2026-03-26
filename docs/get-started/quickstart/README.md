@@ -31,7 +31,7 @@ Execute a swap with Fynd in three steps.
 
 ```bash
 export TYCHO_API_KEY=your-api-key
-export RUST_LOG=info
+export RUST_LOG=fynd=info
 cargo run --release -- serve
 ```
 

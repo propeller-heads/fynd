@@ -15,7 +15,7 @@ services:
       - TYCHO_URL=${TYCHO_URL:-tycho-fynd-ethereum.propellerheads.xyz}
       - WORKER_POOLS_CONFIG=/etc/fynd/worker_pools.toml
       - BLACKLIST_CONFIG=/etc/fynd/blacklist.toml
-      - RUST_LOG=info
+      - RUST_LOG=fynd=info
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
     depends_on:
       - tempo
@@ -59,7 +59,7 @@ services:
     volumes:
       - ./monitoring/tempo.yml:/etc/tempo.yml:ro
       - tempo-data:/var/tempo
-    command: [ "-config.file=/etc/tempo.yml" ]
+    command: ["-config.file=/etc/tempo.yml"]
 
 volumes:
   prometheus-data:
