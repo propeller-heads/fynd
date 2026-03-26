@@ -362,6 +362,7 @@ impl Transaction {
 /// The direction of a swap order.
 ///
 /// Currently only [`Sell`](Self::Sell) (exact-input) is supported.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSide {
     /// Sell exactly the specified `amount` of `token_in` for as much `token_out` as possible.
