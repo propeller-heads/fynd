@@ -18,17 +18,20 @@ set -euo pipefail
 # shellcheck source=scripts/_env-setup.sh disable=SC1091
 source "$(dirname "$0")/_env-setup.sh"
 
-EXAMPLES=(swap_erc20 swap_permit2 swap_client_fee)
+RUST_EXAMPLES=(swap_erc20 swap_permit2 swap_client_fee)
+TS_EXAMPLES=(tutorial)
 
 check_deps
+build_ts
 start_anvil
 wrap_weth
 start_fynd
 
 echo ""
 failed=()
-for example in "${EXAMPLES[@]}"; do
-    echo "==> Running: $example"
+
+for example in "${RUST_EXAMPLES[@]}"; do
+    echo "==> Running Rust: $example"
     if RPC_URL="$ANVIL_RPC_URL" FYND_URL="$FYND_URL" cargo run \
         --manifest-path "$REPO_ROOT/Cargo.toml" \
         --example "$example" \
@@ -37,7 +40,22 @@ for example in "${EXAMPLES[@]}"; do
         echo "    PASS: $example"
     else
         echo "    FAIL: $example"
-        failed+=("$example")
+        failed+=("rust/$example")
+    fi
+    echo ""
+done
+
+for example in "${TS_EXAMPLES[@]}"; do
+    echo "==> Running TS: $example"
+    if FYND_URL="$FYND_URL" \
+       RPC_URL="$ANVIL_RPC_URL" \
+       PRIVATE_KEY="$_PRIVATE_KEY" \
+       npx --prefix "$REPO_ROOT/clients/typescript" tsx \
+           "$REPO_ROOT/clients/typescript/examples/$example/main.ts" 2>&1; then
+        echo "    PASS: $example"
+    else
+        echo "    FAIL: $example"
+        failed+=("ts/$example")
     fi
     echo ""
 done
