@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         "tycho-fynd-ethereum.propellerheads.xyz".into(),
         "https://reth-ethereum.ithaca.xyz/rpc".into(),
         vec!["uniswap_v3".into(), "uniswap_v2".into()],
-        10.0, // minimum pool TVL
+        10.0, // minimum pool TVL (chain native token)
     )
     .build()?
     .wait_until_ready()
