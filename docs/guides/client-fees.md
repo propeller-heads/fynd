@@ -2,19 +2,22 @@
 icon: coins
 ---
 
-# Fees
+# Client Fees
+
+{% hint style="danger" %}
+Client fees accumulate in the TychoRouter Vault, which is still undergoing a security audit. Keep balances minimal and withdraw regularly - funds stored here may be lost. Use at your own discretion.&#x20;
+{% endhint %}
 
 Every swap through the TychoRouter incurs two fees, deducted from the swap output:
 
-- **Router fee**: 10 bps (0.1%) on the swap output, always applied.
-- **Client fee**: optional integrator fee via `ClientFeeParams`. The router takes a 20% share; the integrator keeps 80%.
+* **Router fee**: 10 bps (0.1%) on the swap output, always applied.
+* **Client fee**: optional integrator fee via `ClientFeeParams`. The router takes a 20% share; the integrator keeps 80%.
 
 When you request encoding, the quote response includes a `fee_breakdown` with the exact amounts.
 
 ## Fee breakdown
 
-The on-chain `FeeCalculator` deducts fees from the raw swap output. Fynd mirrors this calculation (identical integer
-arithmetic) to set `minAmountOut` in the encoded transaction.
+The on-chain `FeeCalculator` deducts fees from the raw swap output. Fynd mirrors this calculation (identical integer arithmetic) to set `minAmountOut` in the encoded transaction.
 
 Given `amount_out` (raw swap output), `client_fee_bps` (0 if none), and `slippage`:
 
@@ -31,12 +34,12 @@ Given `amount_out` (raw swap output), `client_fee_bps` (0 if none), and `slippag
 
 The response fields (all absolute values in output token units):
 
-| Field                  | Description                                                   |
-|------------------------|---------------------------------------------------------------|
-| `router_fee`           | Router's total take (output fee + 20% of client fee)          |
-| `client_fee`           | Integrator's portion (80% of the client fee)                  |
-| `max_slippage`         | Slippage allowance on the post-fee amount                     |
-| `min_amount_received`  | On-chain minimum the user receives (`minAmountOut` in the tx) |
+| Field                 | Description                                                   |
+| --------------------- | ------------------------------------------------------------- |
+| `router_fee`          | Router's total take (output fee + 20% of client fee)          |
+| `client_fee`          | Integrator's portion (80% of the client fee)                  |
+| `max_slippage`        | Slippage allowance on the post-fee amount                     |
+| `min_amount_received` | On-chain minimum the user receives (`minAmountOut` in the tx) |
 
 Invariant: `amount_out = router_fee + client_fee + max_slippage + min_amount_received`
 
@@ -66,20 +69,18 @@ No `ClientFeeParams`? No client fee. The 10 bps router fee still applies.
 
 ### maxClientContribution
 
-The maximum amount (in output token units) the client will subsidize from their vault balance if slippage pushes the
-output below `minAmountOut`. If the shortfall exceeds this limit, the transaction reverts.
+The maximum amount (in output token units) the client will subsidize from their vault balance if slippage pushes the output below `minAmountOut`. If the shortfall exceeds this limit, the transaction reverts.
 
 Set to `0` to collect fees without covering slippage losses. This is the common case.
 
-See [Tycho encoding docs](https://docs.propellerheads.xyz/tycho/for-solvers/execution/encoding#encode) for vault
-details.
+See [Tycho encoding docs](https://docs.propellerheads.xyz/tycho/for-solvers/execution/encoding#encode) for vault details.
 
 ## EIP-712 signing
 
 The fee receiver signs a typed data hash:
 
 | Field                   | Type      | Description                       |
-|-------------------------|-----------|-----------------------------------|
+| ----------------------- | --------- | --------------------------------- |
 | `clientFeeBps`          | `uint16`  | Fee in basis points (0-10,000)    |
 | `clientFeeReceiver`     | `address` | Address receiving the fee         |
 | `maxClientContribution` | `uint256` | Maximum subsidy from client vault |
@@ -88,7 +89,7 @@ The fee receiver signs a typed data hash:
 **EIP-712 domain:**
 
 | Field               | Value                        |
-|---------------------|------------------------------|
+| ------------------- | ---------------------------- |
 | `name`              | `TychoRouter`                |
 | `version`           | `1`                          |
 | `chainId`           | Target chain ID              |
@@ -98,7 +99,6 @@ The fee receiver signs a typed data hash:
 
 {% tabs %}
 {% tab title="Rust" %}
-
 ```rust
     // Build the fee params (without signature).
     let fee = ClientFeeParams::new(
@@ -119,12 +119,10 @@ The fee receiver signs a typed data hash:
     let encoding_options = EncodingOptions::new(SLIPPAGE).with_client_fee(fee);
 ```
 
-See the full working
-example: [`clients/rust/examples/swap_client_fee.rs`](https://github.com/propeller-heads/fynd/blob/main/clients/rust/examples/swap_client_fee.rs)
+See the full working example: [`clients/rust/examples/swap_client_fee.rs`](../../clients/rust/examples/swap_client_fee.rs)
 {% endtab %}
 
 {% tab title="TypeScript" %}
-
 ```typescript
 // Build fee params (without signature).
 const feeParams: ClientFeeParams = {
@@ -141,6 +139,5 @@ const signature = await account.signMessage({message: {raw: hash}});
 // Attach signature and wire into encoding options.
 const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
 ```
-
 {% endtab %}
 {% endtabs %}

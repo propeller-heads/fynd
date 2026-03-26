@@ -1,4 +1,5 @@
 ---
+description: Swap via Fynd in minutes.
 icon: rocket-launch
 layout:
   width: default
@@ -68,7 +69,7 @@ This quotes 1000 USDC (6 decimals → 1 000 000 000 atomic units) for WETH.
 {% endtab %}
 
 {% tab title="TypeScript" %}
-From [`clients/typescript/examples/tutorial/main.ts`](https://github.com/propeller-heads/fynd/blob/main/clients/typescript/examples/tutorial/main.ts):
+From [`clients/typescript/examples/tutorial/main.ts`](../../../clients/typescript/examples/tutorial/main.ts):
 
 ```typescript
 const client = new FyndClient({
