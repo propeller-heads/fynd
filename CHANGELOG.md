@@ -1,3 +1,11 @@
+## [0.34.3](https://github.com/propeller-heads/fynd/compare/0.34.2...0.34.3) (2026-03-26)
+
+
+### Bug Fixes
+
+* add versions to workspace dep entries for crates.io publish ([fec4cab](https://github.com/propeller-heads/fynd/commit/fec4cab9e99577efdc81cc54a9b764762d735d41))
+* update Cargo.lock for internal crates after version bump ([b6aaef6](https://github.com/propeller-heads/fynd/commit/b6aaef65fc8977b2e3ee5b53daaeb1071303eb69))
+
 ## [0.34.2](https://github.com/propeller-heads/fynd/compare/0.34.1...0.34.2) (2026-03-26)
 
 
