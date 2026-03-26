@@ -468,6 +468,7 @@ async fn full_quote_then_swap_payload_resolves_from_provider() {
         "reward": [["0xf4240", "0x1e8480"]]
     });
     asserter.push_success(&fee_history); // eth_feeHistory
+    asserter.push_success(&180_000u64); // eth_estimateGas
 
     let hints = SigningHints::default(); // no overrides — resolved from provider
 

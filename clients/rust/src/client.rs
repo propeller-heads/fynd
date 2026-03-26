@@ -13,7 +13,6 @@ use alloy::{
 };
 use bytes::Bytes;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
 use reqwest::Client as HttpClient;
 
 use crate::{
@@ -124,7 +123,9 @@ impl SigningHints {
         self
     }
 
-    /// Override the gas limit. If not set, taken from the quote's `gas_estimate`.
+    /// Override the gas limit. If not set, estimated via `eth_estimateGas` against the
+    /// current chain state. Set explicitly to opt out (e.g. use `quote.gas_estimate()`
+    /// as a pre-buffered fallback).
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = Some(gas_limit);
         self
@@ -658,17 +659,6 @@ where
                 }
             };
 
-        // Resolve gas limit. Add a 200_000 fixed buffer on top of the server estimate to
-        // account for cold storage slots on forked chains (EIP-2929). TODO: fix server-side.
-        let gas_limit = match hints.gas_limit() {
-            Some(g) => g,
-            None => quote
-                .gas_estimate()
-                .to_u64()
-                .ok_or_else(|| FyndError::Protocol("gas estimate exceeds u64".into()))?
-                .saturating_add(200_000),
-        };
-
         let tx_data = quote.transaction().ok_or_else(|| {
             FyndError::Protocol(
                 "quote has no calldata; set encoding_options in QuoteOptions".into(),
@@ -677,6 +667,24 @@ where
         let to_addr = mapping::bytes_to_alloy_address(tx_data.to())?;
         let value = mapping::biguint_to_u256(tx_data.value());
         let input = AlloyBytes::from(tx_data.data().to_vec());
+
+        // Resolve gas limit. If not explicitly set, estimate via eth_estimateGas so the
+        // limit reflects the actual chain state. Pass with_gas_limit() to use a fixed value
+        // instead (e.g. quote.gas_estimate() as a pre-buffered fallback).
+        let gas_limit = match hints.gas_limit() {
+            Some(g) => g,
+            None => {
+                let req = alloy::rpc::types::TransactionRequest::default()
+                    .from(sender)
+                    .to(to_addr)
+                    .value(value)
+                    .input(input.clone().into());
+                self.provider
+                    .estimate_gas(req)
+                    .await
+                    .map_err(FyndError::Provider)?
+            }
+        };
 
         let tx_eip1559 = TxEip1559 {
             chain_id: self.chain_id,
@@ -875,9 +883,23 @@ where
                 }
             };
 
-        let gas_limit = hints.gas_limit().unwrap_or(65_000);
         let calldata =
             erc20::approveCall { spender: spender_addr, amount: amount_u256 }.abi_encode();
+
+        // Resolve gas limit via eth_estimateGas unless the caller provided an explicit value.
+        let gas_limit = match hints.gas_limit() {
+            Some(g) => g,
+            None => {
+                let req = alloy::rpc::types::TransactionRequest::default()
+                    .from(sender)
+                    .to(token_addr)
+                    .input(AlloyBytes::from(calldata.clone()).into());
+                self.provider
+                    .estimate_gas(req)
+                    .await
+                    .map_err(FyndError::Provider)?
+            }
+        };
 
         let tx = TxEip1559 {
             chain_id: self.chain_id,
@@ -1397,6 +1419,8 @@ mod tests {
             "reward": [["0xf4240", "0x1e8480"]]
         });
         asserter.push_success(&fee_history);
+        // eth_estimateGas → 150_000
+        asserter.push_success(&150_000u64);
 
         let quote = make_order_quote();
         let hints = SigningHints::default();
@@ -1413,6 +1437,7 @@ mod tests {
             panic!("expected EIP-1559 transaction");
         };
         assert_eq!(tx.nonce, 7, "nonce should come from mock");
+        assert_eq!(tx.gas_limit, 150_000, "gas limit should come from eth_estimateGas");
     }
 
     #[tokio::test]
@@ -1769,9 +1794,8 @@ mod tests {
             gas_limit: None, // should default to 65_000
             simulate: false,
         };
-        // push dummy response to satisfy alloy mock (not actually consumed here since no
-        // allowance check)
-        let _ = &asserter; // suppress unused warning
+        // eth_estimateGas → 65_000
+        asserter.push_success(&65_000u64);
 
         let params = ApprovalParams::new(
             bytes::Bytes::copy_from_slice(&[0xdd; 20]),
@@ -1788,7 +1812,7 @@ mod tests {
         // Verify function selector is approve(address,uint256) = 0x095ea7b3.
         let selector = &payload.tx().input[0..4];
         assert_eq!(selector, &[0x09, 0x5e, 0xa7, 0xb3]);
-        assert_eq!(payload.tx().gas_limit, 65_000);
+        assert_eq!(payload.tx().gas_limit, 65_000, "gas limit should come from eth_estimateGas");
         assert_eq!(payload.tx().nonce, 3);
     }
 
@@ -1824,6 +1848,8 @@ mod tests {
         // Mock eth_call for allowance: return 0 (allowance insufficient).
         let zero_allowance = alloy::primitives::Bytes::copy_from_slice(&[0u8; 32]);
         asserter.push_success(&zero_allowance);
+        // eth_estimateGas → 65_000
+        asserter.push_success(&65_000u64);
 
         let params = ApprovalParams::new(
             bytes::Bytes::copy_from_slice(&[0xdd; 20]),
