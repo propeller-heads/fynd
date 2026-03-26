@@ -33,7 +33,7 @@ export interface Order {
 }
 
 /** How the router pulls input tokens from the sender. */
-export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds';
+export type UserTransferType = 'transfer_from' | 'transfer_from_permit2' | 'use_vaults_funds' | 'none';
 
 /** Uniswap Permit2 allowance details for a single token. */
 export interface PermitDetails {

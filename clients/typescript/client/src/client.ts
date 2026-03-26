@@ -1,4 +1,4 @@
-import { encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
+import { decodeAbiParameters, encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
 import { createFyndClient, type FyndClient as AutogenClient } from "@fynd/autogen";
 import type { components } from "@fynd/autogen";
 import { FyndError } from "./error.js";
@@ -35,6 +35,8 @@ const ERC6909_TRANSFER_TOPIC = keccak256(toHex('Transfer(address,address,address
 /** Minimal transaction receipt, compatible with viem and ethers receipts. */
 export interface MinimalReceipt {
   transactionHash: Hex;
+  /** 1 = success, 0 = reverted. */
+  status: number;
   gasUsed: bigint;
   effectiveGasPrice: bigint;
   logs: Array<{ address: Address; topics: readonly Hex[]; data: Hex }>;
@@ -53,6 +55,8 @@ export interface EthProvider {
   sendRawTransaction(rawTx: Hex): Promise<Hex>;
   getTransactionReceipt(args: { hash: Hex }): Promise<MinimalReceipt | null>;
   readAllowance?(token: Address, owner: Address, spender: Address): Promise<bigint>;
+  /** Replay a mined transaction in its original block context to extract the revert reason. */
+  debugTraceTransaction?(hash: Hex): Promise<{ output: Hex }>;
 }
 
 /** Configuration for exponential backoff retry on transient quote errors. */
@@ -75,7 +79,7 @@ export interface SigningHints {
   maxFeePerGas?: bigint;
   /** Override `maxPriorityFeePerGas` (defaults to provider estimate). */
   maxPriorityFeePerGas?: bigint;
-  /** Override gas limit (defaults to `quote.gasEstimate`). */
+  /** Override gas limit (defaults to `eth_estimateGas`). */
   gasLimit?: bigint;
   /** When `true`, simulate the transaction via `eth_call` before returning. */
   simulate?: boolean;
@@ -102,6 +106,12 @@ export interface FyndClientOptions {
   provider?: EthProvider;
   /** Separate provider for broadcasting transactions; falls back to `provider`. */
   submitProvider?: EthProvider;
+  /**
+   * When `true` (default), fetch the revert reason when a transaction reverts.
+   * Tries `debug_traceTransaction` first; falls back to `eth_call` with a warning.
+   * Set to `false` to skip the extra RPC call and throw a generic revert error.
+   */
+  fetchRevertReason?: boolean;
 }
 
 /**
@@ -239,8 +249,8 @@ export class FyndClient {
   /**
    * Builds an unsigned EIP-1559 transaction payload from a quote, ready for wallet signing.
    *
-   * Fetches the sender's nonce and current gas fees from the provider unless
-   * overridden via {@link SigningHints}. The gas limit defaults to `quote.gasEstimate`.
+   * Fetches the sender's nonce, current gas fees, and gas estimate from the provider
+   * unless overridden via {@link SigningHints}.
    *
    * The quote must include a `transaction` field (returned when `encodingOptions`
    * is set in the quote request). The `to`, `value`, and `data` fields are read
@@ -250,7 +260,7 @@ export class FyndClient {
    * before returning. This catches reverts early but adds one RPC round-trip.
    *
    * @param quote - A quote obtained from {@link quote}. Must have `transaction` populated.
-   * @param hints - Optional overrides for nonce, gas fees, gas limit, sender, and simulation.
+   * @param hints - Optional overrides for nonce, gas fees, gas limit (defaults to `eth_estimateGas`), sender, and simulation.
    * @throws {FyndError} With code `CONFIG` if `provider` or `sender` is not configured.
    * @throws {FyndError} With code `CONFIG` if `quote.transaction` is absent (forgot `encodingOptions`).
    * @throws {FyndError} With code `SIMULATE_FAILED` if `hints.simulate` is `true` and the `eth_call` reverts.
@@ -285,8 +295,6 @@ export class FyndClient {
         ? { maxFeePerGas: hints.maxFeePerGas, maxPriorityFeePerGas: hints.maxPriorityFeePerGas }
         : await provider.estimateFeesPerGas();
 
-    const gas = hints.gasLimit ?? quote.gasEstimate;
-
     const txData = quote.transaction;
     if (txData === undefined) {
       throw FyndError.config(
@@ -294,16 +302,21 @@ export class FyndClient {
       );
     }
 
-    const tx: Eip1559Transaction = {
+    const txBase = {
       chainId:              this.options.chainId,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,
-      gas,
       to:    txData.to,
       value: txData.value,
       data:  txData.data,
     };
+
+    const gas = hints.gasLimit !== undefined
+      ? hints.gasLimit
+      : await provider.estimateGas({ ...txBase, gas: 0n });
+
+    const tx: Eip1559Transaction = { ...txBase, gas };
 
     if (hints.simulate === true) {
       await provider.call(tx).catch((err: unknown) => {
@@ -337,6 +350,7 @@ export class FyndClient {
    * @throws {FyndError} With code `CONFIG` if no provider is configured.
    * @throws {FyndError} With code `CONFIG` if the signature has an invalid v byte.
    * @throws {FyndError} With code `SIMULATE_FAILED` when `dryRun` is `true` and the simulation reverts.
+   * @throws {FyndError} With code `EXECUTION_REVERTED` when the mined transaction reverts.
    */
   async executeSwap(order: SignedSwap, options?: ExecutionOptions): Promise<ExecutionReceipt> {
     const { payload, signature } = order;
@@ -360,6 +374,12 @@ export class FyndClient {
       settle: async (options?: SettleOptions): Promise<SettledOrder> => {
         const timeoutMs = options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
         const receipt = await this.pollForReceipt(provider, txHash, timeoutMs);
+        if (receipt.status === 0) {
+          const reason = this.options.fetchRevertReason !== false
+            ? await this.getRevertReason(provider, tx, txHash)
+            : 'revert reason fetching disabled';
+          throw FyndError.executionReverted(`swap reverted: ${reason}`);
+        }
         const settledAmount = computeSettledAmount(receipt, tokenOut, receiver);
         const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
         // exactOptionalPropertyTypes: spread optional fields only when defined
@@ -406,6 +426,27 @@ export class FyndClient {
     ) as Hex;
 
     return provider.sendRawTransaction(rawTx);
+  }
+
+  private async getRevertReason(
+    provider: EthProvider,
+    tx: Eip1559Transaction,
+    txHash: Hex,
+  ): Promise<string> {
+    if (provider.debugTraceTransaction !== undefined) {
+      try {
+        const trace = await provider.debugTraceTransaction(txHash);
+        return decodeRevertData(trace.output);
+      } catch { /* fall through to eth_call */ }
+    }
+    console.warn(
+      '[fynd] debug_traceTransaction unavailable; replaying via eth_call — ' +
+      'revert reason may differ if block state has changed since execution',
+    );
+    return provider.call(tx).then(
+      () => 'transaction reverted with no revert data',
+      (err: unknown) => String(err),
+    );
   }
 
   private async pollForReceipt(
@@ -509,6 +550,7 @@ export class FyndClient {
    * @param options - Optional poll timeout (defaults to {@link DEFAULT_SETTLE_TIMEOUT_MS}).
    * @throws {FyndError} With code `CONFIG` if no provider is configured.
    * @throws {FyndError} With code `SETTLE_TIMEOUT` if the transaction does not confirm in time.
+   * @throws {FyndError} With code `EXECUTION_REVERTED` when the mined transaction reverts.
    */
   async executeApproval(signedApproval: SignedApproval, options?: SettleOptions): Promise<TxReceipt> {
     const provider = this.options.submitProvider ?? this.options.provider;
@@ -517,6 +559,12 @@ export class FyndClient {
     const receipt = await this.pollForReceipt(
       provider, txHash, options?.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS,
     );
+    if (receipt.status === 0) {
+      const reason = this.options.fetchRevertReason !== false
+        ? await this.getRevertReason(provider, signedApproval.tx, txHash)
+        : 'revert reason fetching disabled';
+      throw FyndError.executionReverted(`approval reverted: ${reason}`);
+    }
     return { txHash, gasCost: receipt.gasUsed * receipt.effectiveGasPrice };
   }
 
@@ -602,4 +650,25 @@ function computeSettledAmount(
   }
 
   return found ? total : undefined;
+}
+
+const ERROR_SELECTOR = '0x08c379a0';
+const PANIC_SELECTOR  = '0x4e487b71';
+
+/** Decode a Solidity revert payload into a human-readable string. */
+function decodeRevertData(output: Hex): string {
+  if (output === '0x') return 'empty revert data';
+  if (output.startsWith(ERROR_SELECTOR) && output.length > 10) {
+    try {
+      const [msg] = decodeAbiParameters([{ type: 'string' }], `0x${output.slice(10)}` as Hex);
+      return msg;
+    } catch { /* fall through */ }
+  }
+  if (output.startsWith(PANIC_SELECTOR) && output.length > 10) {
+    try {
+      const [code] = decodeAbiParameters([{ type: 'uint256' }], `0x${output.slice(10)}` as Hex);
+      return `Panic(${code})`;
+    } catch { /* fall through */ }
+  }
+  return `revert data: ${output}`;
 }
