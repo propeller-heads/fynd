@@ -141,10 +141,10 @@ itertools = "0.14.0"
 hex = "0.4"
 
 # Internal crates
-fynd-core = { path = "fynd-core" }
-fynd-rpc = { path = "fynd-rpc" }
-fynd-rpc-types = { path = "fynd-rpc-types" }
-fynd-client = { path = "clients/rust" }
+fynd-core = { path = "fynd-core", version = "0.34.1" }
+fynd-rpc = { path = "fynd-rpc", version = "0.34.1" }
+fynd-rpc-types = { path = "fynd-rpc-types", version = "0.34.1" }
+fynd-client = { path = "clients/rust", version = "0.34.1" }
 
 # Dev dependencies
 rstest = "0.18"
