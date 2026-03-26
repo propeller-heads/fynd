@@ -12,6 +12,7 @@ use tycho_simulation::tycho_common::models::Address;
 use crate::feed::market_data::SharedMarketDataRef;
 
 /// Errors that can occur when fetching external prices.
+#[non_exhaustive]
 #[derive(Error, Debug, Clone)]
 pub enum PriceProviderError {
     /// External price source is unavailable.
@@ -19,6 +20,7 @@ pub enum PriceProviderError {
     Unavailable(String),
 
     /// Token address not found in the market data registry.
+    #[non_exhaustive]
     #[error("token not found: {address}")]
     TokenNotFound {
         /// Hex-encoded address of the missing token.
@@ -26,6 +28,7 @@ pub enum PriceProviderError {
     },
 
     /// No price data found for the requested token pair.
+    #[non_exhaustive]
     #[error("price not found for pair {token_in} -> {token_out}")]
     PriceNotFound {
         /// Input token identifier.
@@ -35,6 +38,7 @@ pub enum PriceProviderError {
     },
 
     /// Price data is stale (e.g., feed hasn't updated recently).
+    #[non_exhaustive]
     #[error("price data stale: last update {age_ms}ms ago")]
     StaleData {
         /// Milliseconds since the last successful price update.
