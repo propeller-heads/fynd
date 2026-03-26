@@ -19,10 +19,10 @@
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Fynd default: http://localhost:3000  RPC default (Anvil): http://localhost:8545
+//! // Fynd default: http://localhost:3000  RPC default (Anvil): https://reth-ethereum.ithaca.xyz/rpc
 //! let client = FyndClientBuilder::new(
 //!     "http://localhost:3000",
-//!     "http://localhost:8545",
+//!     "https://reth-ethereum.ithaca.xyz/rpc",
 //! )
 //! .build()
 //! .await?;
