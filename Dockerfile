@@ -39,7 +39,11 @@ COPY src/ src/
 COPY fynd-core/src/ fynd-core/src/
 COPY fynd-rpc/src/ fynd-rpc/src/
 COPY fynd-rpc-types/src/ fynd-rpc-types/src/
-RUN touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
+RUN mkdir -p clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src && \
+    echo "" > clients/rust/src/lib.rs && \
+    echo "fn main() {}" > tools/benchmark/src/main.rs && \
+    echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
+    touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
         fynd-rpc-types/src/lib.rs && \
     cargo build --release --package fynd
 
