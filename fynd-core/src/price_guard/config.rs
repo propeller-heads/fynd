@@ -2,6 +2,7 @@
 ///
 /// Controls tolerance thresholds, fail-open behavior, and whether validation
 /// is enabled at all. All fields have sensible defaults via [`Default`].
+#[must_use]
 #[derive(Debug, Clone)]
 pub struct PriceGuardConfig {
     /// Maximum allowed deviation when `amount_out < expected`, in basis points.

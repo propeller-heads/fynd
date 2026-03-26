@@ -66,6 +66,7 @@ impl QuoteRequest {
 }
 
 /// Options to customize the solving behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuoteOptions {
@@ -247,6 +248,7 @@ impl FeeBreakdown {
 }
 
 /// Options to customize the encoding behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingOptions {

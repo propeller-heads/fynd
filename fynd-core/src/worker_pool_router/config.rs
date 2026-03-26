@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 /// Configuration for the WorkerPoolRouter.
+#[must_use]
 #[derive(Debug, Clone)]
 pub struct WorkerPoolRouterConfig {
     /// Default timeout per order (can be overridden per-request).

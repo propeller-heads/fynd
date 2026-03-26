@@ -38,6 +38,7 @@ use crate::{
 };
 
 /// Configuration for an Algorithm instance.
+#[must_use]
 #[derive(Debug, Clone)]
 pub struct AlgorithmConfig {
     /// Minimum hops to search (must be >= 1).

@@ -99,6 +99,7 @@ fn default_algo_timeout_ms() -> u64 {
 }
 
 /// Per-pool configuration for [`FyndBuilder::add_pool`].
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     /// Algorithm name for this pool (e.g., `"most_liquid"`).
