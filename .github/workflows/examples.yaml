@@ -1,0 +1,45 @@
+name: Examples
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  run_examples:
+    name: Run Rust client examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
+      TYCHO_URL: tycho-beta.propellerheads.xyz
+      FORK_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+      RUST_LOG: info
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build fynd (release)
+        run: cargo build --release --locked --quiet
+
+      - name: Run all examples
+        run: ./scripts/run-all-examples.sh

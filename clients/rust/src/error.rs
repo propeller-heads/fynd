@@ -105,6 +105,11 @@ pub enum FyndError {
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
+    /// An on-chain transaction was mined but reverted. The message contains the revert reason
+    /// decoded from replaying the transaction via `eth_call`.
+    #[error("transaction reverted: {0}")]
+    TransactionReverted(String),
+
     /// Invalid client configuration (e.g. unparseable URL, missing sender address).
     #[error("configuration error: {0}")]
     Config(String),
@@ -121,6 +126,11 @@ impl FyndError {
             Self::Api { code, .. } => code.is_retryable(),
             _ => false,
         }
+    }
+
+    /// Returns `true` if this error represents an on-chain transaction revert.
+    pub fn is_revert(&self) -> bool {
+        matches!(self, Self::TransactionReverted(_))
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use alloy::{
-    consensus::TypedTransaction,
+    consensus::{TxEip1559, TypedTransaction},
     dyn_abi::TypedData,
     primitives::{Address, Signature, B256},
 };
@@ -15,7 +15,7 @@ use crate::{error::FyndError, Quote};
 
 /// A ready-to-sign EIP-1559 transaction produced by the Fynd execution path.
 ///
-/// Obtain one via [`FyndClient::signable_payload`](crate::FyndClient::signable_payload) when
+/// Obtain one via [`FyndClient::swap_payload`](crate::FyndClient::swap_payload) when
 /// the quote's backend is [`BackendKind::Fynd`](crate::BackendKind::Fynd).
 #[derive(Debug)]
 pub struct FyndPayload {
@@ -35,7 +35,7 @@ impl FyndPayload {
 
     /// The unsigned EIP-1559 transaction. Sign its
     /// [`signature_hash()`](alloy::consensus::SignableTransaction::signature_hash) and pass the
-    /// result to [`SignedOrder::assemble`].
+    /// result to [`SignedSwap::assemble`].
     pub fn tx(&self) -> &TypedTransaction {
         &self.tx
     }
@@ -54,22 +54,22 @@ pub struct TurbinePayload {
     _order_quote: (),
 }
 
-/// A payload that needs to be signed before it can be executed.
+/// A payload that needs to be signed before a swap can be executed.
 ///
 /// Use [`signing_hash`](Self::signing_hash) to obtain the bytes to sign, then pass the resulting
-/// [`alloy::primitives::Signature`] to [`SignedOrder::assemble`].
+/// [`alloy::primitives::Signature`] to [`SignedSwap::assemble`].
 ///
 /// Only the [`Fynd`](Self::Fynd) variant is currently executable; calling methods on the
 /// [`Turbine`](Self::Turbine) variant will panic with `unimplemented!`.
 #[derive(Debug)]
-pub enum SignablePayload {
+pub enum SwapPayload {
     /// Fynd execution path — an EIP-1559 transaction targeting the RouterV3 contract.
     Fynd(Box<FyndPayload>),
     /// Turbine execution path — not yet implemented.
     Turbine(TurbinePayload),
 }
 
-impl SignablePayload {
+impl SwapPayload {
     /// Returns the 32-byte hash that must be signed.
     ///
     /// For the Fynd path this is the EIP-1559 transaction's `signature_hash()`.
@@ -110,7 +110,7 @@ impl SignablePayload {
         }
     }
 
-    /// Consume the payload and return its inner parts for use in `execute()`.
+    /// Consume the payload and return its inner parts for use in `execute_swap()`.
     pub(crate) fn into_fynd_parts(
         self,
     ) -> Result<(Quote, TypedTransaction), crate::error::FyndError> {
@@ -127,25 +127,25 @@ impl SignablePayload {
 // SIGNED ORDER
 // ============================================================================
 
-/// A [`SignablePayload`] paired with its cryptographic signature.
+/// A [`SwapPayload`] paired with its cryptographic signature.
 ///
-/// Construct via [`SignedOrder::assemble`] after signing the
-/// [`signing_hash`](SignablePayload::signing_hash). Pass to
-/// [`FyndClient::execute`](crate::FyndClient::execute) to broadcast and settle.
-pub struct SignedOrder {
-    payload: SignablePayload,
+/// Construct via [`SignedSwap::assemble`] after signing the
+/// [`signing_hash`](SwapPayload::signing_hash). Pass to
+/// [`FyndClient::execute_swap`](crate::FyndClient::execute_swap) to broadcast and settle.
+pub struct SignedSwap {
+    payload: SwapPayload,
     signature: Signature,
 }
 
-impl SignedOrder {
+impl SignedSwap {
     /// Pair a payload with the signature produced by signing its
-    /// [`signing_hash`](SignablePayload::signing_hash).
-    pub fn assemble(payload: SignablePayload, signature: Signature) -> Self {
+    /// [`signing_hash`](SwapPayload::signing_hash).
+    pub fn assemble(payload: SwapPayload, signature: Signature) -> Self {
         Self { payload, signature }
     }
 
-    /// The underlying signable payload.
-    pub fn payload(&self) -> &SignablePayload {
+    /// The underlying swap payload.
+    pub fn payload(&self) -> &SwapPayload {
         &self.payload
     }
 
@@ -154,7 +154,7 @@ impl SignedOrder {
         &self.signature
     }
 
-    pub(crate) fn into_parts(self) -> (SignablePayload, Signature) {
+    pub(crate) fn into_parts(self) -> (SwapPayload, Signature) {
         (self.payload, self.signature)
     }
 }
@@ -196,9 +196,9 @@ impl SettledOrder {
 
 /// A future that resolves once the swap transaction is mined and settled.
 ///
-/// Returned by [`FyndClient::execute`](crate::FyndClient::execute). The inner future polls the
-/// RPC node every 2 seconds and **has no built-in timeout** — it will poll indefinitely if the
-/// transaction is never mined. Callers should wrap it with [`tokio::time::timeout`]:
+/// Returned by [`FyndClient::execute_swap`](crate::FyndClient::execute_swap). The inner future
+/// polls the RPC node every 2 seconds and **has no built-in timeout** — it will poll indefinitely
+/// if the transaction is never mined. Callers should wrap it with [`tokio::time::timeout`]:
 ///
 /// ```rust,no_run
 /// # use fynd_client::ExecutionReceipt;
@@ -221,6 +221,132 @@ impl Future for ExecutionReceipt {
     ) -> std::task::Poll<Self::Output> {
         match self.get_mut() {
             Self::Transaction(fut) => fut.as_mut().poll(cx),
+        }
+    }
+}
+
+// ============================================================================
+// APPROVAL PAYLOAD
+// ============================================================================
+
+/// An unsigned EIP-1559 `approve(spender, amount)` transaction.
+///
+/// Obtain via [`FyndClient::approval`](crate::FyndClient::approval). Sign its
+/// [`signing_hash`](Self::signing_hash) and pass the result to [`SignedApproval::assemble`].
+pub struct ApprovalPayload {
+    pub(crate) tx: TxEip1559,
+    /// ERC-20 token contract address (20 raw bytes).
+    pub(crate) token: bytes::Bytes,
+    /// Spender address being approved (20 raw bytes).
+    pub(crate) spender: bytes::Bytes,
+    /// Amount being approved (token units).
+    pub(crate) amount: BigUint,
+}
+
+impl ApprovalPayload {
+    /// The 32-byte hash to sign.
+    pub fn signing_hash(&self) -> B256 {
+        use alloy::consensus::SignableTransaction;
+        self.tx.signature_hash()
+    }
+
+    /// The unsigned EIP-1559 transaction.
+    pub fn tx(&self) -> &TxEip1559 {
+        &self.tx
+    }
+
+    /// ERC-20 token address (20 raw bytes).
+    pub fn token(&self) -> &bytes::Bytes {
+        &self.token
+    }
+
+    /// Spender address (20 raw bytes).
+    pub fn spender(&self) -> &bytes::Bytes {
+        &self.spender
+    }
+
+    /// Amount to approve (token units).
+    pub fn amount(&self) -> &BigUint {
+        &self.amount
+    }
+}
+
+/// An [`ApprovalPayload`] paired with its cryptographic signature.
+///
+/// Construct via [`SignedApproval::assemble`] after signing the
+/// [`signing_hash`](ApprovalPayload::signing_hash). Pass to
+/// [`FyndClient::execute_approval`](crate::FyndClient::execute_approval).
+pub struct SignedApproval {
+    payload: ApprovalPayload,
+    signature: Signature,
+}
+
+impl SignedApproval {
+    /// Pair a payload with the signature produced by signing its
+    /// [`signing_hash`](ApprovalPayload::signing_hash).
+    pub fn assemble(payload: ApprovalPayload, signature: Signature) -> Self {
+        Self { payload, signature }
+    }
+
+    /// The underlying approval payload.
+    pub fn payload(&self) -> &ApprovalPayload {
+        &self.payload
+    }
+
+    /// The signature over the payload's signing hash.
+    pub fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    pub(crate) fn into_parts(self) -> (ApprovalPayload, Signature) {
+        (self.payload, self.signature)
+    }
+}
+
+// ============================================================================
+// MINED TX / TX RECEIPT
+// ============================================================================
+
+/// The result of a successfully mined transaction (non-swap).
+pub struct MinedTx {
+    tx_hash: B256,
+    gas_cost: BigUint,
+}
+
+impl MinedTx {
+    pub(crate) fn new(tx_hash: B256, gas_cost: BigUint) -> Self {
+        Self { tx_hash, gas_cost }
+    }
+
+    /// Transaction hash.
+    pub fn tx_hash(&self) -> B256 {
+        self.tx_hash
+    }
+
+    /// Actual gas cost in wei (`gas_used * effective_gas_price`).
+    pub fn gas_cost(&self) -> &BigUint {
+        &self.gas_cost
+    }
+}
+
+/// A future that resolves once a submitted transaction is mined.
+///
+/// Returned by [`FyndClient::execute_approval`](crate::FyndClient::execute_approval). Polls the RPC
+/// node every 2 seconds with no built-in timeout — wrap with [`tokio::time::timeout`] as needed.
+pub enum TxReceipt {
+    /// A pending on-chain transaction.
+    Pending(Pin<Box<dyn Future<Output = Result<MinedTx, FyndError>> + Send + 'static>>),
+}
+
+impl Future for TxReceipt {
+    type Output = Result<MinedTx, FyndError>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Pending(fut) => fut.as_mut().poll(cx),
         }
     }
 }

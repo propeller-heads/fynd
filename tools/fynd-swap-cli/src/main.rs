@@ -28,7 +28,7 @@ use clap::Parser;
 use fynd_client::{
     EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus, Order,
     OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
-    QuoteParams, SignedOrder, SigningHints, StorageOverrides,
+    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
 };
 use fynd_rpc::{
     builder::{parse_chain, FyndRPCBuilder},
@@ -543,12 +543,12 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sign order payload ────────────────────────────────────────────────────
     let payload = client
-        .signable_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default())
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
         .await?;
-    let signed = SignedOrder::assemble(payload, order_sig);
+    let signed = SignedSwap::assemble(payload, order_sig);
 
     // ── Build execution options ───────────────────────────────────────────────
     let exec_options = if cli.execute {
@@ -574,12 +574,12 @@ async fn main() -> anyhow::Result<()> {
             TransferType::UseVaultsFunds => None,
         };
         info!("Submitting dry-run execution...");
-        ExecutionOptions { dry_run: true, storage_overrides: overrides }
+        ExecutionOptions { dry_run: true, storage_overrides: overrides, fetch_revert_reason: true }
     };
 
     // ── Execute ───────────────────────────────────────────────────────────────
     let receipt = client
-        .execute(signed, &exec_options)
+        .execute_swap(signed, &exec_options)
         .await?;
     let settled = if cli.execute {
         tokio::time::timeout(Duration::from_secs(120), receipt)
