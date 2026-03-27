@@ -17,9 +17,40 @@ use tycho_simulation::tycho_common::models::Address;
 
 use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
-    utils::{check_staleness, expected_out_from_price, normalize_symbol},
+    utils::{check_staleness, expected_out_from_price},
 };
 use crate::feed::market_data::SharedMarketDataRef;
+
+/// Maps on-chain token symbols to their Hyperliquid asset names.
+///
+/// Returns `(hyperliquid_symbol, price_scale)` where `price_scale` adjusts the oracle price
+/// to a per-token basis. For most tokens this is `1.0`. Curated from the Hyperliquid perp
+/// universe across three categories:
+///
+/// 1. **Wrapped native tokens** — on-chain "W"-prefixed wrappers of chain gas tokens.
+///    Tokens like WLD/WIF whose names happen to start with W are NOT included.
+/// 2. **k-prefix tokens** — Hyperliquid quotes these per 1,000 tokens to avoid tiny
+///    decimals. `price_scale` is `0.001` so callers get the per-token price.
+fn normalize_symbol(symbol: &str) -> (String, f64) {
+    match symbol.to_uppercase().as_str() {
+        // Wrapped native tokens
+        "WETH" => ("ETH".to_string(), 1.0),
+        "WBTC" => ("BTC".to_string(), 1.0),
+        "WBNB" => ("BNB".to_string(), 1.0),
+        "WMATIC" => ("MATIC".to_string(), 1.0),
+        "WAVAX" => ("AVAX".to_string(), 1.0),
+        "WFTM" => ("FTM".to_string(), 1.0),
+        // k-prefix: Hyperliquid quotes per 1,000 tokens
+        "PEPE" => ("kPEPE".to_string(), 0.001),
+        "SHIB" => ("kSHIB".to_string(), 0.001),
+        "BONK" => ("kBONK".to_string(), 0.001),
+        "FLOKI" => ("kFLOKI".to_string(), 0.001),
+        "LUNC" => ("kLUNC".to_string(), 0.001),
+        "NEIRO" => ("kNEIRO".to_string(), 0.001),
+        "DOGS" => ("kDOGS".to_string(), 0.001),
+        other => (other.to_string(), 1.0),
+    }
+}
 
 const DEFAULT_API_URL: &str = "https://api.hyperliquid.xyz/info";
 const API_URL_ENV_VAR: &str = "HYPERLIQUID_API_URL";
@@ -82,8 +113,13 @@ impl HyperliquidProvider {
         }
     }
 
-    /// Resolves a token address to (normalized_symbol, decimals) from the local token cache.
-    fn resolve_token(&self, address: &Address) -> Result<(String, u32), PriceProviderError> {
+    /// Resolves a token address to (hyperliquid_symbol, decimals, price_scale) from the local
+    /// token cache. The `price_scale` factor converts Hyperliquid's oracle price to a per-token
+    /// basis (relevant for k-prefix tokens).
+    fn resolve_token(
+        &self,
+        address: &Address,
+    ) -> Result<(String, u32, f64), PriceProviderError> {
         let cache = self
             .token_cache
             .read()
@@ -91,8 +127,8 @@ impl HyperliquidProvider {
         let info = cache
             .get(address)
             .ok_or_else(|| PriceProviderError::TokenNotFound { address: address.to_string() })?;
-        let symbol = normalize_symbol(&info.symbol);
-        Ok((symbol, info.decimals))
+        let (symbol, price_scale) = normalize_symbol(&info.symbol);
+        Ok((symbol, info.decimals, price_scale))
     }
 }
 
@@ -121,8 +157,8 @@ impl PriceProvider for HyperliquidProvider {
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = self.resolve_token(token_in)?;
-        let (sym_out, dec_out) = self.resolve_token(token_out)?;
+        let (sym_in, dec_in, scale_in) = self.resolve_token(token_in)?;
+        let (sym_out, dec_out, scale_out) = self.resolve_token(token_out)?;
 
         let cache = self
             .price_cache
@@ -151,7 +187,9 @@ impl PriceProvider for HyperliquidProvider {
             return Err(PriceProviderError::Unavailable("zero oracle price".into()));
         }
 
-        let price = price_in.usd_price / price_out.usd_price;
+        let usd_in = price_in.usd_price * scale_in;
+        let usd_out = price_out.usd_price * scale_out;
+        let price = usd_in / usd_out;
         let expected_out = expected_out_from_price(amount_in, price, dec_in, dec_out);
 
         Ok(ExternalPrice::new(expected_out, "hyperliquid".to_string(), oldest_ts))
@@ -459,6 +497,40 @@ mod tests {
         assert_eq!(meta.universe[1].name, "ETH");
         assert_eq!(ctxs[0].oracle_px, "66820.0");
         assert_eq!(ctxs[1].oracle_px, "1989.0");
+    }
+
+    #[tokio::test]
+    #[ignore] // requires network access
+    async fn hyperliquid_live_pepe_usdc() {
+        let pepe_addr: Address = "6982508145454Ce325dDbE47a25d4ec3d2311933"
+            .parse()
+            .expect("valid address");
+        let pepe = make_token(pepe_addr.clone(), "PEPE", 18);
+        let usdc = make_token(usdc_address(), "USDC", 6);
+
+        let mut market_data = SharedMarketData::new();
+        market_data.upsert_tokens([pepe, usdc]);
+        let market_data = Arc::new(RwLock::new(market_data));
+
+        let mut provider = HyperliquidProvider::default();
+        let _handle = provider.start(market_data);
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // 1 billion PEPE → USDC
+        let one_billion_pepe = BigUint::from(10u64).pow(27);
+        let price = provider
+            .get_expected_out(&pepe_addr, &usdc_address(), &one_billion_pepe)
+            .expect("should get a price from Hyperliquid for PEPE");
+
+        // 1B PEPE should be worth between $1,000 and $100,000 USDC (6 decimals)
+        let min = BigUint::from(1_000_000_000u64); // $1,000
+        let max = BigUint::from(100_000_000_000u64); // $100,000
+        let amount = price.expected_amount_out();
+        assert!(
+            *amount >= min && *amount <= max,
+            "expected 1B PEPE worth in [{min}, {max}] USDC, got {amount}"
+        );
     }
 
     #[tokio::test]
