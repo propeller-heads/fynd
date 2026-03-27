@@ -20,12 +20,10 @@
 //! # use fynd_client::FyndClientBuilder;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Fynd default: http://localhost:3000  RPC default (Anvil): https://reth-ethereum.ithaca.xyz/rpc
-//! let client = FyndClientBuilder::new(
-//!     "http://localhost:3000",
-//!     "https://reth-ethereum.ithaca.xyz/rpc",
-//! )
-//! .build()
-//! .await?;
+//! let client = FyndClientBuilder::new("http://localhost:3000")
+//!     .with_rpc_url("https://reth-ethereum.ithaca.xyz/rpc")
+//!     .build()
+//!     .await?;
 //! # Ok(()) }
 //! ```
 //!
@@ -34,8 +32,10 @@
 //!
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
-//! let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = FyndClientBuilder::new("http://localhost:3000")
 //!     .build_quote_only()?;
+//! # Ok(()) }
 //! ```
 //!
 //! # Requesting a quote
@@ -45,7 +45,7 @@
 //! # use bytes::Bytes;
 //! # use num_bigint::BigUint;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
+//! # let client = FyndClientBuilder::new("http://localhost:3000")
 //! #     .build_quote_only()?;
 //! // WETH → USDC on mainnet (Vitalik's address as sender).
 //! let weth = Bytes::copy_from_slice(

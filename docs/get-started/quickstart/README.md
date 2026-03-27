@@ -102,7 +102,8 @@ cargo add fynd-client
 ```
 
 ```rust
-let client = FyndClientBuilder::new(FYND_URL, RPC_URL)
+let client = FyndClientBuilder::new(FYND_URL)
+    .with_rpc_url(RPC_URL)
     .with_sender(sender)
     .build()
     .await?;

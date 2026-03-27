@@ -61,7 +61,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     info!("Parallelization mode: {:?}", parallelization_mode);
 
     let client = Arc::new(
-        FyndClientBuilder::new(&args.solver_url, "")
+        FyndClientBuilder::new(&args.solver_url)
             .build_quote_only()
             .map_err(|e| anyhow::anyhow!("{e}"))?,
     );

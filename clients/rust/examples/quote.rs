@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fynd_url = std::env::var("FYND_URL").unwrap_or_else(|_| DEFAULT_FYND_URL.to_owned());
 
     // [doc:start quote-rust]
-    let client = FyndClientBuilder::new(&fynd_url, &fynd_url)
+    let client = FyndClientBuilder::new(&fynd_url)
         .build_quote_only()
         .map_err(|e| {
             format!(

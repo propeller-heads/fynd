@@ -95,8 +95,13 @@ export interface ExecutionOptions {
 export interface FyndClientOptions {
   /** Base URL of the Fynd API (e.g. `"https://api.fynd.exchange"`). */
   baseUrl: string;
-  /** EVM chain ID for transaction signing. */
-  chainId: number;
+  /**
+   * EVM chain ID for transaction signing.
+   *
+   * Required when calling {@link FyndClient.swapPayload} or {@link FyndClient.approval}.
+   * May be omitted for quote-only use ({@link FyndClient.quote}, {@link FyndClient.health}).
+   */
+  chainId?: number;
   /** Default sender address, used when {@link SigningHints.sender} is not set. */
   sender?: Address;
   /** HTTP request timeout in milliseconds (default: 30000). */
@@ -288,6 +293,11 @@ export class FyndClient {
       throw FyndError.config("provider is required for swapPayload");
     }
 
+    if (this.options.chainId === undefined) {
+      throw FyndError.config("chainId is required for swapPayload");
+    }
+    const chainId = this.options.chainId;
+
     const nonce = hints.nonce !== undefined
       ? hints.nonce
       : await provider.getTransactionCount({ address: sender });
@@ -305,7 +315,7 @@ export class FyndClient {
     }
 
     const txBase = {
-      chainId:              this.options.chainId,
+      chainId,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,
@@ -500,6 +510,11 @@ export class FyndClient {
     const provider = this.options.provider;
     if (provider === undefined) throw FyndError.config("provider is required for approval");
 
+    if (this.options.chainId === undefined) {
+      throw FyndError.config("chainId is required for approval");
+    }
+    const chainId = this.options.chainId;
+
     const senderOpt = hints?.sender ?? this.options.sender;
     if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
     const sender: Address = senderOpt;
@@ -532,7 +547,7 @@ export class FyndClient {
     }) as Hex;
 
     const tx: Eip1559Transaction = {
-      chainId: this.options.chainId,
+      chainId,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,

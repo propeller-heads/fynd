@@ -115,7 +115,7 @@ struct OutputConfig {
 }
 
 fn build_client(url: &str, timeout_ms: u64) -> anyhow::Result<FyndClient> {
-    let client = FyndClientBuilder::new(url, "")
+    let client = FyndClientBuilder::new(url)
         .with_timeout(Duration::from_millis(timeout_ms))
         .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
         .build_quote_only()

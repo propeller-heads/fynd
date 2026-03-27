@@ -59,7 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fee_signer = PrivateKeySigner::random();
     let fee_receiver = fee_signer.address();
 
-    let client = FyndClientBuilder::new(&fynd_url, &rpc_url)
+    let client = FyndClientBuilder::new(&fynd_url)
+        .with_rpc_url(&rpc_url)
         .with_sender(sender)
         .build()
         .await
