@@ -9,7 +9,7 @@
 //! # Workflow
 //!
 //! A complete swap runs in three steps: **quote → approve → sign and execute**.
-//! See `clients/rust/examples/swap_erc20.rs` for a full walkthrough, or follow the
+//! See `examples/swap_erc20.rs` for a full walkthrough, or follow the
 //! [quickstart](https://docs.fynd.xyz/get-started/quickstart) to run a local Fynd instance.
 //!
 //! # Constructing a client
@@ -34,29 +34,26 @@
 //!
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
 //!     .build_quote_only()?;
+//! # Ok(()) }
 //! ```
 //!
 //! # Requesting a quote
 //!
 //! ```rust,no_run
 //! # use fynd_client::{FyndClientBuilder, Order, OrderSide, QuoteOptions, QuoteParams};
+//! # use alloy::primitives::address;
 //! # use bytes::Bytes;
 //! # use num_bigint::BigUint;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let client = FyndClientBuilder::new("http://localhost:3000", "http://localhost:3000")
 //! #     .build_quote_only()?;
 //! // WETH → USDC on mainnet (Vitalik's address as sender).
-//! let weth = Bytes::copy_from_slice(
-//!     alloy::primitives::address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").as_slice(),
-//! );
-//! let usdc = Bytes::copy_from_slice(
-//!     alloy::primitives::address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").as_slice(),
-//! );
-//! let sender = Bytes::copy_from_slice(
-//!     alloy::primitives::address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045").as_slice(),
-//! );
+//! let weth: Bytes = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").to_vec().into();
+//! let usdc: Bytes = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").to_vec().into();
+//! let sender: Bytes = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045").to_vec().into();
 //!
 //! let quote = client
 //!     .quote(QuoteParams::new(
