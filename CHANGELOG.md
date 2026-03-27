@@ -1,3 +1,10 @@
+## [0.37.0](https://github.com/propeller-heads/fynd/compare/0.36.0...0.37.0) (2026-03-27)
+
+
+### Features
+
+* **config:** embed worker_pools.toml defaults in binary ([4e8c968](https://github.com/propeller-heads/fynd/commit/4e8c968fd5c8d9e59bea0f790709ca1e6088271e))
+
 ## [0.36.0](https://github.com/propeller-heads/fynd/compare/0.35.0...0.36.0) (2026-03-27)
 
 
