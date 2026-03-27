@@ -130,11 +130,11 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
             Some(price) => {
                 let num = price.numerator.to_f64().unwrap_or(0.0);
                 let den = price.denominator.to_f64().unwrap_or(0.0);
-                if num == 0.0 {
+                if num == 0.0 || den == 0.0 {
                     trace!(
                         component_id = %component_id,
                         token_in = %token_in.address,
-                        "token price numerator is zero, skipping edge"
+                        "token price has zero numerator or denominator, skipping edge"
                     );
                     return None;
                 }
@@ -648,12 +648,13 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
-        // MostLiquidAlgorithm uses token prices to convert gas costs from wei
-        // to output token terms for accurate amount_out_net_gas calculation.
+        // MostLiquidAlgorithm uses token prices for two purposes:
+        // 1. Converting gas costs from wei to output token terms (net_amount_out)
+        // 2. Normalizing pool depth to ETH units for path scoring (from_sim_and_derived)
         //
         // Token prices are marked as `allow_stale` since they don't change much
-        // block-to-block and having slightly stale prices is acceptable for
-        // gas cost estimation.
+        // block-to-block. Stale prices affect scoring order (not correctness)
+        // and gas cost estimation accuracy.
         ComputationRequirements::none()
             .allow_stale("token_prices")
             .expect("Conflicting Computation Requirements")
