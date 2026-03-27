@@ -924,6 +924,36 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn test_from_sim_and_derived_missing_token_price_returns_none() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+        // Spot price and pool depth both present
+        let mut prices = crate::derived::types::SpotPrices::default();
+        prices.insert(key.clone(), 1.5);
+        derived.set_spot_prices(prices, vec![], 10, true);
+
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(1000u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // No token prices set — normalization should return None
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        assert!(
+            result.is_none(),
+            "should return None when token price is missing for depth normalization"
+        );
+    }
+
     // ==================== find_paths Tests ====================
 
     fn all_ids(paths: Vec<Path<'_, DepthAndPrice>>) -> HashSet<Vec<&str>> {
