@@ -1,3 +1,27 @@
+## [0.36.0](https://github.com/propeller-heads/fynd/compare/0.35.0...0.36.0) (2026-03-27)
+
+
+### Features
+
+* add more tests ([304eed8](https://github.com/propeller-heads/fynd/commit/304eed82b66ee995d4ba9e45bffb0a22c094adfd))
+* broadcast error for all failures ([fcedc4d](https://github.com/propeller-heads/fynd/commit/fcedc4da9f3285f56396d937a67057b2cbee674f))
+* change graph weight to 0 for a pool with failed calculation ([c5598a7](https://github.com/propeller-heads/fynd/commit/c5598a7a233149d192f68e5151ea0b381aa3218c))
+* expose per-computation block numbers ([b1206a9](https://github.com/propeller-heads/fynd/commit/b1206a927c48b8a8c55d5de2e0b5df2f6228f138))
+* improve error handling in computation manager ([0d9168e](https://github.com/propeller-heads/fynd/commit/0d9168ef7ef9aab95138fef3e5c740e1b14c3041))
+* keep track of the failed computations ([c45c7b8](https://github.com/propeller-heads/fynd/commit/c45c7b834029371b36ca5d3a4fcd8de698b8ea27))
+
+
+### Bug Fixes
+
+* add error handling ([d0f0b06](https://github.com/propeller-heads/fynd/commit/d0f0b066e683ae3735ca406a3db9d1c041534ec8))
+* check blocked state before waiting in wait_until_ready ([bea0bd9](https://github.com/propeller-heads/fynd/commit/bea0bd96b1fe4950182cfab1c36dc98b6db41783))
+* distinguish between partial and full failure ([62dbd83](https://github.com/propeller-heads/fynd/commit/62dbd83c965c54c88ddcf205206db9892db48442))
+* make FailedItemError variants more explicit ([fd7daa6](https://github.com/propeller-heads/fynd/commit/fd7daa698f5230b7b48bb2732b8accbd5fa47d04))
+* remove unneded Option wrapping ([c28e031](https://github.com/propeller-heads/fynd/commit/c28e0316af77fb7a531a2c6e568a829a6b33ff8d))
+* replace method according to the previous changes ([0654fce](https://github.com/propeller-heads/fynd/commit/0654fce1e679a93dd211e7e2062cd57fca3b94c8))
+* return None instead of zero-weight for failed edge lookups ([81e3a53](https://github.com/propeller-heads/fynd/commit/81e3a530c5a7d0cd4aba2381896c390b9d1d9595))
+* update signatures after rebase ([c3ed276](https://github.com/propeller-heads/fynd/commit/c3ed276ee6b13c148b55a5e9598f311d18105331))
+
 ## [0.35.0](https://github.com/propeller-heads/fynd/compare/0.34.3...0.35.0) (2026-03-26)
 
 
