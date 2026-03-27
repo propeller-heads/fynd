@@ -796,6 +796,18 @@ mod tests {
         format!("{comp}/{}/{}", addr(b_in), addr(b_out))
     }
 
+    fn make_token_prices(addresses: &[Address]) -> TokenGasPrices {
+        let mut prices = TokenGasPrices::new();
+        for addr in addresses {
+            // 1:1 price (1 token unit = 1 gas token unit)
+            prices.insert(
+                addr.clone(),
+                Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+            );
+        }
+        prices
+    }
+
     #[test]
     fn test_from_sim_and_derived_failed_spot_price_returns_none() {
         let key = pair_key("pool1", 0x01, 0x02);
@@ -815,6 +827,12 @@ mod tests {
             true,
         );
         derived.set_pool_depths(Default::default(), vec![], 10, true);
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
+            10,
+            true,
+        );
 
         let sim = make_mock_sim();
         let result =
@@ -844,6 +862,12 @@ mod tests {
                 key: key_str,
                 error: FailedItemError::SimulationFailed("depth error".into()),
             }],
+            10,
+            true,
+        );
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
             10,
             true,
         );
@@ -880,6 +904,12 @@ mod tests {
                 key: key_str,
                 error: FailedItemError::SimulationFailed("depth error".into()),
             }],
+            10,
+            true,
+        );
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
             10,
             true,
         );
