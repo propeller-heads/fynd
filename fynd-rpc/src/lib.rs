@@ -1,29 +1,24 @@
-//! Fynd RPC - HTTP server for DEX routing
+#![deny(missing_docs)]
+//! HTTP RPC server for the [Fynd](https://fynd.xyz) DEX router.
 //!
-//! This crate provides an HTTP RPC server that exposes Fynd's solving capabilities
-//! via REST API endpoints. It builds on [`fynd-core`](https://docs.rs/fynd-core) and adds
-//! HTTP infrastructure, worker pool management, and customizable middleware support.
+//! Wraps [`fynd-core`] with Actix Web to expose swap-routing as a REST service.
+//! Use [`FyndRPCBuilder`](builder::FyndRPCBuilder) to assemble and start the server.
 //!
-//! # Use Cases
+//! For documentation, configuration guides, and API reference see **<https://docs.fynd.xyz/>**.
 //!
-//! - **Turnkey HTTP server**: Use `FyndRPCBuilder` to quickly deploy a routing service
-//! - **Custom middleware**: Add authentication, rate limiting, or custom logic to the HTTP layer
-//! - **Microservices**: Integrate Fynd as an HTTP microservice in your infrastructure
+//! ## Endpoints
 //!
-//! # Main Components
-//!
-//! - **builder**: `FyndRPCBuilder` for assembling and configuring the HTTP server
-//! - **api**: HTTP endpoint handlers (`/v1/quote`, `/v1/health`) and OpenAPI documentation
-//! - **config**: Configuration types for pools, algorithms, and blacklists
+//! | Endpoint | Description |
+//! |---|---|
+//! | `POST /v1/quote` | Request an optimal swap route |
+//! | `GET /v1/health` | Data freshness and solver readiness |
+//! | `GET /v1/info` | Static instance metadata (chain ID, contract addresses) |
 
-// Public modules
+/// HTTP endpoint handlers, OpenAPI docs, and shared application state.
 pub mod api;
+/// Server builder and runner.
 pub mod builder;
+/// TOML-based pool configuration and server defaults.
 pub mod config;
+/// Protocol discovery via the Tycho RPC.
 pub mod protocols;
-
-// Re-export key RPC types
-pub use api::{ApiError, AppState, HealthStatus};
-// Re-export price guard types so users can implement custom providers
-// without depending on fynd-core directly.
-pub use fynd_core::price_guard::provider::{ExternalPrice, PriceProvider, PriceProviderError};

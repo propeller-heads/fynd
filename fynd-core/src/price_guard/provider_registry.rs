@@ -11,6 +11,7 @@ pub struct PriceProviderRegistry {
 }
 
 impl PriceProviderRegistry {
+    /// Create an empty registry with no providers registered.
     pub fn new() -> Self {
         Self { providers: Vec::new() }
     }

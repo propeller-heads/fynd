@@ -1,11 +1,16 @@
-//! Data Transfer Objects (DTOs) for the Fynd RPC HTTP API.
+#![deny(missing_docs)]
+//! Wire-format types for the [Fynd](https://fynd.xyz) RPC HTTP API.
 //!
-//! This crate contains only the wire-format types shared between the Fynd RPC server
+//! This crate contains only the serialisation types shared between the Fynd RPC server
 //! (`fynd-rpc`) and its clients (`fynd-client`). It has no server-side infrastructure
 //! dependencies (no actix-web, no server logic).
 //!
-//! Enable the `openapi` feature to derive `utoipa::ToSchema` on all types for use in
-//! API documentation generation.
+//! For documentation and API reference see **<https://docs.fynd.xyz/>**.
+//!
+//! ## Features
+//!
+//! - **`openapi`** — derives `utoipa::ToSchema` on all types for OpenAPI spec generation.
+//! - **`core`** — enables `Into` conversions between wire DTOs and `fynd-core` domain types.
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -18,6 +23,7 @@ use uuid::Uuid;
 // ============================================================================
 
 /// Request to solve one or more swap orders.
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct QuoteRequest {
@@ -52,6 +58,7 @@ impl QuoteRequest {
 }
 
 /// Options to customize the solving behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -252,6 +259,7 @@ impl FeeBreakdown {
 }
 
 /// Options to customize the encoding behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -472,6 +480,7 @@ impl Quote {
 /// A single swap order to be solved.
 ///
 /// An order specifies an intent to swap one token for another.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -582,6 +591,7 @@ impl Order {
 /// Specifies the side of an order: sell (exact input) or buy (exact output).
 ///
 /// Currently only `Sell` is supported. `Buy` will be added in a future version.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -1028,6 +1038,7 @@ impl InstanceInfo {
 }
 
 /// Error response body.
+#[must_use]
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorResponse {

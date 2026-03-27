@@ -22,7 +22,9 @@ pub struct PricesQuery {
 /// Parsed variant of the `include` query parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeField {
+    /// Include pool depth data.
     Depths,
+    /// Include spot price data.
     SpotPrices,
 }
 

@@ -93,10 +93,11 @@ mod tests {
         let pool = &config.pools()["basic"];
         assert_eq!(pool.algorithm(), "most_liquid");
         assert_eq!(pool.num_workers(), num_cpus::get());
-        assert_eq!(pool.task_queue_capacity(), defaults::POOL_TASK_QUEUE_CAPACITY);
-        assert_eq!(pool.min_hops(), defaults::POOL_MIN_HOPS);
-        assert_eq!(pool.max_hops(), defaults::POOL_MAX_HOPS);
-        assert_eq!(pool.timeout_ms(), defaults::POOL_TIMEOUT_MS);
+        use fynd_core::solver::defaults as core_defaults;
+        assert_eq!(pool.task_queue_capacity(), core_defaults::POOL_TASK_QUEUE_CAPACITY);
+        assert_eq!(pool.min_hops(), core_defaults::POOL_MIN_HOPS);
+        assert_eq!(pool.max_hops(), core_defaults::POOL_MAX_HOPS);
+        assert_eq!(pool.timeout_ms(), core_defaults::POOL_TIMEOUT_MS);
         assert_eq!(pool.max_routes(), None);
     }
 
@@ -124,26 +125,30 @@ mod tests {
     }
 }
 
+/// Default values for all `fynd-rpc` configuration parameters.
 pub mod defaults {
     // Re-export shared defaults from fynd-core as the single source of truth.
     pub use fynd_core::solver::defaults::{
-        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, POOL_MAX_HOPS, POOL_MIN_HOPS,
-        POOL_TASK_QUEUE_CAPACITY, POOL_TIMEOUT_MS, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
+        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
         TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
     };
 
-    // HTTP server — fynd-rpc specific.
+    /// Default HTTP bind host (`"0.0.0.0"` — all interfaces).
     pub const HTTP_HOST: &str = "0.0.0.0";
+    /// Default HTTP port (`3000`).
     pub const HTTP_PORT: u16 = 3000;
 
-    // RPC — fynd-rpc specific.
+    /// Default Ethereum JSON-RPC URL used when none is provided.
     pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 
-    // Minimum TVL passed to FyndBuilder::new — fynd-rpc's opinion of a sensible floor.
+    /// Minimum TVL a pool must have to be included in routing, denominated in the chain's native
+    /// token.
     pub const MIN_TVL: f64 = 10.0;
 
-    // Router timeout — intentionally tighter than FyndBuilder's generous 10 s standalone
-    // default; an HTTP service must respond within its request deadline.
+    /// Worker-router timeout in milliseconds.
+    ///
+    /// Intentionally tighter than `FyndBuilder`'s generous 10 s standalone default; an HTTP
+    /// service must respond within its request deadline.
     pub const WORKER_ROUTER_TIMEOUT_MS: u64 = 100;
 
     /// Returns the default Tycho Fynd endpoint URL for the given chain.

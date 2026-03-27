@@ -33,6 +33,13 @@ pub struct PermitDetails {
 }
 
 impl PermitDetails {
+    /// Construct a Permit2 token details entry.
+    ///
+    /// - `token`: 20-byte ERC-20 token address.
+    /// - `amount`: allowance cap (must fit in `uint160`).
+    /// - `expiration`: Unix timestamp in seconds at which the permit expires (must fit in
+    ///   `uint48`).
+    /// - `nonce`: Permit2 per-token nonce (must fit in `uint48`).
     pub fn new(
         token: bytes::Bytes,
         amount: num_bigint::BigUint,
@@ -52,6 +59,11 @@ pub struct PermitSingle {
 }
 
 impl PermitSingle {
+    /// Construct a single-token Permit2 authorisation.
+    ///
+    /// - `details`: per-token allowance parameters (see [`PermitDetails::new`]).
+    /// - `spender`: 20-byte address authorised to transfer the token.
+    /// - `sig_deadline`: Unix timestamp in seconds at which the signature expires.
     pub fn new(
         details: PermitDetails,
         spender: bytes::Bytes,
@@ -350,6 +362,7 @@ impl Transaction {
 /// The direction of a swap order.
 ///
 /// Currently only [`Sell`](Self::Sell) (exact-input) is supported.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSide {
     /// Sell exactly the specified `amount` of `token_in` for as much `token_out` as possible.
