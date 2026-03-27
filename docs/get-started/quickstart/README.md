@@ -21,29 +21,49 @@ layout:
 
 # Quickstart
 
-Execute a swap with Fynd in three steps.
+Execute a swap with Fynd in two steps.
 
 ## Prerequisites
 
 * **Tycho API key** (set as `TYCHO_API_KEY`, [get one here](https://t.me/fynd_portal_bot))
-* **Rust 1.92+** ([install via rustup](https://rustup.rs/))
+* **Rust 1.92+** ([install via rustup](https://rustup.rs/)) or **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/))
 
-## Step 0 — Clone the repo
+## Step 0 — Start Fynd
 
+{% tabs %}
+{% tab title="cargo install" %}
+```bash
+cargo install fynd
+export TYCHO_API_KEY=your-api-key
+export RUST_LOG=fynd=info
+fynd serve
+```
+{% endtab %}
+
+{% tab title="Docker" %}
+Images are available for linux/amd64 and linux/arm64.
+
+```bash
+docker run \
+  -e TYCHO_API_KEY=your-api-key \
+  -e RUST_LOG=fynd=info \
+  -p 3000:3000 -p 9898:9898 \
+  ghcr.io/propeller-heads/fynd
+```
+{% endtab %}
+
+{% tab title="Build from source" %}
 ```bash
 git clone https://github.com/propeller-heads/fynd.git
 cd fynd
-```
-
-## Step 1 — Start Fynd
-
-```bash
 export TYCHO_API_KEY=your-api-key
 export RUST_LOG=fynd=info
 cargo run --release -- serve
 ```
+{% endtab %}
+{% endtabs %}
 
-## Step 2 — Execute a swap
+## Step 1 — Execute a swap
 
 The following examples showcase how to integrate Fynd in your application. To interact with live quotes directly, use the [swap CLI](../../guides/swap-cli.md).
 
@@ -153,7 +173,6 @@ let receipt = client
     .await?;
 println!("gas: {}", receipt.gas_cost());
 ```
-
 {% endtab %}
 
 {% tab title="curl" %}
