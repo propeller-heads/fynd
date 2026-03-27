@@ -1,4 +1,4 @@
-//! Registry for managing multiple [`PriceProvider`]s.
+//! Registry for managing multiple [PriceProvider](crate::price_guard::provider::PriceProvider)s.
 
 use num_bigint::BigUint;
 use tycho_simulation::tycho_common::models::Address;
