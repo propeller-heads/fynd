@@ -37,10 +37,12 @@ Crate name: `fynd-client` (workspace member at `clients/rust/`).
 
 **`FyndClientBuilder`**
 ```rust
-FyndClientBuilder::new(fynd_url, rpc_url)
-    .retry_config(RetryConfig::default())
+FyndClientBuilder::new(fynd_url)
+    .with_rpc_url(rpc_url)  // required for swap_payload / execute_swap; omit for quote-only
     .build()
     .await?
+// or for quote-only use:
+FyndClientBuilder::new(fynd_url).build_quote_only()?
 ```
 
 **`FyndClient`**

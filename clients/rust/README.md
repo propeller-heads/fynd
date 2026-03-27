@@ -1,16 +1,17 @@
-# @kayibal/fynd-client
+# fynd-client
 
-TypeScript client for the [Fynd](https://fynd.xyz) DEX router.
+Rust client for the [Fynd](https://fynd.xyz) DEX router.
 
 For documentation, guides, and API reference visit **<https://docs.fynd.xyz/>**.
 
 ## Installation
 
-```bash
-npm install @kayibal/fynd-client
+```toml
+[dependencies]
+fynd-client = "0.35"
 ```
 
 ## Quick start
 
 See the [quickstart guide](https://docs.fynd.xyz/get-started/quickstart) and the
-[full example](examples/tutorial/main.ts).
+[`examples/`](examples/) directory for complete, runnable programs.

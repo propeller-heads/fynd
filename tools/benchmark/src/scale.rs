@@ -198,7 +198,7 @@ fn build_solver(
 }
 
 async fn wait_for_health(url: &str, timeout: Duration) -> Result<()> {
-    let client = FyndClientBuilder::new(url, "")
+    let client = FyndClientBuilder::new(url)
         .build_quote_only()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -361,7 +361,7 @@ async fn run_iteration(
     tokio::time::sleep(Duration::from_secs(args.warmup_secs)).await;
 
     let client = Arc::new(
-        FyndClientBuilder::new(solver_url, "")
+        FyndClientBuilder::new(solver_url)
             .build_quote_only()
             .map_err(|e| anyhow::anyhow!("{e}"))?,
     );

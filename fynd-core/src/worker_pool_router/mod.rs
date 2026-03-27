@@ -13,7 +13,8 @@
 //! 3. **Collection**: Wait for N responses OR timeout per order
 //! 4. **Selection**: Choose best quote (max `amount_out_net_gas`)
 //! 5. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
-//!    encode winning solutions into executable on-chain transactions via the [`Encoder`]
+//!    encode winning solutions into executable on-chain transactions via the
+//!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
 pub mod config;
 

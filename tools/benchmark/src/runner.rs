@@ -382,7 +382,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = Arc::new(
-            FyndClientBuilder::new(server.uri(), "")
+            FyndClientBuilder::new(server.uri())
                 .build_quote_only()
                 .unwrap(),
         );
