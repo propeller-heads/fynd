@@ -32,8 +32,6 @@ Execute a swap with Fynd in two steps.
 
 {% tabs %}
 {% tab title="cargo install" %}
-Requires **Rust 1.92+** ([install via rustup](https://rustup.rs/)).
-
 ```bash
 cargo install fynd
 export TYCHO_API_KEY=your-api-key
@@ -43,7 +41,7 @@ fynd serve
 {% endtab %}
 
 {% tab title="Docker" %}
-Requires **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/)). Images are available for linux/amd64 and linux/arm64.
+Images are available for linux/amd64 and linux/arm64.
 
 ```bash
 docker run \
@@ -55,8 +53,6 @@ docker run \
 {% endtab %}
 
 {% tab title="Build from source" %}
-Requires **Rust 1.92+** ([install via rustup](https://rustup.rs/)).
-
 ```bash
 git clone https://github.com/propeller-heads/fynd.git
 cd fynd
