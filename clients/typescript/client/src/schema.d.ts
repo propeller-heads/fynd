@@ -372,6 +372,29 @@ export interface components {
             spender: string;
         };
         /**
+         * @description Per-request overrides for price guard validation.
+         *
+         *     All fields are optional. When `None`, the server's configured defaults are used.
+         */
+        PriceGuardConfig: {
+            /** @description Whether to let solutions pass when no provider can return a price. */
+            allow_on_provider_error?: boolean | null;
+            /** @description Whether price guard validation is enabled. */
+            enabled?: boolean | null;
+            /**
+             * Format: int32
+             * @description Maximum allowed deviation when `amount_out < expected`, in basis points.
+             * @example 300
+             */
+            lower_tolerance_bps?: number | null;
+            /**
+             * Format: int32
+             * @description Maximum allowed deviation when `amount_out >= expected`, in basis points.
+             * @example 10000
+             */
+            upper_tolerance_bps?: number | null;
+        };
+        /**
          * @description Complete solution for a [`QuoteRequest`].
          *
          *     Contains a solution for each order in the request, along with aggregate
@@ -408,6 +431,7 @@ export interface components {
              *     Values exceeding the number of active solver pools are clamped internally.
              */
             min_responses?: number | null;
+            price_guard?: null | components["schemas"]["PriceGuardConfig"];
             /**
              * Format: int64
              * @description Timeout in milliseconds. If `None`, uses server default.
@@ -426,7 +450,7 @@ export interface components {
          * @description Status of an order quote.
          * @enum {string}
          */
-        QuoteStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready";
+        QuoteStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready" | "price_check_failed";
         /**
          * @description A route consisting of one or more sequential swaps.
          *
