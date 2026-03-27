@@ -29,6 +29,13 @@
 * [Architecture](ARCHITECTURE.md)
 * [Performance](benchmark-results.md)
 
+## Rust API Reference
+
+* [fynd-client](https://docs.rs/fynd-client)
+* [fynd-core](https://docs.rs/fynd-core)
+* [fynd-rpc](https://docs.rs/fynd-rpc)
+* [fynd-rpc-types](https://docs.rs/fynd-rpc-types)
+
 ## MEDIA KIT
 
 * [Brand Assets](https://drive.google.com/drive/folders/1AZzrF_3r9lVMRUZJbNNNaPiDM7GJ4ySc?usp=sharing)
