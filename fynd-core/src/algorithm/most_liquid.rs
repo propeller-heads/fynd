@@ -47,7 +47,7 @@ pub struct MostLiquidAlgorithm {
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
-    /// Liquidity depth in raw units of the sell token.
+    /// Liquidity depth normalized to gas token (ETH) units.
     pub depth: f64,
 }
 
@@ -108,13 +108,44 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         };
 
         // Look up pre-computed depth; skip edge if unavailable.
-        let depth = match derived
+        let raw_depth = match derived
             .pool_depths()
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64().unwrap_or(0.0),
             None => {
                 trace!(component_id = %component_id, "pool depth not found, skipping edge");
+                return None;
+            }
+        };
+
+        // Normalize depth from raw token_in units to gas token (ETH) units.
+        // TokenGasPrices stores Price { numerator, denominator } where
+        // numerator/denominator = "token units per gas token unit".
+        // To convert token->ETH: depth_eth = raw_depth * denominator / numerator.
+        let depth = match derived
+            .token_prices()
+            .and_then(|p| p.get(&token_in.address))
+        {
+            Some(price) => {
+                let num = price.numerator.to_f64().unwrap_or(0.0);
+                let den = price.denominator.to_f64().unwrap_or(0.0);
+                if num == 0.0 {
+                    trace!(
+                        component_id = %component_id,
+                        token_in = %token_in.address,
+                        "token price numerator is zero, skipping edge"
+                    );
+                    return None;
+                }
+                raw_depth * den / num
+            }
+            None => {
+                trace!(
+                    component_id = %component_id,
+                    token_in = %token_in.address,
+                    "token price not found, skipping edge"
+                );
                 return None;
             }
         };
