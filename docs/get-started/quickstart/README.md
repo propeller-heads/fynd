@@ -26,6 +26,7 @@ Execute a swap with Fynd in two steps.
 ## Prerequisites
 
 * **Tycho API key** (set as `TYCHO_API_KEY`, [get one here](https://t.me/fynd_portal_bot))
+* **Rust 1.92+** ([install via rustup](https://rustup.rs/)) or **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/))
 
 ## Step 0 — Start Fynd
 
