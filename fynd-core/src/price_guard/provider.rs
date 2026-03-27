@@ -1,7 +1,7 @@
 //! Price provider trait and types.
 //!
-//! Defines the [`PriceProvider`] trait for fetching external token prices
-//! and supporting error and result types.
+//! Defines the [`provider::PriceProvider`](crate::price_guard::provider::PriceProvider) trait for
+//! fetching external token prices and supporting error and result types.
 
 use async_trait::async_trait;
 use num_bigint::BigUint;

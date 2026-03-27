@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! HTTP RPC server for the [Fynd](https://fynd.xyz) DEX router.
 //!
-//! Wraps [`fynd-core`] with Actix Web to expose swap-routing as a REST service.
+//! Wraps [fynd-core](fynd_core) with Actix Web to expose swap-routing as a REST service.
 //! Use [`FyndRPCBuilder`](builder::FyndRPCBuilder) to assemble and start the server.
 //!
 //! For documentation, configuration guides, and API reference see **<https://docs.fynd.xyz/>**.
