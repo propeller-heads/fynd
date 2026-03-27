@@ -954,6 +954,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_from_sim_and_derived_normalizes_depth_to_eth() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+
+        // Spot price
+        let mut spot = crate::derived::types::SpotPrices::default();
+        spot.insert(key.clone(), 2.0);
+        derived.set_spot_prices(spot, vec![], 10, true);
+
+        // Raw depth: 2_000_000 token_in units
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(2_000_000u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
+        // So 2_000_000 raw units / 2000 = 1000 ETH
+        let mut token_prices = TokenGasPrices::new();
+        token_prices.insert(
+            tok_in.address.clone(),
+            Price {
+                numerator: BigUint::from(2000u64),
+                denominator: BigUint::from(1u64),
+            },
+        );
+        derived.set_token_prices(token_prices, vec![], 10, true);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        let data = result.expect("should return Some when all data present");
+        assert!((data.spot_price - 2.0).abs() < f64::EPSILON, "spot price should be 2.0");
+        // depth_in_eth = 2_000_000 * 1 / 2000 = 1000.0
+        assert!(
+            (data.depth - 1000.0).abs() < f64::EPSILON,
+            "depth should be 1000.0 ETH, got {}",
+            data.depth
+        );
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_normalizes_depth_fractional_price() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+
+        let mut spot = crate::derived::types::SpotPrices::default();
+        spot.insert(key.clone(), 0.5);
+        derived.set_spot_prices(spot, vec![], 10, true);
+
+        // Raw depth: 500 token_in units
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(500u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
+        // depth_in_eth = 500 * 2 / 3 = 333.333...
+        let mut token_prices = TokenGasPrices::new();
+        token_prices.insert(
+            tok_in.address.clone(),
+            Price {
+                numerator: BigUint::from(3u64),
+                denominator: BigUint::from(2u64),
+            },
+        );
+        derived.set_token_prices(token_prices, vec![], 10, true);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        let data = result.expect("should return Some when all data present");
+        let expected_depth = 500.0 * 2.0 / 3.0;
+        assert!(
+            (data.depth - expected_depth).abs() < 1e-10,
+            "depth should be {expected_depth}, got {}",
+            data.depth
+        );
+    }
+
     // ==================== find_paths Tests ====================
 
     fn all_ids(paths: Vec<Path<'_, DepthAndPrice>>) -> HashSet<Vec<&str>> {
