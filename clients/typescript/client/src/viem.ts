@@ -73,7 +73,7 @@ export interface ViemPublicClient {
  * @example
  * ```ts
  * const provider = viemProvider(publicClient, senderAddress);
- * const client = new FyndClient({ baseUrl, chainId, provider });
+ * const client = new FyndClient({ baseUrl, provider });
  * ```
  */
 export function viemProvider(

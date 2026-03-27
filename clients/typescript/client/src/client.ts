@@ -95,13 +95,6 @@ export interface ExecutionOptions {
 export interface FyndClientOptions {
   /** Base URL of the Fynd API (e.g. `"https://api.fynd.exchange"`). */
   baseUrl: string;
-  /**
-   * EVM chain ID for transaction signing.
-   *
-   * Required when calling {@link FyndClient.swapPayload} or {@link FyndClient.approval}.
-   * May be omitted for quote-only use ({@link FyndClient.quote}, {@link FyndClient.health}).
-   */
-  chainId?: number;
   /** Default sender address, used when {@link SigningHints.sender} is not set. */
   sender?: Address;
   /** HTTP request timeout in milliseconds (default: 30000). */
@@ -293,10 +286,7 @@ export class FyndClient {
       throw FyndError.config("provider is required for swapPayload");
     }
 
-    if (this.options.chainId === undefined) {
-      throw FyndError.config("chainId is required for swapPayload");
-    }
-    const chainId = this.options.chainId;
+    const { chainId } = await this.info();
 
     const nonce = hints.nonce !== undefined
       ? hints.nonce
@@ -510,10 +500,7 @@ export class FyndClient {
     const provider = this.options.provider;
     if (provider === undefined) throw FyndError.config("provider is required for approval");
 
-    if (this.options.chainId === undefined) {
-      throw FyndError.config("chainId is required for approval");
-    }
-    const chainId = this.options.chainId;
+    const { chainId } = info;
 
     const senderOpt = hints?.sender ?? this.options.sender;
     if (senderOpt === undefined) throw FyndError.config("sender is required for approval");
