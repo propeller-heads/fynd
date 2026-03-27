@@ -5,7 +5,8 @@ HTTP RPC server for the [Fynd](https://fynd.xyz) DEX router.
 Wraps [`fynd-core`](https://crates.io/crates/fynd-core) with Actix Web and exposes swap routing
 as a REST service on `http://0.0.0.0:3000` by default.
 
-For documentation, configuration guides, and API reference visit **<https://docs.fynd.xyz/>**.
+For documentation and configuration guides visit **<https://docs.fynd.xyz/>**.
+For the full API reference visit **<https://docs.fynd.xyz/reference/api>**.
 
 ## Endpoints
 

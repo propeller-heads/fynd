@@ -4,7 +4,8 @@
 //! Wraps [fynd-core](fynd_core) with Actix Web to expose swap-routing as a REST service.
 //! Use [`FyndRPCBuilder`](builder::FyndRPCBuilder) to assemble and start the server.
 //!
-//! For documentation, configuration guides, and API reference see **<https://docs.fynd.xyz/>**.
+//! For documentation and configuration guides see **<https://docs.fynd.xyz/>**.
+//! For the full API reference see **<https://docs.fynd.xyz/reference/api>**.
 //!
 //! ## Endpoints
 //!

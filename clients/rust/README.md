@@ -8,7 +8,7 @@ For documentation, guides, and API reference visit **<https://docs.fynd.xyz/>**.
 
 ```toml
 [dependencies]
-fynd-client = "0.35"
+fynd-client = "0"  # see crates.io for the latest version
 ```
 
 ## Quick start
