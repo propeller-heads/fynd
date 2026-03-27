@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.29.0"
+    "version": "0.35.0"
   },
   "paths": {
     "/v1/health": {
@@ -577,6 +577,46 @@
           }
         }
       },
+      "PriceGuardConfig": {
+        "type": "object",
+        "description": "Per-request overrides for price guard validation.\n\nAll fields are optional. When `None`, the server's configured defaults are used.",
+        "properties": {
+          "allow_on_provider_error": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to let solutions pass when no provider can return a price."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether price guard validation is enabled."
+          },
+          "lower_tolerance_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum allowed deviation when `amount_out < expected`, in basis points.",
+            "example": 300,
+            "minimum": 0
+          },
+          "upper_tolerance_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum allowed deviation when `amount_out >= expected`, in basis points.",
+            "example": 10000,
+            "minimum": 0
+          }
+        }
+      },
       "Quote": {
         "type": "object",
         "description": "Complete solution for a [`QuoteRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
@@ -637,6 +677,17 @@
             ],
             "description": "Minimum number of solver responses to wait for before returning.\nIf `None` or `0`, waits for all solvers to respond (or timeout).\n\nUse the `/health` endpoint to check `num_solver_pools` before setting this value.\nValues exceeding the number of active solver pools are clamped internally.",
             "minimum": 0
+          },
+          "price_guard": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriceGuardConfig",
+                "description": "Per-request price guard overrides. If `None`, uses server defaults."
+              }
+            ]
           },
           "timeout_ms": {
             "type": [

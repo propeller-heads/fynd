@@ -71,7 +71,7 @@ impl PriceGuard {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
-            let Some((token_in, token_out)) = self.check_structure(quote) else {
+            let Some((token_in, token_out)) = self.validated_token_pair(quote) else {
                 // This should not happen.
                 quote.set_status(QuoteStatus::NoRouteFound);
                 continue;
@@ -86,7 +86,7 @@ impl PriceGuard {
 
     /// Checks that a successful quote has a route with input/output tokens.
     /// Returns the token pair if valid, `None` otherwise.
-    fn check_structure(&self, quote: &OrderQuote) -> Option<(Address, Address)> {
+    fn validated_token_pair(&self, quote: &OrderQuote) -> Option<(Address, Address)> {
         //invalid route would be rejected earlier; this prevents using expect
         let Some(route) = quote.route() else {
             warn!(order_id = quote.order_id(), "successful quote has no route");
@@ -319,7 +319,9 @@ mod tests {
             .with_upper_tolerance_bps(upper_bps);
         let guard = price_guard(vec![mock_provider(provider_amount)]);
 
-        let result = guard.validate(vec![make_quote(fynd_amount)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(fynd_amount)], &config)
+            .unwrap();
 
         let expected_status =
             if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
@@ -334,7 +336,9 @@ mod tests {
         let config = PriceGuardConfig::default().with_allow_on_provider_error(allow_on_error);
         let guard = price_guard(vec![Box::new(FailingProvider), Box::new(FailingProvider)]);
 
-        let result = guard.validate(vec![make_quote(500)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(500)], &config)
+            .unwrap();
 
         let want = if should_pass { QuoteStatus::Success } else { QuoteStatus::PriceCheckFailed };
         assert_eq!(result[0].status(), want);
@@ -348,7 +352,9 @@ mod tests {
         // because the provider is never called.
         let guard = price_guard(vec![mock_provider(10_000)]);
 
-        let result = guard.validate(vec![make_quote(50)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(50)], &config)
+            .unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::Success);
@@ -364,7 +370,9 @@ mod tests {
         // but passes with the second.
         let guard = price_guard(vec![mock_provider(1000), mock_provider(970)]);
 
-        let result = guard.validate(vec![make_quote(960)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(960)], &config)
+            .unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
@@ -374,7 +382,9 @@ mod tests {
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![Box::new(FailingProvider), mock_provider(1000)]);
 
-        let result = guard.validate(vec![make_quote(980)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(980)], &config)
+            .unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
     }
@@ -388,7 +398,9 @@ mod tests {
         let mut quote = make_quote(1);
         quote.set_status(QuoteStatus::NoRouteFound);
 
-        let result = guard.validate(vec![quote], &config).unwrap();
+        let result = guard
+            .validate(vec![quote], &config)
+            .unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
     }
@@ -410,7 +422,9 @@ mod tests {
         let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
         let guard = price_guard(vec![mock_provider(1000)]);
 
-        let result = guard.validate(vec![make_quote(980), make_quote(500)], &config).unwrap();
+        let result = guard
+            .validate(vec![make_quote(980), make_quote(500)], &config)
+            .unwrap();
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
         assert_eq!(result[1].status(), QuoteStatus::PriceCheckFailed);
