@@ -116,6 +116,66 @@ impl ComputationRequirements {
     }
 }
 
+/// Typed error for a failed computation item.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum FailedItemError {
+    #[error("missing simulation state")]
+    MissingSimulationState,
+
+    #[error("missing token metadata")]
+    MissingTokenMetadata,
+
+    #[error("missing spot price")]
+    MissingSpotPrice,
+
+    #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
+    ExtremeDecimalMismatch { from: u32, to: u32 },
+
+    #[error("spot price too small: {0}")]
+    SpotPriceTooSmall(f64),
+
+    #[error("simulation failed: {0}")]
+    SimulationFailed(String),
+
+    #[error("all simulation paths failed")]
+    AllSimulationPathsFailed,
+}
+
+/// A single item that failed during a computation.
+#[derive(Debug, Clone)]
+pub struct FailedItem {
+    /// Human-readable key for the failed item.
+    /// - spot_prices/pool_depths: "component_id/token_in/token_out"
+    /// - token_prices: "token_address"
+    pub key: String,
+    /// Typed error describing the failure.
+    pub error: FailedItemError,
+}
+
+/// Computation result with optional partial failure details.
+///
+/// `Err(...)` = total failure (no usable data).
+/// `Ok(output)` = some data produced; `output.failed_items` may be non-empty.
+#[derive(Debug, Clone)]
+pub struct ComputationOutput<T> {
+    pub data: T,
+    pub failed_items: Vec<FailedItem>,
+}
+
+impl<T> ComputationOutput<T> {
+    pub fn success(data: T) -> Self {
+        Self { data, failed_items: vec![] }
+    }
+
+    pub fn with_failures(data: T, failed_items: Vec<FailedItem>) -> Self {
+        Self { data, failed_items }
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failed_items.is_empty()
+    }
+}
+
 /// Trait for derived data computations.
 ///
 /// Implement this trait to define a new type of derived data that can be
@@ -191,11 +251,10 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// Computations should acquire locks only when needed and release them as early
     /// as possible to minimize contention. Use `.read().await` for async lock acquisition.
-    // TODO: Support Partial Failures, including IDs for which computation failed.
     async fn compute(
         &self,
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Self::Output, ComputationError>;
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError>;
 }

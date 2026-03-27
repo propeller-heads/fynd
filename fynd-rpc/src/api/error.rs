@@ -39,6 +39,7 @@ impl ResponseError for ApiError {
                 SolveError::QueueFull => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                SolveError::ComputationFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
@@ -60,6 +61,7 @@ impl ResponseError for ApiError {
                 SolveError::InvalidOrder(_) => "INVALID_ORDER",
                 SolveError::Internal(_) => "INTERNAL_ERROR",
                 SolveError::NotReady(_) => "NOT_READY",
+                SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
                 SolveError::FailedEncoding(_) => "FAILED_ENCODING",
                 other => {
                     warn!(?other, "unhandled SolveError variant");

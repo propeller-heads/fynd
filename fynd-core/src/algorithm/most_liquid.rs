@@ -94,16 +94,29 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
     ) -> Option<Self> {
         let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
 
-        // Use pre-computed spot price
-        let spot_price = derived
+        // Use pre-computed spot price; skip edge if unavailable.
+        let spot_price = match derived
             .spot_prices()
-            .and_then(|prices| prices.get(&key).copied())?;
+            .and_then(|p| p.get(&key).copied())
+        {
+            Some(p) => p,
+            None => {
+                trace!(component_id = %component_id, "spot price not found, skipping edge");
+                return None;
+            }
+        };
 
-        // Look up pre-computed depth
-        let depth = derived
+        // Look up pre-computed depth; skip edge if unavailable.
+        let depth = match derived
             .pool_depths()
-            .and_then(|depths| depths.get(&key))?
-            .to_f64()?;
+            .and_then(|d| d.get(&key))
+        {
+            Some(d) => d.to_f64().unwrap_or(0.0),
+            None => {
+                trace!(component_id = %component_id, "pool depth not found, skipping edge");
+                return None;
+            }
+        };
 
         Some(Self { spot_price, depth })
     }
@@ -637,7 +650,11 @@ mod tests {
             fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
             market_read, order, setup_market, token, MockProtocolSim, ONE_ETH,
         },
-        derived::{types::TokenGasPrices, DerivedData},
+        derived::{
+            computation::{FailedItem, FailedItemError},
+            types::TokenGasPrices,
+            DerivedData,
+        },
         graph::GraphManager,
         types::OrderSide,
     };
@@ -661,7 +678,7 @@ mod tests {
         }
 
         let mut derived_data = DerivedData::new();
-        derived_data.set_token_prices(token_prices, 1);
+        derived_data.set_token_prices(token_prices, vec![], 1, true);
         Arc::new(RwLock::new(derived_data))
     }
     // ==================== try_score_path Tests ====================
@@ -733,6 +750,115 @@ mod tests {
         let score = MostLiquidAlgorithm::try_score_path(&paths[0]).unwrap();
         let expected = 2.0 * 0.6 * 800.0;
         assert_eq!(score, expected, "expected {expected}, got {score}");
+    }
+
+    fn make_mock_sim() -> MockProtocolSim {
+        MockProtocolSim::new(2.0)
+    }
+
+    fn pair_key(comp: &str, b_in: u8, b_out: u8) -> (String, Address, Address) {
+        (comp.to_string(), addr(b_in), addr(b_out))
+    }
+
+    fn pair_key_str(comp: &str, b_in: u8, b_out: u8) -> String {
+        format!("{comp}/{}/{}", addr(b_in), addr(b_out))
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_failed_spot_price_returns_none() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let key_str = pair_key_str("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+        // spot price fails, pool depth not computed
+        derived.set_spot_prices(
+            Default::default(),
+            vec![FailedItem {
+                key: key_str,
+                error: FailedItemError::SimulationFailed("sim error".into()),
+            }],
+            10,
+            true,
+        );
+        derived.set_pool_depths(Default::default(), vec![], 10, true);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_failed_pool_depth_returns_none() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let key_str = pair_key_str("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+        // spot price succeeds
+        let mut prices = crate::derived::types::SpotPrices::default();
+        prices.insert(key.clone(), 1.5);
+        derived.set_spot_prices(prices, vec![], 10, true);
+        // pool depth fails
+        derived.set_pool_depths(
+            Default::default(),
+            vec![FailedItem {
+                key: key_str,
+                error: FailedItemError::SimulationFailed("depth error".into()),
+            }],
+            10,
+            true,
+        );
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_both_failed_returns_none() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let key_str = pair_key_str("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+        derived.set_spot_prices(
+            Default::default(),
+            vec![FailedItem {
+                key: key_str.clone(),
+                error: FailedItemError::SimulationFailed("spot error".into()),
+            }],
+            10,
+            true,
+        );
+        derived.set_pool_depths(
+            Default::default(),
+            vec![FailedItem {
+                key: key_str,
+                error: FailedItemError::SimulationFailed("depth error".into()),
+            }],
+            10,
+            true,
+        );
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        assert!(result.is_none());
     }
 
     // ==================== find_paths Tests ====================

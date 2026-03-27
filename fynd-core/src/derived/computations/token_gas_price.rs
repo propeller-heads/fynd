@@ -27,7 +27,7 @@
 //! # Dependencies
 //!
 //! This computation depends on [`SpotPrices`](crate::derived::types::SpotPrices) being
-//! available in the [`DerivedDataStore`](crate::derived::store::DerivedDataStore).
+//! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
 use std::collections::{HashMap, HashSet};
@@ -43,7 +43,9 @@ use tycho_simulation::{
 
 use crate::{
     derived::{
-        computation::{ComputationId, DerivedComputation},
+        computation::{
+            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+        },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
@@ -322,7 +324,10 @@ impl TokenGasPriceComputation {
         market: &SharedMarketDataRef,
         spot_prices: &SpotPrices,
         filter_tokens: Option<&HashSet<Address>>,
-    ) -> Result<(HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64), ComputationError> {
+    ) -> Result<
+        (HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64, Vec<FailedItem>),
+        ComputationError,
+    > {
         // Brief lock 1: topology + gas_price + block (all cheap clones)
         let (topology, gas_price, block) = {
             let guard = market.read().await;
@@ -441,7 +446,17 @@ impl TokenGasPriceComputation {
             }
         }
 
-        Ok((best_prices, block))
+        // Tokens with discovered paths but no successful simulation
+        let failed_items: Vec<FailedItem> = paths_by_token
+            .keys()
+            .filter(|token| !best_prices.contains_key(*token))
+            .map(|token| FailedItem {
+                key: token.to_string(),
+                error: FailedItemError::AllSimulationPathsFailed,
+            })
+            .collect();
+
+        Ok((best_prices, block, failed_items))
     }
 
     /// Attempts incremental recomputation for state-only changes.
@@ -455,7 +470,7 @@ impl TokenGasPriceComputation {
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Option<TokenGasPrices>, ComputationError> {
+    ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
         // Read all needed data from store in a single lock acquisition.
         let (existing_deps, existing_prices, spot_prices) = {
             let store_guard = store.read().await;
@@ -489,7 +504,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(existing_prices));
+            return Ok(Some(ComputationOutput::success(existing_prices.clone())));
         }
 
         debug!(
@@ -498,13 +513,14 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let (best_prices, block) = self
+        let (best_prices, block, _) = self
             .simulate_token_prices(market, &spot_prices, Some(&tokens_to_recompute))
             .await?;
 
         // Merge results into existing prices and deps
         let mut result = existing_prices;
         let mut new_deps = existing_deps;
+        let mut failed_items: Vec<FailedItem> = Vec::new();
 
         for token in &tokens_to_recompute {
             if let Some((_, price, components)) = best_prices.get(token) {
@@ -516,6 +532,10 @@ impl TokenGasPriceComputation {
             } else {
                 result.remove(token);
                 new_deps.remove(token);
+                failed_items.push(FailedItem {
+                    key: token.to_string(),
+                    error: FailedItemError::AllSimulationPathsFailed,
+                });
             }
         }
 
@@ -525,7 +545,7 @@ impl TokenGasPriceComputation {
             .set_token_prices_deps(new_deps, block);
         Span::current().record("updated_token_prices", result.len());
 
-        Ok(Some(result))
+        Ok(Some(ComputationOutput::with_failures(result, failed_items)))
     }
 }
 
@@ -541,7 +561,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         market: &SharedMarketDataRef,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Self::Output, ComputationError> {
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // For topology changes or full recompute, do a full computation
         // For state-only changes, use incremental computation
         if !changed.is_full_recompute && !changed.is_topology_change() {
@@ -563,7 +583,7 @@ impl DerivedComputation for TokenGasPriceComputation {
             .ok_or(ComputationError::MissingDependency("spot_prices"))?
             .clone();
 
-        let (best_prices, block) = self
+        let (best_prices, block, failed_items) = self
             .simulate_token_prices(market, &spot_prices, None)
             .await?;
 
@@ -597,7 +617,7 @@ impl DerivedComputation for TokenGasPriceComputation {
 
         Span::current().record("updated_token_prices", token_prices.len());
 
-        Ok(token_prices)
+        Ok(ComputationOutput::with_failures(token_prices, failed_items))
     }
 }
 
@@ -640,14 +660,14 @@ mod tests {
             updated: vec![],
             is_full_recompute: true,
         };
-        let spot_prices = spot_comp
+        let spot_prices_output = spot_comp
             .compute(&wrapped_market, &wrapped_store, &changed)
             .await
             .expect("spot price computation should succeed");
         wrapped_store
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_prices, 0);
+            .set_spot_prices(spot_prices_output.data, vec![], 0, true);
 
         (wrapped_market, wrapped_store)
     }
@@ -914,7 +934,8 @@ mod tests {
         let prices = computation
             .compute(&market, &derived, &changed)
             .await
-            .unwrap();
+            .unwrap()
+            .data;
 
         // Exactly 2 prices: ETH (gas token) and USDC
         assert_eq!(prices.len(), 2, "should have exactly 2 token prices");
@@ -1001,7 +1022,8 @@ mod tests {
         let prices = computation
             .compute(&market, &derived, &changed)
             .await
-            .unwrap();
+            .unwrap()
+            .data;
 
         assert_eq!(prices.len(), 4, "should have prices for ETH, A, B, C");
 
@@ -1088,7 +1110,8 @@ mod tests {
         let prices = computation
             .compute(&market, &derived, &changed)
             .await
-            .unwrap();
+            .unwrap()
+            .data;
 
         // Only the gas token itself should have a price (1:1)
         assert_eq!(prices.len(), 1, "should only have gas token price");
@@ -1255,14 +1278,14 @@ mod tests {
         };
 
         let spot_comp = SpotPriceComputation::new();
-        let spot_prices = spot_comp
+        let spot_output = spot_comp
             .compute(&market, &derived, &changed)
             .await
             .unwrap();
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_prices, 0);
+            .set_spot_prices(spot_output.data, vec![], 0, true);
 
         let computation = computation_for(&eth.address);
         let result = computation
@@ -1272,6 +1295,46 @@ mod tests {
         assert!(
             matches!(result, Err(ComputationError::MissingDependency("gas_price"))),
             "should return MissingDependency for gas_price"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_all_paths_fail_reported() {
+        // gas_units = 1e16, gas_price = 100 (set by setup_market)
+        // sell_gas_cost = 1e16 * 100 = 1e18 = sell_out (1e18 ETH) → path not viable
+        // → all paths for USDC fail → USDC lands in failed_items
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let (market, derived) = setup_test_env(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(10_000_000_000_000_000u64), // 1e16 gas units
+        )])
+        .await;
+        let changed = ChangedComponents::default();
+
+        let computation = computation_for(&eth.address);
+        let output = computation
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        // USDC has a discovered path but all simulations fail
+        assert!(
+            output
+                .failed_items
+                .iter()
+                .any(|item| item.key == usdc.address.to_string()),
+            "USDC should appear in failed_items when all simulation paths fail"
+        );
+        // Gas token always has a 1:1 price
+        assert!(output.data.contains_key(&eth.address), "gas token should always have price");
+        // USDC should not have a price
+        assert!(
+            !output.data.contains_key(&usdc.address),
+            "USDC should not have a price when all simulation paths fail"
         );
     }
 }

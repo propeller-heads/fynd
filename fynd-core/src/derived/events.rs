@@ -3,7 +3,7 @@
 //! Workers subscribe to these events to track readiness of derived data
 //! computations before solving.
 
-use super::computation::ComputationId;
+use super::computation::{ComputationId, FailedItem};
 
 /// Events broadcast when derived data computations complete.
 ///
@@ -26,6 +26,19 @@ pub enum DerivedDataEvent {
         /// Which computation completed.
         computation_id: ComputationId,
         /// Block number this computation was performed for.
+        block: u64,
+        /// Items that failed during this computation (empty = full success).
+        failed_items: Vec<FailedItem>,
+    },
+
+    /// A computation failed for a block and will not produce a result.
+    ///
+    /// Workers with `require_fresh` requirements use this to exit immediately
+    /// rather than waiting until timeout.
+    ComputationFailed {
+        /// Which computation failed.
+        computation_id: ComputationId,
+        /// Block number this computation was attempted for.
         block: u64,
     },
 }

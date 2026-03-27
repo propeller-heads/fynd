@@ -14,7 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{feed::market_data::SharedMarketData, types::ComponentId};
@@ -279,22 +279,57 @@ impl ComputationManager {
 
         // Write spot prices to store before dependent computations
         match spot_prices_result {
-            Ok(prices) => {
-                let count = prices.len();
+            Ok(output) => {
+                let count = output.data.len();
+                if output.has_failures() {
+                    warn!(
+                        count,
+                        failed = output.failed_items.len(),
+                        "spot prices partial failures"
+                    );
+                    for item in &output.failed_items {
+                        debug!(key = %item.key, error = %item.error, "spot price failed item");
+                    }
+                } else {
+                    info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
+                }
                 self.store
                     .write()
                     .await
-                    .set_spot_prices(prices, block);
-                info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
+                    .set_spot_prices(
+                        output.data,
+                        output.failed_items.clone(),
+                        block,
+                        changed.is_full_recompute,
+                    );
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
                         computation_id: SpotPriceComputation::ID,
                         block,
+                        failed_items: output.failed_items,
                     });
             }
             Err(e) => {
                 warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: SpotPriceComputation::ID,
+                        block,
+                    });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
@@ -326,36 +361,82 @@ impl ComputationManager {
         let mut store_write = self.store.write().await;
 
         match token_prices_result {
-            Ok(prices) => {
-                let count = prices.len();
-                store_write.set_token_prices(prices, block);
-                info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
+            Ok(output) => {
+                let count = output.data.len();
+                if output.has_failures() {
+                    warn!(
+                        count,
+                        failed = output.failed_items.len(),
+                        "token prices partial failures"
+                    );
+                    for item in &output.failed_items {
+                        debug!(key = %item.key, error = %item.error, "token price failed item");
+                    }
+                } else {
+                    info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
+                }
+                store_write.set_token_prices(
+                    output.data,
+                    output.failed_items.clone(),
+                    block,
+                    changed.is_full_recompute,
+                );
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
                         computation_id: TokenGasPriceComputation::ID,
                         block,
+                        failed_items: output.failed_items,
                     });
             }
             Err(e) => {
                 warn!(error = ?e, "token price computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: TokenGasPriceComputation::ID,
+                        block,
+                    });
             }
         }
 
         match pool_depths_result {
-            Ok(depths) => {
-                let count = depths.len();
-                store_write.set_pool_depths(depths, block);
-                info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
+            Ok(output) => {
+                let count = output.data.len();
+                if output.has_failures() {
+                    warn!(
+                        count,
+                        failed = output.failed_items.len(),
+                        "pool depths partial failures"
+                    );
+                    for item in &output.failed_items {
+                        debug!(key = %item.key, error = %item.error, "pool depth failed item");
+                    }
+                } else {
+                    info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
+                }
+                store_write.set_pool_depths(
+                    output.data,
+                    output.failed_items.clone(),
+                    block,
+                    changed.is_full_recompute,
+                );
                 let _ = self
                     .event_tx
                     .send(DerivedDataEvent::ComputationComplete {
                         computation_id: PoolDepthComputation::ID,
                         block,
+                        failed_items: output.failed_items,
                     });
             }
             Err(e) => {
                 warn!(error = ?e, "pool depth computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
             }
         }
 
@@ -402,12 +483,30 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, RwLock};
 
     use super::*;
-    use crate::algorithm::test_utils::{setup_market, token, MockProtocolSim};
+    use crate::{
+        algorithm::test_utils::{component, setup_market, token, MockProtocolSim},
+        feed::market_data::SharedMarketData,
+        types::BlockInfo,
+    };
+
+    /// Drains all currently-pending events from a broadcast receiver into a Vec.
+    fn drain_events(rx: &mut broadcast::Receiver<DerivedDataEvent>) -> Vec<DerivedDataEvent> {
+        let mut events = vec![];
+        loop {
+            match rx.try_recv() {
+                Ok(e) => events.push(e),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        events
+    }
 
     #[test]
     fn invalid_slippage_threshold_returns_error() {
@@ -492,6 +591,114 @@ mod tests {
             .expect("task should complete successfully");
     }
 
+    /// Creates a market with a component in topology but WITHOUT simulation state.
+    ///
+    /// Used to trigger `TotalFailure` in spot_price computation (full recompute with
+    /// all components missing sim_state → succeeded == 0 → failure).
+    fn market_with_component_no_sim_state() -> Arc<RwLock<SharedMarketData>> {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+
+        let mut market = SharedMarketData::new();
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components(std::iter::once(pool));
+        // Note: no update_states() — simulation state is intentionally absent
+        market.upsert_tokens([eth, usdc]);
+        Arc::new(RwLock::new(market))
+    }
+
+    /// Creates a market with two pools: one with sim state (pool succeeds) and one without (pool
+    /// fails). Used to trigger partial spot price failure.
+    fn market_with_mixed_sim_states() -> Arc<RwLock<SharedMarketData>> {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let dai = token(3, "DAI");
+
+        let pool1 = component("eth_usdc", &[eth.clone(), usdc.clone()]);
+        let pool2 = component("eth_dai", &[eth.clone(), dai.clone()]);
+
+        let mut market = SharedMarketData::new();
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components([pool1, pool2]);
+        // Only pool1 has simulation state; pool2 intentionally has none
+        market
+            .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.upsert_tokens([eth, usdc, dai]);
+        Arc::new(RwLock::new(market))
+    }
+
+    /// Creates a market WITH sim_state but WITHOUT gas_price.
+    ///
+    /// Spot price computation succeeds (MockProtocolSim works), but token_price
+    /// computation fails with `MissingDependency("gas_price")`.
+    fn market_with_sim_state_no_gas_price() -> Arc<RwLock<SharedMarketData>> {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+
+        let mut market = SharedMarketData::new();
+        // Note: no update_gas_price() — gas price is intentionally absent
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components(std::iter::once(pool));
+        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.upsert_tokens([eth, usdc]);
+        Arc::new(RwLock::new(market))
+    }
+
+    #[tokio::test]
+    async fn test_spot_price_failure_broadcasts_computation_failed() {
+        let market = market_with_component_no_sim_state();
+        let config = ComputationManagerConfig::new();
+        let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
+
+        // Full recompute with components that have no sim_state → TotalFailure
+        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+        manager.compute_all(&changed).await;
+
+        let events = drain_events(&mut event_rx);
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
+            )),
+            "expected ComputationFailed(spot_prices) in events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_price_failure_broadcasts_computation_failed() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let market = market_with_sim_state_no_gas_price();
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (mut manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
+
+        // handle_event with added components — spot_price succeeds, token_price fails
+        let event = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        manager
+            .handle_event(&event)
+            .await
+            .unwrap();
+
+        let events = drain_events(&mut event_rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationFailed { computation_id: "token_prices", .. }
+            )),
+            "expected ComputationFailed(token_prices) in events: {events:?}"
+        );
+    }
+
     #[tokio::test]
     async fn run_shuts_down_on_channel_close() {
         let (market, _) = setup_market(vec![]);
@@ -511,5 +718,64 @@ mod tests {
             .await
             .expect("manager should shutdown on channel close")
             .expect("task should complete successfully");
+    }
+
+    #[tokio::test]
+    async fn partial_spot_price_failure_broadcasts_computation_complete() {
+        // market_with_mixed_sim_states has pool1 (with sim state) and pool2 (without)
+        // → spot price computation partially succeeds → ComputationComplete with failed_items
+        let market = market_with_mixed_sim_states();
+        let config = ComputationManagerConfig::new();
+        let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
+
+        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+        manager.compute_all(&changed).await;
+
+        let events = drain_events(&mut event_rx);
+
+        // Should broadcast ComputationComplete (not ComputationFailed) because pool1 succeeds
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. }
+            )),
+            "expected ComputationComplete(spot_prices), got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
+            )),
+            "should not broadcast ComputationFailed for partial failure"
+        );
+
+        // The ComputationComplete event should carry the failed item for pool2
+        let complete = events.iter().find(|e| {
+            matches!(e, DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. })
+        });
+        if let Some(DerivedDataEvent::ComputationComplete { failed_items, .. }) = complete {
+            assert!(
+                !failed_items.is_empty(),
+                "ComputationComplete should carry failed_items for pool2"
+            );
+        }
+
+        // The store should persist the failure reason for the failed pool.
+        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for pool2.
+        let eth = token(1, "ETH");
+        let dai = token(3, "DAI");
+        let store = manager.store();
+        let guard = store.read().await;
+        let key_eth_dai = ("eth_dai".to_string(), eth.address.clone(), dai.address.clone());
+        let key_dai_eth = ("eth_dai".to_string(), dai.address.clone(), eth.address.clone());
+        assert!(
+            guard
+                .spot_price_failure(&key_eth_dai)
+                .is_some() ||
+                guard
+                    .spot_price_failure(&key_dai_eth)
+                    .is_some(),
+            "store should persist failure reason for eth_dai (missing sim state)"
+        );
     }
 }

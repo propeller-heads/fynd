@@ -283,7 +283,8 @@ where
     ///
     /// Uses a Notify pattern to know when it's available to solve.
     ///
-    /// Returns `Ok(())` if ready or no requirements, `Err` if timeout reached.
+    /// Returns `Ok(())` if ready or no requirements, `Err` if timeout reached or computation
+    /// failed.
     async fn wait_until_ready(&self, timeout: Duration) -> Result<(), SolveError> {
         // Fast path: no requirements or already ready
         if !self
@@ -305,6 +306,17 @@ where
                 return Ok(());
             }
 
+            // Check if blocked before waiting for a notification that may never come
+            if self
+                .readiness_tracker
+                .is_blocked_for_current_block()
+            {
+                return Err(SolveError::ComputationFailed(format!(
+                    "required computation failed for current block: {:?}",
+                    self.readiness_tracker.missing()
+                )));
+            }
+
             // Calculate remaining time
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -323,6 +335,13 @@ where
                     )));
                 }
                 _ = notified => {
+                    // Check if any require_fresh computation permanently failed this block
+                    if self.readiness_tracker.is_blocked_for_current_block() {
+                        return Err(SolveError::ComputationFailed(format!(
+                            "required computation failed for current block: {:?}",
+                            self.readiness_tracker.missing()
+                        )));
+                    }
                     // Woken up by notify, loop to check readiness again
                     continue;
                 }
@@ -396,7 +415,7 @@ where
                             self.ready_notify.notify_waiters();
 
                             // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block } = &event {
+                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
                                 if self.requirements.is_required(computation_id) {
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
@@ -579,6 +598,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+                failed_items: vec![],
             });
 
         // Should return immediately since already ready
@@ -677,6 +697,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+                failed_items: vec![],
             });
 
         // Now wait - should succeed immediately since we're already ready
@@ -723,6 +744,7 @@ mod tests {
             .handle_event(&DerivedDataEvent::ComputationComplete {
                 computation_id: TokenGasPriceComputation::ID,
                 block: 1,
+                failed_items: vec![],
             });
         notify.notify_waiters();
 
@@ -730,6 +752,94 @@ mod tests {
         let (r1, r2) = tokio::join!(waiter1, waiter2);
         assert!(r1.unwrap());
         assert!(r2.unwrap());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_immediately_on_blocked_state() {
+        let (market, _) = setup_market(vec![]);
+        let derived = DerivedData::new_shared();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Mark the current block and record a failure for spot_prices
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::NewBlock { block: 1 });
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            });
+
+        // Notify AFTER wait_until_ready starts waiting (must arrive after the
+        // Notified future is registered, not before).
+        let notify = worker.ready_notify.clone();
+        let notifier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify.notify_waiters();
+        });
+
+        // wait_until_ready is woken by the notification, then checks
+        // is_blocked_for_current_block() → true → returns Err immediately.
+        let result = worker
+            .wait_until_ready(Duration::from_secs(5))
+            .await;
+        notifier.await.unwrap();
+
+        match result {
+            Err(SolveError::ComputationFailed(msg)) => {
+                assert!(
+                    msg.contains("required computation failed"),
+                    "expected 'required computation failed' message, got: {msg}"
+                );
+            }
+            other => panic!("Expected ComputationFailed error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_blocked_when_failure_already_processed() {
+        let (market, _) = setup_market(vec![]);
+        let derived = DerivedData::new_shared();
+
+        let requirements = ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+
+        // Mark the current block and record a failure for spot_prices
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::NewBlock { block: 1 });
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            });
+
+        // Do NOT spawn a notifier — the failure was already processed
+        // before wait_until_ready starts. Without the is_blocked_for_current_block() check in the
+        // loop body, this hangs for 1 second and returns NotReady.
+        let result = worker
+            .wait_until_ready(Duration::from_secs(1))
+            .await;
+
+        match result {
+            Err(SolveError::ComputationFailed(msg)) => {
+                assert!(
+                    msg.contains("required computation failed"),
+                    "expected 'required computation failed' message, got: {msg}"
+                );
+            }
+            other => panic!("Expected ComputationFailed error, got {:?}", other),
+        }
     }
 
     // ==================== Integration Tests with run() ====================
@@ -763,6 +873,7 @@ mod tests {
             .send(DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
+                failed_items: vec![],
             })
             .unwrap();
 

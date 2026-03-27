@@ -61,6 +61,19 @@ impl fmt::Display for IncludeField {
     }
 }
 
+/// Block numbers at which each computation was last run.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComputationBlocks {
+    /// Block at which token gas prices were computed.
+    pub token_prices: u64,
+    /// Block at which spot prices were computed. `None` if not yet available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spot_prices: Option<u64>,
+    /// Block at which pool depths were computed. `None` if not yet available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_depths: Option<u64>,
+}
+
 /// Top-level response for GET /v1/prices.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PricesResponse {
@@ -69,8 +82,8 @@ pub struct PricesResponse {
     /// The gas token address (e.g. WETH).
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]
     pub gas_token: Address,
-    /// Block number at which prices were last computed.
-    pub last_block: u64,
+    /// Block numbers at which each computation was last run.
+    pub blocks: ComputationBlocks,
     /// Spot prices per pool direction (only if requested via `include=spot_prices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spot_prices: Option<Vec<SpotPriceEntry>>,
