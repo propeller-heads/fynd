@@ -129,7 +129,10 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         {
             Some(price) => {
                 let num = price.numerator.to_f64().unwrap_or(0.0);
-                let den = price.denominator.to_f64().unwrap_or(0.0);
+                let den = price
+                    .denominator
+                    .to_f64()
+                    .unwrap_or(0.0);
                 if num == 0.0 || den == 0.0 {
                     trace!(
                         component_id = %component_id,
@@ -977,10 +980,7 @@ mod tests {
         let mut token_prices = TokenGasPrices::new();
         token_prices.insert(
             tok_in.address.clone(),
-            Price {
-                numerator: BigUint::from(2000u64),
-                denominator: BigUint::from(1u64),
-            },
+            Price { numerator: BigUint::from(2000u64), denominator: BigUint::from(1u64) },
         );
         derived.set_token_prices(token_prices, vec![], 10, true);
 
@@ -1022,10 +1022,7 @@ mod tests {
         let mut token_prices = TokenGasPrices::new();
         token_prices.insert(
             tok_in.address.clone(),
-            Price {
-                numerator: BigUint::from(3u64),
-                denominator: BigUint::from(2u64),
-            },
+            Price { numerator: BigUint::from(3u64), denominator: BigUint::from(2u64) },
         );
         derived.set_token_prices(token_prices, vec![], 10, true);
 
