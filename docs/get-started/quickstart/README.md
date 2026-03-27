@@ -42,11 +42,10 @@ fynd serve
 {% endtab %}
 
 {% tab title="Docker" %}
-Requires **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/)). Only available for `--platform=linux/amd64`.
+Requires **Docker** ([install Docker](https://docs.docker.com/get-started/get-docker/)). Images are available for linux/amd64 and linux/arm64.
 
 ```bash
 docker run \
-  --platform=linux/amd64 \
   -e TYCHO_API_KEY=your-api-key \
   -e RUST_LOG=fynd=info \
   -p 3000:3000 -p 9898:9898 \
@@ -68,6 +67,8 @@ cargo run --release -- serve
 {% endtabs %}
 
 ## Step 1 — Execute a swap
+
+The following examples showcase how to integrate Fynd in your application. To interact with live quotes directly, use the [swap CLI](../../guides/swap-cli.md).
 
 {% hint style="info" %}
 Fynd currently only supports **sell orders** (exact input). Set `"side": "sell"` in your order. Buy orders (exact output) are not yet supported.
@@ -175,8 +176,6 @@ let receipt = client
     .await?;
 println!("gas: {}", receipt.gas_cost());
 ```
-
-Run with: `cargo run --example swap_erc20 -p fynd-client`
 {% endtab %}
 
 {% tab title="curl" %}
