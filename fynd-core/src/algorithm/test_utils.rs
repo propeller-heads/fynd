@@ -57,30 +57,36 @@ pub struct MockProtocolSim {
 }
 
 impl MockProtocolSim {
+    /// Create a mock with the given spot price and all other fields at default.
     pub fn new(spot_price: f64) -> Self {
         Self { spot_price, ..Default::default() }
     }
 
+    /// Override the spot price.
     pub fn with_spot_price(mut self, spot_price: f64) -> Self {
         self.spot_price = spot_price;
         self
     }
 
+    /// Override the gas estimate.
     pub fn with_gas(mut self, gas: u64) -> Self {
         self.gas = gas;
         self
     }
 
+    /// Override the available liquidity.
     pub fn with_liquidity(mut self, liquidity: u128) -> Self {
         self.liquidity = liquidity;
         self
     }
 
+    /// Override the fee.
     pub fn with_fee(mut self, fee: f64) -> Self {
         self.fee = fee;
         self
     }
 
+    /// Register token decimals for the given tokens.
     pub fn with_tokens(mut self, tokens: &[Token]) -> Self {
         for token in tokens {
             self.token_decimals
@@ -261,6 +267,7 @@ pub fn token(addr_b: u8, symbol: &str) -> Token {
     token_with_decimals(addr_b, symbol, 18)
 }
 
+/// Construct a test `Token` with a single-byte address, symbol, and decimal count.
 pub fn token_with_decimals(addr_b: u8, symbol: &str, decimals: u32) -> Token {
     Token {
         address: addr(addr_b),

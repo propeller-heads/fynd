@@ -93,7 +93,12 @@ pub enum FyndError {
     /// A structured error response from the Fynd RPC API. Check `code` to distinguish permanent
     /// failures (e.g. `NoRouteFound`) from transient ones (e.g. `SolveTimeout`).
     #[error("API error ({code:?}): {message}")]
-    Api { code: ErrorCode, message: String },
+    Api {
+        /// The structured error code identifying the failure kind.
+        code: ErrorCode,
+        /// The human-readable error message returned by the server.
+        message: String,
+    },
 
     /// Malformed or unexpected data in the API response (e.g. an address with the wrong byte
     /// length, an unrecognised enum variant).

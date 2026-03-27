@@ -1,7 +1,7 @@
 //! Price provider trait and types.
 //!
-//! Defines the [`PriceProvider`] trait for fetching external token prices
-//! and supporting error and result types.
+//! Defines the [`provider::PriceProvider`](crate::price_guard::provider::PriceProvider) trait for
+//! fetching external token prices and supporting error and result types.
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -20,15 +20,26 @@ pub enum PriceProviderError {
 
     /// Token address not found in the market data registry.
     #[error("token not found: {address}")]
-    TokenNotFound { address: String },
+    TokenNotFound {
+        /// Hex-encoded address of the missing token.
+        address: String,
+    },
 
     /// No price data found for the requested token pair.
     #[error("price not found for pair {token_in} -> {token_out}")]
-    PriceNotFound { token_in: String, token_out: String },
+    PriceNotFound {
+        /// Input token identifier.
+        token_in: String,
+        /// Output token identifier.
+        token_out: String,
+    },
 
     /// Price data is stale (e.g., feed hasn't updated recently).
     #[error("price data stale: last update {age_ms}ms ago")]
-    StaleData { age_ms: u64 },
+    StaleData {
+        /// Milliseconds since the last successful price update.
+        age_ms: u64,
+    },
 }
 
 /// A price quote from an external source.
@@ -43,18 +54,22 @@ pub struct ExternalPrice {
 }
 
 impl ExternalPrice {
+    /// Create a new external price quote.
     pub fn new(expected_amount_out: BigUint, source: String, timestamp_ms: u64) -> Self {
         Self { expected_amount_out, source, timestamp_ms }
     }
 
+    /// Expected output amount in raw output token units.
     pub fn expected_amount_out(&self) -> &BigUint {
         &self.expected_amount_out
     }
 
+    /// Name of the price source (e.g. `"hyperliquid"`, `"binance_ws"`).
     pub fn source(&self) -> &str {
         &self.source
     }
 
+    /// Timestamp of the price data in Unix milliseconds.
     pub fn timestamp_ms(&self) -> u64 {
         self.timestamp_ms
     }

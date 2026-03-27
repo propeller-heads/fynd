@@ -38,7 +38,7 @@ use crate::AlgorithmError;
 // REQUEST TYPES
 // ============================================================================
 
-// Request to solve one or more swap orders.
+/// Request to solve one or more swap orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuoteRequest {
     /// Orders to solve.
@@ -593,8 +593,10 @@ pub enum OrderSide {
 #[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum OrderValidationError {
+    /// `token_in` and `token_out` are the same address.
     #[error("token_in and token_out must be different")]
     SameTokens,
+    /// The requested swap amount is zero.
     #[error("amount must be non-zero")]
     ZeroAmount,
 }
@@ -1076,17 +1078,32 @@ impl Route {
 #[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RouteValidationError {
+    /// Route contains no swaps.
     #[error("route must contain at least one swap")]
     EmptyRoute,
+    /// Adjacent swaps in the route do not share a token.
     #[non_exhaustive]
     #[error("swaps are not connected: {first_out} != {second_in}")]
-    DisconnectedSwaps { first_out: Address, second_in: Address },
+    DisconnectedSwaps {
+        /// Output token of the first swap.
+        first_out: Address,
+        /// Input token of the second swap.
+        second_in: Address,
+    },
+    /// Route contains a cycle involving a token that is not start == end.
     #[non_exhaustive]
     #[error(
         "unsupported cycle: token {token} appears more than once in route \
          {first} -> ... -> {last} (only first == last cycles are supported)"
     )]
-    UnsupportedCycle { token: Address, first: Address, last: Address },
+    UnsupportedCycle {
+        /// Token that appears more than once.
+        token: Address,
+        /// First token in the route.
+        first: Address,
+        /// Last token in the route.
+        last: Address,
+    },
 }
 
 /// A single swap within a route.
