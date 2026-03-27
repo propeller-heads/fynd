@@ -179,11 +179,21 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
 async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
-    // Load worker pools config
+    // Load worker pools config, falling back to the built-in defaults when the default path is
+    // absent (e.g. `cargo install`, Docker). Custom paths that don't exist still fail fast.
+    let default_path = std::path::Path::new("worker_pools.toml");
     let pools_config =
-        WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
-            SolverError::SetupError(format!("failed to load worker pools config: {}", e))
-        })?;
+        if args.worker_pools_config == default_path && !args.worker_pools_config.exists() {
+            warn!(
+                "worker_pools.toml not found; using built-in defaults. \
+             Set --worker-pools-config or WORKER_POOLS_CONFIG to use a custom config."
+            );
+            WorkerPoolsConfig::builtin_default()
+        } else {
+            WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
+                SolverError::SetupError(format!("failed to load worker pools config: {}", e))
+            })?
+        };
 
     // Parse chain
     let chain = parse_chain(&args.chain)

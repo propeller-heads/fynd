@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 pub use fynd_core::PoolConfig;
 use serde::{Deserialize, Serialize};
 
+/// The default worker pools configuration embedded at compile time.
+///
+/// Used as a fallback when the default `worker_pools.toml` path is not found at runtime,
+/// so the binary works out-of-the-box without a config file (e.g. `cargo install`, Docker).
+const DEFAULT_WORKER_POOLS_TOML: &str = include_str!("../../worker_pools.toml");
+
 /// Worker pools configuration loaded from TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPoolsConfig {
@@ -29,6 +35,13 @@ impl WorkerPoolsConfig {
     /// Consumes the config and returns the pools map.
     pub fn into_pools(self) -> HashMap<String, PoolConfig> {
         self.pools
+    }
+
+    /// Returns the built-in default configuration embedded in the binary.
+    ///
+    /// This is the repo-root `worker_pools.toml` baked in at compile time.
+    pub fn builtin_default() -> Self {
+        toml::from_str(DEFAULT_WORKER_POOLS_TOML).expect("built-in worker_pools.toml is valid TOML")
     }
 
     /// Load worker pools configuration from a TOML file.
@@ -82,6 +95,12 @@ impl BlacklistConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_builtin_default_does_not_panic() {
+        let config = WorkerPoolsConfig::builtin_default();
+        assert!(!config.pools().is_empty(), "built-in config must have at least one pool");
+    }
 
     #[test]
     fn test_pool_config_minimal_uses_defaults() {
