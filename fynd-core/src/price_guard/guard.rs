@@ -119,7 +119,7 @@ impl PriceGuard {
         for result in &results {
             match result {
                 Ok(price) => {
-                    all_errors = false;
+                    has_price = true;
                     if self.price_within_tolerance(quote, price, config) {
                         return true;
                     }
@@ -160,8 +160,6 @@ impl PriceGuard {
 
         let provider_amount_out = provider_price.expected_amount_out();
         let fynd_amount_out = quote.amount_out();
-        let diff;
-        let tolerance;
 
         let (diff, tolerance) = if fynd_amount_out >= provider_amount_out {
             (fynd_amount_out - provider_amount_out, config.upper_tolerance_bps())
