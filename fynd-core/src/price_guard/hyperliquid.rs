@@ -4,8 +4,8 @@
 //! in memory. The [`HyperliquidProvider`] reads from this cache to validate solution prices.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    collections::{HashMap, HashSet},
+    sync::{Arc, LazyLock, RwLock},
     time::Duration,
 };
 
@@ -55,8 +55,10 @@ fn normalize_symbol(symbol: &str) -> (String, f64) {
 const API_URL: &str = "https://api.hyperliquid.xyz/info";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Stablecoins pegged to USD that aren't listed as Hyperliquid perps.
-const USD_STABLECOINS: &[&str] = &["USDC", "USDT", "DAI", "FRAX"];
+/// USD-pegged stablecoins. Loaded from `stable_usd.json` — shared across providers.
+static USD_STABLECOINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("stable_usd.json")).expect("stable_usd.json is valid")
+});
 
 /// Cached oracle price entry (USD-denominated).
 #[derive(Debug, Clone)]
@@ -256,9 +258,9 @@ impl HyperliquidWorker {
             }
         }
 
-        for stable in USD_STABLECOINS {
+        for stable in USD_STABLECOINS.iter() {
             new_cache
-                .entry((*stable).to_string())
+                .entry(stable.clone())
                 .or_insert(OraclePrice { usd_price: 1.0, timestamp_ms: now_ms });
         }
 
