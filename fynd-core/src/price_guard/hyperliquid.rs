@@ -13,7 +13,7 @@ use num_bigint::BigUint;
 use reqwest::Client;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::tycho_common::models::{token::Token, Address};
 
 use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
@@ -27,10 +27,10 @@ use crate::feed::market_data::SharedMarketDataRef;
 /// to a per-token basis. For most tokens this is `1.0`. Curated from the Hyperliquid perp
 /// universe across three categories:
 ///
-/// 1. **Wrapped native tokens** — on-chain "W"-prefixed wrappers of chain gas tokens.
-///    Tokens like WLD/WIF whose names happen to start with W are NOT included.
-/// 2. **k-prefix tokens** — Hyperliquid quotes these per 1,000 tokens to avoid tiny
-///    decimals. `price_scale` is `0.001` so callers get the per-token price.
+/// 1. **Wrapped native tokens** — on-chain "W"-prefixed wrappers of chain gas tokens. Tokens like
+///    WLD/WIF whose names happen to start with W are NOT included.
+/// 2. **k-prefix tokens** — Hyperliquid quotes these per 1,000 tokens to avoid tiny decimals.
+///    `price_scale` is `0.001` so callers get the per-token price.
 fn normalize_symbol(symbol: &str) -> (String, f64) {
     match symbol.to_uppercase().as_str() {
         // Wrapped native tokens
@@ -52,8 +52,7 @@ fn normalize_symbol(symbol: &str) -> (String, f64) {
     }
 }
 
-const DEFAULT_API_URL: &str = "https://api.hyperliquid.xyz/info";
-const API_URL_ENV_VAR: &str = "HYPERLIQUID_API_URL";
+const API_URL: &str = "https://api.hyperliquid.xyz/info";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Stablecoins pegged to USD that aren't listed as Hyperliquid perps.
@@ -70,13 +69,7 @@ struct OraclePrice {
 type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
 
 /// Cached token metadata resolved from on-chain addresses.
-type TokenCache = Arc<RwLock<HashMap<Address, TokenInfo>>>;
-
-#[derive(Debug, Clone)]
-struct TokenInfo {
-    symbol: String,
-    decimals: u32,
-}
+type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 
 /// Hyperliquid oracle price provider.
 ///
@@ -93,33 +86,18 @@ pub struct HyperliquidProvider {
 
 impl HyperliquidProvider {
     pub fn new(poll_interval: Duration) -> Self {
-        let api_url =
-            std::env::var(API_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
         Self {
             price_cache: Arc::new(RwLock::new(HashMap::new())),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
             poll_interval,
-            api_url,
-        }
-    }
-
-    /// Overrides the Hyperliquid API endpoint URL
-    pub fn new_with_api_url(poll_interval: Duration, api_url: impl Into<String>) -> Self {
-        Self {
-            api_url: api_url.into(),
-            price_cache: Arc::new(RwLock::new(HashMap::new())),
-            token_cache: Arc::new(RwLock::new(HashMap::new())),
-            poll_interval,
+            api_url: API_URL.to_string(),
         }
     }
 
     /// Resolves a token address to (hyperliquid_symbol, decimals, price_scale) from the local
     /// token cache. The `price_scale` factor converts Hyperliquid's oracle price to a per-token
     /// basis (relevant for k-prefix tokens).
-    fn resolve_token(
-        &self,
-        address: &Address,
-    ) -> Result<(String, u32, f64), PriceProviderError> {
+    fn resolve_token(&self, address: &Address) -> Result<(String, u32, f64), PriceProviderError> {
         let cache = self
             .token_cache
             .read()
@@ -224,19 +202,13 @@ impl HyperliquidWorker {
     async fn refresh_token_cache(&self) {
         // Keep the `SharedMarketData` read-lock held for as short a time as possible:
         // snapshot only the fields we need, then build the local cache off-lock.
-        let token_entries: Vec<(Address, String, u32)> = {
+        let new_cache: HashMap<Address, Token> = {
             let data = self.market_data.read().await;
             data.token_registry_ref()
                 .iter()
-                .map(|(address, token)| (address.clone(), token.symbol.clone(), token.decimals))
+                .map(|(address, token)| (address.clone(), token.clone()))
                 .collect()
         };
-
-        // Build the next cache snapshot off-lock so the write-lock is held briefly.
-        let mut new_cache: HashMap<Address, TokenInfo> = HashMap::new();
-        for (address, symbol, decimals) in token_entries {
-            new_cache.insert(address, TokenInfo { symbol, decimals });
-        }
 
         let mut cache = match self.token_cache.write() {
             Ok(c) => c,
@@ -264,7 +236,7 @@ impl HyperliquidWorker {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        // Build the next snapshot off-lock, then swap it in atomically.
+        // Build the full snapshot before acquiring the write-lock to minimize hold time.
         let mut new_cache: HashMap<String, OraclePrice> = HashMap::new();
         let mut count = 0;
 
@@ -384,16 +356,20 @@ mod tests {
                 .token_cache
                 .write()
                 .expect("lock");
-            cache.insert(weth_address(), TokenInfo { symbol: "WETH".to_string(), decimals: 18 });
-            cache.insert(usdc_address(), TokenInfo { symbol: "USDC".to_string(), decimals: 6 });
+            let weth = make_token(weth_address(), "WETH", 18);
+            cache.insert(weth.address.clone(), weth);
+            let usdc = make_token(usdc_address(), "USDC", 6);
+            cache.insert(usdc.address.clone(), usdc);
             let link_addr: Address = "514910771AF9Ca656af840dff83E8264EcF986CA"
                 .parse()
                 .expect("valid address");
-            cache.insert(link_addr, TokenInfo { symbol: "LINK".to_string(), decimals: 18 });
+            let link = make_token(link_addr, "LINK", 18);
+            cache.insert(link.address.clone(), link);
             let aave_addr: Address = "7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"
                 .parse()
                 .expect("valid address");
-            cache.insert(aave_addr, TokenInfo { symbol: "AAVE".to_string(), decimals: 18 });
+            let aave = make_token(aave_addr, "AAVE", 18);
+            cache.insert(aave.address.clone(), aave);
         }
 
         provider
@@ -474,8 +450,10 @@ mod tests {
                 .token_cache
                 .write()
                 .expect("lock");
-            cache.insert(weth_address(), TokenInfo { symbol: "WETH".to_string(), decimals: 18 });
-            cache.insert(usdc_address(), TokenInfo { symbol: "USDC".to_string(), decimals: 6 });
+            let weth = make_token(weth_address(), "WETH", 18);
+            cache.insert(weth.address.clone(), weth);
+            let usdc = make_token(usdc_address(), "USDC", 6);
+            cache.insert(usdc.address.clone(), usdc);
         }
 
         let one_eth = BigUint::from(10u64).pow(18);
