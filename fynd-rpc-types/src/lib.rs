@@ -10,8 +10,94 @@
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::{tycho_common::models::Address, tycho_core::Bytes};
 use uuid::Uuid;
+
+// ── Primitive byte types ──────────────────────────────────────────────────────
+//
+// Wire-format: `"0x{lowercase hex}"` on serialize; accepts with or without the
+// `0x` prefix on deserialize. Replaces the unconditional tycho-simulation dep
+// so crates that don't need the `core` feature (e.g. fynd-client) compile
+// without the full simulation stack.
+
+mod hex_bytes_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(x: &bytes::Bytes, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&format!("0x{}", hex::encode(x.as_ref())))
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<bytes::Bytes, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(d)?;
+        let stripped = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(stripped)
+            .map(bytes::Bytes::from)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// A byte sequence that serializes as `"0x{lowercase hex}"` in JSON.
+///
+/// Deserialization accepts hex strings with or without the `0x` prefix.
+///
+/// The inner `bytes::Bytes` is `pub` to allow zero-copy conversions with other
+/// crates that also wrap `bytes::Bytes` (e.g. the `core` feature bridge to tycho).
+#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Bytes(#[serde(with = "hex_bytes_serde")] pub bytes::Bytes);
+
+impl Bytes {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bytes(0x{})", hex::encode(self.0.as_ref()))
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<&[u8]> for Bytes {
+    fn from(src: &[u8]) -> Self {
+        Self(bytes::Bytes::copy_from_slice(src))
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(src: Vec<u8>) -> Self {
+        Self(src.into())
+    }
+}
+
+impl From<bytes::Bytes> for Bytes {
+    fn from(src: bytes::Bytes) -> Self {
+        Self(src)
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for Bytes {
+    fn from(src: [u8; N]) -> Self {
+        Self(bytes::Bytes::copy_from_slice(&src))
+    }
+}
+
+/// An EVM address — 20 bytes, same wire format as `Bytes`.
+pub type Address = Bytes;
 
 // ============================================================================
 // REQUEST TYPES
@@ -1153,7 +1239,6 @@ fn generate_order_id() -> String {
 #[cfg(test)]
 mod serde_tests {
     use num_bigint::BigUint;
-    use tycho_simulation::{tycho_common::models::Address, tycho_core::Bytes};
 
     use super::*;
 
@@ -1534,7 +1619,26 @@ mod serde_tests {
 ///   violate the orphan rule.)
 #[cfg(feature = "core")]
 mod conversions {
+    use tycho_simulation::tycho_core::Bytes as TychoBytes;
+
     use super::*;
+
+    // ── Byte-type bridge ─────────────────────────────────────────────────────
+    //
+    // Both types wrap `bytes::Bytes` and share the same wire format. The inner
+    // field is `pub` on TychoBytes, so the conversion is zero-copy.
+
+    impl From<TychoBytes> for Bytes {
+        fn from(b: TychoBytes) -> Self {
+            Self(b.0)
+        }
+    }
+
+    impl From<Bytes> for TychoBytes {
+        fn from(b: Bytes) -> Self {
+            Self(b.0)
+        }
+    }
 
     // -------------------------------------------------------------------------
     // DTO → Core  (use Into; From<DTO> on core types would violate orphan rules)
@@ -1578,7 +1682,7 @@ mod conversions {
             if let (Some(permit), Some(sig)) = (self.permit, self.permit2_signature) {
                 opts = opts
                     .with_permit(permit.into())
-                    .with_signature(sig);
+                    .with_signature(sig.into());
             }
             if let Some(fee) = self.client_fee_params {
                 opts = opts.with_client_fee_params(fee.into());
@@ -1591,10 +1695,10 @@ mod conversions {
         fn into(self) -> fynd_core::ClientFeeParams {
             fynd_core::ClientFeeParams::new(
                 self.bps,
-                self.receiver,
+                self.receiver.into(),
                 self.max_contribution,
                 self.deadline,
-                self.signature,
+                self.signature.into(),
             )
         }
     }
@@ -1613,28 +1717,37 @@ mod conversions {
 
     impl Into<fynd_core::PermitSingle> for PermitSingle {
         fn into(self) -> fynd_core::PermitSingle {
-            fynd_core::PermitSingle::new(self.details.into(), self.spender, self.sig_deadline)
+            fynd_core::PermitSingle::new(
+                self.details.into(),
+                self.spender.into(),
+                self.sig_deadline,
+            )
         }
     }
 
     impl Into<fynd_core::PermitDetails> for PermitDetails {
         fn into(self) -> fynd_core::PermitDetails {
-            fynd_core::PermitDetails::new(self.token, self.amount, self.expiration, self.nonce)
+            fynd_core::PermitDetails::new(
+                self.token.into(),
+                self.amount,
+                self.expiration,
+                self.nonce,
+            )
         }
     }
 
     impl Into<fynd_core::Order> for Order {
         fn into(self) -> fynd_core::Order {
             let mut order = fynd_core::Order::new(
-                self.token_in,
-                self.token_out,
+                self.token_in.into(),
+                self.token_out.into(),
                 self.amount,
                 self.side.into(),
-                self.sender,
+                self.sender.into(),
             )
             .with_id(self.id);
             if let Some(r) = self.receiver {
-                order = order.with_receiver(r);
+                order = order.with_receiver(r.into());
             }
             order
         }
@@ -1746,8 +1859,8 @@ mod conversions {
             Self {
                 component_id: core.component_id().to_string(),
                 protocol: core.protocol().to_string(),
-                token_in: core.token_in().clone(),
-                token_out: core.token_out().clone(),
+                token_in: core.token_in().clone().into(),
+                token_out: core.token_out().clone().into(),
                 amount_in: core.amount_in().clone(),
                 amount_out: core.amount_out().clone(),
                 gas_estimate: core.gas_estimate().clone(),
@@ -1758,7 +1871,11 @@ mod conversions {
 
     impl From<fynd_core::Transaction> for Transaction {
         fn from(core: fynd_core::Transaction) -> Self {
-            Self { to: core.to().clone(), value: core.value().clone(), data: core.data().to_vec() }
+            Self {
+                to: core.to().clone().into(),
+                value: core.value().clone(),
+                data: core.data().to_vec(),
+            }
         }
     }
 
@@ -1776,7 +1893,6 @@ mod conversions {
     #[cfg(test)]
     mod tests {
         use num_bigint::BigUint;
-        use tycho_simulation::tycho_common::models::Address;
 
         use super::*;
 
@@ -1830,14 +1946,12 @@ mod conversions {
 
         #[test]
         fn test_client_fee_params_into_core() {
-            use tycho_simulation::tycho_core::Bytes as TychoBytes;
-
             let dto = ClientFeeParams::new(
                 200,
-                TychoBytes::from(make_address(0xBB).as_ref()),
+                Bytes::from(make_address(0xBB).as_ref()),
                 BigUint::from(1_000_000u64),
                 1_893_456_000u64,
-                TychoBytes::from(vec![0xAB; 65]),
+                Bytes::from(vec![0xABu8; 65]),
             );
             let core: fynd_core::ClientFeeParams = dto.into();
             assert_eq!(core.bps(), 200);
@@ -1848,14 +1962,12 @@ mod conversions {
 
         #[test]
         fn test_encoding_options_with_client_fee_into_core() {
-            use tycho_simulation::tycho_core::Bytes as TychoBytes;
-
             let fee = ClientFeeParams::new(
                 100,
-                TychoBytes::from(make_address(0xCC).as_ref()),
+                Bytes::from(make_address(0xCC).as_ref()),
                 BigUint::from(500u64),
                 9_999u64,
-                TychoBytes::from(vec![0xDE; 65]),
+                Bytes::from(vec![0xDEu8; 65]),
             );
             let dto = EncodingOptions::new(0.005).with_client_fee_params(fee);
             let core: fynd_core::EncodingOptions = dto.into();
@@ -1868,14 +1980,12 @@ mod conversions {
 
         #[test]
         fn test_client_fee_params_serde_roundtrip() {
-            use tycho_simulation::tycho_core::Bytes as TychoBytes;
-
             let fee = ClientFeeParams::new(
                 150,
-                TychoBytes::from(make_address(0xDD).as_ref()),
+                Bytes::from(make_address(0xDD).as_ref()),
                 BigUint::from(999_999u64),
                 1_700_000_000u64,
-                TychoBytes::from(vec![0xFF; 65]),
+                Bytes::from(vec![0xFFu8; 65]),
             );
             let json = serde_json::to_string(&fee).unwrap();
             assert!(json.contains(r#""max_contribution":"999999""#));

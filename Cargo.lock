@@ -3372,7 +3372,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "tycho-simulation",
  "wiremock",
 ]
 
@@ -3439,6 +3438,7 @@ dependencies = [
 name = "fynd-rpc-types"
 version = "0.38.0"
 dependencies = [
+ "bytes",
  "fynd-core",
  "hex",
  "num-bigint",

@@ -5,7 +5,6 @@
 
 use fynd_rpc_types as dto;
 use fynd_rpc_types::OrderQuote;
-use tycho_simulation::tycho_common::models::Address as TychoAddress;
 
 use crate::{
     error::{ErrorCode, FyndError},
@@ -29,19 +28,17 @@ pub(crate) fn bytes_to_alloy_address(
     Ok(alloy::primitives::Address::from(arr))
 }
 
-/// Convert a client `bytes::Bytes` address to a tycho DTO-format address.
-fn bytes_to_tycho(b: &bytes::Bytes) -> Result<TychoAddress, FyndError> {
+/// Wrap a client `bytes::Bytes` address as a DTO address, validating the 20-byte length.
+fn bytes_to_dto_addr(b: &bytes::Bytes) -> Result<dto::Bytes, FyndError> {
     if b.len() != 20 {
         return Err(FyndError::Protocol(format!("expected 20-byte address, got {} bytes", b.len())));
     }
-    // hex_bytes::Bytes has From<bytes::Bytes>
-    Ok(TychoAddress::from(b.clone()))
+    Ok(dto::Bytes::from(b.as_ref()))
 }
 
-/// Convert a tycho DTO-format address to a client `bytes::Bytes` address.
-fn tycho_to_bytes(addr: TychoAddress) -> bytes::Bytes {
-    // hex_bytes::Bytes has From<Bytes> -> bytes::Bytes, and inner field .0 is pub
-    addr.0
+/// Unwrap a DTO address back to a client `bytes::Bytes`.
+fn dto_addr_to_bytes(b: dto::Bytes) -> bytes::Bytes {
+    b.0
 }
 
 // ============================================================================
@@ -67,12 +64,12 @@ impl TryFrom<Order> for dto::Order {
     type Error = FyndError;
 
     fn try_from(order: Order) -> Result<Self, Self::Error> {
-        let token_in = bytes_to_tycho(order.token_in())?;
-        let token_out = bytes_to_tycho(order.token_out())?;
-        let sender = bytes_to_tycho(order.sender())?;
+        let token_in = bytes_to_dto_addr(order.token_in())?;
+        let token_out = bytes_to_dto_addr(order.token_out())?;
+        let sender = bytes_to_dto_addr(order.sender())?;
         let receiver = order
             .receiver()
-            .map(bytes_to_tycho)
+            .map(bytes_to_dto_addr)
             .transpose()?;
         let mut dto_order = dto::Order::new(
             token_in,
@@ -121,7 +118,6 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
     type Error = FyndError;
 
     fn try_from(opts: EncodingOptions) -> Result<Self, Self::Error> {
-        use tycho_simulation::tycho_core::Bytes as TychoBytes;
         let mut dto_opts =
             dto::EncodingOptions::new(opts.slippage).with_transfer_type(opts.transfer_type.into());
         if let (Some(permit), Some(sig)) = (
@@ -129,17 +125,21 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
                 .map(dto::PermitSingle::try_from)
                 .transpose()?,
             opts.permit2_signature
-                .map(TychoBytes::from),
+                .map(|b| dto::Bytes::from(b.as_ref())),
         ) {
             dto_opts = dto_opts.with_permit2(permit, sig);
         }
         if let Some(fee) = opts.client_fee_params {
             dto_opts = dto_opts.with_client_fee_params(dto::ClientFeeParams::new(
                 fee.bps,
-                TychoBytes::from(fee.receiver),
+                dto::Bytes::from(fee.receiver.as_ref()),
                 fee.max_contribution,
                 fee.deadline,
-                TychoBytes::from(fee.signature.unwrap_or_default()),
+                dto::Bytes::from(
+                    fee.signature
+                        .unwrap_or_default()
+                        .as_ref(),
+                ),
             ));
         }
         Ok(dto_opts)
@@ -150,9 +150,8 @@ impl TryFrom<PermitSingle> for dto::PermitSingle {
     type Error = FyndError;
 
     fn try_from(p: PermitSingle) -> Result<Self, Self::Error> {
-        use tycho_simulation::tycho_core::Bytes as TychoBytes;
         let details = dto::PermitDetails::try_from(p.details)?;
-        let spender = TychoBytes::from(bytes_to_tycho(&p.spender)?.0);
+        let spender = bytes_to_dto_addr(&p.spender)?;
         Ok(dto::PermitSingle::new(details, spender, p.sig_deadline))
     }
 }
@@ -161,8 +160,7 @@ impl TryFrom<PermitDetails> for dto::PermitDetails {
     type Error = FyndError;
 
     fn try_from(d: PermitDetails) -> Result<Self, Self::Error> {
-        use tycho_simulation::tycho_core::Bytes as TychoBytes;
-        let token = TychoBytes::from(bytes_to_tycho(&d.token)?.0);
+        let token = bytes_to_dto_addr(&d.token)?;
         Ok(dto::PermitDetails::new(token, d.amount, d.expiration, d.nonce))
     }
 }
@@ -276,8 +274,8 @@ impl TryFrom<dto::Swap> for Swap {
     type Error = FyndError;
 
     fn try_from(ds: dto::Swap) -> Result<Self, Self::Error> {
-        let token_in = tycho_to_bytes(ds.token_in().clone());
-        let token_out = tycho_to_bytes(ds.token_out().clone());
+        let token_in = dto_addr_to_bytes(ds.token_in().clone());
+        let token_out = dto_addr_to_bytes(ds.token_out().clone());
         Ok(Swap::new(
             ds.component_id().to_string(),
             ds.protocol().to_string(),
@@ -413,10 +411,9 @@ mod tests {
 
     #[test]
     fn transaction_from_dto() {
-        use tycho_simulation::tycho_core::Bytes as TychoBytes;
         let router_bytes = vec![0x01u8; 20];
         let dto_tx = dto::Transaction::new(
-            TychoBytes::from(Bytes::copy_from_slice(&router_bytes)),
+            dto::Bytes::from(router_bytes.as_slice()),
             BigUint::ZERO,
             vec![0x12, 0x34],
         );
@@ -526,10 +523,9 @@ mod tests {
         );
 
         let dto_order = dto::Order::try_from(order).unwrap();
-        // Verify token addresses are correctly represented as Tycho addresses
-        assert_eq!(dto_order.token_in().0, Bytes::copy_from_slice(&[0xaa; 20]));
-        assert_eq!(dto_order.token_out().0, Bytes::copy_from_slice(&[0xbb; 20]));
-        assert_eq!(dto_order.sender().0, Bytes::copy_from_slice(&[0xcc; 20]));
+        assert_eq!(dto_order.token_in().as_ref(), &[0xaa; 20]);
+        assert_eq!(dto_order.token_out().as_ref(), &[0xbb; 20]);
+        assert_eq!(dto_order.sender().as_ref(), &[0xcc; 20]);
         assert!(dto_order.receiver().is_none());
         assert_eq!(dto_order.amount(), &BigUint::from(1_000u32));
     }
@@ -547,7 +543,7 @@ mod tests {
 
         let dto_order = dto::Order::try_from(order).unwrap();
         let receiver = dto_order.receiver().unwrap();
-        assert_eq!(receiver.0, Bytes::copy_from_slice(&[0xdd; 20]));
+        assert_eq!(receiver.as_ref(), &[0xdd; 20]);
     }
 
     #[test]

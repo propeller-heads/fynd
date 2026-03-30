@@ -143,8 +143,8 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
 pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
     let body = dto::InstanceInfo::new(
         state.chain_id(),
-        state.router_address().clone(),
-        state.permit2_address().clone(),
+        state.router_address().clone().into(),
+        state.permit2_address().clone().into(),
     );
     HttpResponse::Ok().json(body)
 }
