@@ -220,7 +220,7 @@ solving.
 | `--min-tvl`                  | -                     | `10.0`              | Minimum pool TVL in native token           |
 | `--worker-router-timeout-ms` | -                     | `100`               | Default solve timeout                      |
 | `-w, --worker-pools-config`  | `WORKER_POOLS_CONFIG` | `worker_pools.toml` | Worker pools config                        |
-| `--blocklist-config`               | `BLOCKLIST_CONFIG` | `blocklist.toml` | Path to blocklist TOML config file               |
+| `--blocklist-config`         | `BLOCKLIST_CONFIG`    | `blocklist.toml`    | Path to blocklist TOML config file         |
 | `--gas-price-stale-threshold-secs` | -               | *(disabled)*        | Health returns 503 when gas price exceeds this age |
 
 See `--help` for the full list.
@@ -262,7 +262,7 @@ Each order gets 2 candidate solutions — one from each pool — and the best is
 
 ### Blocklist Config
 
-By default, Fynd loads `blocklist.toml` from the working directory. The shipped default excludes components with known
+By default, Fynd loads `blocklist.toml` from the working directory. The default excludes components with known
 simulation issues (e.g., rebasing tokens). Override with `--blocklist-config`:
 
 ```bash

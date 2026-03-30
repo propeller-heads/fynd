@@ -8,13 +8,13 @@ services:
       - "9898:9898"
     volumes:
       - ./worker_pools.toml:/etc/fynd/worker_pools.toml:ro
-      - ./blacklist.toml:/etc/fynd/blacklist.toml:ro
+      - ./blocklist.toml:/etc/fynd/blocklist.toml:ro
     environment:
       - RPC_URL=${RPC_URL}
       - TYCHO_API_KEY=${TYCHO_API_KEY:-}
       - TYCHO_URL=${TYCHO_URL:-tycho-fynd-ethereum.propellerheads.xyz}
       - WORKER_POOLS_CONFIG=/etc/fynd/worker_pools.toml
-      - BLACKLIST_CONFIG=/etc/fynd/blacklist.toml
+      - BLOCKLIST_CONFIG=/etc/fynd/blocklist.toml
       - RUST_LOG=fynd=info
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
     depends_on:
