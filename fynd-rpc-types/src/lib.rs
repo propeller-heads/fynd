@@ -1655,7 +1655,7 @@ mod conversions {
             // Unset fields get core defaults
             assert_eq!(core.upper_tolerance_bps(), 10_000);
             assert!(!core.allow_on_provider_error());
-            assert!(core.enabled());
+            assert!(!core.enabled());
         }
 
         #[test]
