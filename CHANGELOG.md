@@ -1,3 +1,10 @@
+## [0.38.0](https://github.com/propeller-heads/fynd/compare/0.37.1...0.38.0) (2026-03-30)
+
+
+### Features
+
+* **config:** embed blacklist defaults in binary ([abd1f2d](https://github.com/propeller-heads/fynd/commit/abd1f2d1c498c4cfc86bd2fcc2a9b3c7905ff132))
+
 ## [0.37.1](https://github.com/propeller-heads/fynd/compare/0.37.0...0.37.1) (2026-03-30)
 
 
