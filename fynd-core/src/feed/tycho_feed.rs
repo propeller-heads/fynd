@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+use metrics::gauge;
 use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinHandle,
@@ -330,7 +331,7 @@ impl TychoFeed {
         );
         trace!("Updating market data");
         // Update market data. We should only hold the write lock inside this code block.
-        {
+        let (pool_counts, simulation_states_total) = {
             let mut market_data = self
                 .market_data
                 .write()
@@ -371,8 +372,25 @@ impl TychoFeed {
             if let Some(block_info) = latest_block_info {
                 market_data.update_last_updated(block_info);
             }
+
+            let pool_counts = market_data.pool_counts_by_protocol();
+            let simulation_states_total = market_data.simulation_states_count();
+            (pool_counts, simulation_states_total)
+        };
+
+        for (protocol, count) in &pool_counts {
+            gauge!("pool_count", "protocol" => protocol.clone()).set(*count as f64);
         }
-        trace!("Market data updated");
+        gauge!("simulation_states_total").set(simulation_states_total as f64);
+
+        let total_pools: usize = pool_counts.values().sum();
+        let mut breakdown: Vec<_> = pool_counts.into_iter().collect();
+        breakdown.sort_by_key(|b| std::cmp::Reverse(b.1));
+        let breakdown_str: Vec<String> = breakdown
+            .iter()
+            .map(|(proto, count)| format!("{}={}", proto, count))
+            .collect();
+        info!(total_pools, simulation_states_total, "pool counts: [{}]", breakdown_str.join(", "));
 
         // Only broadcast event if there are actual changes
         if !added_components.is_empty() ||

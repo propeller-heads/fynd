@@ -20,6 +20,7 @@
 pub mod api;
 pub mod builder;
 pub mod config;
+pub mod middleware;
 pub mod protocols;
 
 // Re-export key RPC types

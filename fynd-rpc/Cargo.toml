@@ -9,6 +9,7 @@ license = "MIT"
 fynd-core.workspace = true
 fynd-rpc-types = { workspace = true, features = ["openapi", "core"] }
 actix-web.workspace = true
+actix-cors.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 tycho-simulation.workspace = true

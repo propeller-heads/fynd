@@ -32,7 +32,9 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 
 # Serialization (for OpenAPI spec output)
 serde_json = { workspace = true }
@@ -42,6 +44,9 @@ utoipa = { workspace = true }
 
 # Tycho (for Chain type in CLI)
 tycho-simulation = { workspace = true }
+
+[features]
+experimental = ["fynd-rpc/experimental"]
 
 [dev-dependencies]
 rstest = { workspace = true }
@@ -88,6 +93,7 @@ alloy = { version = "1", features = [
 ] }
 # HTTP
 actix-web = "4"
+actix-cors = "0.7"
 
 # Async
 tokio = { version = "1", features = ["full", "sync"] }

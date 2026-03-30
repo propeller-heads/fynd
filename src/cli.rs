@@ -108,6 +108,11 @@ pub struct ServeArgs {
     /// Disabled by default.
     #[arg(long)]
     pub gas_price_stale_threshold_secs: Option<u64>,
+
+    /// Comma-separated list of allowed CORS origins (e.g. https://app.turbine.exchange).
+    /// If empty, all origins are allowed.
+    #[arg(long, env, value_delimiter = ',')]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 #[cfg(test)]

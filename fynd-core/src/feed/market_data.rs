@@ -170,6 +170,22 @@ impl SharedMarketData {
         self.last_updated = Some(block_info);
     }
 
+    /// Returns the total number of simulation states.
+    pub fn simulation_states_count(&self) -> usize {
+        self.simulation_states.len()
+    }
+
+    /// Returns pool counts grouped by protocol system.
+    pub fn pool_counts_by_protocol(&self) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for component in self.components.values() {
+            *counts
+                .entry(component.protocol_system.clone())
+                .or_default() += 1;
+        }
+        counts
+    }
+
     /// Creates a filtered subset containing only data needed for the given components.
     ///
     /// This is used to create a local snapshot of market data that can be used for

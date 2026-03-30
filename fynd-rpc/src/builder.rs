@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use actix_cors::Cors;
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use fynd_core::{encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder};
@@ -22,6 +23,8 @@ pub struct FyndRPCBuilder {
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
+    /// Allowed CORS origins. If empty, CORS is permissive (allow all).
+    cors_allowed_origins: Vec<String>,
 }
 
 impl FyndRPCBuilder {
@@ -50,6 +53,7 @@ impl FyndRPCBuilder {
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
+            cors_allowed_origins: Vec::new(),
         }
     }
 
@@ -62,6 +66,12 @@ impl FyndRPCBuilder {
     /// Sets the HTTP port (default: 3000).
     pub fn http_port(mut self, port: u16) -> Self {
         self.http_port = port;
+        self
+    }
+
+    /// Sets allowed CORS origins. If empty, all origins are allowed.
+    pub fn cors_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = origins;
         self
     }
 
@@ -226,9 +236,27 @@ impl FyndRPCBuilder {
             gas_token,
         );
 
+        let cors_origins = self.cors_allowed_origins.clone();
         let server = HttpServer::new(move || {
+            let cors = if cors_origins.is_empty() {
+                Cors::permissive()
+            } else {
+                let mut cors = Cors::default()
+                    .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+                    .allowed_headers(vec![
+                        actix_web::http::header::CONTENT_TYPE,
+                        actix_web::http::header::ACCEPT,
+                    ])
+                    .max_age(3600);
+                for origin in &cors_origins {
+                    cors = cors.allowed_origin(origin);
+                }
+                cors
+            };
             App::new()
+                .wrap(cors)
                 .wrap(tracing_actix_web::TracingLogger::default())
+                .wrap(crate::middleware::MetricsMiddleware)
                 .configure(|cfg| configure_app(cfg, app_state.clone()))
         })
         .bind((self.http_host.as_str(), self.http_port))

@@ -38,6 +38,7 @@ use fynd_rpc::{
     config::{defaults, BlacklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };
+use metrics::gauge;
 mod cli;
 use cli::{Cli, Commands};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -176,6 +177,22 @@ fn create_metrics_exporter() -> tokio::task::JoinHandle<()> {
     })
 }
 
+fn spawn_rss_reporter() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
+        let pid = sysinfo::get_current_pid().expect("failed to get current PID");
+        loop {
+            let mut system = sysinfo::System::new();
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            if let Some(process) = system.process(pid) {
+                let rss_bytes = process.memory();
+                gauge!("process_rss_bytes").set(rss_bytes as f64);
+                info!(rss_mb = rss_bytes / (1024 * 1024), "process memory");
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    })
+}
+
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
 async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
@@ -273,7 +290,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
             .gas_price_stale_threshold(
                 args.gas_price_stale_threshold_secs
                     .map(Duration::from_secs),
-            );
+            )
+            .cors_allowed_origins(args.cors_allowed_origins.clone());
 
     if args.disable_tls {
         builder = builder.disable_tls();
@@ -312,6 +330,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     info!("Starting Fynd");
 
     let _metrics_task = create_metrics_exporter();
+    let _rss_task = spawn_rss_reporter();
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {
