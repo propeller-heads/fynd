@@ -12,7 +12,34 @@ use serde::{Deserialize, Serialize};
 ///
 /// Used as a fallback when the default `worker_pools.toml` path is not found at runtime,
 /// so the binary works out-of-the-box without a config file (e.g. `cargo install`, Docker).
-const DEFAULT_WORKER_POOLS_TOML: &str = include_str!("../../worker_pools.toml");
+///
+/// Keep in sync with the repo-root `worker_pools.toml` (the user-facing example config).
+/// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
+/// and the file lives outside the `fynd-rpc` package directory.
+const DEFAULT_WORKER_POOLS_TOML: &str = r#"
+[pools.most_liquid_2_hops_fast]
+algorithm = "most_liquid"
+num_workers = 5
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 100
+max_routes = 50
+
+[pools.most_liquid_3_hops]
+algorithm = "most_liquid"
+num_workers = 3
+task_queue_capacity = 1000
+min_hops = 2
+max_hops = 3
+timeout_ms = 5000
+
+[pools.bellman_ford_5_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 5
+timeout_ms = 500
+"#;
 
 /// Worker pools configuration loaded from TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
