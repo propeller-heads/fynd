@@ -1,3 +1,17 @@
+## [0.39.0](https://github.com/propeller-heads/fynd/compare/0.38.0...0.39.0) (2026-03-30)
+
+
+### Features
+
+* **docker:** add fynd-swap-cli binary to Docker image ([ba98305](https://github.com/propeller-heads/fynd/commit/ba98305b87e0d5e8e8c68f62ae17247ecd8f6ac9))
+
+
+### Bug Fixes
+
+* **swap-cli:** fix balance slot detection for bit-packed tokens (e.g. USDC) ([a54e488](https://github.com/propeller-heads/fynd/commit/a54e488ca5a548d38391b3cf5666ee1c6e35c384))
+* **swap-cli:** make dry-run work without real funds ([83ad717](https://github.com/propeller-heads/fynd/commit/83ad717720266c923f6843bed817be10587cc893))
+* **swap-cli:** remove embedded solver to speed up builds ([e4fe30c](https://github.com/propeller-heads/fynd/commit/e4fe30c73081d8bab37829918b4b557e06729ad9))
+
 ## [0.38.0](https://github.com/propeller-heads/fynd/compare/0.37.1...0.38.0) (2026-03-30)
 
 
