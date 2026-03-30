@@ -154,7 +154,7 @@ impl PriceProvider for HyperliquidProvider {
                 token_in: sym_in.clone(),
                 token_out: sym_out.clone(),
             })?;
-        let price_out = cache
+            let price_out = cache
             .get(&sym_out)
             .ok_or(PriceProviderError::PriceNotFound { token_in: sym_in, token_out: sym_out })?;
 
