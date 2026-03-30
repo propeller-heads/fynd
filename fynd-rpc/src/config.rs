@@ -91,7 +91,43 @@ pub struct BlacklistConfig {
     components: HashSet<String>,
 }
 
+/// The default blacklist configuration embedded at compile time.
+///
+/// Keep in sync with the repo-root `blacklist.toml` (the user-facing example config).
+/// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
+/// and the file lives outside the `fynd-rpc` package directory.
+const DEFAULT_BLACKLIST_TOML: &str = r#"
+[blacklist]
+components = [
+    # AMPL pools - AMPL is a rebasing token that breaks simulation assumptions
+    # UniswapV3 AMPL/WETH
+    "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
+    # UniswapV2 AMPL/WETH
+    "0xc5be99a02c6857f9eac67bbce58df5572498f40c",
+    # Fluid Lite pools with broken simulation (ENG-5696)
+    "0x32aa6f5c6f771b39d383c6e36d7ef0702a28e32ad64671c059f41547b82ef0ef",
+    "0x7f31b44f032f125bb465c161343fccfdc88fee8dc94c068f6430d2345d80f1d1",
+    # Curve yETH/WETH — exploited Nov 2025 ($9M), broken invariant, pool insolvent
+    "0x69accb968b19a53790f43e57558f5e443a91af22",
+    # Fluid syrupUSDC/USDC — ERC-4626 vault token, simulation can't track accumulating rate
+    "0x79eea4a1be86c43a9a9c4384b0b28a07af24ae29",
+]
+"#;
+
 impl BlacklistConfig {
+    /// Returns the built-in default blacklist embedded in the binary.
+    ///
+    /// This is the repo-root `blacklist.toml` baked in at compile time.
+    pub fn builtin_default() -> Self {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            blacklist: BlacklistConfig,
+        }
+        let wrapper: Wrapper =
+            toml::from_str(DEFAULT_BLACKLIST_TOML).expect("built-in blacklist.toml is valid TOML");
+        wrapper.blacklist
+    }
+
     /// Load blacklist configuration from a TOML file.
     ///
     /// The TOML file should have a `[blacklist]` section:
@@ -127,6 +163,15 @@ mod tests {
     fn test_builtin_default_does_not_panic() {
         let config = WorkerPoolsConfig::builtin_default();
         assert!(!config.pools().is_empty(), "built-in config must have at least one pool");
+    }
+
+    #[test]
+    fn test_blacklist_builtin_default_does_not_panic() {
+        let config = BlacklistConfig::builtin_default();
+        assert!(
+            !config.components.is_empty(),
+            "built-in blacklist must have at least one component"
+        );
     }
 
     #[test]
