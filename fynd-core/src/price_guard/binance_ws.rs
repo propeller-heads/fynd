@@ -21,9 +21,26 @@ use tycho_simulation::tycho_common::models::Address;
 
 use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
-    utils::{check_staleness, expected_out_from_price, normalize_symbol},
+    utils::{check_staleness, expected_out_from_price},
 };
 use crate::feed::market_data::SharedMarketDataRef;
+
+/// Maps on-chain token symbols to their Binance spot trading names.
+///
+/// On-chain tokens use wrapped ("W"-prefixed) names for native gas tokens, but Binance
+/// lists the unwrapped base asset.
+///
+/// Binance-specific: MATIC was renamed to POL (Polygon rebrand).
+fn normalize_symbol(symbol: &str) -> String {
+    match symbol.to_uppercase().as_str() {
+        "WETH" => "ETH".to_string(),
+        "WBTC" => "BTC".to_string(),
+        "WBNB" => "BNB".to_string(),
+        "WMATIC" | "MATIC" => "POL".to_string(),
+        "WAVAX" => "AVAX".to_string(),
+        other => other.to_string(),
+    }
+}
 
 const DEFAULT_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const DEFAULT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
@@ -240,10 +257,7 @@ impl PriceProvider for BinanceWsProvider {
             .map_err(|e| PriceProviderError::Unavailable(format!("ticker cache poisoned: {e}")))?;
 
         let lookup = Self::resolve_price(&cache, &sym_in, &sym_out).ok_or_else(|| {
-            PriceProviderError::PriceNotFound {
-                token_in: sym_in.clone(),
-                token_out: sym_out.clone(),
-            }
+            PriceProviderError::TokenNotFound { address: format!("{sym_in}/{sym_out}") }
         })?;
 
         check_staleness(lookup.timestamp_ms)?;
