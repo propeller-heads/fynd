@@ -1,3 +1,12 @@
+## [0.39.1](https://github.com/propeller-heads/fynd/compare/0.39.0...0.39.1) (2026-03-30)
+
+
+### Bug Fixes
+
+* remove runtime workaround for tycho-execution encoding ([0505997](https://github.com/propeller-heads/fynd/commit/050599775cf540a8877421e071ad15bd522aafba))
+* Upgrade to new tycho-execution version ([fd1daae](https://github.com/propeller-heads/fynd/commit/fd1daae9be6f7400c1d38c2a7a22a3ee1c5b331e))
+* Upgrade to new tycho-execution version instead of local ([9d840ad](https://github.com/propeller-heads/fynd/commit/9d840adbb38390a9afc392e56d40599f2bc8d30e))
+
 ## [0.39.0](https://github.com/propeller-heads/fynd/compare/0.38.0...0.39.0) (2026-03-30)
 
 
