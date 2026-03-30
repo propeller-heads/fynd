@@ -123,7 +123,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Tycho
 tycho-simulation = ">=0.251.1"
-tycho-execution = { version = ">=0.170.0", features = ["evm"] }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho-contracts.git", branch = "dc/improve-block-inplace", features = ["evm"] }
 typetag = "0.2"
 
 # Graph algorithms
