@@ -152,6 +152,9 @@ pub struct PriceGuardConfig {
     /// Whether to let solutions pass when no provider can return a price.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     allow_on_provider_error: Option<bool>,
+    /// Whether to let solutions pass when no provider returns price for token pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_on_token_price_not_found: Option<bool>,
     /// Whether price guard validation is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
@@ -176,6 +179,12 @@ impl PriceGuardConfig {
         self
     }
 
+    /// Set whether to allow solutions when no provider returns price for token pair.
+    pub fn with_allow_on_token_price_not_found(mut self, allow: bool) -> Self {
+        self.allow_on_token_price_not_found = Some(allow);
+        self
+    }
+
     /// Set whether price guard validation is enabled.
     pub fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = Some(enabled);
@@ -195,6 +204,11 @@ impl PriceGuardConfig {
     /// Whether to allow on provider error, if set.
     pub fn allow_on_provider_error(&self) -> Option<bool> {
         self.allow_on_provider_error
+    }
+
+    /// Whether to allow on token price not found, if set.
+    pub fn allow_on_token_price_not_found(&self) -> Option<bool> {
+        self.allow_on_token_price_not_found
     }
 
     /// Whether price guard is enabled, if set.
@@ -1289,6 +1303,9 @@ mod conversions {
             }
             if let Some(allow) = self.allow_on_provider_error {
                 config = config.with_allow_on_provider_error(allow);
+            }
+            if let Some(allow) = self.allow_on_token_price_not_found {
+                config = config.with_allow_on_token_price_not_found(allow);
             }
             if let Some(enabled) = self.enabled {
                 config = config.with_enabled(enabled);

@@ -8,7 +8,9 @@ use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    config::PriceGuardConfig, provider::ExternalPrice, provider_registry::PriceProviderRegistry,
+    config::PriceGuardConfig,
+    provider::{ExternalPrice, PriceProviderError},
+    provider_registry::PriceProviderRegistry,
 };
 use crate::types::{OrderQuote, QuoteStatus};
 
@@ -112,6 +114,8 @@ impl PriceGuard {
             .get_all_expected_out(token_in, token_out, quote.amount_in());
 
         let mut has_price = false;
+        let mut no_price_for_token_found = true;
+
         for result in &results {
             match result {
                 Ok(price) => {
@@ -120,11 +124,19 @@ impl PriceGuard {
                     }
                     has_price = true;
                 }
-                Err(e) => debug!(error = %e, "price provider error"),
+                Err(e) => {
+                    if !matches!(e, PriceProviderError::PriceNotFound { .. }) {
+                        no_price_for_token_found = false;
+                    }
+                    debug!(error = %e, "price provider error");
+                }
             }
         }
         if has_price {
-            false
+            return false;
+        }
+        if no_price_for_token_found {
+            config.allow_on_token_price_not_found()
         } else {
             config.allow_on_provider_error()
         }
@@ -232,6 +244,26 @@ mod tests {
             _amount_in: &BigUint,
         ) -> Result<ExternalPrice, PriceProviderError> {
             Err(PriceProviderError::Unavailable("test failure".into()))
+        }
+    }
+
+    struct PriceNotFoundProvider;
+
+    impl PriceProvider for PriceNotFoundProvider {
+        fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
+            tokio::spawn(std::future::ready(()))
+        }
+
+        fn get_expected_out(
+            &self,
+            _token_in: &Address,
+            _token_out: &Address,
+            _amount_in: &BigUint,
+        ) -> Result<ExternalPrice, PriceProviderError> {
+            Err(PriceProviderError::PriceNotFound {
+                token_in: "0xdead".to_string(),
+                token_out: "0xbeef".to_string(),
+            })
         }
     }
 
@@ -428,5 +460,54 @@ mod tests {
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
         assert_eq!(result[1].status(), QuoteStatus::PriceCheckFailed);
+    }
+
+    #[rstest]
+    #[case::allow(true, QuoteStatus::Success)]
+    #[case::deny(false, QuoteStatus::PriceCheckFailed)]
+    #[test]
+    fn test_all_price_not_found(#[case] allow: bool, #[case] result_status: QuoteStatus) {
+        let config = PriceGuardConfig::default().with_allow_on_token_price_not_found(allow);
+        let guard =
+            price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(PriceNotFoundProvider)]);
+
+        let result = guard
+            .validate(vec![make_quote(500)], &config)
+            .unwrap();
+
+        assert_eq!(result[0].status(), result_status);
+    }
+
+    #[test]
+    fn test_mixed_price_not_found_and_error() {
+        // When at least one provider has an infrastructure error, the token
+        // might be supported but the provider is just down — fall back to
+        // allow_on_provider_error.
+        let config = PriceGuardConfig::default()
+            .with_allow_on_token_price_not_found(true)
+            .with_allow_on_provider_error(false);
+        let guard = price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(FailingProvider)]);
+
+        let result = guard
+            .validate(vec![make_quote(500)], &config)
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::PriceCheckFailed);
+    }
+
+    #[test]
+    fn test_price_not_found_ignores_provider_error() {
+        // allow_on_provider_error should not allow price-not-found cases.
+        let config = PriceGuardConfig::default()
+            .with_allow_on_provider_error(true)
+            .with_allow_on_token_price_not_found(false);
+        let guard =
+            price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(PriceNotFoundProvider)]);
+
+        let result = guard
+            .validate(vec![make_quote(500)], &config)
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::PriceCheckFailed);
     }
 }

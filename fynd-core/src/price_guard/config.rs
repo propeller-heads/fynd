@@ -23,6 +23,12 @@ pub struct PriceGuardConfig {
     /// `true`: let solutions pass through when no provider can be reached.
     allow_on_provider_error: bool,
 
+    /// Controls behavior when every provider returns `PriceNotFound` for the
+    /// requested token pair.
+    /// `false` (default): reject solutions for unknown token pairs.
+    /// `true`: let solutions pass through when no provider has a price.
+    allow_on_token_price_not_found: bool,
+
     /// Whether the price guard is enabled.
     /// Default: `true`.
     enabled: bool,
@@ -34,6 +40,7 @@ impl Default for PriceGuardConfig {
             lower_tolerance_bps: 300,
             upper_tolerance_bps: 10_000,
             allow_on_provider_error: false,
+            allow_on_token_price_not_found: false,
             enabled: true,
         }
     }
@@ -52,6 +59,10 @@ impl PriceGuardConfig {
         self.allow_on_provider_error
     }
 
+    pub fn allow_on_token_price_not_found(&self) -> bool {
+        self.allow_on_token_price_not_found
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -68,6 +79,11 @@ impl PriceGuardConfig {
 
     pub fn with_allow_on_provider_error(mut self, allow: bool) -> Self {
         self.allow_on_provider_error = allow;
+        self
+    }
+
+    pub fn with_allow_on_token_price_not_found(mut self, allow: bool) -> Self {
+        self.allow_on_token_price_not_found = allow;
         self
     }
 
