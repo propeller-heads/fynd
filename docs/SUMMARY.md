@@ -1,5 +1,6 @@
 # Table of contents
 
+* [GitHub](https://github.com/propeller-heads/fynd)
 * [Contact us](https://t.me/+B4CNQwv7dgIyYTJl)
 
 ## Get Started
