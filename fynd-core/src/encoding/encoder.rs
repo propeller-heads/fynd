@@ -40,23 +40,6 @@ pub struct Encoder {
     tycho_encoder: Box<dyn TychoEncoder>,
     chain: Chain,
     router_address: Bytes,
-    /// Dedicated multi-threaded runtime so that swap encoders using
-    /// `block_in_place` (e.g. Bebop RFQ) work even when the caller
-    /// runs on a current-thread runtime (actix-web workers).
-    encoding_rt: Option<Arc<tokio::runtime::Runtime>>,
-}
-
-impl Drop for Encoder {
-    fn drop(&mut self) {
-        // Take ownership so the field auto-drop is a no-op.
-        // If inside an async context, move shutdown to a background
-        // thread to avoid the "cannot drop a runtime" panic.
-        if let Some(rt) = self.encoding_rt.take() {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                std::thread::spawn(move || drop(rt));
-            }
-        }
-    }
 }
 
 impl TryFrom<&OrderQuote> for Solution {
@@ -124,13 +107,6 @@ impl Encoder {
         let router_address = get_router_address(&chain)
             .map_err(|e| SolveError::FailedEncoding(e.to_string()))?
             .clone();
-        let encoding_rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                SolveError::FailedEncoding(format!("failed to create encoding runtime: {e}"))
-            })?;
         Ok(Self {
             tycho_encoder: TychoRouterEncoderBuilder::new()
                 .chain(chain)
@@ -138,7 +114,6 @@ impl Encoder {
                 .build()?,
             chain,
             router_address,
-            encoding_rt: Some(Arc::new(encoding_rt)),
         })
     }
 
@@ -185,21 +160,9 @@ impl Encoder {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
-        let rt = self
-            .encoding_rt
-            .as_ref()
-            .ok_or_else(|| SolveError::FailedEncoding("encoding runtime was dropped".into()))?;
-        let encoded_solutions = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    rt.block_on(async {
-                        self.tycho_encoder
-                            .encode_solutions(solutions)
-                    })
-                })
-                .join()
-                .expect("encoding thread panicked")
-        })?;
+        let encoded_solutions = self
+            .tycho_encoder
+            .encode_solutions(solutions)?;
 
         for (encoded_solution, (idx, solution)) in encoded_solutions
             .into_iter()
@@ -502,13 +465,6 @@ mod tests {
             tycho_encoder: Box::new(MockTychoEncoder),
             chain,
             router_address: Bytes::from([0u8; 20].as_ref()),
-            encoding_rt: Some(Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            )),
         }
     }
 
