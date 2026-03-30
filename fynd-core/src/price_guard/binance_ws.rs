@@ -17,7 +17,7 @@ use reqwest::Client;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::tycho_common::models::{token::Token, Address};
 
 use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
@@ -73,14 +73,8 @@ struct PriceLookup {
 /// Shared ticker cache. Key is the uppercase Binance symbol (e.g. "ETHUSDT").
 type TickerCache = Arc<RwLock<HashMap<String, TickerData>>>;
 
-/// Shared token metadata cache.
-type TokenCache = Arc<RwLock<HashMap<Address, TokenInfo>>>;
-
-#[derive(Debug, Clone)]
-struct TokenInfo {
-    symbol: String,
-    decimals: u32,
-}
+/// Cached token metadata resolved from on-chain addresses.
+type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 
 /// Binance WebSocket price provider.
 ///
@@ -430,18 +424,13 @@ impl BinanceWsWorker {
 
     /// Snapshots the token registry from SharedMarketData into the local token cache.
     async fn refresh_token_cache(&self) {
-        let token_entries: Vec<(Address, String, u32)> = {
+        let new_cache: HashMap<Address, Token> = {
             let data = self.market_data.read().await;
             data.token_registry_ref()
                 .iter()
-                .map(|(address, token)| (address.clone(), token.symbol.clone(), token.decimals))
+                .map(|(address, token)| (address.clone(), token.clone()))
                 .collect()
         };
-
-        let mut new_cache: HashMap<Address, TokenInfo> = HashMap::new();
-        for (address, symbol, decimals) in token_entries {
-            new_cache.insert(address, TokenInfo { symbol, decimals });
-        }
 
         let Ok(mut cache) = self.token_cache.write() else {
             warn!("token cache lock poisoned");
@@ -575,7 +564,7 @@ struct SymbolInfo {
 #[cfg(test)]
 mod tests {
     use tokio::sync::RwLock;
-    use tycho_simulation::{evm::tycho_models::Chain, tycho_common::models::token::Token};
+    use tycho_simulation::evm::tycho_models::Chain;
 
     use super::*;
     use crate::feed::market_data::SharedMarketData;
@@ -654,9 +643,12 @@ mod tests {
                 .token_cache
                 .write()
                 .expect("lock");
-            cache.insert(weth_address(), TokenInfo { symbol: "WETH".to_string(), decimals: 18 });
-            cache.insert(usdc_address(), TokenInfo { symbol: "USDC".to_string(), decimals: 6 });
-            cache.insert(link_address(), TokenInfo { symbol: "LINK".to_string(), decimals: 18 });
+            let weth = make_token(weth_address(), "WETH", 18);
+            cache.insert(weth.address.clone(), weth);
+            let usdc = make_token(usdc_address(), "USDC", 6);
+            cache.insert(usdc.address.clone(), usdc);
+            let link = make_token(link_address(), "LINK", 18);
+            cache.insert(link.address.clone(), link);
         }
 
         provider
@@ -784,8 +776,10 @@ mod tests {
                 .token_cache
                 .write()
                 .expect("lock");
-            cache.insert(weth_address(), TokenInfo { symbol: "WETH".to_string(), decimals: 18 });
-            cache.insert(usdt_address(), TokenInfo { symbol: "USDT".to_string(), decimals: 6 });
+            let weth = make_token(weth_address(), "WETH", 18);
+            cache.insert(weth.address.clone(), weth);
+            let usdt = make_token(usdt_address(), "USDT", 6);
+            cache.insert(usdt.address.clone(), usdt);
         }
 
         let one_eth = BigUint::from(10u64).pow(18);
