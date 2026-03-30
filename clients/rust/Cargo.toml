@@ -19,9 +19,6 @@ num-traits = { workspace = true }
 # Raw bytes for addresses
 bytes = { workspace = true }
 
-# Tycho address type (used in fynd-rpc-types wire format)
-tycho-simulation = { workspace = true }
-
 # Async
 tokio = { workspace = true }
 

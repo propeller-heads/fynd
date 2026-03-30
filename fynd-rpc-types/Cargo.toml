@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 openapi = ["dep:utoipa"]
-core = ["dep:fynd-core"]
+core = ["dep:fynd-core", "dep:tycho-simulation"]
 
 [lints.clippy]
 # `Into` is implemented directly (rather than `From`) for the DTO→Core direction because
@@ -20,10 +20,11 @@ serde_json.workspace = true
 serde_with.workspace = true
 num-bigint.workspace = true
 uuid.workspace = true
-tycho-simulation.workspace = true
+bytes.workspace = true
 hex.workspace = true
 
 # Optional: OpenAPI schema generation (used by fynd-rpc server)
 utoipa = { version = "5", optional = true }
-# Optional: conversions to/from fynd-core domain types
+# Optional: conversions to/from fynd-core domain types (also enables tycho-simulation for conversions)
 fynd-core = { workspace = true, optional = true }
+tycho-simulation = { workspace = true, optional = true }
