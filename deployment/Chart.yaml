@@ -1,0 +1,4 @@
+apiVersion: v2
+name: fynd
+description: Fynd DEX aggregator/solver
+version: 0.1.0

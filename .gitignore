@@ -8,3 +8,5 @@ scale_results*.json
 .env
 .claude/worktrees/
 .claude/plans/
+deployment/blacklist.toml
+deployment/worker_pools.toml

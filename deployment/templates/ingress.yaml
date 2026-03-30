@@ -1,0 +1,34 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "fynd.fullname" . }}
+  labels:
+    {{- include "fynd.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: {{ .Values.corsAllowedOrigins | quote }}
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+    nginx.ingress.kubernetes.io/limit-rps: {{ .Values.ingress.rateLimitRps | default "15" | quote }}
+    nginx.ingress.kubernetes.io/limit-connections: {{ .Values.ingress.rateLimitConnections | default "15" | quote }}
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: {{ .Values.ingress.rateLimitBurstMultiplier | default "2" | quote }}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      if ($http_x_forwarded_proto = 'http') {
+        return 301 https://$host$request_uri;
+      }
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: {{ .Values.ingress.host }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ include "fynd.fullname" . }}
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

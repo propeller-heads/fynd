@@ -5,5 +5,10 @@ docs/
 .env
 k8s/
 .claude/
+deployment/
+examples/
 *.pdf
 *.drawio
+*.md
+build_and_push.sh
+deploy.sh

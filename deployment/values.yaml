@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: 120569639765.dkr.ecr.eu-central-1.amazonaws.com/fynd
+  tag: latest
+  pullPolicy: Always
+
+externalSecrets:
+  enabled: false
+  awsSecretName: ""
+  refreshInterval: "2m"
+  secretStoreRef:
+    name: default
+    kind: ClusterSecretStore
+
+chain: "Ethereum"
+protocols: "uniswap_v2,uniswap_v3,pancakeswap_v2,sushiswap_v2,pancakeswap_v3,fluid_v1,uniswap_v4,ekubo_v2"
+tychoUrl: "tycho-beta.propellerheads.xyz"
+minTvl: "50"
+corsAllowedOrigins: "https://dev-app.turbine.exchange,https://staging-app.turbine.exchange,https://app.turbine.exchange"
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 4Gi
+  limits:
+    cpu: 2000m
+    memory: 8Gi
+
+ingress:
+  enabled: true
+  host: fynd.propellerheads.xyz
+  rateLimitRps: "15"
+  rateLimitConnections: "15"
+  rateLimitBurstMultiplier: "2"
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+podScrape:
+  enabled: true
+  port: metrics
+  path: /metrics

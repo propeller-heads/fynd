@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fynd.fullname" . }}-config
+  labels:
+    {{- include "fynd.labels" . | nindent 4 }}
+data:
+  worker_pools.toml: |
+{{ .Files.Get "worker_pools.toml" | indent 4 }}
+  blacklist.toml: |
+{{ .Files.Get "blacklist.toml" | indent 4 }}

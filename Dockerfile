@@ -1,8 +1,15 @@
-# Stage 1: Build
-FROM rust:1.92-bookworm AS builder
+# Stage 1: Generate dependency recipe
+FROM lukemathwalker/cargo-chef:latest-rust-1.92-bookworm AS chef
+WORKDIR /app
 
-# Install system dependencies needed by aws-lc-sys, openssl-sys, etc.
-RUN apt-get update && apt-get install -y \
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 2: Build dependencies + binary
+FROM chef AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
     libssl-dev \
@@ -10,52 +17,26 @@ RUN apt-get update && apt-get install -y \
     perl \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
-# Dependency caching layer: copy all workspace manifests and build deps first
-COPY Cargo.toml Cargo.lock ./
-COPY fynd-core/Cargo.toml fynd-core/
-COPY fynd-rpc/Cargo.toml fynd-rpc/
-COPY fynd-rpc-types/Cargo.toml fynd-rpc-types/
-COPY clients/rust/Cargo.toml clients/rust/
-COPY tools/benchmark/Cargo.toml tools/benchmark/
-COPY tools/fynd-swap-cli/Cargo.toml tools/fynd-swap-cli/
-RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
-        clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "" > src/lib.rs && \
-    echo "" > fynd-core/src/lib.rs && \
-    echo "" > fynd-rpc/src/lib.rs && \
-    echo "" > fynd-rpc-types/src/lib.rs && \
-    echo "" > clients/rust/src/lib.rs && \
-    echo "fn main() {}" > tools/benchmark/src/main.rs && \
-    echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
-    cargo build --release --package fynd && \
-    rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
-        clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src
+COPY . .
+RUN cargo build -p fynd --locked --release --features experimental && \
+    cp /app/target/release/fynd /usr/local/bin/fynd
 
-# Copy real source and rebuild
-COPY src/ src/
-COPY fynd-core/src/ fynd-core/src/
-COPY fynd-rpc/src/ fynd-rpc/src/
-COPY fynd-rpc-types/src/ fynd-rpc-types/src/
-RUN mkdir -p clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src && \
-    echo "" > clients/rust/src/lib.rs && \
-    echo "fn main() {}" > tools/benchmark/src/main.rs && \
-    echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
-    touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
-        fynd-rpc-types/src/lib.rs && \
-    cargo build --release --package fynd
-
-# Stage 2: Runtime
+# Stage 3: Runtime
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
+RUN useradd -r -s /bin/false -u 1000 fynd
+
+COPY --from=builder /usr/local/bin/fynd /usr/local/bin/fynd
+
+USER fynd
 
 EXPOSE 3000 9898
 

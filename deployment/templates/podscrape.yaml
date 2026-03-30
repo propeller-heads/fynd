@@ -1,0 +1,15 @@
+{{- if .Values.podScrape.enabled -}}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: {{ include "fynd.fullname" . }}
+  labels:
+    {{- include "fynd.selectorLabels" . | nindent 4 }}
+spec:
+  podMetricsEndpoints:
+  - port: {{ .Values.podScrape.port }}
+    path: {{ .Values.podScrape.path }}
+  selector:
+    matchLabels:
+      {{- include "fynd.selectorLabels" . | nindent 6 }}
+{{- end }}

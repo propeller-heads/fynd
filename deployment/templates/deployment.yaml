@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fynd.fullname" . }}
+  labels:
+    {{- include "fynd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fynd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fynd.selectorLabels" . | nindent 8 }}
+      annotations:
+        promtail.io/scrape: "true"
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--chain"
+            - "{{ .Values.chain }}"
+            - "--protocols"
+            - "{{ .Values.protocols }}"
+            - "--tycho-url"
+            - "{{ .Values.tychoUrl }}"
+            - "--worker-pools-config"
+            - "/etc/fynd/worker_pools.toml"
+            - "--blacklist-config"
+            - "/etc/fynd/blacklist.toml"
+            - "--min-tvl"
+            - "{{ .Values.minTvl }}"
+          env:
+            {{- if .Values.externalSecrets.enabled }}
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fynd.fullname" . }}-secrets
+                  key: RPC_URL
+            - name: TYCHO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fynd.fullname" . }}-secrets
+                  key: TYCHO_API_KEY
+            {{- end }}
+            - name: CORS_ALLOWED_ORIGINS
+              value: "{{ .Values.corsAllowedOrigins }}"
+            - name: RUST_LOG
+              value: "info"
+          ports:
+            - name: api
+              containerPort: 3000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9898
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: api
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fynd
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fynd.fullname" . }}-config
