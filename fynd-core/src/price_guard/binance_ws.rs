@@ -1,7 +1,7 @@
 //! Binance WebSocket price provider.
 //!
 //! Connects to the Binance `bookTicker` WebSocket stream, dynamically discovers trading pairs
-//! from [`SharedMarketData`](crate::feed::market_data::SharedMarketData), and caches real-time
+//! from [`SharedMarketData`](crate::feed::market_data::SharedMarketData)(crate::feed::market_data::SharedMarketData), and caches real-time
 //! bid/ask prices. Price resolution supports direct pairs, reverse pairs, and intermediate
 //! routing through common quote assets (USDT, USDC, ETH, BTC).
 
@@ -79,9 +79,9 @@ type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 /// Binance WebSocket price provider.
 ///
 /// Subscribes to `bookTicker` streams for pairs discovered by cross-referencing
-/// Binance exchange info with tokens in [`SharedMarketData`]. Prices are resolved
-/// via direct pair (bid), reverse pair (1/ask), or intermediate routing through
-/// USDT/USDC/ETH/BTC.
+/// Binance exchange info with tokens in
+/// [`SharedMarketData`](crate::feed::market_data::SharedMarketData). Prices are resolved via direct
+/// pair (bid), reverse pair (1/ask), or intermediate routing through USDT/USDC/ETH/BTC.
 pub struct BinanceWsProvider {
     ticker_cache: TickerCache,
     token_cache: TokenCache,
