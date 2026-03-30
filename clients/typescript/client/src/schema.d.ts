@@ -379,6 +379,8 @@ export interface components {
         PriceGuardConfig: {
             /** @description Whether to let solutions pass when no provider can return a price. */
             allow_on_provider_error?: boolean | null;
+            /** @description Whether to let solutions pass when no provider returns price for token pair. */
+            allow_on_token_price_not_found?: boolean | null;
             /** @description Whether price guard validation is enabled. */
             enabled?: boolean | null;
             /**
