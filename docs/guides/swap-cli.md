@@ -20,17 +20,27 @@ cargo build --release -p fynd-swap-cli
 # binary: target/release/fynd-swap-cli
 ```
 
+{% hint style="info" %}
+Alternatively, the binary is included in the official Docker image (`ghcr.io/propeller-heads/fynd`) and can be invoked with `--entrypoint fynd-swap-cli`.
+{% endhint %}
+
 ## Dry-run a swap (ERC-20)
 
-By default, `fynd-swap-cli` runs a **dry-run**: it generates an ephemeral key and injects ERC-20 storage overrides so the simulation succeeds without any real funds or wallet approvals.
+By default, `fynd-swap-cli` runs a **dry-run**: it uses a well-funded sender address and injects ERC-20 storage overrides so the simulation succeeds without any real funds or wallet approvals.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 
+./target/release/fynd-swap-cli
+```
+
+This sells 1 WETH for USDC using the defaults. Pass explicit tokens and amounts to customise:
+
+```bash
 ./target/release/fynd-swap-cli \
-  --sell-token  0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token   0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount 1000000000
+  --sell-token  0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
+  --buy-token   0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --sell-amount 2000000000000000000
 ```
 
 The output prints the quote (amount\_in, amount\_out, gas estimate, route) followed by the simulation result.
@@ -47,9 +57,6 @@ Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address w
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 
 ./target/release/fynd-swap-cli \
-  --sell-token    0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token     0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount   1000000000 \
   --transfer-type transfer-from-permit2 \
   --router        <TychoRouter address>
 ```
@@ -68,11 +75,7 @@ This sends a real transaction. Ensure your wallet has the sell token and has app
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 
-./target/release/fynd-swap-cli \
-  --sell-token  0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token   0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount 1000000000 \
-  --execute
+./target/release/fynd-swap-cli --execute
 ```
 
 ## Execute on-chain (Permit2)
@@ -86,9 +89,6 @@ export RPC_URL=https://your-rpc-provider.com/v1/your_key
 export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 
 ./target/release/fynd-swap-cli \
-  --sell-token    0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token     0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount   1000000000 \
   --transfer-type transfer-from-permit2 \
   --router        <TychoRouter address> \
   --execute
@@ -99,53 +99,25 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 If tokens are already deposited in the Tycho Router vault, use `--transfer-type use-vaults-funds`. No ERC-20 approval or Permit2 signature is needed.
 
 ```bash
-./target/release/fynd-swap-cli \
-  --sell-token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --buy-token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-  --sell-amount 1000000000 \
-  --transfer-type use-vaults-funds
+./target/release/fynd-swap-cli --transfer-type use-vaults-funds
 ```
 
-***
-
-## Embedded server (no separate `fynd serve` needed)
-
-{% hint style="info" %}
-If you don't want to run `fynd serve` separately, pass `--tycho-url` and `fynd-swap-cli` will spawn its own embedded solver automatically.
-
-```bash
-export TYCHO_API_KEY=your_api_key
-export RPC_URL=https://your-rpc-provider.com/v1/your_key
-
-./target/release/fynd-swap-cli \
-  --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
-  --sell-amount 1000000000
-```
-
-This is convenient for a one-off swap but slow to initialize on every run (the solver must sync protocol state from Tycho before it can serve quotes). For repeated use, keep `fynd serve` running and omit `--tycho-url`.
-{% endhint %}
+---
 
 ## CLI Reference
 
-| Flag                    | Env var         | Default                                      | Description                                                                   |
-| ----------------------- | --------------- | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| `--sell-token`          | —               | USDC (mainnet)                               | Token address to sell                                                         |
-| `--buy-token`           | —               | WETH (mainnet)                               | Token address to buy                                                          |
-| `--sell-amount`         | —               | `1000000000`                                 | Amount to sell in raw atomic units                                            |
-| `--slippage-bps`        | —               | `50` (0.5%)                                  | Slippage tolerance in basis points                                            |
-| `--fynd-url`            | —               | `http://localhost:3000`                      | Fynd server URL (ignored when `--tycho-url` is set)                           |
-| `--transfer-type`       | —               | `transfer-from`                              | `transfer-from`, `transfer-from-permit2`, or `use-vaults-funds`               |
-| `--execute`             | —               | false (dry-run)                              | Submit the swap on-chain. Requires `PRIVATE_KEY`.                             |
-| `--router`              | —               | —                                            | TychoRouter address. Required for `transfer-from-permit2`.                    |
-| `--permit2`             | —               | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Permit2 contract address                                                      |
-| `--rpc-url`             | `RPC_URL`       | `https://eth.llamarpc.com`                   | Ethereum RPC endpoint                                                         |
-| `--chain`               | —               | `Ethereum`                                   | Target chain                                                                  |
-| `--tycho-url`           | —               | —                                            | If set, spawns an embedded Fynd solver connecting to this Tycho WebSocket URL |
-| `--tycho-api-key`       | `TYCHO_API_KEY` | —                                            | Tycho API key (required when `--tycho-url` is set)                            |
-| `--disable-tls`         | —               | false                                        | Disable TLS for the Tycho WebSocket connection                                |
-| `--protocols`           | —               | (all on-chain, fetched from Tycho)           | Comma-separated protocols to index. Only used with `--tycho-url`.             |
-| `--worker-pools-config` | —               | —                                            | Path to worker pools TOML config. Only used with `--tycho-url`.               |
-| `--http-port`           | —               | `3000`                                       | HTTP port for the embedded solver. Only used with `--tycho-url`.              |
+| Flag              | Env var   | Default                                      | Description                                                     |
+| ----------------- | --------- | -------------------------------------------- | --------------------------------------------------------------- |
+| `--sell-token`    | —         | WETH (mainnet)                               | Token address to sell                                           |
+| `--buy-token`     | —         | USDC (mainnet)                               | Token address to buy                                            |
+| `--sell-amount`   | —         | `1000000000000000000` (1 WETH)               | Amount to sell in raw atomic units                              |
+| `--slippage-bps`  | —         | `50` (0.5%)                                  | Slippage tolerance in basis points                              |
+| `--fynd-url`      | —         | `http://localhost:3000`                      | Fynd server URL                                                 |
+| `--transfer-type` | —         | `transfer-from`                              | `transfer-from`, `transfer-from-permit2`, or `use-vaults-funds` |
+| `--execute`       | —         | false (dry-run)                              | Submit the swap on-chain. Requires `PRIVATE_KEY`.               |
+| `--router`        | —         | —                                            | TychoRouter address. Required for `transfer-from-permit2`.      |
+| `--permit2`       | —         | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Permit2 contract address                                        |
+| `--rpc-url`       | `RPC_URL` | `https://eth.llamarpc.com`                   | Ethereum RPC endpoint (must support `eth_call` state overrides) |
 
 ## Security Notes
 

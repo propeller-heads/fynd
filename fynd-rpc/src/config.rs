@@ -17,27 +17,11 @@ use serde::{Deserialize, Serialize};
 /// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
 /// and the file lives outside the `fynd-rpc` package directory.
 const DEFAULT_WORKER_POOLS_TOML: &str = r#"
-[pools.most_liquid_2_hops_fast]
-algorithm = "most_liquid"
-num_workers = 5
-task_queue_capacity = 1000
-max_hops = 2
-timeout_ms = 100
-max_routes = 50
-
-[pools.most_liquid_3_hops]
-algorithm = "most_liquid"
-num_workers = 3
-task_queue_capacity = 1000
-min_hops = 2
-max_hops = 3
-timeout_ms = 5000
-
-[pools.bellman_ford_5_hops]
+[pools.bellman_ford_2_hops]
 algorithm = "bellman_ford"
 num_workers = 3
 task_queue_capacity = 1000
-max_hops = 5
+max_hops = 2
 timeout_ms = 500
 "#;
 
