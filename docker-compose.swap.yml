@@ -1,0 +1,43 @@
+# Minimal compose file for running fynd serve + an interactive swap-cli shell.
+#
+# Usage:
+#   docker compose -f docker-compose.swap.yml up -d fynd-serve
+#   docker compose -f docker-compose.swap.yml run --rm fynd-shell
+#
+# Required env vars (set in .env or export before running):
+#   TYCHO_API_KEY   — Tycho API key
+#   RPC_URL         — Ethereum RPC endpoint that supports eth_call state overrides
+#
+# Optional env vars:
+#   CHAIN       — chain name passed to fynd serve (default: Ethereum)
+#   PROTOCOLS   — comma-separated protocol list (default: mainnet preset below)
+#   TYCHO_URL   — Tycho WebSocket endpoint (default: tycho-fynd-ethereum.propellerheads.xyz)
+#   RUST_LOG    — tracing filter (default: fynd=info)
+
+services:
+  fynd-serve:
+    image: ghcr.io/propeller-heads/fynd:latest
+    entrypoint: ["/usr/local/bin/fynd"]
+    command:
+      - serve
+      - "--chain"
+      - "${CHAIN:-Ethereum}"
+      - "--protocols"
+      - "${PROTOCOLS:-uniswap_v2,uniswap_v3,ekubo_v2,pancakeswap_v3,sushiswap_v2,fluid_v1,pancakeswap_v2}"
+    ports:
+      - "3000:3000"
+    environment:
+      - TYCHO_API_KEY=${TYCHO_API_KEY}
+      - TYCHO_URL=${TYCHO_URL:-tycho-fynd-ethereum.propellerheads.xyz}
+      - RUST_LOG=${RUST_LOG:-fynd=info}
+
+  fynd-shell:
+    image: ghcr.io/propeller-heads/fynd:latest
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+    environment:
+      - RPC_URL=${RPC_URL:-https://reth-ethereum.ithaca.xyz/rpc}
+      - FYND_URL=http://fynd-serve:3000
+    depends_on:
+      - fynd-serve

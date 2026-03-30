@@ -72,8 +72,8 @@ struct Cli {
     #[arg(long, default_value_t = 50u32)]
     slippage_bps: u32,
 
-    /// Fynd solver URL (ignored when --tycho-url is set)
-    #[arg(long, default_value = "http://localhost:3000")]
+    /// Fynd solver URL
+    #[arg(long, env = "FYND_URL", default_value = "http://localhost:3000")]
     fynd_url: String,
 
     /// Token transfer flow
@@ -94,7 +94,7 @@ struct Cli {
     permit2: String,
 
     /// Node RPC URL for the target chain
-    #[arg(long, env = "RPC_URL", default_value = "https://eth.llamarpc.com")]
+    #[arg(long, env = "RPC_URL", default_value = "https://reth-ethereum.ithaca.xyz/rpc")]
     rpc_url: String,
 }
 
@@ -402,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Sign order payload ────────────────────────────────────────────────────
     let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
     let payload = client
-        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 2u64))
+        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 10u64))
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
