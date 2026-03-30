@@ -18,7 +18,7 @@ use actix_web::dev::ServerHandle;
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{Address, B256, U256},
+    primitives::{address, Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
@@ -43,6 +43,10 @@ use tycho_simulation::tycho_common::models::Chain;
 mod erc20;
 mod permit2;
 
+/// Vitalik's address — used as the dry-run sender so `eth_call` simulations don't fail due
+/// to insufficient ETH for gas. Signatures are not checked in dry-run mode.
+const DRY_RUN_SENDER: Address = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 /// Token transfer flow — mirrors `UserTransferType` from `fynd-rpc-types`.
@@ -61,12 +65,12 @@ enum TransferType {
 #[command(name = "fynd-swap-cli")]
 #[command(about = "Quote and execute token swaps via Fynd (ERC-20 or Permit2)")]
 struct Cli {
-    /// Sell token address (defaults to USDC on mainnet)
-    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
+    /// Sell token address (defaults to WETH on mainnet)
+    #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
     sell_token: String,
 
-    /// Buy token address (defaults to WETH on mainnet)
-    #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    /// Buy token address (defaults to USDC on mainnet)
+    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     buy_token: String,
 
     /// Amount to sell in raw atomic units (e.g. 1000000000 for 1000 USDC at 6 decimals)
@@ -393,7 +397,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         PrivateKeySigner::random()
     };
-    let sender = signer.address();
+    // In dry-run mode use a well-funded address so the eth_call simulation has enough ETH for gas.
+    // The actual signing key is irrelevant since signatures are not validated in dry-run.
+    let sender = if cli.execute { signer.address() } else { DRY_RUN_SENDER };
     info!("Sender: {sender:?}");
 
     let provider: RootProvider<Ethereum> = ProviderBuilder::default().connect_http(
@@ -542,8 +548,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Sign order payload ────────────────────────────────────────────────────
+    let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
     let payload = client
-        .swap_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 2u64))
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
@@ -635,8 +642,8 @@ mod tests {
         std::env::remove_var("TYCHO_API_KEY");
         std::env::remove_var("RPC_URL");
         let cli = Cli::try_parse_from(["fynd-swap-cli"]).unwrap();
-        assert_eq!(cli.sell_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        assert_eq!(cli.buy_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(cli.sell_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(cli.buy_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         assert_eq!(cli.sell_amount, 1_000_000_000u128);
         assert_eq!(cli.slippage_bps, 50u32);
         assert_eq!(cli.fynd_url, "http://localhost:3000");
