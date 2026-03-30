@@ -1,12 +1,10 @@
 //! fynd-swap-cli — quote and execute token swaps via the Fynd solver.
 //!
-//! Supports both ERC-20 approve and Permit2 transfer flows. When `--tycho-url` is
-//! provided, an embedded Fynd solver is spawned automatically instead of connecting
-//! to an external instance.
+//! Supports both ERC-20 approve and Permit2 transfer flows.
 //!
 //! # Dry-run (default)
 //!
-//! Uses an ephemeral key and ERC-20 storage overrides so no funds are required.
+//! Uses a well-funded sender address and ERC-20 storage overrides so no funds are required.
 //!
 //! # On-chain execution (`--execute`)
 //!
@@ -14,11 +12,10 @@
 
 use std::{env, str::FromStr, time::Duration};
 
-use actix_web::dev::ServerHandle;
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{Address, B256, U256},
+    primitives::{address, Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
@@ -30,18 +27,16 @@ use fynd_client::{
     OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
     QuoteParams, SignedSwap, SigningHints, StorageOverrides,
 };
-use fynd_rpc::{
-    builder::{parse_chain, FyndRPCBuilder},
-    config::WorkerPoolsConfig,
-    protocols::fetch_protocol_systems,
-};
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use tycho_simulation::tycho_common::models::Chain;
 
 mod erc20;
 mod permit2;
+
+/// Vitalik's address — used as the dry-run sender so `eth_call` simulations don't fail due
+/// to insufficient ETH for gas. Signatures are not checked in dry-run mode.
+const DRY_RUN_SENDER: Address = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -61,16 +56,16 @@ enum TransferType {
 #[command(name = "fynd-swap-cli")]
 #[command(about = "Quote and execute token swaps via Fynd (ERC-20 or Permit2)")]
 struct Cli {
-    /// Sell token address (defaults to USDC on mainnet)
-    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
+    /// Sell token address (defaults to WETH on mainnet)
+    #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
     sell_token: String,
 
-    /// Buy token address (defaults to WETH on mainnet)
-    #[arg(long, default_value = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    /// Buy token address (defaults to USDC on mainnet)
+    #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     buy_token: String,
 
     /// Amount to sell in raw atomic units (e.g. 1000000000 for 1000 USDC at 6 decimals)
-    #[arg(long, default_value_t = 1_000_000_000u128)]
+    #[arg(long, default_value_t = 1000000000000000000u128)]
     sell_amount: u128,
 
     /// Slippage tolerance in basis points (e.g. 50 = 0.5%)
@@ -98,39 +93,9 @@ struct Cli {
     #[arg(long, default_value = "0x000000000022D473030F116dDEE9F6B43aC78BA3")]
     permit2: String,
 
-    /// If set, spawn an embedded Fynd solver connecting to this Tycho WebSocket URL
-    #[arg(long)]
-    tycho_url: Option<String>,
-
-    /// Tycho API key
-    #[arg(long, env = "TYCHO_API_KEY")]
-    tycho_api_key: Option<String>,
-
-    /// Disable TLS for the Tycho WebSocket connection
-    #[arg(long)]
-    disable_tls: bool,
-
     /// Node RPC URL for the target chain
     #[arg(long, env = "RPC_URL", default_value = "https://eth.llamarpc.com")]
     rpc_url: String,
-
-    /// Target chain (e.g. Ethereum)
-    #[arg(long, default_value = "Ethereum")]
-    chain: String,
-
-    /// Protocols to index (comma-separated). Only used with --tycho-url.
-    /// If empty, all on-chain protocols are fetched from Tycho.
-    #[arg(long, value_delimiter = ',')]
-    protocols: Vec<String>,
-
-    /// Path to worker pools TOML config. Only used with --tycho-url.
-    /// If absent, uses a sensible default (most_liquid, 1-3 hops).
-    #[arg(long)]
-    worker_pools_config: Option<String>,
-
-    /// HTTP port for the embedded solver
-    #[arg(long, default_value_t = 3000u16)]
-    http_port: u16,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -175,106 +140,19 @@ async fn build_dry_run_overrides(
     Ok(overrides)
 }
 
-struct EmbeddedSolverConfig<'a> {
-    tycho_url: &'a str,
-    tycho_api_key: Option<&'a str>,
-    disable_tls: bool,
-    rpc_url: &'a str,
-    chain: Chain,
-    protocols: Vec<String>,
-    worker_pools_config: Option<&'a str>,
-    http_port: u16,
-}
-
-/// Spawn an embedded Fynd solver and return its server handle for later shutdown.
-async fn spawn_embedded_solver(cfg: EmbeddedSolverConfig<'_>) -> anyhow::Result<ServerHandle> {
-    let pools_config = match cfg.worker_pools_config {
-        Some(path) => WorkerPoolsConfig::load_from_file(path)?,
-        None => toml::from_str(
-            r#"
-[pools.default]
-algorithm = "most_liquid"
-min_hops = 1
-max_hops = 3
-"#,
-        )
-        .context("failed to parse default worker pools config")?,
-    };
-
-    let resolved_protocols = if cfg.protocols.is_empty() {
-        let fetched =
-            fetch_protocol_systems(cfg.tycho_url, cfg.tycho_api_key, !cfg.disable_tls, cfg.chain)
-                .await?;
-        if fetched.is_empty() {
-            bail!("no protocols found; check Tycho connectivity or use --protocols");
-        }
-        fetched
-    } else {
-        cfg.protocols
-    };
-
-    info!("Starting embedded solver with {} protocol(s)", resolved_protocols.len());
-
-    let mut builder = FyndRPCBuilder::new(
-        cfg.chain,
-        pools_config.into_pools(),
-        cfg.tycho_url.to_string(),
-        cfg.rpc_url.to_string(),
-        resolved_protocols,
-    )
-    .http_port(cfg.http_port);
-
-    if cfg.disable_tls {
-        builder = builder.disable_tls();
-    }
-    if let Some(api_key) = cfg.tycho_api_key {
-        builder = builder.tycho_api_key(api_key.to_string());
-    }
-
-    let fynd = builder
-        .build()
-        .context("failed to build embedded solver")?;
-    let handle = fynd.server_handle();
-    tokio::spawn(async move { fynd.run().await.ok() });
-    Ok(handle)
-}
-
-/// Poll the solver health endpoint until healthy or deadline expires.
-///
-/// For embedded solvers, retries for up to 60 seconds. For external solvers,
-/// checks once and fails immediately if not healthy.
-async fn wait_for_health(
-    client: &FyndClient,
-    fynd_url: &str,
-    is_embedded: bool,
-) -> anyhow::Result<HealthStatus> {
+/// Poll the solver health endpoint until healthy or fail immediately if not healthy.
+async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<HealthStatus> {
     info!("Checking solver health at {fynd_url}...");
-    let health_deadline = tokio::time::Instant::now() +
-        if is_embedded { Duration::from_secs(60) } else { Duration::ZERO };
-
-    loop {
-        match client.health().await {
-            Ok(h) if h.healthy() => break Ok(h),
-            other => {
-                if is_embedded && tokio::time::Instant::now() < health_deadline {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-                match other {
-                    Ok(h) => bail!(
-                        "solver at {fynd_url} is not healthy \
-                         (last update: {}ms ago, {} pools); \
-                         wait for market data to load",
-                        h.last_update_ms(),
-                        h.num_solver_pools()
-                    ),
-                    Err(e) if is_embedded => {
-                        bail!("embedded solver did not become healthy within 60s: {e}")
-                    }
-                    Err(e) => bail!("health check failed: {e}"),
-                }
-            }
-        }
+    match client.health().await {
+        Ok(h) if h.healthy() => Ok(h),
+        Ok(h) => bail!(
+            "solver at {fynd_url} is not healthy \
+             (last update: {}ms ago, {} pools); \
+             wait for market data to load",
+            h.last_update_ms(),
+            h.num_solver_pools()
+        ),
+        Err(e) => bail!("health check failed: {e}"),
     }
 }
 
@@ -393,7 +271,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         PrivateKeySigner::random()
     };
-    let sender = signer.address();
+    // In dry-run mode use a well-funded address so the eth_call simulation has enough ETH for gas.
+    // The actual signing key is irrelevant since signatures are not validated in dry-run.
+    let sender = if cli.execute { signer.address() } else { DRY_RUN_SENDER };
     info!("Sender: {sender:?}");
 
     let provider: RootProvider<Ethereum> = ProviderBuilder::default().connect_http(
@@ -402,36 +282,14 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("invalid RPC URL: {}", cli.rpc_url))?,
     );
 
-    // ── Optionally spawn an embedded solver ───────────────────────────────────
-    let (fynd_url, server_handle): (String, Option<ServerHandle>) =
-        if let Some(ref tycho_url) = cli.tycho_url {
-            let chain =
-                parse_chain(&cli.chain).with_context(|| format!("invalid chain: {}", cli.chain))?;
-            let handle = spawn_embedded_solver(EmbeddedSolverConfig {
-                tycho_url,
-                tycho_api_key: cli.tycho_api_key.as_deref(),
-                disable_tls: cli.disable_tls,
-                rpc_url: &cli.rpc_url,
-                chain,
-                protocols: cli.protocols.clone(),
-                worker_pools_config: cli.worker_pools_config.as_deref(),
-                http_port: cli.http_port,
-            })
-            .await?;
-            (format!("http://localhost:{}", cli.http_port), Some(handle))
-        } else {
-            (cli.fynd_url.clone(), None)
-        };
-
     // ── Build FyndClient ──────────────────────────────────────────────────────
-    let client = FyndClientBuilder::new(&fynd_url, &cli.rpc_url)
+    let client = FyndClientBuilder::new(&cli.fynd_url, &cli.rpc_url)
         .with_sender(sender)
         .build()
         .await?;
 
-    // ── Health check (polls for embedded solver; checks once for external) ────
-    let is_embedded = server_handle.is_some();
-    let health = wait_for_health(&client, &fynd_url, is_embedded).await?;
+    // ── Health check ──────────────────────────────────────────────────────────
+    let health = wait_for_health(&client, &cli.fynd_url).await?;
     info!(
         "Solver healthy: {}, last update: {}ms ago, {} solver pools",
         health.healthy(),
@@ -542,8 +400,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Sign order payload ────────────────────────────────────────────────────
+    let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
     let payload = client
-        .swap_payload(quote, &SigningHints::default())
+        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 2u64))
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
@@ -600,12 +459,6 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("Gas cost (wei): {}", settled.gas_cost());
 
-    // ── Shutdown embedded solver ──────────────────────────────────────────────
-    if let Some(handle) = server_handle {
-        info!("Stopping embedded solver...");
-        handle.stop(true).await;
-    }
-
     Ok(())
 }
 
@@ -632,21 +485,17 @@ mod tests {
 
     #[test]
     fn cli_defaults() {
-        std::env::remove_var("TYCHO_API_KEY");
         std::env::remove_var("RPC_URL");
         let cli = Cli::try_parse_from(["fynd-swap-cli"]).unwrap();
-        assert_eq!(cli.sell_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        assert_eq!(cli.buy_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
-        assert_eq!(cli.sell_amount, 1_000_000_000u128);
+        assert_eq!(cli.sell_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(cli.buy_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(cli.sell_amount, 1_000_000_000_000_000_000u128);
         assert_eq!(cli.slippage_bps, 50u32);
         assert_eq!(cli.fynd_url, "http://localhost:3000");
         assert_eq!(cli.transfer_type, TransferType::TransferFrom);
         assert_eq!(cli.permit2, "0x000000000022D473030F116dDEE9F6B43aC78BA3");
-        assert_eq!(cli.http_port, 3000u16);
         assert!(!cli.execute);
-        assert!(cli.tycho_url.is_none());
         assert!(cli.router.is_none());
-        assert!(cli.protocols.is_empty());
     }
 
     #[test]
@@ -661,22 +510,6 @@ mod tests {
         .unwrap();
         assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
         assert_eq!(cli.router.as_deref(), Some("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"));
-    }
-
-    #[test]
-    fn cli_tycho_url_sets_embedded_solver_path() {
-        let cli = Cli::try_parse_from(["fynd-swap-cli", "--tycho-url", "localhost:8888"]).unwrap();
-        assert_eq!(cli.tycho_url.as_deref(), Some("localhost:8888"));
-        // fynd_url keeps its default; the embedded solver overrides the URL at runtime
-        assert_eq!(cli.fynd_url, "http://localhost:3000");
-    }
-
-    #[test]
-    fn cli_protocols_split_by_comma() {
-        let cli =
-            Cli::try_parse_from(["fynd-swap-cli", "--protocols", "uniswap_v2,uniswap_v3,curve"])
-                .unwrap();
-        assert_eq!(cli.protocols, vec!["uniswap_v2", "uniswap_v3", "curve"]);
     }
 
     #[test]

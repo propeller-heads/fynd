@@ -282,9 +282,19 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
         builder = builder.tycho_api_key(api_key.clone());
     }
     if let Some(blacklist_path) = &args.blacklist_config {
-        let blacklist = BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
-            SolverError::SetupError(format!("failed to load blacklist config: {}", e))
-        })?;
+        let default_blacklist_path = std::path::Path::new("blacklist.toml");
+        let blacklist =
+            if blacklist_path.as_path() == default_blacklist_path && !blacklist_path.exists() {
+                warn!(
+                    "blacklist.toml not found; using built-in defaults. \
+                     Set --blacklist-config or BLACKLIST_CONFIG to use a custom config."
+                );
+                BlacklistConfig::builtin_default()
+            } else {
+                BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
+                    SolverError::SetupError(format!("failed to load blacklist config: {}", e))
+                })?
+            };
         builder = builder.blacklist(blacklist);
     }
 
