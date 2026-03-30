@@ -347,6 +347,7 @@ mod tests {
         #[case] should_pass: bool,
     ) {
         let config = PriceGuardConfig::default()
+            .with_enabled(true)
             .with_lower_tolerance_bps(lower_bps)
             .with_upper_tolerance_bps(upper_bps);
         let guard = price_guard(vec![mock_provider(provider_amount)]);
@@ -365,7 +366,9 @@ mod tests {
     #[case::all_error_deny(false, false)]
     #[test]
     fn test_all_providers_error(#[case] allow_on_error: bool, #[case] should_pass: bool) {
-        let config = PriceGuardConfig::default().with_allow_on_provider_error(allow_on_error);
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_allow_on_provider_error(allow_on_error);
         let guard = price_guard(vec![Box::new(FailingProvider), Box::new(FailingProvider)]);
 
         let result = guard
@@ -396,7 +399,9 @@ mod tests {
     fn test_one_pass_one_fail() {
         // Test that the quote status is success even with one failing provider,
         // as long as the second provider passes.
-        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_lower_tolerance_bps(300);
 
         // Our amount out is below the acceptable lower bound of the first provider,
         // but passes with the second.
@@ -411,7 +416,9 @@ mod tests {
 
     #[test]
     fn test_one_provider_failure() {
-        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_lower_tolerance_bps(300);
         let guard = price_guard(vec![Box::new(FailingProvider), mock_provider(1000)]);
 
         let result = guard
@@ -424,7 +431,7 @@ mod tests {
     #[test]
     fn test_failed_quote() {
         // Test that the QuoteStatus::NoRouteFound remains unchanged
-        let config = PriceGuardConfig::default();
+        let config = PriceGuardConfig::default().with_enabled(true);
         let guard = price_guard(vec![mock_provider(10_000_000)]);
 
         let mut quote = make_quote(1);
@@ -439,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_no_providers_returns_error() {
-        let config = PriceGuardConfig::default();
+        let config = PriceGuardConfig::default().with_enabled(true);
         let guard = price_guard(vec![]);
 
         let result = guard.validate(vec![make_quote(1000)], &config);
@@ -451,7 +458,9 @@ mod tests {
     fn test_multiple_quotes() {
         // Test that multiple quotes get statuses independent of each other.
         // For example - one passes and one fails.
-        let config = PriceGuardConfig::default().with_lower_tolerance_bps(300);
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_lower_tolerance_bps(300);
         let guard = price_guard(vec![mock_provider(1000)]);
 
         let result = guard
@@ -467,7 +476,9 @@ mod tests {
     #[case::deny(false, QuoteStatus::PriceCheckFailed)]
     #[test]
     fn test_all_price_not_found(#[case] allow: bool, #[case] result_status: QuoteStatus) {
-        let config = PriceGuardConfig::default().with_allow_on_token_price_not_found(allow);
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_allow_on_token_price_not_found(allow);
         let guard =
             price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(PriceNotFoundProvider)]);
 
@@ -484,6 +495,7 @@ mod tests {
         // might be supported but the provider is just down — fall back to
         // allow_on_provider_error.
         let config = PriceGuardConfig::default()
+            .with_enabled(true)
             .with_allow_on_token_price_not_found(true)
             .with_allow_on_provider_error(false);
         let guard = price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(FailingProvider)]);
@@ -499,6 +511,7 @@ mod tests {
     fn test_price_not_found_ignores_provider_error() {
         // allow_on_provider_error should not allow price-not-found cases.
         let config = PriceGuardConfig::default()
+            .with_enabled(true)
             .with_allow_on_provider_error(true)
             .with_allow_on_token_price_not_found(false);
         let guard =

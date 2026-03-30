@@ -41,7 +41,7 @@ impl Default for PriceGuardConfig {
             upper_tolerance_bps: 10_000,
             allow_on_provider_error: false,
             allow_on_token_price_not_found: false,
-            enabled: true,
+            enabled: false,
         }
     }
 }
