@@ -1,3 +1,11 @@
+## [0.39.2](https://github.com/propeller-heads/fynd/compare/0.39.1...0.39.2) (2026-03-30)
+
+
+### Bug Fixes
+
+* **fynd-rpc-types:** remove unconditional tycho-simulation dependency ([7d849aa](https://github.com/propeller-heads/fynd/commit/7d849aaeb0814bd7e9ac8d8396f81bdd02ff0079))
+* **workspace:** add clap env feature to workspace dep ([5215f78](https://github.com/propeller-heads/fynd/commit/5215f78b2e24c2184e0addc59fa22e37df9707bc))
+
 ## [0.39.1](https://github.com/propeller-heads/fynd/compare/0.39.0...0.39.1) (2026-03-30)
 
 
