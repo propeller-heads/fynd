@@ -119,10 +119,10 @@ impl PriceGuard {
         for result in &results {
             match result {
                 Ok(price) => {
+                    has_price = true;
                     if self.price_within_tolerance(quote, price, config) {
                         return true;
                     }
-                    has_price = true;
                 }
                 Err(e) => {
                     if !matches!(e, PriceProviderError::PriceNotFound { .. }) {
@@ -189,6 +189,7 @@ impl PriceGuard {
 mod tests {
     use std::str::FromStr;
 
+    use async_trait::async_trait;
     use num_bigint::BigUint;
     use rstest::rstest;
     use tokio::task::JoinHandle;
@@ -215,6 +216,7 @@ mod tests {
         source: String,
     }
 
+    #[async_trait]
     impl PriceProvider for MockProvider {
         fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
@@ -232,6 +234,7 @@ mod tests {
 
     struct FailingProvider;
 
+    #[async_trait]
     impl PriceProvider for FailingProvider {
         fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))

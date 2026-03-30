@@ -3392,6 +3392,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "petgraph",
+ "reqwest",
  "rstest",
  "serde",
  "serde_json",
