@@ -26,6 +26,13 @@ sol! {
 
 pub const MAX_PROBE_SLOT: u64 = 20;
 
+/// Sentinel written to a candidate storage slot during balance/allowance probing.
+///
+/// Deliberately avoids high bits so tokens that mask upper bits (e.g. USDC packs a
+/// blacklist flag in bit 255 of its balance slot) still return this value exactly from
+/// `balanceOf`/`allowance`, allowing an exact-match check.
+const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef, 0, 0, 0]);
+
 pub fn balance_slot_at(holder: Address, position: u64) -> B256 {
     let mut buf = [0u8; 64];
     buf[12..32].copy_from_slice(holder.as_slice());
@@ -56,7 +63,7 @@ pub async fn find_balance_slot(
     holder: Address,
 ) -> anyhow::Result<u64> {
     let calldata = IERC20::balanceOfCall { account: holder }.abi_encode();
-    let target = B256::from(U256::MAX);
+    let sentinel = B256::from(PROBE_SENTINEL);
     for position in 0..=MAX_PROBE_SLOT {
         let slot = balance_slot_at(holder, position);
         let result = provider
@@ -65,9 +72,9 @@ pub async fn find_balance_slot(
                 input: AlloyBytes::from(calldata.clone()).into(),
                 ..Default::default()
             })
-            .overrides(state_override_single(token, slot, target))
+            .overrides(state_override_single(token, slot, sentinel))
             .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
+        if result.len() >= 32 && result[..32] == *sentinel.as_slice() {
             return Ok(position);
         }
     }
@@ -84,7 +91,7 @@ pub async fn find_allowance_slot(
     spender: Address,
 ) -> anyhow::Result<u64> {
     let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let target = B256::from(U256::MAX);
+    let sentinel = B256::from(PROBE_SENTINEL);
     for position in 0..=MAX_PROBE_SLOT {
         let slot = allowance_slot_at(owner, spender, position);
         let result = provider
@@ -93,9 +100,9 @@ pub async fn find_allowance_slot(
                 input: AlloyBytes::from(calldata.clone()).into(),
                 ..Default::default()
             })
-            .overrides(state_override_single(token, slot, target))
+            .overrides(state_override_single(token, slot, sentinel))
             .await?;
-        if result.len() >= 32 && result[..32] == *target.as_slice() {
+        if result.len() >= 32 && result[..32] == *sentinel.as_slice() {
             return Ok(position);
         }
     }

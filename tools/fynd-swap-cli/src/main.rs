@@ -74,7 +74,7 @@ struct Cli {
     buy_token: String,
 
     /// Amount to sell in raw atomic units (e.g. 1000000000 for 1000 USDC at 6 decimals)
-    #[arg(long, default_value_t = 1_000_000_000u128)]
+    #[arg(long, default_value_t = 1000000000000000000u128)]
     sell_amount: u128,
 
     /// Slippage tolerance in basis points (e.g. 50 = 0.5%)
@@ -644,7 +644,7 @@ mod tests {
         let cli = Cli::try_parse_from(["fynd-swap-cli"]).unwrap();
         assert_eq!(cli.sell_token, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
         assert_eq!(cli.buy_token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        assert_eq!(cli.sell_amount, 1_000_000_000u128);
+        assert_eq!(cli.sell_amount, 1_000_000_000_000_000_000u128);
         assert_eq!(cli.slippage_bps, 50u32);
         assert_eq!(cli.fynd_url, "http://localhost:3000");
         assert_eq!(cli.transfer_type, TransferType::TransferFrom);
