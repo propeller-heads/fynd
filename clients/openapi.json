@@ -588,6 +588,13 @@
             ],
             "description": "Whether to let solutions pass when no provider can return a price."
           },
+          "allow_on_token_price_not_found": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to let solutions pass when no provider returns price for token pair."
+          },
           "enabled": {
             "type": [
               "boolean",
