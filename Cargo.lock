@@ -3454,22 +3454,16 @@ dependencies = [
 name = "fynd-swap-cli"
 version = "0.38.0"
 dependencies = [
- "actix-web",
  "alloy",
  "anyhow",
  "bytes",
  "clap",
  "fynd-client",
- "fynd-rpc",
  "num-bigint",
  "reqwest",
- "serde",
- "serde_json",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber 0.3.23",
- "tycho-simulation",
 ]
 
 [[package]]
