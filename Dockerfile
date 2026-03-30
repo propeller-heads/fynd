@@ -30,7 +30,7 @@ RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
     echo "" > clients/rust/src/lib.rs && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
     echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
-    cargo build --release --package fynd && \
+    cargo build --release --package fynd --package fynd-swap-cli && \
     rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src
 
@@ -39,13 +39,14 @@ COPY src/ src/
 COPY fynd-core/src/ fynd-core/src/
 COPY fynd-rpc/src/ fynd-rpc/src/
 COPY fynd-rpc-types/src/ fynd-rpc-types/src/
-RUN mkdir -p clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src && \
-    echo "" > clients/rust/src/lib.rs && \
+COPY clients/rust/src/ clients/rust/src/
+COPY tools/fynd-swap-cli/src/ tools/fynd-swap-cli/src/
+RUN mkdir -p tools/benchmark/src && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
-    echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
     touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
-        fynd-rpc-types/src/lib.rs && \
-    cargo build --release --package fynd
+        fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
+        tools/fynd-swap-cli/src/main.rs && \
+    cargo build --release --package fynd --package fynd-swap-cli
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -56,6 +57,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
+COPY --from=builder /app/target/release/fynd-swap-cli /usr/local/bin/fynd-swap-cli
 
 EXPOSE 3000 9898
 
