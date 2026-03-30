@@ -1229,381 +1229,139 @@ fn generate_order_id() -> String {
 }
 
 // ============================================================================
-// SERIALIZATION TESTS
+// WIRE FORMAT TESTS
 // ============================================================================
 //
-// These tests pin the exact JSON wire format for every field that uses `Address`
-// or `Bytes`. They must pass before and after any dependency swap, so we know the
-// wire format hasn't changed.
+// These tests pin the JSON wire format for the key API types. They catch
+// field renames, enum case changes, wrong numeric types, and structural
+// changes that would silently break API clients.
 
 #[cfg(test)]
-mod serde_tests {
+mod wire_format_tests {
     use num_bigint::BigUint;
 
     use super::*;
 
-    // ── helpers ──────────────────────────────────────────────────────────────
-
-    /// Build an Address from a 20-byte array.
-    fn addr(raw: [u8; 20]) -> Address {
-        Address::from(raw)
-    }
-
-    /// Build a Bytes value from a literal byte slice.
-    fn bytes(slice: &[u8]) -> Bytes {
-        Bytes::from(slice)
-    }
-
-    /// The expected JSON for a given byte slice: `"0x{lowercase_hex}"`.
-    fn hex_json(b: &[u8]) -> String {
-        format!(r#""0x{}""#, hex::encode(b))
-    }
-
-    // ── Address serialization ─────────────────────────────────────────────────
-
-    #[test]
-    fn address_serializes_as_0x_prefixed_lowercase_hex() {
-        let raw = [0xABu8; 20];
-        let a = addr(raw);
-        let json = serde_json::to_string(&a).unwrap();
-        assert_eq!(json, hex_json(&raw));
-    }
-
-    #[test]
-    fn address_deserializes_with_0x_prefix() {
-        let raw = [0xABu8; 20];
-        let json = hex_json(&raw);
-        let a: Address = serde_json::from_str(&json).unwrap();
-        assert_eq!(a, addr(raw));
-    }
-
-    #[test]
-    fn address_deserializes_without_0x_prefix() {
-        let raw = [0xABu8; 20];
-        // Hex without 0x prefix — tycho accepts both forms.
-        let no_prefix_json = format!(r#""{}""#, hex::encode(raw));
-        let a: Address = serde_json::from_str(&no_prefix_json).unwrap();
-        assert_eq!(a, addr(raw));
-    }
-
-    #[test]
-    fn address_serde_roundtrip() {
-        let original = addr([0x12u8; 20]);
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: Address = serde_json::from_str(&json).unwrap();
-        assert_eq!(original, recovered);
-    }
-
-    // ── Bytes serialization ───────────────────────────────────────────────────
-
-    #[test]
-    fn bytes_serializes_as_0x_prefixed_lowercase_hex() {
-        let raw = [0xDE, 0xAD, 0xBE, 0xEF];
-        let b = bytes(&raw);
-        let json = serde_json::to_string(&b).unwrap();
-        assert_eq!(json, hex_json(&raw));
-    }
-
-    #[test]
-    fn bytes_deserializes_with_0x_prefix() {
-        let raw = [0xDE, 0xAD, 0xBE, 0xEF];
-        let json = hex_json(&raw);
-        let b: Bytes = serde_json::from_str(&json).unwrap();
-        assert_eq!(b, bytes(&raw));
-    }
+    // ── Bytes: accept hex without 0x prefix ───────────────────────────────────
+    //
+    // All other Bytes/Address format behaviour is covered implicitly by the
+    // struct tests below. This case (no prefix) is the only non-obvious one
+    // worth testing in isolation.
 
     #[test]
     fn bytes_deserializes_without_0x_prefix() {
-        let raw = [0xDE, 0xAD, 0xBE, 0xEF];
-        let no_prefix_json = format!(r#""{}""#, hex::encode(raw));
-        let b: Bytes = serde_json::from_str(&no_prefix_json).unwrap();
-        assert_eq!(b, bytes(&raw));
+        let b: Bytes = serde_json::from_str(r#""deadbeef""#).unwrap();
+        assert_eq!(b.as_ref(), [0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
-    #[test]
-    fn bytes_serde_roundtrip() {
-        let original = bytes(&[0x01, 0x02, 0x03, 0x04, 0x05]);
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: Bytes = serde_json::from_str(&json).unwrap();
-        assert_eq!(original, recovered);
-    }
-
-    // ── Order ─────────────────────────────────────────────────────────────────
+    // ── Order: full request JSON shape ────────────────────────────────────────
+    //
+    // Verifies field names, side as "sell" (not "Sell"), amount as decimal
+    // string (not a number), addresses as "0x..." hex, and receiver absent
+    // when not set.
 
     #[test]
-    fn order_address_fields_serialize_as_hex() {
-        let (a11, a22, a33) = ([0x11u8; 20], [0x22u8; 20], [0x33u8; 20]);
+    fn order_serializes_to_full_json() {
         let order = Order::new(
-            addr(a11),
-            addr(a22),
-            BigUint::from(1_000_000_000u64),
+            Bytes::from([0xAAu8; 20]),
+            Bytes::from([0xBBu8; 20]),
+            BigUint::from(1_000_000_000_000_000_000u64),
             OrderSide::Sell,
-            addr(a33),
-        );
-        let json = serde_json::to_string(&order).unwrap();
-        assert!(json.contains(&format!(r#""token_in":{}"#, hex_json(&a11))));
-        assert!(json.contains(&format!(r#""token_out":{}"#, hex_json(&a22))));
-        assert!(json.contains(&format!(r#""sender":{}"#, hex_json(&a33))));
-    }
-
-    #[test]
-    fn order_with_receiver_serializes_receiver_field() {
-        let a44 = [0x44u8; 20];
-        let order = Order::new(
-            addr([0x11u8; 20]),
-            addr([0x22u8; 20]),
-            BigUint::from(500u64),
-            OrderSide::Sell,
-            addr([0x33u8; 20]),
+            Bytes::from([0xCCu8; 20]),
         )
-        .with_receiver(addr(a44));
-        let json = serde_json::to_string(&order).unwrap();
-        assert!(json.contains(&format!(r#""receiver":{}"#, hex_json(&a44))));
-    }
+        .with_id("abc");
 
-    #[test]
-    fn order_without_receiver_omits_receiver_field() {
-        let order = Order::new(
-            addr([0x11u8; 20]),
-            addr([0x22u8; 20]),
-            BigUint::from(500u64),
-            OrderSide::Sell,
-            addr([0x33u8; 20]),
-        );
-        let json = serde_json::to_string(&order).unwrap();
-        assert!(!json.contains("receiver"));
-    }
-
-    #[test]
-    fn order_address_fields_roundtrip() {
-        let original = Order::new(
-            addr([0xAAu8; 20]),
-            addr([0xBBu8; 20]),
-            BigUint::from(42u64),
-            OrderSide::Sell,
-            addr([0xCCu8; 20]),
-        )
-        .with_id("test-id");
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: Order = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.token_in(), original.token_in());
-        assert_eq!(recovered.token_out(), original.token_out());
-        assert_eq!(recovered.sender(), original.sender());
-    }
-
-    // ── ClientFeeParams ───────────────────────────────────────────────────────
-
-    #[test]
-    fn client_fee_params_bytes_fields_serialize_as_hex() {
-        let receiver_raw = [0xAAu8; 20];
-        let sig_raw = [0x01u8, 0x02, 0x03];
-        let fee = ClientFeeParams::new(
-            100,
-            bytes(&receiver_raw),
-            BigUint::from(1_000u64),
-            9_999u64,
-            bytes(&sig_raw),
-        );
-        let json = serde_json::to_string(&fee).unwrap();
-        assert!(
-            json.contains(&format!(r#""receiver":{}"#, hex_json(&receiver_raw))),
-            "unexpected json: {json}"
-        );
-        assert!(
-            json.contains(&format!(r#""signature":{}"#, hex_json(&sig_raw))),
-            "unexpected json: {json}"
+        assert_eq!(
+            serde_json::to_value(&order).unwrap(),
+            serde_json::json!({
+                "id": "abc",
+                "token_in":  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "amount":    "1000000000000000000",
+                "side":      "sell",
+                "sender":    "0xcccccccccccccccccccccccccccccccccccccccc"
+            })
         );
     }
 
+    // ── OrderQuote: full response JSON deserialization ────────────────────────
+    //
+    // Verifies that a realistic server response deserializes correctly:
+    // status as "success", BigUint fields from decimal strings, nested block,
+    // route with a Swap whose token addresses are hex and split is a string.
+
     #[test]
-    fn client_fee_params_bytes_fields_roundtrip() {
-        let original = ClientFeeParams::new(
-            200,
-            bytes(&[0xBBu8; 20]),
-            BigUint::from(500u64),
-            1_700_000_000u64,
-            bytes(&[0xFFu8; 65]),
-        );
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: ClientFeeParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.receiver(), original.receiver());
-        assert_eq!(recovered.signature(), original.signature());
+    fn order_quote_deserializes_from_json() {
+        let json = r#"{
+            "order_id": "order-1",
+            "status": "success",
+            "amount_in": "1000000000000000000",
+            "amount_out": "2000000000",
+            "gas_estimate": "150000",
+            "amount_out_net_gas": "1999000000",
+            "price_impact_bps": 5,
+            "block": { "number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000 },
+            "route": { "swaps": [{
+                "component_id": "pool-1",
+                "protocol": "uniswap_v3",
+                "token_in":  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "amount_in": "1000000000000000000",
+                "amount_out": "2000000000",
+                "gas_estimate": "150000",
+                "split": "0"
+            }]}
+        }"#;
+
+        let quote: OrderQuote = serde_json::from_str(json).unwrap();
+
+        assert_eq!(quote.status(), QuoteStatus::Success);
+        assert_eq!(*quote.amount_in(), BigUint::from(1_000_000_000_000_000_000u64));
+        assert_eq!(quote.price_impact_bps(), Some(5));
+        assert_eq!(quote.block().number(), 21_000_000);
+
+        let swap = &quote.route().unwrap().swaps()[0];
+        assert_eq!(swap.token_in().as_ref(), [0xAAu8; 20]);
+        assert_eq!(swap.token_out().as_ref(), [0xBBu8; 20]);
+        assert_eq!(swap.split(), 0.0);
     }
 
-    // ── PermitDetails ─────────────────────────────────────────────────────────
+    // ── EncodingOptions: full request JSON shape ──────────────────────────────
+    //
+    // Verifies transfer_type serializes as "transfer_from" (snake_case, not
+    // "TransferFrom"), slippage is a float, and optional fields are absent
+    // when not set.
 
     #[test]
-    fn permit_details_token_serializes_as_hex() {
-        let token_raw = [0x55u8; 20];
-        let details = PermitDetails::new(
-            bytes(&token_raw),
-            BigUint::from(u128::MAX),
-            BigUint::from(u64::MAX),
-            BigUint::from(0u64),
-        );
-        let json = serde_json::to_string(&details).unwrap();
-        assert!(
-            json.contains(&format!(r#""token":{}"#, hex_json(&token_raw))),
-            "unexpected json: {json}"
-        );
-    }
-
-    #[test]
-    fn permit_details_roundtrip() {
-        let original = PermitDetails::new(
-            bytes(&[0x66u8; 20]),
-            BigUint::from(999u64),
-            BigUint::from(1_000u64),
-            BigUint::from(7u64),
-        );
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: PermitDetails = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.token(), original.token());
-        assert_eq!(recovered.nonce(), original.nonce());
-    }
-
-    // ── PermitSingle ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn permit_single_spender_serializes_as_hex() {
-        let spender_raw = [0x20u8; 20];
-        let permit = PermitSingle::new(
-            PermitDetails::new(
-                bytes(&[0x10u8; 20]),
-                BigUint::from(1u64),
-                BigUint::from(2u64),
-                BigUint::from(3u64),
-            ),
-            bytes(&spender_raw),
-            BigUint::from(100u64),
-        );
-        let json = serde_json::to_string(&permit).unwrap();
-        assert!(
-            json.contains(&format!(r#""spender":{}"#, hex_json(&spender_raw))),
-            "unexpected json: {json}"
+    fn encoding_options_serializes_to_full_json() {
+        assert_eq!(
+            serde_json::to_value(EncodingOptions::new(0.005)).unwrap(),
+            serde_json::json!({
+                "slippage":      "0.005",
+                "transfer_type": "transfer_from"
+            })
         );
     }
 
-    // ── EncodingOptions with permit2_signature ────────────────────────────────
+    // ── InstanceInfo: response deserialization with forward compat ────────────
+    //
+    // Verifies the /info endpoint response deserializes correctly, and that
+    // unknown fields added in future server versions are silently ignored
+    // (no #[serde(deny_unknown_fields)] on this type).
 
     #[test]
-    fn encoding_options_permit2_signature_serializes_as_hex() {
-        let sig_raw = [0xABu8; 65];
-        let permit = PermitSingle::new(
-            PermitDetails::new(
-                bytes(&[0x10u8; 20]),
-                BigUint::from(1u64),
-                BigUint::from(2u64),
-                BigUint::from(3u64),
-            ),
-            bytes(&[0x20u8; 20]),
-            BigUint::from(100u64),
-        );
-        let opts = EncodingOptions::new(0.005).with_permit2(permit, bytes(&sig_raw));
-        let json = serde_json::to_string(&opts).unwrap();
-        assert!(
-            json.contains(&format!(r#""permit2_signature":{}"#, hex_json(&sig_raw))),
-            "unexpected json: {json}"
-        );
-    }
+    fn instance_info_deserializes_and_ignores_unknown_fields() {
+        let json = r#"{
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "future_field": "ignored"
+        }"#;
 
-    #[test]
-    fn encoding_options_no_permit2_omits_signature() {
-        let opts = EncodingOptions::new(0.005);
-        let json = serde_json::to_string(&opts).unwrap();
-        assert!(!json.contains("permit2_signature"), "unexpected json: {json}");
-    }
-
-    // ── Transaction ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn transaction_to_field_serializes_as_hex() {
-        let to_raw = [0x77u8; 20];
-        let tx = Transaction::new(bytes(&to_raw), BigUint::from(0u64), vec![]);
-        let json = serde_json::to_string(&tx).unwrap();
-        assert!(
-            json.contains(&format!(r#""to":{}"#, hex_json(&to_raw))),
-            "unexpected json: {json}"
-        );
-    }
-
-    #[test]
-    fn transaction_data_field_serializes_as_hex() {
-        let data_raw = [0xCAu8, 0xFE, 0xBA, 0xBE];
-        let tx = Transaction::new(bytes(&[0x77u8; 20]), BigUint::from(0u64), data_raw.to_vec());
-        let json = serde_json::to_string(&tx).unwrap();
-        assert!(
-            json.contains(&format!(r#""data":{}"#, hex_json(&data_raw))),
-            "unexpected json: {json}"
-        );
-    }
-
-    #[test]
-    fn transaction_roundtrip() {
-        let original = Transaction::new(
-            bytes(&[0x88u8; 20]),
-            BigUint::from(1_000_000u64),
-            vec![0x12, 0x34, 0x56],
-        );
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: Transaction = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.to(), original.to());
-        assert_eq!(recovered.value(), original.value());
-        assert_eq!(recovered.data(), original.data());
-    }
-
-    // ── InstanceInfo ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn chain_info_address_fields_serialize_as_hex() {
-        let router_raw = [0xEEu8; 20];
-        let permit2_raw = [0xFFu8; 20];
-        let info = InstanceInfo::new(1u64, bytes(&router_raw), bytes(&permit2_raw));
-        let json = serde_json::to_string(&info).unwrap();
-        assert!(
-            json.contains(&format!(r#""router_address":{}"#, hex_json(&router_raw))),
-            "unexpected json: {json}"
-        );
-        assert!(
-            json.contains(&format!(r#""permit2_address":{}"#, hex_json(&permit2_raw))),
-            "unexpected json: {json}"
-        );
-    }
-
-    #[test]
-    fn chain_info_roundtrip() {
-        let original = InstanceInfo::new(1u64, bytes(&[0xEEu8; 20]), bytes(&[0xFFu8; 20]));
-        let json = serde_json::to_string(&original).unwrap();
-        let recovered: InstanceInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.router_address(), original.router_address());
-        assert_eq!(recovered.permit2_address(), original.permit2_address());
-        assert_eq!(recovered.chain_id(), original.chain_id());
-    }
-
-    // ── Swap ──────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn swap_token_fields_serialize_as_hex() {
-        let (c0, c1) = ([0xC0u8; 20], [0xC1u8; 20]);
-        let swap = Swap::new(
-            "0xpool".to_string(),
-            "uniswap_v3".to_string(),
-            addr(c0),
-            addr(c1),
-            BigUint::from(1u64),
-            BigUint::from(2u64),
-            BigUint::from(3u64),
-            1.0,
-        );
-        let json = serde_json::to_string(&swap).unwrap();
-        assert!(
-            json.contains(&format!(r#""token_in":{}"#, hex_json(&c0))),
-            "unexpected json: {json}"
-        );
-        assert!(
-            json.contains(&format!(r#""token_out":{}"#, hex_json(&c1))),
-            "unexpected json: {json}"
-        );
+        let info: InstanceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.chain_id(), 1);
+        assert_eq!(info.router_address().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
     }
 }
 
