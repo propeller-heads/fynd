@@ -9,8 +9,9 @@ icon: rectangle-terminal
 
 ## Prerequisites
 
-1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
-2. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
+1. **Clone the repo** — `git clone https://github.com/propeller-heads/fynd.git && cd fynd`
+2. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
+3. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
 
 ## Build
 
