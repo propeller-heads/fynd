@@ -73,6 +73,9 @@ pub struct QuoteOptions {
     max_gas: Option<BigUint>,
     /// Options during encoding. If None, quote will be returned without calldata.
     encoding_options: Option<EncodingOptions>,
+    /// Per-request price guard overrides. If `None`, uses server defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    price_guard: Option<PriceGuardConfig>,
 }
 
 impl QuoteOptions {
@@ -118,6 +121,99 @@ impl QuoteOptions {
     /// Encoding options, if set.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// Set per-request price guard overrides.
+    pub fn with_price_guard(mut self, config: PriceGuardConfig) -> Self {
+        self.price_guard = Some(config);
+        self
+    }
+
+    /// Per-request price guard config, if set.
+    pub fn price_guard(&self) -> Option<&PriceGuardConfig> {
+        self.price_guard.as_ref()
+    }
+}
+
+/// Per-request overrides for price guard validation.
+///
+/// All fields are optional. When `None`, the server's configured defaults are used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PriceGuardConfig {
+    /// Maximum allowed deviation when `amount_out < expected`, in basis points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 300))]
+    lower_tolerance_bps: Option<u32>,
+    /// Maximum allowed deviation when `amount_out >= expected`, in basis points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 10000))]
+    upper_tolerance_bps: Option<u32>,
+    /// Whether to let solutions pass when no provider can return a price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_on_provider_error: Option<bool>,
+    /// Whether to let solutions pass when no provider returns price for token pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_on_token_price_not_found: Option<bool>,
+    /// Whether price guard validation is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+}
+
+impl PriceGuardConfig {
+    /// Set the lower tolerance in basis points.
+    pub fn with_lower_tolerance_bps(mut self, bps: u32) -> Self {
+        self.lower_tolerance_bps = Some(bps);
+        self
+    }
+
+    /// Set the upper tolerance in basis points.
+    pub fn with_upper_tolerance_bps(mut self, bps: u32) -> Self {
+        self.upper_tolerance_bps = Some(bps);
+        self
+    }
+
+    /// Set whether to allow solutions when providers error.
+    pub fn with_allow_on_provider_error(mut self, allow: bool) -> Self {
+        self.allow_on_provider_error = Some(allow);
+        self
+    }
+
+    /// Set whether to allow solutions when no provider returns price for token pair.
+    pub fn with_allow_on_token_price_not_found(mut self, allow: bool) -> Self {
+        self.allow_on_token_price_not_found = Some(allow);
+        self
+    }
+
+    /// Set whether price guard validation is enabled.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Lower tolerance in basis points, if set.
+    pub fn lower_tolerance_bps(&self) -> Option<u32> {
+        self.lower_tolerance_bps
+    }
+
+    /// Upper tolerance in basis points, if set.
+    pub fn upper_tolerance_bps(&self) -> Option<u32> {
+        self.upper_tolerance_bps
+    }
+
+    /// Whether to allow on provider error, if set.
+    pub fn allow_on_provider_error(&self) -> Option<bool> {
+        self.allow_on_provider_error
+    }
+
+    /// Whether to allow on token price not found, if set.
+    pub fn allow_on_token_price_not_found(&self) -> Option<bool> {
+        self.allow_on_token_price_not_found
+    }
+
+    /// Whether price guard is enabled, if set.
+    pub fn enabled(&self) -> Option<bool> {
+        self.enabled
     }
 }
 
@@ -722,6 +818,8 @@ pub enum QuoteStatus {
     Timeout,
     /// No solver workers are ready (e.g., market data not yet initialized).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 /// Block information at which a quote was computed.
@@ -1187,7 +1285,32 @@ mod conversions {
             if let Some(enc) = self.encoding_options {
                 opts = opts.with_encoding_options(enc.into());
             }
+            if let Some(pg) = self.price_guard {
+                opts = opts.with_price_guard(pg.into());
+            }
             opts
+        }
+    }
+
+    impl Into<fynd_core::PriceGuardConfig> for PriceGuardConfig {
+        fn into(self) -> fynd_core::PriceGuardConfig {
+            let mut config = fynd_core::PriceGuardConfig::default();
+            if let Some(bps) = self.lower_tolerance_bps {
+                config = config.with_lower_tolerance_bps(bps);
+            }
+            if let Some(bps) = self.upper_tolerance_bps {
+                config = config.with_upper_tolerance_bps(bps);
+            }
+            if let Some(allow) = self.allow_on_provider_error {
+                config = config.with_allow_on_provider_error(allow);
+            }
+            if let Some(allow) = self.allow_on_token_price_not_found {
+                config = config.with_allow_on_token_price_not_found(allow);
+            }
+            if let Some(enabled) = self.enabled {
+                config = config.with_enabled(enabled);
+            }
+            config
         }
     }
 
@@ -1333,6 +1456,7 @@ mod conversions {
                 fynd_core::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
                 fynd_core::QuoteStatus::Timeout => Self::Timeout,
                 fynd_core::QuoteStatus::NotReady => Self::NotReady,
+                fynd_core::QuoteStatus::PriceCheckFailed => Self::PriceCheckFailed,
                 // Fallback for future variants added to fynd_core::QuoteStatus.
                 _ => Self::NotReady,
             }
@@ -1421,6 +1545,7 @@ mod conversions {
                     min_responses: None,
                     max_gas: None,
                     encoding_options: None,
+                    price_guard: None,
                 },
             };
 
@@ -1504,6 +1629,57 @@ mod conversions {
             let deserialized: ClientFeeParams = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized.bps(), 150);
             assert_eq!(*deserialized.max_contribution(), BigUint::from(999_999u64));
+        }
+
+        #[test]
+        fn test_price_guard_config_into_core() {
+            let dto = PriceGuardConfig::default()
+                .with_lower_tolerance_bps(200)
+                .with_upper_tolerance_bps(5000)
+                .with_allow_on_provider_error(true)
+                .with_enabled(false);
+
+            let core: fynd_core::PriceGuardConfig = dto.into();
+            assert_eq!(core.lower_tolerance_bps(), 200);
+            assert_eq!(core.upper_tolerance_bps(), 5000);
+            assert!(core.allow_on_provider_error());
+            assert!(!core.enabled());
+        }
+
+        #[test]
+        fn test_price_guard_config_defaults_preserved() {
+            let dto = PriceGuardConfig::default().with_lower_tolerance_bps(100);
+            let core: fynd_core::PriceGuardConfig = dto.into();
+
+            assert_eq!(core.lower_tolerance_bps(), 100);
+            // Unset fields get core defaults
+            assert_eq!(core.upper_tolerance_bps(), 10_000);
+            assert!(!core.allow_on_provider_error());
+            assert!(!core.enabled());
+        }
+
+        #[test]
+        fn test_quote_options_with_price_guard_roundtrip() {
+            let dto = QuoteRequest {
+                orders: vec![Order {
+                    id: "pg-test".to_string(),
+                    token_in: make_address(0x01),
+                    token_out: make_address(0x02),
+                    amount: BigUint::from(1000u64),
+                    side: OrderSide::Sell,
+                    sender: make_address(0xAA),
+                    receiver: None,
+                }],
+                options: QuoteOptions::default()
+                    .with_price_guard(PriceGuardConfig::default().with_enabled(false)),
+            };
+
+            let core: fynd_core::QuoteRequest = dto.into();
+            let pg = core
+                .options()
+                .price_guard()
+                .expect("price_guard should be set");
+            assert!(!pg.enabled());
         }
 
         #[test]

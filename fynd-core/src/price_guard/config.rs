@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// Configuration for the PriceGuard external price validation.
 ///
 /// Controls tolerance thresholds, fail-open behavior, and whether validation
 /// is enabled at all. All fields have sensible defaults via [`Default`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceGuardConfig {
     /// Maximum allowed deviation when `amount_out < expected`, in basis points.
     /// Solutions where the user gets less than expected by more than this are rejected.
@@ -15,10 +17,17 @@ pub struct PriceGuardConfig {
     /// Default: 10_000 (100%).
     upper_tolerance_bps: u32,
 
-    /// Controls behavior when all providers error (network issues, API down).
+    /// Controls behavior when all providers error for reasons unrelated to pricing
+    /// (network issues, API down).
     /// `false` (default): reject solutions when no provider can return a price.
     /// `true`: let solutions pass through when no provider can be reached.
     allow_on_provider_error: bool,
+
+    /// Controls behavior when every provider returns `PriceNotFound` for the
+    /// requested token pair.
+    /// `false` (default): reject solutions for unknown token pairs.
+    /// `true`: let solutions pass through when no provider has a price.
+    allow_on_token_price_not_found: bool,
 
     /// Whether the price guard is enabled.
     /// Default: `true`.
@@ -31,7 +40,8 @@ impl Default for PriceGuardConfig {
             lower_tolerance_bps: 300,
             upper_tolerance_bps: 10_000,
             allow_on_provider_error: false,
-            enabled: true,
+            allow_on_token_price_not_found: false,
+            enabled: false,
         }
     }
 }
@@ -47,6 +57,10 @@ impl PriceGuardConfig {
 
     pub fn allow_on_provider_error(&self) -> bool {
         self.allow_on_provider_error
+    }
+
+    pub fn allow_on_token_price_not_found(&self) -> bool {
+        self.allow_on_token_price_not_found
     }
 
     pub fn enabled(&self) -> bool {
@@ -65,6 +79,11 @@ impl PriceGuardConfig {
 
     pub fn with_allow_on_provider_error(mut self, allow: bool) -> Self {
         self.allow_on_provider_error = allow;
+        self
+    }
+
+    pub fn with_allow_on_token_price_not_found(mut self, allow: bool) -> Self {
+        self.allow_on_token_price_not_found = allow;
         self
     }
 

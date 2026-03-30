@@ -2,6 +2,8 @@
 //!
 //! This module provides the infrastructure for external price validation:
 //!
+//! - **[`guard`]**: [`PriceGuard`](guard::PriceGuard) struct that orchestrates validation of solver
+//!   solutions
 //! - **[`provider`]**: [`PriceProvider`](provider::PriceProvider) trait and supporting types
 //! - **[`provider_registry`]**: [`PriceProviderRegistry`](provider_registry::PriceProviderRegistry)
 //!   for managing multiple providers concurrently
@@ -11,6 +13,7 @@
 //!   fail-open behavior
 
 pub mod config;
+pub mod guard;
 pub mod provider;
 pub mod provider_registry;
 pub mod utils;

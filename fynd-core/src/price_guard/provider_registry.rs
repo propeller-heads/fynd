@@ -5,7 +5,7 @@ use tycho_simulation::tycho_common::models::Address;
 
 use super::provider::{ExternalPrice, PriceProvider, PriceProviderError};
 
-/// Manages multiple [`PriceProvider`]s and queries them concurrently.
+/// Manages multiple [`PriceProvider`]s and queries them.
 pub struct PriceProviderRegistry {
     providers: Vec<Box<dyn PriceProvider>>,
 }
@@ -28,19 +28,22 @@ impl PriceProviderRegistry {
         self
     }
 
-    /// Queries all providers concurrently for the expected output amount.
-    pub async fn get_all_expected_out(
+    /// Returns `true` if no providers are registered.
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
+    /// Queries all providers for the expected output amount.
+    pub fn get_all_expected_out(
         &self,
         token_in: &Address,
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Vec<Result<ExternalPrice, PriceProviderError>> {
-        let futs: Vec<_> = self
-            .providers
+        self.providers
             .iter()
             .map(|p| p.get_expected_out(token_in, token_out, amount_in))
-            .collect();
-        futures::future::join_all(futs).await
+            .collect()
     }
 }
 
