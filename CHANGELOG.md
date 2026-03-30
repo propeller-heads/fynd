@@ -1,3 +1,10 @@
+## [0.37.1](https://github.com/propeller-heads/fynd/compare/0.37.0...0.37.1) (2026-03-30)
+
+
+### Bug Fixes
+
+* **config:** inline worker_pools defaults to fix cargo publish ([02f66aa](https://github.com/propeller-heads/fynd/commit/02f66aa49799341547d6d9eb8cb757245b05d268))
+
 ## [0.37.0](https://github.com/propeller-heads/fynd/compare/0.36.0...0.37.0) (2026-03-27)
 
 
