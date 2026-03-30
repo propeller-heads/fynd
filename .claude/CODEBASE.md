@@ -97,7 +97,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
-| `BLOCKLIST_CONFIG` | Blacklist config file (default: `blocklist.toml`) |
+| `BLOCKLIST_CONFIG` | Blocklist config file (default: `blocklist.toml`) |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 
 ### CLI Commands
