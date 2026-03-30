@@ -121,7 +121,7 @@ impl PriceGuard {
                 Ok(price) => {
                     has_price = true;
                     if self.price_within_tolerance(quote, price, config) {
-                        return true;
+                        return true
                     }
                     price_out_of_tolerance = true;
                 }
@@ -262,10 +262,7 @@ mod tests {
             _token_out: &Address,
             _amount_in: &BigUint,
         ) -> Result<ExternalPrice, PriceProviderError> {
-            Err(PriceProviderError::PriceNotFound {
-                token_in: "0xdead".to_string(),
-                token_out: "0xbeef".to_string(),
-            })
+            Err(PriceProviderError::TokenNotFound { address: "0xdead".to_string() })
         }
     }
 

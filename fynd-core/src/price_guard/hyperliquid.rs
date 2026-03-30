@@ -147,16 +147,10 @@ impl PriceProvider for HyperliquidProvider {
 
         let price_in = cache
             .get(&sym_in)
-            .ok_or_else(|| PriceProviderError::PriceNotFound {
-                token_in: sym_in.clone(),
-                token_out: sym_out.clone(),
-            })?;
+            .ok_or_else(|| PriceProviderError::TokenNotFound { address: sym_in.clone() })?;
         let price_out = cache
             .get(&sym_out)
-            .ok_or_else(|| PriceProviderError::PriceNotFound {
-                token_in: sym_in.clone(),
-                token_out: sym_out.clone(),
-            })?;
+            .ok_or_else(|| PriceProviderError::TokenNotFound { address: sym_out.clone() })?;
 
         let oldest_ts = price_in
             .timestamp_ms

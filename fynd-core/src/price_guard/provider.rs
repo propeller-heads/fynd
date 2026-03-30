@@ -21,10 +21,6 @@ pub enum PriceProviderError {
     #[error("token not found: {address}")]
     TokenNotFound { address: String },
 
-    /// No price data found for the requested token pair.
-    #[error("price not found for pair {token_in} -> {token_out}")]
-    PriceNotFound { token_in: String, token_out: String },
-
     /// Price data is stale (e.g., feed hasn't updated recently).
     #[error("price data stale: last update {age_ms}ms ago")]
     StaleData { age_ms: u64 },
