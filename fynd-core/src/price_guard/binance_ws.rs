@@ -71,7 +71,7 @@ struct PriceLookup {
 }
 
 /// Shared ticker cache. Key is the uppercase Binance symbol (e.g. "ETHUSDT").
-type TickerCache = Arc<RwLock<HashMap<String, TickerData>>>;
+type PriceCache = Arc<RwLock<HashMap<String, TickerData>>>;
 
 /// Cached token metadata resolved from on-chain addresses.
 type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
@@ -83,7 +83,7 @@ type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 /// [`SharedMarketData`](crate::feed::market_data::SharedMarketData). Prices are resolved via direct
 /// pair (bid), reverse pair (1/ask), or intermediate routing through USDT/USDC/ETH/BTC.
 pub struct BinanceWsProvider {
-    ticker_cache: TickerCache,
+    price_cache: PriceCache,
     token_cache: TokenCache,
     ws_url: String,
     exchange_info_url: String,
@@ -92,7 +92,7 @@ pub struct BinanceWsProvider {
 impl BinanceWsProvider {
     pub fn new() -> Self {
         Self {
-            ticker_cache: Arc::new(RwLock::new(HashMap::new())),
+            price_cache: Arc::new(RwLock::new(HashMap::new())),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
             ws_url: DEFAULT_WS_URL.to_string(),
             exchange_info_url: DEFAULT_EXCHANGE_INFO_URL.to_string(),
@@ -102,7 +102,7 @@ impl BinanceWsProvider {
     /// Overrides the Binance WebSocket and exchange info endpoint URLs.
     pub fn new_with_urls(ws_url: impl Into<String>, exchange_info_url: impl Into<String>) -> Self {
         Self {
-            ticker_cache: Arc::new(RwLock::new(HashMap::new())),
+            price_cache: Arc::new(RwLock::new(HashMap::new())),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
             ws_url: ws_url.into(),
             exchange_info_url: exchange_info_url.into(),
@@ -224,7 +224,7 @@ impl Default for BinanceWsProvider {
 impl PriceProvider for BinanceWsProvider {
     fn start(&mut self, market_data: SharedMarketDataRef) -> JoinHandle<()> {
         let worker = BinanceWsWorker {
-            ticker_cache: Arc::clone(&self.ticker_cache),
+            price_cache: Arc::clone(&self.price_cache),
             token_cache: Arc::clone(&self.token_cache),
             market_data,
             client: Client::new(),
@@ -246,7 +246,7 @@ impl PriceProvider for BinanceWsProvider {
         let (sym_out, dec_out) = self.resolve_token(token_out)?;
 
         let cache = self
-            .ticker_cache
+            .price_cache
             .read()
             .map_err(|e| PriceProviderError::Unavailable(format!("ticker cache poisoned: {e}")))?;
 
@@ -263,7 +263,7 @@ impl PriceProvider for BinanceWsProvider {
 
 /// Background worker that manages the Binance WebSocket connection lifecycle.
 struct BinanceWsWorker {
-    ticker_cache: TickerCache,
+    price_cache: PriceCache,
     token_cache: TokenCache,
     market_data: SharedMarketDataRef,
     client: Client,
@@ -338,23 +338,20 @@ impl BinanceWsWorker {
                     let Some(msg) = msg else {
                         return Ok(());
                     };
-                    let msg = msg?;
-                    self.handle_message(&msg);
+                    self.handle_message(&msg?);
                 }
                 _ = resync_interval.tick() => {
-                    self.refresh_token_cache().await;
-                    if let Err(e) = self.resync_subscriptions(&mut write).await {
-                        warn!(error = %e, "failed to resync Binance subscriptions");
-                    }
+                    self.discover_new_pairs(&mut write).await;
                 }
             }
         }
     }
 
-    /// Handles a single WebSocket message.
+    /// Routes a WebSocket message by type: text frames are parsed as bookTicker
+    /// updates, close frames are logged, and everything else is ignored.
     fn handle_message(&self, msg: &Message) {
         match msg {
-            Message::Text(text) => self.handle_ticker(text),
+            Message::Text(text) => self.update_price_cache(text),
             Message::Close(frame) => {
                 let reason = frame
                     .as_ref()
@@ -366,7 +363,9 @@ impl BinanceWsWorker {
         }
     }
 
-    fn handle_ticker(&self, text: &str) {
+    /// Parses a bookTicker JSON message and upserts the bid/ask into the ticker cache.
+    /// Silently drops messages that fail to parse or have non-positive prices.
+    fn update_price_cache(&self, text: &str) {
         let Ok(ticker) = serde_json::from_str::<BookTickerMsg>(text) else {
             return;
         };
@@ -383,7 +382,7 @@ impl BinanceWsWorker {
 
         let timestamp_ms = ticker.event_time.unwrap_or_else(now_ms);
 
-        let Ok(mut cache) = self.ticker_cache.write() else {
+        let Ok(mut cache) = self.price_cache.write() else {
             warn!("ticker cache lock poisoned, dropping update");
             return;
         };
@@ -437,6 +436,18 @@ impl BinanceWsWorker {
             return;
         };
         *cache = new_cache;
+    }
+
+    /// Re-reads tokens from SharedMarketData and subscribes to any new Binance
+    /// pairs that appeared since the last sync.
+    async fn discover_new_pairs<S>(&mut self, write: &mut S)
+    where
+        S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    {
+        self.refresh_token_cache().await;
+        if let Err(e) = self.resync_subscriptions(write).await {
+            warn!(error = %e, "failed to resync Binance subscriptions");
+        }
     }
 
     /// Checks for new token pairs and subscribes to additional streams.
@@ -613,7 +624,7 @@ mod tests {
 
         {
             let mut cache = provider
-                .ticker_cache
+                .price_cache
                 .write()
                 .expect("lock");
             cache.insert(
@@ -655,10 +666,10 @@ mod tests {
     }
 
     /// Creates a `BinanceWsWorker` that writes to the given ticker cache.
-    fn make_worker(ticker_cache: &TickerCache) -> BinanceWsWorker {
+    fn make_worker(price_cache: &PriceCache) -> BinanceWsWorker {
         let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
         BinanceWsWorker {
-            ticker_cache: Arc::clone(ticker_cache),
+            price_cache: Arc::clone(price_cache),
             token_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             market_data,
             client: Client::new(),
@@ -716,7 +727,7 @@ mod tests {
 
         {
             let mut cache = provider
-                .ticker_cache
+                .price_cache
                 .write()
                 .expect("lock");
             cache.insert(
@@ -726,7 +737,7 @@ mod tests {
         }
 
         let cache = provider
-            .ticker_cache
+            .price_cache
             .read()
             .expect("lock");
         // ETH→BTC via reverse BTCETH: sell-side uses 1/ask
@@ -763,7 +774,7 @@ mod tests {
 
         {
             let mut cache = provider
-                .ticker_cache
+                .price_cache
                 .write()
                 .expect("lock");
             cache.insert(
@@ -788,19 +799,19 @@ mod tests {
         assert!(matches!(result, Err(PriceProviderError::StaleData { .. })));
     }
 
-    // -- handle_message / handle_ticker tests (M4) --
+    // -- handle_message / update_price_cache tests (M4) --
 
     #[test]
-    fn handle_ticker_writes_to_cache() {
-        let ticker_cache: TickerCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let worker = make_worker(&ticker_cache);
+    fn update_price_cache_writes_to_cache() {
+        let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let worker = make_worker(&price_cache);
 
         let msg = Message::Text(
             r#"{"s":"ETHUSDT","b":"2000.00","a":"2000.50","E":1700000000000}"#.into(),
         );
         worker.handle_message(&msg);
 
-        let cache = ticker_cache.read().expect("lock");
+        let cache = price_cache.read().expect("lock");
         let ticker = cache
             .get("ETHUSDT")
             .expect("should be cached");
@@ -810,40 +821,40 @@ mod tests {
     }
 
     #[test]
-    fn handle_ticker_rejects_zero_bid() {
-        let ticker_cache: TickerCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let worker = make_worker(&ticker_cache);
+    fn update_price_cache_rejects_zero_bid() {
+        let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let worker = make_worker(&price_cache);
 
         let msg = Message::Text(r#"{"s":"ETHUSDT","b":"0","a":"2000.50"}"#.into());
         worker.handle_message(&msg);
 
-        let cache = ticker_cache.read().expect("lock");
+        let cache = price_cache.read().expect("lock");
         assert!(cache.get("ETHUSDT").is_none());
     }
 
     #[test]
-    fn handle_ticker_rejects_zero_ask() {
-        let ticker_cache: TickerCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let worker = make_worker(&ticker_cache);
+    fn update_price_cache_rejects_zero_ask() {
+        let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let worker = make_worker(&price_cache);
 
         let msg = Message::Text(r#"{"s":"ETHUSDT","b":"2000.00","a":"0"}"#.into());
         worker.handle_message(&msg);
 
-        let cache = ticker_cache.read().expect("lock");
+        let cache = price_cache.read().expect("lock");
         assert!(cache.get("ETHUSDT").is_none());
     }
 
     #[test]
-    fn handle_ticker_uses_now_ms_when_no_event_time() {
-        let ticker_cache: TickerCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let worker = make_worker(&ticker_cache);
+    fn update_price_cache_uses_now_ms_when_no_event_time() {
+        let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let worker = make_worker(&price_cache);
 
         let before = now_ms();
         let msg = Message::Text(r#"{"s":"ETHUSDT","b":"2000.00","a":"2000.50"}"#.into());
         worker.handle_message(&msg);
         let after = now_ms();
 
-        let cache = ticker_cache.read().expect("lock");
+        let cache = price_cache.read().expect("lock");
         let ticker = cache
             .get("ETHUSDT")
             .expect("should be cached");
@@ -852,14 +863,14 @@ mod tests {
 
     #[test]
     fn handle_message_ignores_non_text() {
-        let ticker_cache: TickerCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let worker = make_worker(&ticker_cache);
+        let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let worker = make_worker(&price_cache);
 
         worker.handle_message(&Message::Ping(vec![].into()));
         worker.handle_message(&Message::Pong(vec![].into()));
         worker.handle_message(&Message::Binary(vec![].into()));
 
-        let cache = ticker_cache.read().expect("lock");
+        let cache = price_cache.read().expect("lock");
         assert!(cache.is_empty());
     }
 
