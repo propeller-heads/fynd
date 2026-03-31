@@ -17,11 +17,11 @@ pub enum PriceProviderError {
     #[error("price source unavailable: {0}")]
     Unavailable(String),
 
-    /// Token address not found in the market data registry.
+    /// Token address not found in the market data registry (Fynd's data).
     #[error("token not found: {address}")]
     TokenNotFound { address: String },
 
-    /// No price data found for the requested token pair.
+    /// No price data from the provider found for the requested token pair.
     #[error("price not found for pair {token_in} -> {token_out}")]
     PriceNotFound { token_in: String, token_out: String },
 

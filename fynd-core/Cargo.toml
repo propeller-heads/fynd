@@ -28,6 +28,7 @@ tracing.workspace = true
 metrics.workspace = true
 typetag.workspace = true
 tycho-execution.workspace = true
+reqwest.workspace = true
 alloy = { workspace = true, features = ["sol-types"] }
 
 [dev-dependencies]
