@@ -31,7 +31,7 @@ pub struct PriceGuardConfig {
     allow_on_token_price_not_found: bool,
 
     /// Whether the price guard is enabled.
-    /// Default: `true`.
+    /// Default: `false`.
     enabled: bool,
 }
 

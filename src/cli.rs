@@ -108,6 +108,31 @@ pub struct ServeArgs {
     /// Disabled by default.
     #[arg(long)]
     pub gas_price_stale_threshold_secs: Option<u64>,
+
+    /// Enable price guard validation against external price sources.
+    /// Disabled by default.
+    #[arg(long)]
+    pub enable_price_guard: bool,
+
+    /// Maximum allowed deviation below external price, in basis points (1 bps = 0.01%).
+    /// Default: 300 (3%).
+    #[arg(long, default_value_t = 300)]
+    pub price_guard_lower_tolerance_bps: u32,
+
+    /// Maximum allowed deviation above external price, in basis points (1 bps = 0.01%).
+    /// Default: 10000 (100%).
+    #[arg(long, default_value_t = 10_000)]
+    pub price_guard_upper_tolerance_bps: u32,
+
+    /// Allow solutions through when all price providers error (network issues, API down).
+    /// Default: true.
+    #[arg(long, default_value_t = true)]
+    pub price_guard_allow_on_provider_error: bool,
+
+    /// Allow solutions through when no provider has a price for the token pair.
+    /// Default: true.
+    #[arg(long, default_value_t = true)]
+    pub price_guard_allow_on_token_not_found: bool,
 }
 
 #[cfg(test)]

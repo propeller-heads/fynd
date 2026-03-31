@@ -110,6 +110,9 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
         if let Some(enc) = opts.encoding_options {
             dto_opts = dto_opts.with_encoding_options(dto::EncodingOptions::try_from(enc)?);
         }
+        if let Some(pg) = opts.price_guard {
+            dto_opts = dto_opts.with_price_guard(pg);
+        }
         Ok(dto_opts)
     }
 }
@@ -252,7 +255,8 @@ impl From<dto::QuoteStatus> for QuoteStatus {
             dto::QuoteStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
             dto::QuoteStatus::Timeout => Self::Timeout,
             dto::QuoteStatus::NotReady => Self::NotReady,
-            _ => unreachable!("unexpected QuoteStatus variant"),
+            dto::QuoteStatus::PriceCheckFailed => Self::PriceCheckFailed,
+            _ => Self::NotReady,
         }
     }
 }
@@ -471,6 +475,7 @@ mod tests {
         ));
         assert!(matches!(QuoteStatus::from(Dto::Timeout), QuoteStatus::Timeout));
         assert!(matches!(QuoteStatus::from(Dto::NotReady), QuoteStatus::NotReady));
+        assert!(matches!(QuoteStatus::from(Dto::PriceCheckFailed), QuoteStatus::PriceCheckFailed));
     }
 
     // -----------------------------------------------------------------------

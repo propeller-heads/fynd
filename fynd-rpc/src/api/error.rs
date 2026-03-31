@@ -66,6 +66,7 @@ impl ResponseError for ApiError {
                 SolveError::NotReady(_) => "NOT_READY",
                 SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
                 SolveError::FailedEncoding(_) => "FAILED_ENCODING",
+                SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
                 other => {
                     warn!(?other, "unhandled SolveError variant");
                     "INTERNAL_ERROR"

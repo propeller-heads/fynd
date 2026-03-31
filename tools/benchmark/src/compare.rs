@@ -130,6 +130,7 @@ fn status_str(status: QuoteStatus) -> &'static str {
         QuoteStatus::InsufficientLiquidity => "insufficient_liquidity",
         QuoteStatus::Timeout => "timeout",
         QuoteStatus::NotReady => "not_ready",
+        QuoteStatus::PriceCheckFailed => "price_check_failed",
     }
 }
 
