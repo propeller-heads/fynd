@@ -1,3 +1,17 @@
+## [0.41.0](https://github.com/propeller-heads/fynd/compare/0.40.0...0.41.0) (2026-03-31)
+
+
+### Features
+
+* **swap-cli:** use client approval API, fetch router from /v1/info ([5c0a6e6](https://github.com/propeller-heads/fynd/commit/5c0a6e692d2f0278e610943b84f0672aff0eb998))
+
+
+### Bug Fixes
+
+* **swap-cli:** inject router allowance in addition to Permit2 for dry-run ([c999d3b](https://github.com/propeller-heads/fynd/commit/c999d3bb634007d98776ce23a6759b7c88b4e458))
+* **swap-cli:** use ephemeral signer and zero gas price for dry-run ([94f6b81](https://github.com/propeller-heads/fynd/commit/94f6b817cdd924a51194a470a7e04018e6a9cc1c))
+* **swap-cli:** use MAX>>1 for storage overrides to avoid USDC blacklist ([047e4ff](https://github.com/propeller-heads/fynd/commit/047e4ff328f3decdde207c29201191f869e025d1))
+
 ## [0.40.0](https://github.com/propeller-heads/fynd/compare/0.39.2...0.40.0) (2026-03-31)
 
 
