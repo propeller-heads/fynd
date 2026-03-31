@@ -101,8 +101,10 @@ fn max_uint160() -> BigUint {
 
 /// Detect ERC-20 storage slots and build `StorageOverrides` for a dry-run.
 ///
-/// Injects `U256::MAX` into both the holder's balance slot and the
-/// `holder → spender` allowance slot so the simulation succeeds without real funds.
+/// Injects a large sentinel into the holder's balance slot and the `holder → spender`
+/// allowance slot so the simulation succeeds without real funds. Uses `U256::MAX >> 1`
+/// rather than `U256::MAX` to avoid triggering tokens that pack metadata into bit 255
+/// (e.g. USDC uses that bit as a blacklist flag).
 async fn build_dry_run_overrides(
     provider: &RootProvider<Ethereum>,
     sell_token: Address,
@@ -118,7 +120,10 @@ async fn build_dry_run_overrides(
     let allowance_pos = allowance_res?;
     info!("Found balance slot {balance_pos} and allowance slot {allowance_pos}");
 
-    let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
+    // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
+    // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
+    // 2^255 - 1 is still large enough to cover any realistic balance or allowance.
+    let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
     let token_key = Bytes::copy_from_slice(sell_token.as_slice());
     let mut overrides = StorageOverrides::default();
     overrides.insert(
