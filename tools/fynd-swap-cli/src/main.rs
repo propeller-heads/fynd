@@ -8,7 +8,8 @@
 //!
 //! # On-chain execution (`--execute`)
 //!
-//! Requires `PRIVATE_KEY` env var and a funded wallet with appropriate approvals.
+//! Requires `PRIVATE_KEY` env var and a funded wallet. Any missing approvals are submitted
+//! automatically before the swap.
 
 use std::{env, str::FromStr, time::Duration};
 
@@ -23,9 +24,10 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus, Order,
-    OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
-    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
+    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus,
+    Order, OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle,
+    QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides,
+    UserTransferType,
 };
 use num_bigint::BigUint;
 use tracing::info;
@@ -84,10 +86,6 @@ struct Cli {
     /// Requires the PRIVATE_KEY environment variable.
     #[arg(long)]
     execute: bool,
-
-    /// Tycho Router address (required for transfer-from-permit2 flow)
-    #[arg(long)]
-    router: Option<String>,
 
     /// Permit2 contract address (defaults to the canonical cross-chain deployment)
     #[arg(long, default_value = "0x000000000022D473030F116dDEE9F6B43aC78BA3")]
@@ -156,53 +154,58 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
     }
 }
 
-struct Permit2Args<'a> {
+/// Check allowance and, if insufficient, submit and mine an ERC-20 approval.
+///
+/// `transfer_type` controls the spender: `TransferFrom` -> router, `TransferFromPermit2` ->
+/// Permit2 contract. Resolves the spender address via `GET /v1/info`.
+async fn ensure_approval(
+    client: &FyndClient,
+    signer: &PrivateKeySigner,
+    sell_token: Bytes,
+    amount: BigUint,
+    transfer_type: UserTransferType,
+    sender: Address,
+) -> anyhow::Result<()> {
+    let params = ApprovalParams::new(sell_token, amount, true).with_transfer_type(transfer_type);
+    let hints = SigningHints::default().with_sender(sender);
+    let Some(approval_payload) = client.approval(&params, &hints).await? else {
+        return Ok(()); // allowance already sufficient
+    };
+    info!("Submitting approval transaction...");
+    let sig = signer
+        .sign_hash(&approval_payload.signing_hash())
+        .await?;
+    let signed = SignedApproval::assemble(approval_payload, sig);
+    let receipt = client.execute_approval(signed).await?;
+    tokio::time::timeout(Duration::from_secs(120), receipt)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for approval to be mined"))??;
+    info!("Approval confirmed.");
+    Ok(())
+}
+
+struct Permit2Args {
     sell_token: Address,
     sender: Address,
     permit2_addr: Address,
-    router_str: &'a str,
-    amount: &'a BigUint,
+    router_addr: Address,
     slippage: f64,
     execute: bool,
 }
 
-/// Build Permit2 `EncodingOptions`: validate allowance, read nonce, sign EIP-712 hash.
+/// Build Permit2 `EncodingOptions`: read nonce, sign EIP-712 hash.
 async fn create_permit2_encoding(
     provider: &RootProvider<Ethereum>,
     signer: &PrivateKeySigner,
-    args: Permit2Args<'_>,
+    args: Permit2Args,
 ) -> anyhow::Result<EncodingOptions> {
-    let router_addr = Address::from_str(args.router_str)
-        .with_context(|| format!("invalid router address: {}", args.router_str))?;
-
     let (nonce, expiration, sig_deadline) = if args.execute {
-        let allowance =
-            erc20::read_erc20_allowance(provider, args.sell_token, args.sender, args.permit2_addr)
-                .await?;
-        if allowance < *args.amount {
-            eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
-            eprintln!("  Token:     {:#x}", args.sell_token);
-            eprintln!("  Permit2:   {:#x}", args.permit2_addr);
-            eprintln!("  Allowance: {allowance}");
-            eprintln!("  Required:  {}", args.amount);
-            eprintln!("\nApprove Permit2 with:");
-            eprintln!(
-                "  cast send {:#x} \"approve(address,uint256)\" \
-                 {:#x} {} \\\n    \
-                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                args.sell_token,
-                args.permit2_addr,
-                u128::MAX
-            );
-            bail!("insufficient allowance to Permit2");
-        }
-
         let nonce = permit2::read_nonce(
             provider,
             args.permit2_addr,
             args.sender,
             args.sell_token,
-            router_addr,
+            args.router_addr,
         )
         .await?;
         info!("Permit2 nonce for sender: {nonce}");
@@ -225,7 +228,7 @@ async fn create_permit2_encoding(
             BigUint::from(expiration),
             BigUint::from(nonce),
         ),
-        Bytes::copy_from_slice(router_addr.as_slice()),
+        Bytes::copy_from_slice(args.router_addr.as_slice()),
         BigUint::from(sig_deadline),
     );
 
@@ -308,9 +311,22 @@ async fn main() -> anyhow::Result<()> {
     let encoding_options = match cli.transfer_type {
         TransferType::TransferFrom => EncodingOptions::new(slippage),
         TransferType::TransferFromPermit2 => {
-            let router_str = cli.router.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("--router is required for --transfer-type transfer-from-permit2")
-            })?;
+            let info = client.info().await?;
+            let router_addr = Address::try_from(info.router_address().as_ref())
+                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+
+            if cli.execute {
+                ensure_approval(
+                    &client,
+                    &signer,
+                    sell_token_bytes.clone(),
+                    amount.clone(),
+                    UserTransferType::TransferFromPermit2,
+                    sender,
+                )
+                .await?;
+            }
+
             create_permit2_encoding(
                 &provider,
                 &signer,
@@ -318,8 +334,7 @@ async fn main() -> anyhow::Result<()> {
                     sell_token,
                     sender,
                     permit2_addr,
-                    router_str,
-                    amount: &amount,
+                    router_addr,
                     slippage,
                     execute: cli.execute,
                 },
@@ -335,7 +350,7 @@ async fn main() -> anyhow::Result<()> {
         cli.sell_amount, cli.sell_token, cli.buy_token
     );
     let order = Order::new(
-        sell_token_bytes,
+        sell_token_bytes.clone(),
         buy_token_bytes,
         amount.clone(),
         OrderSide::Sell,
@@ -375,27 +390,18 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let router_from_quote = Address::from_slice(tx.to().as_ref());
 
-    // ── ERC-20 execute: verify allowance before signing ───────────────────────
+    // ── ERC-20 execute: ensure router approval ────────────────────────────────
     if cli.execute {
         if let TransferType::TransferFrom = cli.transfer_type {
-            let allowance =
-                erc20::read_erc20_allowance(&provider, sell_token, sender, router_from_quote)
-                    .await?;
-            if allowance < amount {
-                eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
-                eprintln!("  Token:     {sell_token:#x}");
-                eprintln!("  Router:    {router_from_quote:#x}");
-                eprintln!("  Allowance: {allowance}");
-                eprintln!("  Required:  {amount}");
-                eprintln!("\nApprove the router with:");
-                eprintln!(
-                    "  cast send {sell_token:#x} \"approve(address,uint256)\" \
-                     {router_from_quote:#x} {} \\\n    \
-                     --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                    cli.sell_amount
-                );
-                bail!("insufficient sell-token allowance");
-            }
+            ensure_approval(
+                &client,
+                &signer,
+                sell_token_bytes,
+                amount.clone(),
+                UserTransferType::TransferFrom,
+                sender,
+            )
+            .await?;
         }
     }
 
@@ -466,7 +472,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    // ── max_uint160 ───────────────────────────────────────────────────────────
+    // -- max_uint160 -----------------------------------------------------------
 
     #[test]
     fn max_uint160_is_20_bytes_of_ff() {
@@ -481,7 +487,7 @@ mod tests {
         assert_eq!(max_uint160(), expected);
     }
 
-    // ── CLI parsing ───────────────────────────────────────────────────────────
+    // -- CLI parsing -----------------------------------------------------------
 
     #[test]
     fn cli_defaults() {
@@ -495,21 +501,6 @@ mod tests {
         assert_eq!(cli.transfer_type, TransferType::TransferFrom);
         assert_eq!(cli.permit2, "0x000000000022D473030F116dDEE9F6B43aC78BA3");
         assert!(!cli.execute);
-        assert!(cli.router.is_none());
-    }
-
-    #[test]
-    fn cli_permit2_transfer_type_with_router() {
-        let cli = Cli::try_parse_from([
-            "fynd-swap-cli",
-            "--transfer-type",
-            "transfer-from-permit2",
-            "--router",
-            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        ])
-        .unwrap();
-        assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
-        assert_eq!(cli.router.as_deref(), Some("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"));
     }
 
     #[test]
