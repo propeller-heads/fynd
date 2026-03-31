@@ -16,7 +16,7 @@ use std::{env, str::FromStr, time::Duration};
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{address, Address, B256, U256},
+    primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
@@ -35,10 +35,6 @@ use tracing_subscriber::EnvFilter;
 
 mod erc20;
 mod permit2;
-
-/// Vitalik's address — used as the dry-run sender so `eth_call` simulations don't fail due
-/// to insufficient ETH for gas. Signatures are not checked in dry-run mode.
-const DRY_RUN_SENDER: Address = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -274,9 +270,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         PrivateKeySigner::random()
     };
-    // In dry-run mode use a well-funded address so the eth_call simulation has enough ETH for gas.
-    // The actual signing key is irrelevant since signatures are not validated in dry-run.
-    let sender = if cli.execute { signer.address() } else { DRY_RUN_SENDER };
+    let sender = signer.address();
     info!("Sender: {sender:?}");
 
     let provider: RootProvider<Ethereum> = ProviderBuilder::default().connect_http(
@@ -407,8 +401,18 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sign order payload ────────────────────────────────────────────────────
     let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
+    // For dry-run, set gas price to 0 so eth_call bypasses the ETH balance check.
+    // The EVM still executes the full contract code; it just skips gas*price deduction.
+    let signing_hints = if cli.execute {
+        SigningHints::default().with_gas_limit(gas_limit * 10u64)
+    } else {
+        SigningHints::default()
+            .with_gas_limit(gas_limit * 10u64)
+            .with_max_fee_per_gas(0)
+            .with_max_priority_fee_per_gas(0)
+    };
     let payload = client
-        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 10u64))
+        .swap_payload(quote, &signing_hints)
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
