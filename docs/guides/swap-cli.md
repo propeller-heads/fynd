@@ -7,37 +7,62 @@ icon: rectangle-terminal
 
 `fynd-swap-cli` is a CLI binary for quoting, simulating, and executing swaps. It's useful for quick testing from the terminal without writing any code.
 
-## Prerequisites
+## Setup
 
-1. **Clone the repo** — `git clone https://github.com/propeller-heads/fynd.git && cd fynd`
-2. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
-3. **RPC URL** — required for simulation and on-chain execution. The default public endpoint (`https://eth.llamarpc.com`) does not support state overrides, so you must supply your own.
+{% tabs %}
+{% tab title="Docker Compose" %}
+**Prerequisites:** Docker
 
-## Build
+The [docker-compose.swap.yml](https://github.com/propeller-heads/fynd/blob/main/docker-compose.swap.yml) file in the repo root starts a Fynd server and drops you into a shell with `fynd-swap-cli` pre-installed — no local build required.
 
 ```bash
-cargo build --release -p fynd-swap-cli
-# binary: target/release/fynd-swap-cli
+export TYCHO_API_KEY=your_tycho_api_key
+
+docker compose -f docker-compose.swap.yml run --rm fynd-shell
+```
+
+This also starts `fynd-serve` automatically. Run swaps with:
+
+```bash
+# Inside the fynd-shell container:
+fynd-swap-cli
 ```
 
 {% hint style="info" %}
-Alternatively, the binary is included in the official Docker image (`ghcr.io/propeller-heads/fynd`) and can be invoked with `--entrypoint fynd-swap-cli`.
+For on-chain execution, pass `PRIVATE_KEY` at startup: `docker compose -f docker-compose.swap.yml run --rm -e PRIVATE_KEY=your_key fynd-shell`
 {% endhint %}
+
+When done, stop and remove the server container:
+
+```bash
+docker compose -f docker-compose.swap.yml down
+```
+{% endtab %}
+
+{% tab title="Build from source" %}
+**Prerequisites:** A running Fynd server — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
+
+```bash
+cargo install --path tools/fynd-swap-cli
+```
+
+{% endtab %}
+{% endtabs %}
+
+---
 
 ## Dry-run a swap (ERC-20)
 
 By default, `fynd-swap-cli` runs a **dry-run**: it uses a well-funded sender address and injects ERC-20 storage overrides so the simulation succeeds without any real funds or wallet approvals.
 
 ```bash
-export RPC_URL=https://your-rpc-provider.com/v1/your_key
-
-./target/release/fynd-swap-cli
+fynd-swap-cli
 ```
 
 This sells 1 WETH for USDC using the defaults. Pass explicit tokens and amounts to customise:
 
 ```bash
-./target/release/fynd-swap-cli \
+fynd-swap-cli \
   --sell-token  0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
   --buy-token   0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
   --sell-amount 2000000000000000000
@@ -54,9 +79,7 @@ The output prints the quote (amount\_in, amount\_out, gas estimate, route) follo
 Add `--transfer-type transfer-from-permit2` and supply the TychoRouter address with `--router`. The dry-run uses nonce 0 and maximum deadlines, so you don't need any chain reads for Permit2 state.
 
 ```bash
-export RPC_URL=https://your-rpc-provider.com/v1/your_key
-
-./target/release/fynd-swap-cli \
+fynd-swap-cli \
   --transfer-type transfer-from-permit2 \
   --router        <TychoRouter address>
 ```
@@ -75,7 +98,7 @@ This sends a real transaction. Ensure your wallet has the sell token and has app
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 
-./target/release/fynd-swap-cli --execute
+fynd-swap-cli --execute
 ```
 
 ## Execute on-chain (Permit2)
@@ -88,7 +111,7 @@ Your wallet must have already approved the Permit2 contract (`0x000000000022D473
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
 export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 
-./target/release/fynd-swap-cli \
+fynd-swap-cli \
   --transfer-type transfer-from-permit2 \
   --router        <TychoRouter address> \
   --execute
@@ -99,7 +122,7 @@ export PRIVATE_KEY=your_private_key_hex   # no 0x prefix
 If tokens are already deposited in the Tycho Router vault, use `--transfer-type use-vaults-funds`. No ERC-20 approval or Permit2 signature is needed.
 
 ```bash
-./target/release/fynd-swap-cli --transfer-type use-vaults-funds
+fynd-swap-cli --transfer-type use-vaults-funds
 ```
 
 ---
@@ -112,12 +135,12 @@ If tokens are already deposited in the Tycho Router vault, use `--transfer-type 
 | `--buy-token`     | —         | USDC (mainnet)                               | Token address to buy                                            |
 | `--sell-amount`   | —         | `1000000000000000000` (1 WETH)               | Amount to sell in raw atomic units                              |
 | `--slippage-bps`  | —         | `50` (0.5%)                                  | Slippage tolerance in basis points                              |
-| `--fynd-url`      | —         | `http://localhost:3000`                      | Fynd server URL                                                 |
+| `--fynd-url`      | `FYND_URL` | `http://localhost:3000`                     | Fynd server URL                                                 |
 | `--transfer-type` | —         | `transfer-from`                              | `transfer-from`, `transfer-from-permit2`, or `use-vaults-funds` |
 | `--execute`       | —         | false (dry-run)                              | Submit the swap on-chain. Requires `PRIVATE_KEY`.               |
 | `--router`        | —         | —                                            | TychoRouter address. Required for `transfer-from-permit2`.      |
 | `--permit2`       | —         | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Permit2 contract address                                        |
-| `--rpc-url`       | `RPC_URL` | `https://eth.llamarpc.com`                   | Ethereum RPC endpoint (must support `eth_call` state overrides) |
+| `--rpc-url`       | `RPC_URL` | `https://reth-ethereum.ithaca.xyz/rpc`       | Ethereum RPC endpoint (must support `eth_call` state overrides) |
 
 ## Security Notes
 
