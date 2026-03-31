@@ -7,7 +7,11 @@ icon: rectangle-terminal
 
 `fynd-swap-cli` is a CLI binary for quoting, simulating, and executing swaps. It's useful for quick testing from the terminal without writing any code.
 
-## Quick-start with Docker Compose
+## Setup
+
+{% tabs %}
+{% tab title="Docker Compose" %}
+**Prerequisites:** Docker
 
 The [docker-compose.swap.yml](https://github.com/propeller-heads/fynd/blob/main/docker-compose.swap.yml) file in the repo root starts a Fynd server and drops you into a shell with `fynd-swap-cli` pre-installed — no local build required.
 
@@ -33,22 +37,19 @@ When done, stop and remove the server container:
 ```bash
 docker compose -f docker-compose.swap.yml down
 ```
+{% endtab %}
 
-## Prerequisites
-
-1. **Running Fynd server** — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't, or use Docker Compose above.
-
----
-
-## Build
+{% tab title="Build from source" %}
+**Prerequisites:** A running Fynd server — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
 
 ```bash
 cargo install --path tools/fynd-swap-cli
 ```
 
-{% hint style="info" %}
-The binary is also included in the official Docker image (`ghcr.io/propeller-heads/fynd`) used by the compose file above, and can be invoked standalone with `--entrypoint fynd-swap-cli`.
-{% endhint %}
+{% endtab %}
+{% endtabs %}
+
+---
 
 ## Dry-run a swap (ERC-20)
 
