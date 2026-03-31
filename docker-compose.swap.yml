@@ -1,14 +1,13 @@
 # Minimal compose file for running fynd serve + an interactive swap-cli shell.
 #
 # Usage:
-#   docker compose -f docker-compose.swap.yml up -d fynd-serve
 #   docker compose -f docker-compose.swap.yml run --rm fynd-shell
 #
 # Required env vars (set in .env or export before running):
 #   TYCHO_API_KEY   — Tycho API key
-#   RPC_URL         — Ethereum RPC endpoint that supports eth_call state overrides
 #
 # Optional env vars:
+#   RPC_URL     — Ethereum RPC endpoint (default: https://reth-ethereum.ithaca.xyz/rpc)
 #   CHAIN       — chain name passed to fynd serve (default: Ethereum)
 #   PROTOCOLS   — comma-separated protocol list (default: mainnet preset below)
 #   TYCHO_URL   — Tycho WebSocket endpoint (default: tycho-fynd-ethereum.propellerheads.xyz)
