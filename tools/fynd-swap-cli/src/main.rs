@@ -301,14 +301,30 @@ async fn main() -> anyhow::Result<()> {
     let amount = BigUint::from(cli.sell_amount);
     let slippage = cli.slippage_bps as f64 / 10_000.0;
 
-    // ── Permit2 pre-flight ────────────────────────────────────────────────────
-    let encoding_options = match cli.transfer_type {
-        TransferType::TransferFrom => EncodingOptions::new(slippage),
+    // ── Setup: encoding options, approvals, dry-run spenders ─────────────────
+    // dry_run_spenders: token spenders whose allowance slots are injected for dry-run simulation.
+    let (encoding_options, dry_run_spenders): (_, Vec<Address>) = match cli.transfer_type {
+        TransferType::TransferFrom => {
+            if cli.execute {
+                ensure_approval(
+                    &client,
+                    &signer,
+                    sell_token_bytes.clone(),
+                    amount.clone(),
+                    UserTransferType::TransferFrom,
+                    sender,
+                )
+                .await?;
+            }
+            let info = client.info().await?;
+            let router_addr = Address::try_from(info.router_address().as_ref())
+                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            (EncodingOptions::new(slippage), vec![router_addr])
+        }
         TransferType::TransferFromPermit2 => {
             let info = client.info().await?;
             let router_addr = Address::try_from(info.router_address().as_ref())
                 .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
-
             if cli.execute {
                 ensure_approval(
                     &client,
@@ -320,8 +336,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
             }
-
-            create_permit2_encoding(
+            let enc = create_permit2_encoding(
                 &provider,
                 &signer,
                 Permit2Args {
@@ -333,9 +348,10 @@ async fn main() -> anyhow::Result<()> {
                     execute: cli.execute,
                 },
             )
-            .await?
+            .await?;
+            (enc, vec![permit2_addr, router_addr])
         }
-        TransferType::UseVaultsFunds => EncodingOptions::new(slippage).with_vault_funds(),
+        TransferType::UseVaultsFunds => (EncodingOptions::new(slippage).with_vault_funds(), vec![]),
     };
 
     // ── Quote ─────────────────────────────────────────────────────────────────
@@ -379,26 +395,6 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("============================\n");
 
-    let tx = quote.transaction().ok_or_else(|| {
-        anyhow::anyhow!("quote has no calldata; ensure encoding_options were set in the request")
-    })?;
-    let router_from_quote = Address::from_slice(tx.to().as_ref());
-
-    // ── ERC-20 execute: ensure router approval ────────────────────────────────
-    if cli.execute {
-        if let TransferType::TransferFrom = cli.transfer_type {
-            ensure_approval(
-                &client,
-                &signer,
-                sell_token_bytes,
-                amount.clone(),
-                UserTransferType::TransferFrom,
-                sender,
-            )
-            .await?;
-        }
-    }
-
     // ── Sign order payload ────────────────────────────────────────────────────
     let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
     // For dry-run, set gas price to 0 so eth_call bypasses the ETH balance check.
@@ -424,29 +420,16 @@ async fn main() -> anyhow::Result<()> {
         info!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
-        // Dry-run: the spender for the allowance slot depends on the flow.
-        // TransferFrom: spender is the Fynd router (from quote).
-        // TransferFromPermit2: spender is the Permit2 contract (router authorised via EIP-712).
-        // UseVaultsFunds: no allowance needed — funds are in the router vault.
-        let overrides = match cli.transfer_type {
-            TransferType::TransferFrom => {
-                let overrides =
-                    build_dry_run_overrides(&provider, sell_token, sender, router_from_quote)
-                        .await?;
-                Some(overrides)
+        let overrides = if dry_run_spenders.is_empty() {
+            None
+        } else {
+            let mut overrides =
+                build_dry_run_overrides(&provider, sell_token, sender, dry_run_spenders[0]).await?;
+            for &spender in &dry_run_spenders[1..] {
+                let extra = build_dry_run_overrides(&provider, sell_token, sender, spender).await?;
+                overrides.merge(extra);
             }
-            TransferType::TransferFromPermit2 => {
-                // Inject allowance to both Permit2 (for the permit2.transferFrom path) and
-                // directly to the router (in case the router calls token.transferFrom itself).
-                let mut overrides =
-                    build_dry_run_overrides(&provider, sell_token, sender, permit2_addr).await?;
-                let router_overrides =
-                    build_dry_run_overrides(&provider, sell_token, sender, router_from_quote)
-                        .await?;
-                overrides.merge(router_overrides);
-                Some(overrides)
-            }
-            TransferType::UseVaultsFunds => None,
+            Some(overrides)
         };
         info!("Submitting dry-run execution...");
         ExecutionOptions { dry_run: true, storage_overrides: overrides, fetch_revert_reason: true }
