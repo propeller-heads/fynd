@@ -125,9 +125,9 @@ impl PriceGuard {
                     price_out_of_tolerance = true;
                 }
                 Err(e) => {
-                    if let PriceProviderError::Unavailable(_)
-                    | PriceProviderError::TokenNotFound { .. }
-                    | PriceProviderError::StaleData { .. } = e
+                    if let PriceProviderError::Unavailable(_) |
+                    PriceProviderError::TokenNotFound { .. } |
+                    PriceProviderError::StaleData { .. } = e
                     {
                         has_provider_error = true;
                     }
@@ -502,6 +502,42 @@ mod tests {
             .with_allow_on_token_price_not_found(true)
             .with_allow_on_provider_error(false);
         let guard = price_guard(vec![Box::new(PriceNotFoundProvider), Box::new(FailingProvider)]);
+
+        let result = guard
+            .validate(vec![make_quote(500)], &config)
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::PriceCheckFailed);
+    }
+
+    #[test]
+    fn test_price_not_found_with_valid_price_within_tolerance() {
+        // When one provider returns a valid price within tolerance and
+        // another returns PriceNotFound, the quote should pass — the
+        // valid price is sufficient.
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_lower_tolerance_bps(300)
+            .with_allow_on_token_price_not_found(false);
+        let guard = price_guard(vec![mock_provider(1000), Box::new(PriceNotFoundProvider)]);
+
+        let result = guard
+            .validate(vec![make_quote(980)], &config)
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::Success);
+    }
+
+    #[test]
+    fn test_price_not_found_with_valid_price_out_of_tolerance() {
+        // When one provider returns a valid price out of tolerance and
+        // another returns PriceNotFound, the quote should fail — the
+        // out-of-tolerance price takes precedence over PriceNotFound.
+        let config = PriceGuardConfig::default()
+            .with_enabled(true)
+            .with_lower_tolerance_bps(300)
+            .with_allow_on_token_price_not_found(true);
+        let guard = price_guard(vec![mock_provider(1000), Box::new(PriceNotFoundProvider)]);
 
         let result = guard
             .validate(vec![make_quote(500)], &config)
