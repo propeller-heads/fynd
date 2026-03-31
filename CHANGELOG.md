@@ -1,3 +1,21 @@
+## [0.42.0](https://github.com/propeller-heads/fynd/compare/0.41.0...0.42.0) (2026-03-31)
+
+
+### Features
+
+* add price_guard to fynd-rpc QuoteOptions ([ecad69c](https://github.com/propeller-heads/fynd/commit/ecad69cf15cb3a0c8681f64d8225ba6c86fd94a2))
+* add separate field for cases when token prices are not found ([cab8cd8](https://github.com/propeller-heads/fynd/commit/cab8cd86a6b2dee8c392580abe3bd8b91d88e2e6))
+* PriceGuard validation ([891322a](https://github.com/propeller-heads/fynd/commit/891322ae991a71a5e56ce2f093bb395747a4c83c))
+* return error from PriceGuard when no providers are registered ([5eac8d4](https://github.com/propeller-heads/fynd/commit/5eac8d435782e82b857269039e2f3eab6d74f5bc))
+* update openapi ([71c8c20](https://github.com/propeller-heads/fynd/commit/71c8c201d6aef1b91fddb21444b4d5341c62d710))
+* update openapi ([937aee4](https://github.com/propeller-heads/fynd/commit/937aee4ea7306f6de2d291cd7cde90564fcfef12))
+
+
+### Bug Fixes
+
+* add early exit to avoid division by 0 ([89e1780](https://github.com/propeller-heads/fynd/commit/89e17807398dce556aefd2f7833c4c648edacccd))
+* add missing solution status ([f5df406](https://github.com/propeller-heads/fynd/commit/f5df406e1162d8ccc8b52ca58b75db8a2883643b))
+
 ## [0.41.0](https://github.com/propeller-heads/fynd/compare/0.40.0...0.41.0) (2026-03-31)
 
 
