@@ -1,3 +1,20 @@
+## [0.43.0](https://github.com/propeller-heads/fynd/compare/0.42.0...0.43.0) (2026-03-31)
+
+
+### Features
+
+* add Hyperliquid oracle price provider ([a090ef5](https://github.com/propeller-heads/fynd/commit/a090ef5f25803ffca7717fce3f3a5f08979e555a))
+* Load USD stablecoins from shared stable_usd.json ([400f755](https://github.com/propeller-heads/fynd/commit/400f75585ea96005a2932d334e06def7d606bbbb))
+* PriceGuard validation ([0963393](https://github.com/propeller-heads/fynd/commit/0963393f3618de6a13141146de26ca9532130e92))
+
+
+### Bug Fixes
+
+* Bring back PriceNotFound ([4f07faf](https://github.com/propeller-heads/fynd/commit/4f07fafca6a414ae3aaefd523bb6c821fbcc5b4e))
+* Handle k tokens & use dedicated normalization ([0b08180](https://github.com/propeller-heads/fynd/commit/0b08180065548c3a466a263b994b3cbcac5d5df0))
+* normalize_symbol returns uppercase on fallthrough ([03e0f44](https://github.com/propeller-heads/fynd/commit/03e0f44edbb8ccb554d7190f1816514b101c53fe))
+* Skip token cache refresh when registry is unchanged ([02612e1](https://github.com/propeller-heads/fynd/commit/02612e17396a3d6e4ed71d98454cfbdcb2b08689))
+
 ## [0.42.0](https://github.com/propeller-heads/fynd/compare/0.41.0...0.42.0) (2026-03-31)
 
 
