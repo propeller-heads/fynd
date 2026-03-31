@@ -113,8 +113,8 @@ impl PriceGuard {
             .registry
             .get_all_expected_out(token_in, token_out, quote.amount_in());
 
-        let mut has_price = false;
-        let mut no_price_for_token_found = true;
+        let mut price_out_of_tolerance = false;
+        let mut has_provider_error = false;
 
         for result in &results {
             match result {
@@ -122,23 +122,26 @@ impl PriceGuard {
                     if self.price_within_tolerance(quote, price, config) {
                         return true;
                     }
-                    has_price = true;
+                    price_out_of_tolerance = true;
                 }
                 Err(e) => {
-                    if !matches!(e, PriceProviderError::PriceNotFound { .. }) {
-                        no_price_for_token_found = false;
+                    if let PriceProviderError::Unavailable(_)
+                    | PriceProviderError::TokenNotFound { .. }
+                    | PriceProviderError::StaleData { .. } = e
+                    {
+                        has_provider_error = true;
                     }
                     debug!(error = %e, "price provider error");
                 }
             }
         }
-        if has_price {
+        if price_out_of_tolerance {
             return false;
         }
-        if no_price_for_token_found {
-            config.allow_on_token_price_not_found()
-        } else {
+        if has_provider_error {
             config.allow_on_provider_error()
+        } else {
+            config.allow_on_token_price_not_found()
         }
     }
 
