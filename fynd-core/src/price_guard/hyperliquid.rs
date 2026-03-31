@@ -21,6 +21,20 @@ use super::{
 };
 use crate::feed::market_data::SharedMarketDataRef;
 
+const API_URL: &str = "https://api.hyperliquid.xyz/info";
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// USD-pegged stablecoins. Loaded from `stable_usd.json` — shared across providers.
+static USD_STABLECOINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("stable_usd.json")).expect("stable_usd.json is valid")
+});
+
+/// Shared price cache. Key is the Hyperliquid asset name (e.g. "ETH").
+type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
+
+/// Cached token metadata resolved from on-chain addresses.
+type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
+
 /// Maps on-chain token symbols to their Hyperliquid asset names.
 ///
 /// Returns `(hyperliquid_symbol, price_scale)` where `price_scale` adjusts the oracle price
@@ -52,14 +66,6 @@ fn normalize_symbol(symbol: &str) -> (String, f64) {
     }
 }
 
-const API_URL: &str = "https://api.hyperliquid.xyz/info";
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
-
-/// USD-pegged stablecoins. Loaded from `stable_usd.json` — shared across providers.
-static USD_STABLECOINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("stable_usd.json")).expect("stable_usd.json is valid")
-});
-
 /// Cached oracle price entry (USD-denominated).
 #[derive(Debug, Clone)]
 struct OraclePrice {
@@ -67,15 +73,9 @@ struct OraclePrice {
     timestamp_ms: u64,
 }
 
-/// Shared price cache. Key is the Hyperliquid asset name (e.g. "ETH").
-type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
-
-/// Cached token metadata resolved from on-chain addresses.
-type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
-
 /// Hyperliquid oracle price provider.
 ///
-/// All oracle prices are in USD, so pricing any pair is `price_in / price_out`.
+/// All oracle prices are in USD, so pricing any Fynd pair is `oracle_price_in / oracle_price_out`.
 /// The background worker populates both the price cache (from the API) and a token
 /// cache (snapshotted from `SharedMarketData`) so that `get_expected_out` never
 /// touches the tokio `RwLock`.
@@ -195,12 +195,22 @@ impl HyperliquidWorker {
     }
 
     /// Snapshots the token registry from SharedMarketData into the local token cache.
+    /// Skips the clone when the registry size hasn't changed, since tokens are only
+    /// ever added — never removed or replaced.
     async fn refresh_token_cache(&self) {
-        // Keep the `SharedMarketData` read-lock held for as short a time as possible:
-        // snapshot only the fields we need, then build the local cache off-lock.
+        let current_len = self
+            .token_cache
+            .read()
+            .map(|c| c.len())
+            .unwrap_or(0);
+
         let new_cache: HashMap<Address, Token> = {
             let data = self.market_data.read().await;
-            data.token_registry_ref()
+            let registry = data.token_registry_ref();
+            if registry.len() == current_len {
+                return;
+            }
+            registry
                 .iter()
                 .map(|(address, token)| (address.clone(), token.clone()))
                 .collect()
@@ -372,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn price_from_usd_oracle() {
+    fn test_price_from_usd_oracle() {
         let provider = seeded_provider();
         let one_eth = BigUint::from(10u64).pow(18);
 
@@ -386,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_pair_via_usd() {
+    fn test_cross_pair_via_usd() {
         let provider = seeded_provider();
         let link_addr: Address = "514910771AF9Ca656af840dff83E8264EcF986CA"
             .parse()
@@ -412,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_token_returns_error() {
+    fn test_unknown_token_returns_error() {
         let provider = seeded_provider();
         let unknown: Address = "0000000000000000000000000000000000000001"
             .parse()
@@ -425,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_price_returns_error() {
+    fn test_stale_price_returns_error() {
         let provider = HyperliquidProvider::default();
         let stale_ts = 1_000u64; // far in the past
 
@@ -459,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_meta_and_asset_ctxs() {
+    fn test_parse_meta_and_asset_ctxs() {
         let json = r#"[
             {"universe": [{"name": "BTC", "szDecimals": 5}, {"name": "ETH", "szDecimals": 4}]},
             [{"oraclePx": "66820.0", "markPx": "66787.0"}, {"oraclePx": "1989.0", "markPx": "1988.0"}]
@@ -475,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // requires network access
-    async fn hyperliquid_live_pepe_usdc() {
+    async fn test_hyperliquid_live_pepe_usdc() {
         // Tests functionality using an asset prefixed with k: meaning the price is for
         // 1000 PEPE instead of a single PEPE
         let pepe_addr: Address = "6982508145454Ce325dDbE47a25d4ec3d2311933"
@@ -511,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // requires network access
-    async fn hyperliquid_live_weth_usdc() {
+    async fn test_hyperliquid_live_weth_usdc() {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
