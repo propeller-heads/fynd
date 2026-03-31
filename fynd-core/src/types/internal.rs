@@ -110,6 +110,10 @@ pub enum SolveError {
     /// Error when encoding
     #[error("failed to encode: {0}")]
     FailedEncoding(String),
+
+    /// Price check against external source failed.
+    #[error("price check failed for order {order_id}")]
+    PriceCheckFailed { order_id: String },
 }
 
 impl SolveError {

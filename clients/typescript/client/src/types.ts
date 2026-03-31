@@ -4,7 +4,8 @@ export type SolutionStatus =
   | 'no_route_found'
   | 'insufficient_liquidity'
   | 'timeout'
-  | 'not_ready';
+  | 'not_ready'
+  | 'price_check_failed';
 
 /** Routing backend that produced a quote. */
 export type BackendKind = 'fynd' | 'turbine';

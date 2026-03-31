@@ -3,7 +3,6 @@
 //! Defines the [`PriceProvider`] trait for fetching external token prices
 //! and supporting error and result types.
 
-use async_trait::async_trait;
 use num_bigint::BigUint;
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -65,8 +64,7 @@ impl ExternalPrice {
 /// Implementations follow the worker+cache pattern: [`start`](PriceProvider::start)
 /// spawns a background task that continuously populates an in-memory cache, and
 /// [`get_expected_out`](PriceProvider::get_expected_out) reads from that cache
-/// without blocking or making network calls.
-#[async_trait]
+/// synchronously without blocking or making network calls.
 pub trait PriceProvider: Send + Sync + 'static {
     /// Called once at startup. Spawns a background worker that populates an internal cache and
     /// returns its task handle.
@@ -74,7 +72,7 @@ pub trait PriceProvider: Send + Sync + 'static {
 
     /// Returns the expected output amount for a given input by reading from the internal cache.
     /// Must not block or make network calls.
-    async fn get_expected_out(
+    fn get_expected_out(
         &self,
         token_in: &Address,
         token_out: &Address,
