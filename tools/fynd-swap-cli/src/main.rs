@@ -436,8 +436,14 @@ async fn main() -> anyhow::Result<()> {
                 Some(overrides)
             }
             TransferType::TransferFromPermit2 => {
-                let overrides =
+                // Inject allowance to both Permit2 (for the permit2.transferFrom path) and
+                // directly to the router (in case the router calls token.transferFrom itself).
+                let mut overrides =
                     build_dry_run_overrides(&provider, sell_token, sender, permit2_addr).await?;
+                let router_overrides =
+                    build_dry_run_overrides(&provider, sell_token, sender, router_from_quote)
+                        .await?;
+                overrides.merge(router_overrides);
                 Some(overrides)
             }
             TransferType::UseVaultsFunds => None,
