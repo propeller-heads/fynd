@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, LazyLock, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -47,6 +47,11 @@ const DEFAULT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchange
 
 /// Quote assets used for intermediate price routing.
 const INTERMEDIATE_ASSETS: &[&str] = &["USDT", "USDC", "ETH", "BTC"];
+
+/// USD-pegged stablecoins. Loaded from `stable_usd.json` — shared across providers.
+static USD_STABLECOINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("stable_usd.json")).expect("stable_usd.json is valid")
+});
 
 /// How often to check for new tokens and subscribe to additional streams.
 const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
@@ -387,6 +392,11 @@ impl BinanceWsWorker {
             return;
         };
         cache.insert(symbol.clone(), TickerData { bid, ask, timestamp_ms });
+
+        // When a ticker quotes against USDT or USDC, inject synthetic entries for
+        // all USD stablecoins so unlisted stablecoins (DAI, GHO, …) get priced
+        // as if they were USDT/USDC.
+        inject_stablecoin_tickers(&mut cache, symbol, bid, ask, timestamp_ms);
     }
 
     /// Fetches valid TRADING symbols from Binance exchange info.
@@ -534,6 +544,44 @@ fn discover_pairs(
     }
 
     pairs.into_iter().collect()
+}
+
+/// For a ticker like `ETHUSDT`, injects synthetic entries `ETHDAI`, `ETHGHO`, etc. for every
+/// USD stablecoin in `stable_usd.json` that doesn't already have a real Binance pair cached.
+/// Similarly handles `USDTETH`-style pairs (quote asset is a stablecoin).
+fn inject_stablecoin_tickers(
+    cache: &mut HashMap<String, TickerData>,
+    symbol: &str,
+    bid: f64,
+    ask: f64,
+    timestamp_ms: u64,
+) {
+    for quote in ["USDT", "USDC"] {
+        if let Some(base) = symbol.strip_suffix(quote) {
+            for stable in USD_STABLECOINS.iter() {
+                if stable == quote {
+                    continue;
+                }
+                let synthetic = format!("{base}{stable}");
+                cache
+                    .entry(synthetic)
+                    .or_insert(TickerData { bid, ask, timestamp_ms });
+            }
+            return;
+        }
+        if let Some(base) = symbol.strip_prefix(quote) {
+            for stable in USD_STABLECOINS.iter() {
+                if stable == quote {
+                    continue;
+                }
+                let synthetic = format!("{stable}{base}");
+                cache
+                    .entry(synthetic)
+                    .or_insert(TickerData { bid, ask, timestamp_ms });
+            }
+            return;
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -916,6 +964,141 @@ mod tests {
         assert!(pairs.contains(&"LINKETH".to_string()));
         assert!(pairs.contains(&"AAVEUSDT".to_string()));
         assert!(!pairs.contains(&"XYZUSDT".to_string()));
+    }
+
+    // -- Stablecoin cache injection tests --
+
+    #[test]
+    fn inject_creates_synthetic_stablecoin_tickers() {
+        let mut cache = HashMap::new();
+        let now = now_ms();
+
+        // Receiving ETHUSDT should create ETHDAI, ETHGHO, etc.
+        inject_stablecoin_tickers(&mut cache, "ETHUSDT", 2000.0, 2000.5, now);
+
+        assert!(cache.contains_key("ETHDAI"));
+        assert!(cache.contains_key("ETHGHO"));
+        assert!(cache.contains_key("ETHUSDC"));
+        // Should not create ETHUSDT — that's the original, already in cache via the caller.
+        assert!(!cache.contains_key("ETHUSDT"));
+    }
+
+    #[test]
+    fn inject_does_not_overwrite_real_ticker() {
+        let mut cache = HashMap::new();
+        let now = now_ms();
+
+        // Pre-populate a real ETHUSDC ticker with a different price.
+        cache.insert(
+            "ETHUSDC".to_string(),
+            TickerData { bid: 1999.0, ask: 1999.5, timestamp_ms: now },
+        );
+
+        inject_stablecoin_tickers(&mut cache, "ETHUSDT", 2000.0, 2000.5, now);
+
+        // Real ticker should be preserved.
+        let real = cache
+            .get("ETHUSDC")
+            .expect("should exist");
+        assert!((real.bid - 1999.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn inject_handles_quote_prefix_pair() {
+        let mut cache = HashMap::new();
+        let now = now_ms();
+
+        // USDCETH → strip "USDC" prefix, remainder is "ETH", create "DAITH", "GHOETH", etc.
+        inject_stablecoin_tickers(&mut cache, "USDCETH", 0.0005, 0.00051, now);
+
+        assert!(cache.contains_key("DAIETH"));
+        assert!(cache.contains_key("GHOETH"));
+        assert!(cache.contains_key("USDTETH"));
+    }
+
+    #[test]
+    fn unlisted_stablecoin_resolves_via_cache() {
+        let provider = seeded_provider();
+
+        let dai_address: Address = "6B175474E89094C44Da98b954EedeAC495271d0F"
+            .parse()
+            .expect("valid address");
+        {
+            let mut cache = provider
+                .token_cache
+                .write()
+                .expect("lock");
+            let dai = make_token(dai_address.clone(), "DAI", 18);
+            cache.insert(dai.address.clone(), dai);
+        }
+
+        // Simulate what update_price_cache does: inject stablecoin tickers from ETHUSDT.
+        {
+            let mut cache = provider
+                .price_cache
+                .write()
+                .expect("lock");
+            inject_stablecoin_tickers(&mut cache, "ETHUSDT", 2000.0, 2000.5, now_ms());
+        }
+
+        let one_eth = BigUint::from(10u64).pow(18);
+        let result = provider
+            .get_expected_out(&weth_address(), &dai_address, &one_eth)
+            .expect("should resolve ETH/DAI via synthetic ticker");
+
+        // ETH/DAI uses the ETHUSDT bid (2000.0)
+        let expected = BigUint::from(2000u64) * BigUint::from(10u64).pow(18);
+        let diff = if *result.expected_amount_out() > expected {
+            result.expected_amount_out() - &expected
+        } else {
+            &expected - result.expected_amount_out()
+        };
+        let tolerance = &expected / BigUint::from(100u64); // 1%
+        assert!(diff < tolerance, "result={}, expected ~{expected}", result.expected_amount_out());
+    }
+
+    #[test]
+    fn ws_message_creates_synthetic_stablecoin_ticker() {
+        // End-to-end: a raw ETHUSDT WebSocket message arrives, the worker processes
+        // it, and we can price ETH/GHO through the synthetic cache entry.
+        let provider = BinanceWsProvider::default();
+        let price_cache = Arc::clone(&provider.price_cache);
+        let worker = make_worker(&price_cache);
+
+        let gho_address: Address = "40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f"
+            .parse()
+            .expect("valid address");
+        {
+            let mut cache = provider
+                .token_cache
+                .write()
+                .expect("lock");
+            let weth = make_token(weth_address(), "WETH", 18);
+            cache.insert(weth.address.clone(), weth);
+            let gho = make_token(gho_address.clone(), "GHO", 18);
+            cache.insert(gho.address.clone(), gho);
+        }
+
+        // Simulate a bookTicker message arriving from Binance (no event time → uses now).
+        let msg = Message::Text(r#"{"s":"ETHUSDT","b":"2000.00","a":"2000.50"}"#.into());
+        worker.handle_message(&msg);
+
+        // The cache should now contain a synthetic ETHGHO entry.
+        {
+            let cache = price_cache.read().expect("lock");
+            assert!(cache.contains_key("ETHGHO"), "synthetic ETHGHO ticker missing");
+        }
+
+        // Price 1 ETH → GHO (both 18 decimals).
+        let one_eth = BigUint::from(10u64).pow(18);
+        let result = provider
+            .get_expected_out(&weth_address(), &gho_address, &one_eth)
+            .expect("should resolve ETH/GHO via synthetic ticker");
+
+        // Sell-side uses bid = 2000.0 → 2000 GHO (18 decimals)
+        let expected = BigUint::from(2000u64) * BigUint::from(10u64).pow(18);
+        assert_eq!(*result.expected_amount_out(), expected);
+        assert_eq!(result.source(), "binance_ws");
     }
 
     // -- Live integration test --
