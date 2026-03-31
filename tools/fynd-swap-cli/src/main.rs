@@ -8,14 +8,15 @@
 //!
 //! # On-chain execution (`--execute`)
 //!
-//! Requires `PRIVATE_KEY` env var and a funded wallet with appropriate approvals.
+//! Requires `PRIVATE_KEY` env var and a funded wallet. Any missing approvals are submitted
+//! automatically before the swap.
 
 use std::{env, str::FromStr, time::Duration};
 
 use alloy::{
     hex,
     network::Ethereum,
-    primitives::{address, Address, B256, U256},
+    primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
     signers::{local::PrivateKeySigner, Signer},
 };
@@ -23,9 +24,10 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
-    EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus, Order,
-    OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle, QuoteOptions,
-    QuoteParams, SignedSwap, SigningHints, StorageOverrides,
+    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus,
+    Order, OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle,
+    QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides,
+    UserTransferType,
 };
 use num_bigint::BigUint;
 use tracing::info;
@@ -33,10 +35,6 @@ use tracing_subscriber::EnvFilter;
 
 mod erc20;
 mod permit2;
-
-/// Vitalik's address — used as the dry-run sender so `eth_call` simulations don't fail due
-/// to insufficient ETH for gas. Signatures are not checked in dry-run mode.
-const DRY_RUN_SENDER: Address = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -85,10 +83,6 @@ struct Cli {
     #[arg(long)]
     execute: bool,
 
-    /// Tycho Router address (required for transfer-from-permit2 flow)
-    #[arg(long)]
-    router: Option<String>,
-
     /// Permit2 contract address (defaults to the canonical cross-chain deployment)
     #[arg(long, default_value = "0x000000000022D473030F116dDEE9F6B43aC78BA3")]
     permit2: String,
@@ -107,8 +101,10 @@ fn max_uint160() -> BigUint {
 
 /// Detect ERC-20 storage slots and build `StorageOverrides` for a dry-run.
 ///
-/// Injects `U256::MAX` into both the holder's balance slot and the
-/// `holder → spender` allowance slot so the simulation succeeds without real funds.
+/// Injects a large sentinel into the holder's balance slot and the `holder → spender`
+/// allowance slot so the simulation succeeds without real funds. Uses `U256::MAX >> 1`
+/// rather than `U256::MAX` to avoid triggering tokens that pack metadata into bit 255
+/// (e.g. USDC uses that bit as a blacklist flag).
 async fn build_dry_run_overrides(
     provider: &RootProvider<Ethereum>,
     sell_token: Address,
@@ -124,7 +120,10 @@ async fn build_dry_run_overrides(
     let allowance_pos = allowance_res?;
     info!("Found balance slot {balance_pos} and allowance slot {allowance_pos}");
 
-    let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX).0);
+    // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
+    // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
+    // 2^255 - 1 is still large enough to cover any realistic balance or allowance.
+    let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
     let token_key = Bytes::copy_from_slice(sell_token.as_slice());
     let mut overrides = StorageOverrides::default();
     overrides.insert(
@@ -156,53 +155,58 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
     }
 }
 
-struct Permit2Args<'a> {
+/// Check allowance and, if insufficient, submit and mine an ERC-20 approval.
+///
+/// `transfer_type` controls the spender: `TransferFrom` -> router, `TransferFromPermit2` ->
+/// Permit2 contract. Resolves the spender address via `GET /v1/info`.
+async fn ensure_approval(
+    client: &FyndClient,
+    signer: &PrivateKeySigner,
+    sell_token: Bytes,
+    amount: BigUint,
+    transfer_type: UserTransferType,
+    sender: Address,
+) -> anyhow::Result<()> {
+    let params = ApprovalParams::new(sell_token, amount, true).with_transfer_type(transfer_type);
+    let hints = SigningHints::default().with_sender(sender);
+    let Some(approval_payload) = client.approval(&params, &hints).await? else {
+        return Ok(()); // allowance already sufficient
+    };
+    info!("Submitting approval transaction...");
+    let sig = signer
+        .sign_hash(&approval_payload.signing_hash())
+        .await?;
+    let signed = SignedApproval::assemble(approval_payload, sig);
+    let receipt = client.execute_approval(signed).await?;
+    tokio::time::timeout(Duration::from_secs(120), receipt)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for approval to be mined"))??;
+    info!("Approval confirmed.");
+    Ok(())
+}
+
+struct Permit2Args {
     sell_token: Address,
     sender: Address,
     permit2_addr: Address,
-    router_str: &'a str,
-    amount: &'a BigUint,
+    router_addr: Address,
     slippage: f64,
     execute: bool,
 }
 
-/// Build Permit2 `EncodingOptions`: validate allowance, read nonce, sign EIP-712 hash.
+/// Build Permit2 `EncodingOptions`: read nonce, sign EIP-712 hash.
 async fn create_permit2_encoding(
     provider: &RootProvider<Ethereum>,
     signer: &PrivateKeySigner,
-    args: Permit2Args<'_>,
+    args: Permit2Args,
 ) -> anyhow::Result<EncodingOptions> {
-    let router_addr = Address::from_str(args.router_str)
-        .with_context(|| format!("invalid router address: {}", args.router_str))?;
-
     let (nonce, expiration, sig_deadline) = if args.execute {
-        let allowance =
-            erc20::read_erc20_allowance(provider, args.sell_token, args.sender, args.permit2_addr)
-                .await?;
-        if allowance < *args.amount {
-            eprintln!("\nError: insufficient ERC-20 allowance to the Permit2 contract.");
-            eprintln!("  Token:     {:#x}", args.sell_token);
-            eprintln!("  Permit2:   {:#x}", args.permit2_addr);
-            eprintln!("  Allowance: {allowance}");
-            eprintln!("  Required:  {}", args.amount);
-            eprintln!("\nApprove Permit2 with:");
-            eprintln!(
-                "  cast send {:#x} \"approve(address,uint256)\" \
-                 {:#x} {} \\\n    \
-                 --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                args.sell_token,
-                args.permit2_addr,
-                u128::MAX
-            );
-            bail!("insufficient allowance to Permit2");
-        }
-
         let nonce = permit2::read_nonce(
             provider,
             args.permit2_addr,
             args.sender,
             args.sell_token,
-            router_addr,
+            args.router_addr,
         )
         .await?;
         info!("Permit2 nonce for sender: {nonce}");
@@ -225,7 +229,7 @@ async fn create_permit2_encoding(
             BigUint::from(expiration),
             BigUint::from(nonce),
         ),
-        Bytes::copy_from_slice(router_addr.as_slice()),
+        Bytes::copy_from_slice(args.router_addr.as_slice()),
         BigUint::from(sig_deadline),
     );
 
@@ -271,9 +275,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         PrivateKeySigner::random()
     };
-    // In dry-run mode use a well-funded address so the eth_call simulation has enough ETH for gas.
-    // The actual signing key is irrelevant since signatures are not validated in dry-run.
-    let sender = if cli.execute { signer.address() } else { DRY_RUN_SENDER };
+    let sender = signer.address();
     info!("Sender: {sender:?}");
 
     let provider: RootProvider<Ethereum> = ProviderBuilder::default().connect_http(
@@ -304,29 +306,57 @@ async fn main() -> anyhow::Result<()> {
     let amount = BigUint::from(cli.sell_amount);
     let slippage = cli.slippage_bps as f64 / 10_000.0;
 
-    // ── Permit2 pre-flight ────────────────────────────────────────────────────
-    let encoding_options = match cli.transfer_type {
-        TransferType::TransferFrom => EncodingOptions::new(slippage),
+    // ── Setup: encoding options, approvals, dry-run spenders ─────────────────
+    // dry_run_spenders: token spenders whose allowance slots are injected for dry-run simulation.
+    let (encoding_options, dry_run_spenders): (_, Vec<Address>) = match cli.transfer_type {
+        TransferType::TransferFrom => {
+            if cli.execute {
+                ensure_approval(
+                    &client,
+                    &signer,
+                    sell_token_bytes.clone(),
+                    amount.clone(),
+                    UserTransferType::TransferFrom,
+                    sender,
+                )
+                .await?;
+            }
+            let info = client.info().await?;
+            let router_addr = Address::try_from(info.router_address().as_ref())
+                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            (EncodingOptions::new(slippage), vec![router_addr])
+        }
         TransferType::TransferFromPermit2 => {
-            let router_str = cli.router.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("--router is required for --transfer-type transfer-from-permit2")
-            })?;
-            create_permit2_encoding(
+            let info = client.info().await?;
+            let router_addr = Address::try_from(info.router_address().as_ref())
+                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            if cli.execute {
+                ensure_approval(
+                    &client,
+                    &signer,
+                    sell_token_bytes.clone(),
+                    amount.clone(),
+                    UserTransferType::TransferFromPermit2,
+                    sender,
+                )
+                .await?;
+            }
+            let enc = create_permit2_encoding(
                 &provider,
                 &signer,
                 Permit2Args {
                     sell_token,
                     sender,
                     permit2_addr,
-                    router_str,
-                    amount: &amount,
+                    router_addr,
                     slippage,
                     execute: cli.execute,
                 },
             )
-            .await?
+            .await?;
+            (enc, vec![permit2_addr, router_addr])
         }
-        TransferType::UseVaultsFunds => EncodingOptions::new(slippage).with_vault_funds(),
+        TransferType::UseVaultsFunds => (EncodingOptions::new(slippage).with_vault_funds(), vec![]),
     };
 
     // ── Quote ─────────────────────────────────────────────────────────────────
@@ -335,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
         cli.sell_amount, cli.sell_token, cli.buy_token
     );
     let order = Order::new(
-        sell_token_bytes,
+        sell_token_bytes.clone(),
         buy_token_bytes,
         amount.clone(),
         OrderSide::Sell,
@@ -370,39 +400,20 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("============================\n");
 
-    let tx = quote.transaction().ok_or_else(|| {
-        anyhow::anyhow!("quote has no calldata; ensure encoding_options were set in the request")
-    })?;
-    let router_from_quote = Address::from_slice(tx.to().as_ref());
-
-    // ── ERC-20 execute: verify allowance before signing ───────────────────────
-    if cli.execute {
-        if let TransferType::TransferFrom = cli.transfer_type {
-            let allowance =
-                erc20::read_erc20_allowance(&provider, sell_token, sender, router_from_quote)
-                    .await?;
-            if allowance < amount {
-                eprintln!("\nError: insufficient sell-token allowance for the Fynd router.");
-                eprintln!("  Token:     {sell_token:#x}");
-                eprintln!("  Router:    {router_from_quote:#x}");
-                eprintln!("  Allowance: {allowance}");
-                eprintln!("  Required:  {amount}");
-                eprintln!("\nApprove the router with:");
-                eprintln!(
-                    "  cast send {sell_token:#x} \"approve(address,uint256)\" \
-                     {router_from_quote:#x} {} \\\n    \
-                     --rpc-url $RPC_URL --private-key $PRIVATE_KEY",
-                    cli.sell_amount
-                );
-                bail!("insufficient sell-token allowance");
-            }
-        }
-    }
-
     // ── Sign order payload ────────────────────────────────────────────────────
     let gas_limit: u64 = quote.gas_estimate().try_into().unwrap();
+    // For dry-run, set gas price to 0 so eth_call bypasses the ETH balance check.
+    // The EVM still executes the full contract code; it just skips gas*price deduction.
+    let signing_hints = if cli.execute {
+        SigningHints::default().with_gas_limit(gas_limit * 10u64)
+    } else {
+        SigningHints::default()
+            .with_gas_limit(gas_limit * 10u64)
+            .with_max_fee_per_gas(0)
+            .with_max_priority_fee_per_gas(0)
+    };
     let payload = client
-        .swap_payload(quote, &SigningHints::default().with_gas_limit(gas_limit * 10u64))
+        .swap_payload(quote, &signing_hints)
         .await?;
     let order_sig = signer
         .sign_hash(&payload.signing_hash())
@@ -414,23 +425,16 @@ async fn main() -> anyhow::Result<()> {
         info!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
-        // Dry-run: the spender for the allowance slot depends on the flow.
-        // TransferFrom: spender is the Fynd router (from quote).
-        // TransferFromPermit2: spender is the Permit2 contract (router authorised via EIP-712).
-        // UseVaultsFunds: no allowance needed — funds are in the router vault.
-        let overrides = match cli.transfer_type {
-            TransferType::TransferFrom => {
-                let overrides =
-                    build_dry_run_overrides(&provider, sell_token, sender, router_from_quote)
-                        .await?;
-                Some(overrides)
+        let overrides = if dry_run_spenders.is_empty() {
+            None
+        } else {
+            let mut overrides =
+                build_dry_run_overrides(&provider, sell_token, sender, dry_run_spenders[0]).await?;
+            for &spender in &dry_run_spenders[1..] {
+                let extra = build_dry_run_overrides(&provider, sell_token, sender, spender).await?;
+                overrides.merge(extra);
             }
-            TransferType::TransferFromPermit2 => {
-                let overrides =
-                    build_dry_run_overrides(&provider, sell_token, sender, permit2_addr).await?;
-                Some(overrides)
-            }
-            TransferType::UseVaultsFunds => None,
+            Some(overrides)
         };
         info!("Submitting dry-run execution...");
         ExecutionOptions { dry_run: true, storage_overrides: overrides, fetch_revert_reason: true }
@@ -466,7 +470,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    // ── max_uint160 ───────────────────────────────────────────────────────────
+    // -- max_uint160 -----------------------------------------------------------
 
     #[test]
     fn max_uint160_is_20_bytes_of_ff() {
@@ -481,7 +485,7 @@ mod tests {
         assert_eq!(max_uint160(), expected);
     }
 
-    // ── CLI parsing ───────────────────────────────────────────────────────────
+    // -- CLI parsing -----------------------------------------------------------
 
     #[test]
     fn cli_defaults() {
@@ -495,21 +499,6 @@ mod tests {
         assert_eq!(cli.transfer_type, TransferType::TransferFrom);
         assert_eq!(cli.permit2, "0x000000000022D473030F116dDEE9F6B43aC78BA3");
         assert!(!cli.execute);
-        assert!(cli.router.is_none());
-    }
-
-    #[test]
-    fn cli_permit2_transfer_type_with_router() {
-        let cli = Cli::try_parse_from([
-            "fynd-swap-cli",
-            "--transfer-type",
-            "transfer-from-permit2",
-            "--router",
-            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        ])
-        .unwrap();
-        assert_eq!(cli.transfer_type, TransferType::TransferFromPermit2);
-        assert_eq!(cli.router.as_deref(), Some("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"));
     }
 
     #[test]

@@ -209,6 +209,14 @@ impl StorageOverrides {
             .or_default()
             .insert(slot, value);
     }
+
+    /// Merge all slot overrides from `other` into `self`.
+    pub fn merge(&mut self, other: StorageOverrides) {
+        for (address, slots) in other.slots {
+            let entry = self.slots.entry(address).or_default();
+            entry.extend(slots);
+        }
+    }
 }
 
 fn storage_overrides_to_alloy(so: &StorageOverrides) -> Result<StateOverride, FyndError> {

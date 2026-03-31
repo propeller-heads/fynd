@@ -15,7 +15,6 @@ use alloy::{
     sol_types::SolCall,
 };
 use anyhow::bail;
-use num_bigint::BigUint;
 
 sol! {
     interface IERC20 {
@@ -110,26 +109,6 @@ pub async fn find_allowance_slot(
         "could not detect allowance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
          the token may use a non-standard storage layout"
     )
-}
-
-pub async fn read_erc20_allowance(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> anyhow::Result<BigUint> {
-    let calldata = IERC20::allowanceCall { owner, spender }.abi_encode();
-    let result = provider
-        .call(TransactionRequest {
-            to: Some(TxKind::Call(token)),
-            input: AlloyBytes::from(calldata).into(),
-            ..Default::default()
-        })
-        .await?;
-    if result.len() < 32 {
-        bail!("allowance() returned {} bytes, expected 32", result.len());
-    }
-    Ok(BigUint::from_bytes_be(&result[..32]))
 }
 
 #[cfg(test)]
