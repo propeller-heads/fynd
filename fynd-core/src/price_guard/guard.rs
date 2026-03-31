@@ -125,10 +125,8 @@ impl PriceGuard {
                     price_out_of_tolerance = true;
                 }
                 Err(e) => {
-                    if let PriceProviderError::Unavailable(_) |
-                    PriceProviderError::TokenNotFound { .. } |
-                    PriceProviderError::StaleData { .. } = e
-                    {
+                    if let PriceProviderError::PriceNotFound { .. } = e {
+                    } else {
                         has_provider_error = true;
                     }
                     debug!(error = %e, "price provider error");
