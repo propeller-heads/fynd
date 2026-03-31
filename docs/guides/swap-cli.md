@@ -76,7 +76,7 @@ The output prints the quote (amount\_in, amount\_out, gas estimate, route) follo
 
 ## Dry-run a swap (Permit2)
 
-Add `--transfer-type transfer-from-permit2`. The router address is fetched automatically from the Fynd server. The dry-run uses nonce 0 and maximum deadlines, so no chain reads are needed.
+Add `--transfer-type transfer-from-permit2`. The dry-run uses nonce 0 and maximum deadlines, so no chain reads are needed.
 
 ```bash
 fynd-swap-cli --transfer-type transfer-from-permit2
@@ -99,7 +99,7 @@ fynd-swap-cli --execute
 
 ## Execute on-chain (Permit2)
 
-Add `--execute --transfer-type transfer-from-permit2`. The router address is resolved automatically from the Fynd server. The CLI checks the Permit2 allowance and submits an approval transaction first if needed, then reads the current nonce, builds the EIP-712 permit, signs it, and submits the swap.
+Add `--execute --transfer-type transfer-from-permit2`. The CLI checks the Permit2 allowance and submits an approval transaction first if needed, then reads the current nonce, builds the EIP-712 permit, signs it, and submits the swap.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key
