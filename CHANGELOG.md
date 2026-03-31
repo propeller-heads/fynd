@@ -1,3 +1,10 @@
+## [0.40.0](https://github.com/propeller-heads/fynd/compare/0.39.2...0.40.0) (2026-03-31)
+
+
+### Features
+
+* add docker-compose for swap-cli ([8a059fa](https://github.com/propeller-heads/fynd/commit/8a059fad5093222a5e88699fbc521db7dd7887bd))
+
 ## [0.39.2](https://github.com/propeller-heads/fynd/compare/0.39.1...0.39.2) (2026-03-30)
 
 
