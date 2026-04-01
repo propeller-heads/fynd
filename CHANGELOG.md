@@ -1,3 +1,10 @@
+## [0.45.0](https://github.com/propeller-heads/fynd/compare/0.44.1...0.45.0) (2026-04-01)
+
+
+### Features
+
+* **swap-cli:** poll health for 30s and show amount out net gas ([4018379](https://github.com/propeller-heads/fynd/commit/401837992311ea9c890674e23c8ab9290a25ff98))
+
 ## [0.44.1](https://github.com/propeller-heads/fynd/compare/0.44.0...0.44.1) (2026-04-01)
 
 
