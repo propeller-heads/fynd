@@ -139,19 +139,38 @@ async fn build_dry_run_overrides(
     Ok(overrides)
 }
 
-/// Poll the solver health endpoint until healthy or fail immediately if not healthy.
+/// Poll the solver health endpoint for up to 30 seconds, giving it time to become healthy.
 async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<HealthStatus> {
     info!("Checking solver health at {fynd_url}...");
-    match client.health().await {
-        Ok(h) if h.healthy() => Ok(h),
-        Ok(h) => bail!(
-            "solver at {fynd_url} is not healthy \
-             (last update: {}ms ago, {} pools); \
-             wait for market data to load",
-            h.last_update_ms(),
-            h.num_solver_pools()
-        ),
-        Err(e) => bail!("health check failed: {e}"),
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        interval.tick().await;
+        match client.health().await {
+            Ok(h) if h.healthy() => return Ok(h),
+            Ok(h) => {
+                if tokio::time::Instant::now() >= deadline {
+                    bail!(
+                        "solver at {fynd_url} not healthy after 30s \
+                         (last update: {}ms ago, {} pools); \
+                         wait for market data to load",
+                        h.last_update_ms(),
+                        h.num_solver_pools()
+                    );
+                }
+                info!(
+                    "Solver not ready yet ({} pools, last update {}ms ago), retrying...",
+                    h.num_solver_pools(),
+                    h.last_update_ms()
+                );
+            }
+            Err(e) => {
+                if tokio::time::Instant::now() >= deadline {
+                    bail!("health check failed after 30s: {e}");
+                }
+                info!("Health check failed ({e}), retrying...");
+            }
+        }
     }
 }
 
@@ -380,11 +399,12 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("\n========== Quote ==========");
-    println!("Status:       {:?}", quote.status());
-    println!("Amount in:    {}", quote.amount_in());
-    println!("Amount out:   {}", quote.amount_out());
-    println!("Gas estimate: {}", quote.gas_estimate());
-    println!("Solve time:   {}ms", quote.solve_time_ms());
+    println!("Status:            {:?}", quote.status());
+    println!("Amount in:         {}", quote.amount_in());
+    println!("Amount out:        {}", quote.amount_out());
+    println!("Amount out net gas:{}", quote.amount_out_net_gas());
+    println!("Gas estimate:      {}", quote.gas_estimate());
+    println!("Solve time:        {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
