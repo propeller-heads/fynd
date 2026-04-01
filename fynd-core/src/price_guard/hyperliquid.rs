@@ -1,7 +1,9 @@
 //! Hyperliquid oracle price provider.
 //!
 //! Polls the Hyperliquid REST API for oracle prices (weighted median across 8 CEXs) and caches them
-//! in memory. The [`HyperliquidProvider`] reads from this cache to validate solution prices.
+//! in memory. The
+//! [`HyperliquidProvider`](crate::price_guard::hyperliquid::HyperliquidProvider) reads from this
+//! cache to validate solution prices.
 
 use std::{
     collections::{HashMap, HashSet},

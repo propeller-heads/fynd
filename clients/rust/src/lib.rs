@@ -19,7 +19,7 @@
 //! ```rust,no_run
 //! # use fynd_client::FyndClientBuilder;
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! //! let client = FyndClientBuilder::new(
+//! let client = FyndClientBuilder::new(
 //!     "http://localhost:3000",
 //!     "https://reth-ethereum.ithaca.xyz/rpc",
 //! )
