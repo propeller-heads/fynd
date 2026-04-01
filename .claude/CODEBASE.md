@@ -1,4 +1,4 @@
-<!-- docs-synced-at: d16ad8b53ffde372528ec744ffb4ecf41d5170a3 -->
+<!-- docs-synced-at: 38fd36e488349fb300a2cf6ca74184f1377adb77 -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -24,7 +24,7 @@ Key properties:
 
 | Crate | Location | Description |
 |---|---|---|
-| `fynd` | root (`src/`) | CLI binary: parses args, sets up observability, runs `FyndRPCBuilder` |
+| `fynd` | root (`src/`) | CLI binary and library crate: parses args, sets up observability, runs `FyndRPCBuilder`. `lib.rs` re-exports `fynd_core` and `fynd_rpc` as a single dependency |
 | [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding. No HTTP deps |
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
@@ -36,7 +36,7 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 | Client | Location | Package |
 |---|---|---|
 | Rust | `clients/rust/` | `fynd-client` (Cargo workspace member) |
-| TypeScript | `clients/typescript/` | `@fynd/client` (pnpm workspace) |
+| TypeScript | `clients/typescript/` | `@kayibal/fynd-client` (pnpm workspace) |
 
 ### [Tools](../tools/CLAUDE.md)
 
@@ -51,7 +51,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 ### Core Components
 
-1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`
+1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`, `GET /v1/info`
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in: `MostLiquidAlgorithm`, `BellmanFordAlgorithm`
@@ -111,8 +111,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | File | Purpose |
 |---|---|
-| `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout |
-| `blacklist.toml` | Pool IDs to exclude from routing |
+| `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout. Optional — binary falls back to embedded defaults if not found |
+| `blacklist.toml` | Pool IDs to exclude from routing. Optional — binary falls back to embedded defaults if not found |
 
 ## Testing
 

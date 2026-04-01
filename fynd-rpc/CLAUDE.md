@@ -24,6 +24,7 @@ infrastructure.
 |---|---|---|
 | `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes |
 | `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, pool count) |
+| `GET /v1/info` | `handlers::info` | Static metadata about this Fynd instance (version, chain, spender address) |
 | `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, pool depths (experimental feature only) |
 
 ## API Module (`api/`)
@@ -31,7 +32,7 @@ infrastructure.
 | File | Purpose |
 |---|---|
 | `mod.rs` | `configure_app()`, `AppState`, `HealthTracker`, `ApiDoc` (utoipa OpenAPI) |
-| `handlers.rs` | Request handlers for `/v1/quote` and `/v1/health` |
+| `handlers.rs` | Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info` |
 | `dto.rs` | Re-exports wire types from `fynd-rpc-types` (conversions to `fynd-core` types live in `fynd-rpc-types` via the `core` feature) |
 | `error.rs` | `ApiError` type with HTTP status code mapping |
 | `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_f64` conversion |

@@ -18,10 +18,11 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 
 - `QuoteRequest` — orders + options
 - `Order` — token_in, token_out, amount, side (Sell only), sender, optional receiver
-- `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options
+- `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options, price_guard (optional `PriceGuardConfig`)
 - `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params
 - `UserTransferType` — TransferFrom (default) / TransferFromPermit2 / UseVaultsFunds
 - `ClientFeeParams` — bps, receiver, max_subsidy, signature (client fee on swap output)
+- `PriceGuardConfig` — external price validation config (provider registry, deviation thresholds)
 - `PermitSingle`, `PermitDetails` — Permit2 authorization data
 
 ## Response Types
@@ -35,6 +36,7 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `BlockInfo` — number, hash, timestamp
 - `Transaction` — to, value, data (hex-encoded calldata)
 - `HealthStatus` — market_last_updated, derived_data_ready, num_components, num_solver_pools
+- `InstanceInfo` — static metadata returned by `GET /v1/info` (version, chain, spender address)
 
 ## OpenAPI Codegen
 
