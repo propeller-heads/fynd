@@ -127,7 +127,10 @@ pub enum SolveError {
 
     /// Price check against external source failed.
     #[error("price check failed for order {order_id}")]
-    PriceCheckFailed { order_id: String },
+    PriceCheckFailed {
+        /// Identifier of the order that failed the price check.
+        order_id: String,
+    },
 }
 
 impl SolveError {

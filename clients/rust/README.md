@@ -6,9 +6,8 @@ For documentation, guides, and API reference visit **<https://docs.fynd.xyz/>**.
 
 ## Installation
 
-```toml
-[dependencies]
-fynd-client = "0"  # see crates.io for the latest version
+```sh
+cargo add fynd-client
 ```
 
 ## Quick start

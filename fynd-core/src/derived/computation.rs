@@ -119,24 +119,36 @@ impl ComputationRequirements {
 /// Typed error for a failed computation item.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FailedItemError {
+    /// The pool's simulation state was not available in shared market data.
     #[error("missing simulation state")]
     MissingSimulationState,
 
+    /// Token metadata (decimals, symbol) was not found for the pool's tokens.
     #[error("missing token metadata")]
     MissingTokenMetadata,
 
+    /// A required spot price was not yet computed for this edge.
     #[error("missing spot price")]
     MissingSpotPrice,
 
+    /// The decimal difference between two tokens is too large for a meaningful price.
     #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
-    ExtremeDecimalMismatch { from: u32, to: u32 },
+    ExtremeDecimalMismatch {
+        /// Source token decimals.
+        from: u32,
+        /// Target token decimals.
+        to: u32,
+    },
 
+    /// The computed spot price is below the minimum threshold.
     #[error("spot price too small: {0}")]
     SpotPriceTooSmall(f64),
 
+    /// Protocol simulation returned an error.
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
+    /// Every simulation path for this pool failed.
     #[error("all simulation paths failed")]
     AllSimulationPathsFailed,
 }

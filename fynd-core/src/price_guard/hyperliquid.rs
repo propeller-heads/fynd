@@ -87,6 +87,7 @@ pub struct HyperliquidProvider {
 }
 
 impl HyperliquidProvider {
+    /// Creates a new Hyperliquid provider that polls prices at the given interval.
     pub fn new(poll_interval: Duration) -> Self {
         Self {
             price_cache: Arc::new(RwLock::new(HashMap::new())),

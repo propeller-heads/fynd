@@ -56,10 +56,12 @@ mod hex_bytes_serde {
 pub struct Bytes(#[serde(with = "hex_bytes_serde")] pub bytes::Bytes);
 
 impl Bytes {
+    /// Returns the number of bytes.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if the byte sequence is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
