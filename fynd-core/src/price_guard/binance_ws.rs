@@ -106,6 +106,7 @@ pub struct BinanceWsProvider {
 }
 
 impl BinanceWsProvider {
+    /// Creates a new `BinanceWsProvider` with default Binance WebSocket and exchange info URLs.
     pub fn new() -> Self {
         Self {
             price_cache: Arc::new(RwLock::new(HashMap::new())),
