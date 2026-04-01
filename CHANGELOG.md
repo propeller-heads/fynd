@@ -1,3 +1,12 @@
+## [0.44.1](https://github.com/propeller-heads/fynd/compare/0.44.0...0.44.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* address PR review — use generic gas token naming, separate error paths ([0968040](https://github.com/propeller-heads/fynd/commit/096804069fc07086c7933b14dd87714746fae1b6))
+* guard zero denominator and update computation_requirements comment ([e4558ef](https://github.com/propeller-heads/fynd/commit/e4558ef68b8ce2dbc738b48b27a1dc950b34f8a6))
+* normalize pool depth to ETH in edge weight construction ([74bfa58](https://github.com/propeller-heads/fynd/commit/74bfa588ef0a5c7080f547132bd05136bf677491))
+
 ## [0.44.0](https://github.com/propeller-heads/fynd/compare/0.43.2...0.44.0) (2026-04-01)
 
 
