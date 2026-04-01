@@ -645,16 +645,15 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
-        if !self.price_providers.is_empty() {
-            let mut registry = PriceProviderRegistry::new();
-            let mut worker_handles = Vec::new();
-            for mut provider in self.price_providers {
-                worker_handles.push(provider.start(Arc::clone(&market_data)));
-                registry = registry.register(provider);
-            }
-            let price_guard = PriceGuard::new(registry, worker_handles);
-            router = router.with_price_guard(price_guard, self.price_guard_config);
+
+        let mut registry = PriceProviderRegistry::new();
+        let mut worker_handles = Vec::new();
+        for mut provider in self.price_providers {
+            worker_handles.push(provider.start(Arc::clone(&market_data)));
+            registry = registry.register(provider);
         }
+        let price_guard = PriceGuard::new(registry, worker_handles);
+        router = router.with_price_guard(price_guard, self.price_guard_config);
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = tycho_feed.run().await {
