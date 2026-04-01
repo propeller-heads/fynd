@@ -1,3 +1,13 @@
+## [0.43.2](https://github.com/propeller-heads/fynd/compare/0.43.1...0.43.2) (2026-04-01)
+
+
+### Bug Fixes
+
+* add #[non_exhaustive] to OrderSide in all three crates ([92578ae](https://github.com/propeller-heads/fynd/commit/92578ae894a45bede28d1c77ea1bd9191bc3ac9d))
+* **fynd-core:** add #[must_use] to builder and config types ([3895c8d](https://github.com/propeller-heads/fynd/commit/3895c8dbf6f06dedf90cc63ef2ce101858737280))
+* **fynd-core:** add #[non_exhaustive] to extensible public enums ([331f306](https://github.com/propeller-heads/fynd/commit/331f3066dcb8ca6248e2269d4de657cf3dbddf40))
+* **fynd-rpc-types:** add #[must_use] to request/response builder types ([62ea461](https://github.com/propeller-heads/fynd/commit/62ea461c7065bd6f83db14a1beb770c899057d34))
+
 ## [0.43.1](https://github.com/propeller-heads/fynd/compare/0.43.0...0.43.1) (2026-04-01)
 
 
