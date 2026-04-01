@@ -47,7 +47,7 @@ pub struct MostLiquidAlgorithm {
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
-    /// Liquidity depth normalized to gas token (ETH) units.
+    /// Liquidity depth normalized to gas token (native token) units.
     pub depth: f64,
 }
 
@@ -119,28 +119,53 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
             }
         };
 
-        // Normalize depth from raw token_in units to gas token (ETH) units.
+        // Normalize depth from raw token_in units to gas token units.
         // TokenGasPrices stores Price { numerator, denominator } where
         // numerator/denominator = "token units per gas token unit".
-        // To convert token->ETH: depth_eth = raw_depth * denominator / numerator.
+        // To convert to gas token: depth_gas = raw_depth * denominator / numerator.
         let depth = match derived
             .token_prices()
             .and_then(|p| p.get(&token_in.address))
         {
             Some(price) => {
-                let num = price.numerator.to_f64().unwrap_or(0.0);
-                let den = price
-                    .denominator
-                    .to_f64()
-                    .unwrap_or(0.0);
-                if num == 0.0 || den == 0.0 {
-                    trace!(
-                        component_id = %component_id,
-                        token_in = %token_in.address,
-                        "token price has zero numerator or denominator, skipping edge"
-                    );
-                    return None;
-                }
+                let num = match price.numerator.to_f64() {
+                    Some(v) if v > 0.0 => v,
+                    Some(_) => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price numerator is zero, skipping edge"
+                        );
+                        return None;
+                    }
+                    None => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price numerator overflows f64, skipping edge"
+                        );
+                        return None;
+                    }
+                };
+                let den = match price.denominator.to_f64() {
+                    Some(v) if v > 0.0 => v,
+                    Some(_) => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price denominator is zero, skipping edge"
+                        );
+                        return None;
+                    }
+                    None => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price denominator overflows f64, skipping edge"
+                        );
+                        return None;
+                    }
+                };
                 raw_depth * den / num
             }
             None => {
@@ -653,7 +678,7 @@ impl Algorithm for MostLiquidAlgorithm {
     fn computation_requirements(&self) -> ComputationRequirements {
         // MostLiquidAlgorithm uses token prices for two purposes:
         // 1. Converting gas costs from wei to output token terms (net_amount_out)
-        // 2. Normalizing pool depth to ETH units for path scoring (from_sim_and_derived)
+        // 2. Normalizing pool depth to gas token units for path scoring (from_sim_and_derived)
         //
         // Token prices are marked as `allow_stale` since they don't change much
         // block-to-block. Stale prices affect scoring order (not correctness)
