@@ -38,6 +38,7 @@ use crate::{
 };
 
 /// Configuration for an Algorithm instance.
+#[must_use]
 #[derive(Debug, Clone)]
 pub struct AlgorithmConfig {
     /// Minimum hops to search (must be >= 1).
@@ -257,6 +258,7 @@ pub enum AlgorithmError {
 }
 
 /// Reason why no path was found between tokens.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoPathReason {
     /// Source token not present in the routing graph.

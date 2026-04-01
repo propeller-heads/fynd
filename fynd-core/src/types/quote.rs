@@ -66,6 +66,7 @@ impl QuoteRequest {
 }
 
 /// Options to customize the solving behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuoteOptions {
@@ -261,6 +262,7 @@ impl FeeBreakdown {
 }
 
 /// Options to customize the encoding behavior.
+#[must_use]
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingOptions {
@@ -596,6 +598,7 @@ impl Order {
 /// Specifies the side of an order: sell (exact input) or buy (exact output).
 ///
 /// Currently only `Sell` is supported. `Buy` will be added in a future version.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderSide {
