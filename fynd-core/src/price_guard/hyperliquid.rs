@@ -31,17 +31,11 @@ static USD_STABLECOINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("stable_usd.json")).expect("stable_usd.json is valid")
 });
 
-/// Shared price cache. Key is the Hyperliquid asset name (e.g. "ETH").
-type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
-
-/// Cached token metadata resolved from on-chain addresses.
-type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
-
 /// Maps on-chain token symbols to their Hyperliquid asset names.
 ///
 /// Returns `(hyperliquid_symbol, price_scale)` where `price_scale` adjusts the oracle price
 /// to a per-token basis. For most tokens this is `1.0`. Curated from the Hyperliquid perp
-/// universe across three categories:
+/// universe across two categories:
 ///
 /// 1. **Wrapped native tokens** — on-chain "W"-prefixed wrappers of chain gas tokens. Tokens like
 ///    WLD/WIF whose names happen to start with W are NOT included.
@@ -74,6 +68,12 @@ struct OraclePrice {
     usd_price: f64,
     timestamp_ms: u64,
 }
+
+/// Shared price cache. Key is the Hyperliquid asset name (e.g. "ETH").
+type PriceCache = Arc<RwLock<HashMap<String, OraclePrice>>>;
+
+/// Cached token metadata resolved from on-chain addresses.
+type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 
 /// Hyperliquid oracle price provider.
 ///

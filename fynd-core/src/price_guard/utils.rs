@@ -3,26 +3,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use num_bigint::BigUint;
-use tycho_simulation::tycho_common::models::Address;
 
 use super::provider::PriceProviderError;
-use crate::feed::market_data::SharedMarketDataRef;
 
 /// Maximum age of price data before it is considered stale.
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
-
-/// Resolves an on-chain address to a (symbol, decimals) pair via the
-/// [`SharedMarketData`](crate::feed::market_data::SharedMarketData) token registry.
-pub async fn resolve_token(
-    market_data: &SharedMarketDataRef,
-    address: &Address,
-) -> Result<(String, u32), PriceProviderError> {
-    let data = market_data.read().await;
-    let token = data
-        .get_token(address)
-        .ok_or_else(|| PriceProviderError::TokenNotFound { address: address.to_string() })?;
-    Ok((token.symbol.clone(), token.decimals))
-}
 
 /// Returns `Err(StaleData)` if `ticker_ts` is older than [`STALENESS_THRESHOLD`].
 pub fn check_staleness(ticker_ts: u64) -> Result<(), PriceProviderError> {
