@@ -47,7 +47,7 @@ pub struct MostLiquidAlgorithm {
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
-    /// Liquidity depth in raw units of the sell token.
+    /// Liquidity depth normalized to gas token (native token) units.
     pub depth: f64,
 }
 
@@ -108,13 +108,72 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         };
 
         // Look up pre-computed depth; skip edge if unavailable.
-        let depth = match derived
+        let raw_depth = match derived
             .pool_depths()
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64().unwrap_or(0.0),
             None => {
                 trace!(component_id = %component_id, "pool depth not found, skipping edge");
+                return None;
+            }
+        };
+
+        // Normalize depth from raw token_in units to gas token units.
+        // TokenGasPrices stores Price { numerator, denominator } where
+        // numerator/denominator = "token units per gas token unit".
+        // To convert to gas token: depth_gas = raw_depth * denominator / numerator.
+        let depth = match derived
+            .token_prices()
+            .and_then(|p| p.get(&token_in.address))
+        {
+            Some(price) => {
+                let num = match price.numerator.to_f64() {
+                    Some(v) if v > 0.0 => v,
+                    Some(_) => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price numerator is zero, skipping edge"
+                        );
+                        return None;
+                    }
+                    None => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price numerator overflows f64, skipping edge"
+                        );
+                        return None;
+                    }
+                };
+                let den = match price.denominator.to_f64() {
+                    Some(v) if v > 0.0 => v,
+                    Some(_) => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price denominator is zero, skipping edge"
+                        );
+                        return None;
+                    }
+                    None => {
+                        trace!(
+                            component_id = %component_id,
+                            token_in = %token_in.address,
+                            "token price denominator overflows f64, skipping edge"
+                        );
+                        return None;
+                    }
+                };
+                raw_depth * den / num
+            }
+            None => {
+                trace!(
+                    component_id = %component_id,
+                    token_in = %token_in.address,
+                    "token price not found, skipping edge"
+                );
                 return None;
             }
         };
@@ -617,12 +676,13 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
-        // MostLiquidAlgorithm uses token prices to convert gas costs from wei
-        // to output token terms for accurate amount_out_net_gas calculation.
+        // MostLiquidAlgorithm uses token prices for two purposes:
+        // 1. Converting gas costs from wei to output token terms (net_amount_out)
+        // 2. Normalizing pool depth to gas token units for path scoring (from_sim_and_derived)
         //
         // Token prices are marked as `allow_stale` since they don't change much
-        // block-to-block and having slightly stale prices is acceptable for
-        // gas cost estimation.
+        // block-to-block. Stale prices affect scoring order (not correctness)
+        // and gas cost estimation accuracy.
         ComputationRequirements::none()
             .allow_stale("token_prices")
             .expect("Conflicting Computation Requirements")
@@ -765,6 +825,18 @@ mod tests {
         format!("{comp}/{}/{}", addr(b_in), addr(b_out))
     }
 
+    fn make_token_prices(addresses: &[Address]) -> TokenGasPrices {
+        let mut prices = TokenGasPrices::new();
+        for addr in addresses {
+            // 1:1 price (1 token unit = 1 gas token unit)
+            prices.insert(
+                addr.clone(),
+                Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+            );
+        }
+        prices
+    }
+
     #[test]
     fn test_from_sim_and_derived_failed_spot_price_returns_none() {
         let key = pair_key("pool1", 0x01, 0x02);
@@ -784,6 +856,12 @@ mod tests {
             true,
         );
         derived.set_pool_depths(Default::default(), vec![], 10, true);
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
+            10,
+            true,
+        );
 
         let sim = make_mock_sim();
         let result =
@@ -813,6 +891,12 @@ mod tests {
                 key: key_str,
                 error: FailedItemError::SimulationFailed("depth error".into()),
             }],
+            10,
+            true,
+        );
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
             10,
             true,
         );
@@ -852,6 +936,12 @@ mod tests {
             10,
             true,
         );
+        derived.set_token_prices(
+            make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
+            vec![],
+            10,
+            true,
+        );
 
         let sim = make_mock_sim();
         let result =
@@ -860,6 +950,120 @@ mod tests {
             );
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_missing_token_price_returns_none() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+        // Spot price and pool depth both present
+        let mut prices = crate::derived::types::SpotPrices::default();
+        prices.insert(key.clone(), 1.5);
+        derived.set_spot_prices(prices, vec![], 10, true);
+
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(1000u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // No token prices set — normalization should return None
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        assert!(
+            result.is_none(),
+            "should return None when token price is missing for depth normalization"
+        );
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_normalizes_depth_to_eth() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+
+        // Spot price
+        let mut spot = crate::derived::types::SpotPrices::default();
+        spot.insert(key.clone(), 2.0);
+        derived.set_spot_prices(spot, vec![], 10, true);
+
+        // Raw depth: 2_000_000 token_in units
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(2_000_000u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
+        // So 2_000_000 raw units / 2000 = 1000 ETH
+        let mut token_prices = TokenGasPrices::new();
+        token_prices.insert(
+            tok_in.address.clone(),
+            Price { numerator: BigUint::from(2000u64), denominator: BigUint::from(1u64) },
+        );
+        derived.set_token_prices(token_prices, vec![], 10, true);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        let data = result.expect("should return Some when all data present");
+        assert!((data.spot_price - 2.0).abs() < f64::EPSILON, "spot price should be 2.0");
+        // depth_in_eth = 2_000_000 * 1 / 2000 = 1000.0
+        assert!(
+            (data.depth - 1000.0).abs() < f64::EPSILON,
+            "depth should be 1000.0 ETH, got {}",
+            data.depth
+        );
+    }
+
+    #[test]
+    fn test_from_sim_and_derived_normalizes_depth_fractional_price() {
+        let key = pair_key("pool1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+
+        let mut derived = DerivedData::new();
+
+        let mut spot = crate::derived::types::SpotPrices::default();
+        spot.insert(key.clone(), 0.5);
+        derived.set_spot_prices(spot, vec![], 10, true);
+
+        // Raw depth: 500 token_in units
+        let mut depths = crate::derived::types::PoolDepths::default();
+        depths.insert(key.clone(), BigUint::from(500u64));
+        derived.set_pool_depths(depths, vec![], 10, true);
+
+        // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
+        // depth_in_eth = 500 * 2 / 3 = 333.333...
+        let mut token_prices = TokenGasPrices::new();
+        token_prices.insert(
+            tok_in.address.clone(),
+            Price { numerator: BigUint::from(3u64), denominator: BigUint::from(2u64) },
+        );
+        derived.set_token_prices(token_prices, vec![], 10, true);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim, &key.0, &tok_in, &tok_out, &derived,
+            );
+
+        let data = result.expect("should return Some when all data present");
+        let expected_depth = 500.0 * 2.0 / 3.0;
+        assert!(
+            (data.depth - expected_depth).abs() < 1e-10,
+            "depth should be {expected_depth}, got {}",
+            data.depth
+        );
     }
 
     // ==================== find_paths Tests ====================
