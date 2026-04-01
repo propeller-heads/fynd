@@ -25,23 +25,6 @@ use super::{
 };
 use crate::feed::market_data::SharedMarketDataRef;
 
-/// Maps on-chain token symbols to their Binance spot trading names.
-///
-/// On-chain tokens use wrapped ("W"-prefixed) names for native gas tokens, but Binance
-/// lists the unwrapped base asset.
-///
-/// Binance-specific: MATIC was renamed to POL (Polygon rebrand).
-fn normalize_symbol(symbol: &str) -> String {
-    match symbol.to_uppercase().as_str() {
-        "WETH" => "ETH".to_string(),
-        "WBTC" => "BTC".to_string(),
-        "WBNB" => "BNB".to_string(),
-        "WMATIC" | "MATIC" => "POL".to_string(),
-        "WAVAX" => "AVAX".to_string(),
-        other => other.to_string(),
-    }
-}
-
 const DEFAULT_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const DEFAULT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
 
@@ -432,19 +415,35 @@ impl BinanceWsWorker {
     }
 
     /// Snapshots the token registry from SharedMarketData into the local token cache.
+    /// Skips the clone when the registry size hasn't changed, since tokens are only
+    /// ever added — never removed or replaced.
     async fn refresh_token_cache(&self) {
+        let current_len = self
+            .token_cache
+            .read()
+            .map(|c| c.len())
+            .unwrap_or(0);
+
         let new_cache: HashMap<Address, Token> = {
             let data = self.market_data.read().await;
-            data.token_registry_ref()
+            let registry = data.token_registry_ref();
+            if registry.len() == current_len {
+                return;
+            }
+            registry
                 .iter()
                 .map(|(address, token)| (address.clone(), token.clone()))
                 .collect()
         };
 
-        let Ok(mut cache) = self.token_cache.write() else {
-            warn!("token cache lock poisoned");
-            return;
+        let mut cache = match self.token_cache.write() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "token cache lock poisoned");
+                return;
+            }
         };
+
         *cache = new_cache;
     }
 
@@ -731,7 +730,7 @@ mod tests {
     // -- Price resolution tests --
 
     #[test]
-    fn direct_pair_price() {
+    fn test_direct_pair_price() {
         let provider = seeded_provider();
         let one_eth = BigUint::from(10u64).pow(18);
 
@@ -745,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn price_via_intermediate_usdt() {
+    fn test_price_via_intermediate_usdt() {
         let provider = seeded_provider();
         let ten_link = BigUint::from(10u64) * BigUint::from(10u64).pow(18);
 
@@ -769,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn reverse_pair_price() {
+    fn test_reverse_pair_price() {
         let provider = BinanceWsProvider::default();
         let now = now_ms();
 
@@ -803,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_token_returns_error() {
+    fn test_unknown_token_returns_error() {
         let provider = seeded_provider();
         let unknown: Address = "0000000000000000000000000000000000000001"
             .parse()
@@ -816,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_price_returns_error() {
+    fn test_stale_price_returns_error() {
         let provider = BinanceWsProvider::default();
         let stale_ts = 1_000u64;
 
@@ -850,7 +849,7 @@ mod tests {
     // -- handle_message / update_price_cache tests (M4) --
 
     #[test]
-    fn update_price_cache_writes_to_cache() {
+    fn test_update_price_cache_writes_to_cache() {
         let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let worker = make_worker(&price_cache);
 
@@ -869,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn update_price_cache_rejects_zero_bid() {
+    fn test_update_price_cache_rejects_zero_bid() {
         let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let worker = make_worker(&price_cache);
 
@@ -881,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn update_price_cache_rejects_zero_ask() {
+    fn test_update_price_cache_rejects_zero_ask() {
         let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let worker = make_worker(&price_cache);
 
@@ -893,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn update_price_cache_uses_now_ms_when_no_event_time() {
+    fn test_update_price_cache_uses_now_ms_when_no_event_time() {
         let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let worker = make_worker(&price_cache);
 
@@ -910,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_message_ignores_non_text() {
+    fn test_handle_message_ignores_non_text() {
         let price_cache: PriceCache = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let worker = make_worker(&price_cache);
 
@@ -925,7 +924,7 @@ mod tests {
     // -- Deserialization tests --
 
     #[test]
-    fn parse_book_ticker_msg() {
+    fn test_parse_book_ticker_msg() {
         let json = r#"{"e":"bookTicker","u":123,"s":"ETHUSDT","b":"2000.00","B":"10.5","a":"2000.50","A":"5.2","E":1700000000000}"#;
         let msg: BookTickerMsg = serde_json::from_str(json).expect("should parse");
         assert_eq!(msg.s.as_deref(), Some("ETHUSDT"));
@@ -935,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_exchange_info_response() {
+    fn test_parse_exchange_info_response() {
         let json = r#"{"symbols":[{"symbol":"ETHUSDT","status":"TRADING"},{"symbol":"ETHBTC","status":"BREAK"}]}"#;
         let resp: ExchangeInfoResponse = serde_json::from_str(json).expect("should parse");
         assert_eq!(resp.symbols.len(), 2);
@@ -946,7 +945,7 @@ mod tests {
     // -- Pair discovery tests --
 
     #[test]
-    fn discover_pairs_filters_correctly() {
+    fn test_discover_pairs_filters_correctly() {
         let tokens: HashSet<String> = ["ETH", "LINK", "AAVE"]
             .iter()
             .map(|s| s.to_string())
@@ -969,7 +968,7 @@ mod tests {
     // -- Stablecoin cache injection tests --
 
     #[test]
-    fn inject_creates_synthetic_stablecoin_tickers() {
+    fn test_inject_creates_synthetic_stablecoin_tickers() {
         let mut cache = HashMap::new();
         let now = now_ms();
 
@@ -984,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_does_not_overwrite_real_ticker() {
+    fn test_inject_does_not_overwrite_real_ticker() {
         let mut cache = HashMap::new();
         let now = now_ms();
 
@@ -1004,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_handles_quote_prefix_pair() {
+    fn test_inject_handles_quote_prefix_pair() {
         let mut cache = HashMap::new();
         let now = now_ms();
 
@@ -1017,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn unlisted_stablecoin_resolves_via_cache() {
+    fn test_unlisted_stablecoin_resolves_via_cache() {
         let provider = seeded_provider();
 
         let dai_address: Address = "6B175474E89094C44Da98b954EedeAC495271d0F"
@@ -1058,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_message_creates_synthetic_stablecoin_ticker() {
+    fn test_ws_message_creates_synthetic_stablecoin_ticker() {
         // End-to-end: a raw ETHUSDT WebSocket message arrives, the worker processes
         // it, and we can price ETH/GHO through the synthetic cache entry.
         let provider = BinanceWsProvider::default();
@@ -1105,7 +1104,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // requires network access
-    async fn binance_ws_live_weth_usdc() {
+    async fn test_binance_ws_live_weth_usdc() {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
