@@ -43,6 +43,34 @@ const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// Maps on-chain token symbols to their Binance spot trading names.
+///
+/// Returns `(binance_symbol, price_scale)` where `price_scale` adjusts the oracle price
+/// to a per-token basis. For most tokens this is `1.0`. Curated from the Binance perp
+/// universe across three categories:
+///
+/// 1. **Wrapped native tokens** — on-chain "W"-prefixed wrappers of chain gas tokens. Tokens like
+///    WLD/WIF whose names happen to start with W are NOT included.
+/// 2. **1000-prefix tokens** — Binance quotes these per 1,000 tokens to avoid tiny decimals.
+///    `price_scale` is `0.001` so callers get the per-token price.
+/// 3. **Binance-specific**: MATIC was renamed to POL (Polygon rebrand).
+fn normalize_symbol(symbol: &str) -> (String, f64) {
+    match symbol.to_uppercase().as_str() {
+        // Wrapped native tokens
+        "WETH" => ("ETH".to_string(), 1.0),
+        "WBTC" => ("BTC".to_string(), 1.0),
+        "WBNB" => ("BNB".to_string(), 1.0),
+        "WAVAX" => ("AVAX".to_string(), 1.0),
+        // 1000-prefixed: Binance quotes per 1,000 tokens
+        "CHEEMS" => ("1000CHEEMS".to_string(), 0.001),
+        "SATS" => ("1000SATS".to_string(), 0.001),
+        "CAT" => ("1000CAT".to_string(), 0.001),
+        // Binance specific
+        "WMATIC" | "MATIC" => ("POL".to_string(), 1.0),
+        other => (other.to_string(), 1.0),
+    }
+}
+
 /// Cached ticker data from the bookTicker stream.
 #[derive(Debug, Clone)]
 struct TickerData {
@@ -98,7 +126,7 @@ impl BinanceWsProvider {
     }
 
     /// Resolves a token address to (normalized_symbol, decimals) from the local token cache.
-    fn resolve_token(&self, address: &Address) -> Result<(String, u32), PriceProviderError> {
+    fn resolve_token(&self, address: &Address) -> Result<(String, u32, f64), PriceProviderError> {
         let cache = self
             .token_cache
             .read()
@@ -106,8 +134,8 @@ impl BinanceWsProvider {
         let info = cache
             .get(address)
             .ok_or_else(|| PriceProviderError::TokenNotFound { address: address.to_string() })?;
-        let symbol = normalize_symbol(&info.symbol);
-        Ok((symbol, info.decimals))
+        let (symbol, price_scale) = normalize_symbol(&info.symbol);
+        Ok((symbol, info.decimals, price_scale))
     }
 
     /// Looks up a sell-side price for `base` in terms of `quote`.
@@ -230,8 +258,8 @@ impl PriceProvider for BinanceWsProvider {
         token_out: &Address,
         amount_in: &BigUint,
     ) -> Result<ExternalPrice, PriceProviderError> {
-        let (sym_in, dec_in) = self.resolve_token(token_in)?;
-        let (sym_out, dec_out) = self.resolve_token(token_out)?;
+        let (sym_in, dec_in, scale_in) = self.resolve_token(token_in)?;
+        let (sym_out, dec_out, scale_out) = self.resolve_token(token_out)?;
 
         let cache = self
             .price_cache
@@ -244,7 +272,8 @@ impl PriceProvider for BinanceWsProvider {
 
         check_staleness(lookup.timestamp_ms)?;
 
-        let expected_out = expected_out_from_price(amount_in, lookup.price, dec_in, dec_out);
+        let price = lookup.price * scale_in / scale_out;
+        let expected_out = expected_out_from_price(amount_in, price, dec_in, dec_out);
         Ok(ExternalPrice::new(expected_out, "binance_ws".to_string(), lookup.timestamp_ms))
     }
 }
@@ -410,7 +439,7 @@ impl BinanceWsWorker {
         };
         cache
             .values()
-            .map(|info| normalize_symbol(&info.symbol))
+            .map(|info| normalize_symbol(&info.symbol).0)
             .collect()
     }
 
@@ -621,6 +650,8 @@ struct SymbolInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use tokio::sync::RwLock;
     use tycho_simulation::evm::tycho_models::Chain;
 
@@ -663,6 +694,12 @@ mod tests {
             .expect("valid address")
     }
 
+    fn cheems_address() -> Address {
+        "0x41b1f9dcd5923c9542b6957b9b72169595acbc5c"
+            .parse()
+            .expect("valid address")
+    }
+
     /// Returns a provider pre-seeded with ETH, BTC, LINK tickers and
     /// WETH, USDC, LINK token metadata.
     fn seeded_provider() -> BinanceWsProvider {
@@ -694,6 +731,10 @@ mod tests {
                 "ETHBTC".to_string(),
                 TickerData { bid: 0.0333, ask: 0.0334, timestamp_ms: now },
             );
+            cache.insert(
+                "1000CHEEMSUSDC".to_string(),
+                TickerData { bid: 0.000433, ask: 0.000434, timestamp_ms: now },
+            );
         }
 
         {
@@ -707,6 +748,8 @@ mod tests {
             cache.insert(usdc.address.clone(), usdc);
             let link = make_token(link_address(), "LINK", 18);
             cache.insert(link.address.clone(), link);
+            let cheems = make_token(cheems_address(), "CHEEMS", 18);
+            cache.insert(cheems.address.clone(), cheems);
         }
 
         provider
@@ -799,6 +842,62 @@ mod tests {
         let buy = buy.expect("should have buy price");
         let expected_buy = 1.0 / 30.0;
         assert!((buy.price - expected_buy).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_direct_pair_price_1000_token() {
+        // Testing for pairs that are quoted in 1000 tokens
+        // 1000CHEEMSUSDC price is 0.000433 USDC per 1000 CHEEMS
+        // which means the real price is 0.000000433 USDC per 1 CHEEMS (bid)
+        // and 1 USDC is ~23041474 CHEEMS (ask)
+        let provider = seeded_provider();
+        let amount = BigUint::from(10u64).pow(22);
+
+        let result = provider
+            .get_expected_out(&cheems_address(), &usdc_address(), &amount)
+            .expect("should get price");
+
+        // 10_000 * 10**18 CHEEMS → 4330 USDC (6 decimals)
+        assert_eq!(*result.expected_amount_out(), BigUint::from(4330u64));
+
+        // let's test the reverse price
+        let amount = BigUint::from(10u64).pow(7);
+
+        let result = provider
+            .get_expected_out(&usdc_address(), &cheems_address(), &amount)
+            .expect("should get price");
+
+        // 10 * 10**6 USDC  → ~23094680 * 10**18 CHEEMS
+        assert_eq!(
+            *result.expected_amount_out(),
+            BigUint::from_str("23041474_654377879797760000").unwrap()
+        );
+    }
+    #[test]
+    fn test_pair_price_1000_token_intermediate_usdc() {
+        // Testing for pairs that are quoted in 1000 tokens
+        let provider = seeded_provider();
+        let amount = BigUint::from(10u64).pow(22);
+
+        let result = provider
+            .get_expected_out(&cheems_address(), &weth_address(), &amount)
+            .expect("should get price");
+
+        // 10_000 * 10**18 CHEEMS → 4330 USDC -> 2164458880000 ETH
+        assert_eq!(*result.expected_amount_out(), BigUint::from(2164458880000u64));
+
+        // let's test the reverse price
+        let amount = BigUint::from(10u64).pow(18);
+
+        let result = provider
+            .get_expected_out(&weth_address(), &cheems_address(), &amount)
+            .expect("should get price");
+
+        // 1 * 10**18 ETH -> 2000 * 10**6 USDC  → ~4608294930 * 10**18 CHEEMS
+        assert_eq!(
+            *result.expected_amount_out(),
+            BigUint::from_str("4608294930_875576062631215104").unwrap()
+        );
     }
 
     #[test]
