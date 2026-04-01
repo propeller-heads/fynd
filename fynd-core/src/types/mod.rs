@@ -1,14 +1,19 @@
 //! Core type definitions for Fynd.
 //!
 //! This module contains all shared types used across the solver:
-//! - [`quote`] - Public API types (requests, responses, routes, swaps)
-//! - [`primitives`] - Basic types like ComponentId, ProtocolSystem, GasPrice
-//! - [`internal`] - Internal task and error types
-//! - [`constants`] - Protocol gas costs and native token addresses
+//! - [`types::quote`](crate::types::quote) - Public API types (requests, responses, routes, swaps)
+//! - [`types::primitives`](crate::types::primitives) - Basic types like ComponentId,
+//!   ProtocolSystem, GasPrice
+//! - [`types::internal`](crate::types::internal) - Internal task and error types
+//! - [`types::constants`](crate::types::constants) - Protocol gas costs and native token addresses
 
+/// Protocol gas costs and native token addresses per chain.
 pub mod constants;
+/// Internal task and solve-error types used between the worker pool and router.
 pub mod internal;
+/// Primitive types: `ComponentId`, `ProtocolSystem`, `GasPrice`, `TaskId`.
 pub mod primitives;
+/// Public API types: `Order`, `Quote`, `Route`, `Swap`, `QuoteRequest`, etc.
 pub mod quote;
 
 // Re-export constants

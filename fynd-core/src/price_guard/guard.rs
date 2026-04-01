@@ -43,6 +43,7 @@ impl Drop for PriceGuard {
 }
 
 impl PriceGuard {
+    /// Creates a new price guard with the given provider registry and background worker handles.
     pub fn new(registry: PriceProviderRegistry, worker_handles: Vec<JoinHandle<()>>) -> Self {
         Self { registry, worker_handles }
     }

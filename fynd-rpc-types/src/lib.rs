@@ -1,11 +1,16 @@
-//! Data Transfer Objects (DTOs) for the Fynd RPC HTTP API.
+#![deny(missing_docs)]
+//! Wire-format types for the [Fynd](https://fynd.xyz) RPC HTTP API.
 //!
-//! This crate contains only the wire-format types shared between the Fynd RPC server
+//! This crate contains only the serialisation types shared between the Fynd RPC server
 //! (`fynd-rpc`) and its clients (`fynd-client`). It has no server-side infrastructure
 //! dependencies (no actix-web, no server logic).
 //!
-//! Enable the `openapi` feature to derive `utoipa::ToSchema` on all types for use in
-//! API documentation generation.
+//! For documentation and API reference see **<https://docs.fynd.xyz/>**.
+//!
+//! ## Features
+//!
+//! - **`openapi`** — derives `utoipa::ToSchema` on all types for OpenAPI spec generation.
+//! - **`core`** — enables `Into` conversions between wire DTOs and `fynd-core` domain types.
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -51,10 +56,12 @@ mod hex_bytes_serde {
 pub struct Bytes(#[serde(with = "hex_bytes_serde")] pub bytes::Bytes);
 
 impl Bytes {
+    /// Returns the number of bytes.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if the byte sequence is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

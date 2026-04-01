@@ -43,6 +43,11 @@ use crate::{
 type Subgraph =
     (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
 
+/// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
+///
+/// Finds optimal A→B routes by running actual pool simulations during edge relaxation,
+/// accounting for slippage, fees, and pool mechanics at the requested trade size.
+/// Gas costs are subtracted when price data is available.
 pub struct BellmanFordAlgorithm {
     max_hops: usize,
     timeout: Duration,

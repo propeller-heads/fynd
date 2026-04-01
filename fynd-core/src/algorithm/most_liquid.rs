@@ -47,7 +47,7 @@ pub struct MostLiquidAlgorithm {
 pub struct DepthAndPrice {
     /// Spot price (token_out per token_in) for this edge direction.
     pub spot_price: f64,
-    /// Liquidity depth in USD (or native token terms).
+    /// Liquidity depth in raw units of the sell token.
     pub depth: f64,
 }
 
@@ -58,6 +58,7 @@ impl DepthAndPrice {
         Self { spot_price, depth }
     }
 
+    /// Compute depth and spot price from a live protocol simulation.
     #[cfg(test)]
     pub fn from_protocol_sim(
         sim: &impl ProtocolSim,

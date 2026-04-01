@@ -199,6 +199,7 @@ mod tests {
     }
 }
 
+/// Default values for all `fynd-rpc` configuration parameters.
 pub mod defaults {
     // Re-export shared defaults from fynd-core as the single source of truth.
     pub use fynd_core::solver::defaults::{
@@ -207,18 +208,22 @@ pub mod defaults {
         TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
     };
 
-    // HTTP server — fynd-rpc specific.
+    /// Default HTTP bind host (`"0.0.0.0"` — all interfaces).
     pub const HTTP_HOST: &str = "0.0.0.0";
+    /// Default HTTP port (`3000`).
     pub const HTTP_PORT: u16 = 3000;
 
-    // RPC — fynd-rpc specific.
+    /// Default Ethereum JSON-RPC URL used when none is provided.
     pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
 
-    // Minimum TVL passed to FyndBuilder::new — fynd-rpc's opinion of a sensible floor.
+    /// Minimum TVL a pool must have to be included in routing, denominated in the chain's native
+    /// token.
     pub const MIN_TVL: f64 = 10.0;
 
-    // Router timeout — intentionally tighter than FyndBuilder's generous 10 s standalone
-    // default; an HTTP service must respond within its request deadline.
+    /// Worker-router timeout in milliseconds.
+    ///
+    /// Intentionally tighter than `FyndBuilder`'s generous 10 s standalone default; an HTTP
+    /// service must respond within its request deadline.
     pub const WORKER_ROUTER_TIMEOUT_MS: u64 = 100;
 
     /// Returns the default Tycho Fynd endpoint URL for the given chain.

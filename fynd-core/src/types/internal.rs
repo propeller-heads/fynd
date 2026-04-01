@@ -62,17 +62,28 @@ pub enum SolveError {
     /// No route found between the tokens.
     #[non_exhaustive]
     #[error("no route found for order {order_id}")]
-    NoRouteFound { order_id: String },
+    NoRouteFound {
+        /// ID of the order for which no route was found.
+        order_id: String,
+    },
 
     /// Insufficient liquidity for the requested amount.
     #[non_exhaustive]
     #[error("insufficient liquidity: need {required}, have {available}")]
-    InsufficientLiquidity { required: BigUint, available: BigUint },
+    InsufficientLiquidity {
+        /// Amount the user requested.
+        required: BigUint,
+        /// Maximum amount available in the pool.
+        available: BigUint,
+    },
 
     /// Solving timed out.
     #[non_exhaustive]
     #[error("solve timeout after {elapsed_ms}ms")]
-    Timeout { elapsed_ms: u64 },
+    Timeout {
+        /// Wall-clock time elapsed before the timeout fired, in milliseconds.
+        elapsed_ms: u64,
+    },
 
     /// Algorithm-specific error.
     #[error("algorithm error: {0}")]
@@ -81,7 +92,10 @@ pub enum SolveError {
     /// Market data is too old.
     #[non_exhaustive]
     #[error("market data stale: last update {age_ms}ms ago")]
-    MarketDataStale { age_ms: u64 },
+    MarketDataStale {
+        /// Milliseconds since the last successful market-data update.
+        age_ms: u64,
+    },
 
     /// Task queue is full.
     #[error("task queue full")]
@@ -113,7 +127,10 @@ pub enum SolveError {
 
     /// Price check against external source failed.
     #[error("price check failed for order {order_id}")]
-    PriceCheckFailed { order_id: String },
+    PriceCheckFailed {
+        /// Identifier of the order that failed the price check.
+        order_id: String,
+    },
 }
 
 impl SolveError {

@@ -119,6 +119,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 - `cargo nextest run --workspace --all-targets --all-features` — full test suite
 - `cargo +nightly clippy --workspace --all-targets --all-features` — lint
 - `cargo +nightly fmt --all --check` — format check
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client` — doc build (broken links, missing docs)
 - OpenAPI drift: `cargo run -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`
 - TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @fynd/client run test`
 

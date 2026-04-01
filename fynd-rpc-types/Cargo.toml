@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 description = "Shared DTO types for the Fynd RPC API (request/response wire format)"
 license = "MIT"
+readme = "README.md"
 
 [features]
 openapi = ["dep:utoipa"]
