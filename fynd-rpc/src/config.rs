@@ -93,6 +93,17 @@ components = [
     "0x69accb968b19a53790f43e57558f5e443a91af22",
     # Fluid syrupUSDC/USDC — ERC-4626 vault token, simulation can't track accumulating rate
     "0x79eea4a1be86c43a9a9c4384b0b28a07af24ae29",
+    # Curve weETH/WETH (StableSwapNG) — MissingAccount error, oracle deps not in simulated state
+    "0xdb74dfdd3bb46be8ce6c33dc9d82777bcfc3ded5",
+    # "Dollars" (USD, 0xd233d1f6) token pools — fake stablecoin with mispriced reserves
+    # UniswapV2 LINK/"Dollars"
+    "0x81a8bd7f2b29cee72aae18da9b4637acf4bc125a",
+    # UniswapV2 MKR/"Dollars"
+    "0xa16a3cbc92d77b720a851d33a91890c4fbfb0299",
+    # UniswapV2 DAI/"Dollars" (last trade Sep 2020)
+    "0x1d1126cc2c77384448913b41fbf308563aae1f16",
+    # UniswapV2 WETH/"Dollars" (1938 WETH locked, mispriced)
+    "0x582e3da39948c6339433008703211ad2c13eb2ac",
 ]
 "#;
 
