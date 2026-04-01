@@ -73,13 +73,13 @@ pub struct BlocklistConfig {
     components: HashSet<String>,
 }
 
-/// The default blacklist configuration embedded at compile time.
+/// The default blocklist configuration embedded at compile time.
 ///
-/// Keep in sync with the repo-root `blacklist.toml` (the user-facing example config).
+/// Keep in sync with the repo-root `blocklist.toml` (the user-facing example config).
 /// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
 /// and the file lives outside the `fynd-rpc` package directory.
-const DEFAULT_BLACKLIST_TOML: &str = r#"
-[blacklist]
+const DEFAULT_BLOCKLIST_TOML: &str = r#"
+[blocklist]
 components = [
     # AMPL pools - AMPL is a rebasing token that breaks simulation assumptions
     # UniswapV3 AMPL/WETH
@@ -96,21 +96,21 @@ components = [
 ]
 "#;
 
-impl BlacklistConfig {
-    /// Returns the built-in default blacklist embedded in the binary.
+impl BlocklistConfig {
+    /// Returns the built-in default blocklist embedded in the binary.
     ///
-    /// This is the repo-root `blacklist.toml` baked in at compile time.
+    /// This is the repo-root `blocklist.toml` baked in at compile time.
     pub fn builtin_default() -> Self {
         #[derive(Deserialize)]
         struct Wrapper {
-            blacklist: BlacklistConfig,
+            blocklist: BlocklistConfig,
         }
         let wrapper: Wrapper =
-            toml::from_str(DEFAULT_BLACKLIST_TOML).expect("built-in blacklist.toml is valid TOML");
-        wrapper.blacklist
+            toml::from_str(DEFAULT_BLOCKLIST_TOML).expect("built-in blocklist.toml is valid TOML");
+        wrapper.blocklist
     }
 
-    /// Load blacklist configuration from a TOML file.
+    /// Load blocklist configuration from a TOML file.
     ///
     /// The TOML file should have a `[blocklist]` section:
     /// ```toml
@@ -148,11 +148,11 @@ mod tests {
     }
 
     #[test]
-    fn test_blacklist_builtin_default_does_not_panic() {
-        let config = BlacklistConfig::builtin_default();
+    fn test_blocklist_builtin_default_does_not_panic() {
+        let config = BlocklistConfig::builtin_default();
         assert!(
             !config.components.is_empty(),
-            "built-in blacklist must have at least one component"
+            "built-in blocklist must have at least one component"
         );
     }
 
