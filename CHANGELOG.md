@@ -1,3 +1,18 @@
+## [0.44.0](https://github.com/propeller-heads/fynd/compare/0.43.2...0.44.0) (2026-04-01)
+
+
+### Features
+
+* add Binance WebSocket price provider ([6722416](https://github.com/propeller-heads/fynd/commit/67224169f46d07ebb8e3f8f770ea2b417e48ef02))
+* Update quote in all stablecoins when receiving USDC/USDT prices ([5b7be72](https://github.com/propeller-heads/fynd/commit/5b7be723a9c0c1993cabc24d349914bc08136453))
+
+
+### Bug Fixes
+
+* broken doc link and stale OpenAPI spec ([0903942](https://github.com/propeller-heads/fynd/commit/0903942bd9927d36841b71d802610ed7c5c85a8e))
+* Skip token cache refresh when registry is unchanged ([6428da0](https://github.com/propeller-heads/fynd/commit/6428da063c3975c8880cf572949e678392d152ed))
+* Support prices for 1000 tokens ([d24407b](https://github.com/propeller-heads/fynd/commit/d24407bccf59f5a388958039bcf7f2b70a9e5a90))
+
 ## [0.43.2](https://github.com/propeller-heads/fynd/compare/0.43.1...0.43.2) (2026-04-01)
 
 
