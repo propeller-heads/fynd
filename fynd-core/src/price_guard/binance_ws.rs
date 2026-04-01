@@ -25,23 +25,6 @@ use super::{
 };
 use crate::feed::market_data::SharedMarketDataRef;
 
-/// Maps on-chain token symbols to their Binance spot trading names.
-///
-/// On-chain tokens use wrapped ("W"-prefixed) names for native gas tokens, but Binance
-/// lists the unwrapped base asset.
-///
-/// Binance-specific: MATIC was renamed to POL (Polygon rebrand).
-fn normalize_symbol(symbol: &str) -> String {
-    match symbol.to_uppercase().as_str() {
-        "WETH" => "ETH".to_string(),
-        "WBTC" => "BTC".to_string(),
-        "WBNB" => "BNB".to_string(),
-        "WMATIC" | "MATIC" => "POL".to_string(),
-        "WAVAX" => "AVAX".to_string(),
-        other => other.to_string(),
-    }
-}
-
 const DEFAULT_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const DEFAULT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
 
