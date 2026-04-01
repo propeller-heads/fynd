@@ -1,3 +1,11 @@
+## [0.43.1](https://github.com/propeller-heads/fynd/compare/0.43.0...0.43.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* **docs:** add doc build to check.sh, fix broken intra-doc links ([c1ecfab](https://github.com/propeller-heads/fynd/commit/c1ecfabb82a46154967017906921f687d0e3fbf2))
+* **docs:** resolve broken intra-doc links across fynd-core and fynd-rpc ([ad80d8e](https://github.com/propeller-heads/fynd/commit/ad80d8e7a32157e5f615327d996935fa68200a32))
+
 ## [0.43.0](https://github.com/propeller-heads/fynd/compare/0.42.0...0.43.0) (2026-03-31)
 
 
