@@ -24,7 +24,7 @@ use crate::{
     types::internal::SolveTask,
     worker_pool::{
         registry::{
-            spawn_workers_generic, AlgorithmSpawner, SpawnWorkersParams, UnknownAlgorithmError,
+            AlgorithmSpawner, SpawnWorkersParams, SpawnerHandle, UnknownAlgorithmError,
             DEFAULT_ALGORITHM,
         },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
@@ -227,10 +227,18 @@ impl WorkerPoolBuilder {
         A::GraphManager: MarketEventHandler + EdgeWeightUpdaterWithDerived + 'static,
         F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
     {
-        let name = name.into();
-        let spawner =
-            Box::new(move |params: SpawnWorkersParams| spawn_workers_generic(params, &factory));
-        self.config.spawner = AlgorithmSpawner::Custom { algorithm: name, spawner };
+        self.config.spawner = AlgorithmSpawner::Custom(SpawnerHandle::new(name, factory));
+        self
+    }
+
+    /// Sets the algorithm from a dynamically loaded [`SpawnerHandle`].
+    ///
+    /// Use this when loading participant submissions from `.so` files via the competition
+    /// harness. The handle carries the type-erased factory that was exported by
+    /// `export_algorithm!` inside the participant's shared library.
+    #[cfg(feature = "experimental")]
+    pub fn with_spawner_handle(mut self, handle: SpawnerHandle) -> Self {
+        self.config.spawner = AlgorithmSpawner::Custom(handle);
         self
     }
 

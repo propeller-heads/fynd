@@ -64,6 +64,7 @@ impl<M> EdgeData<M> {
     }
 }
 
+/// Directed stable graph with token addresses as nodes and `EdgeData<D>` as edge weights.
 pub type StableDiGraph<D> = stable_graph::StableDiGraph<Address, EdgeData<D>>;
 
 /// Petgraph implementation of GraphManager.
@@ -84,6 +85,7 @@ pub struct PetgraphStableDiGraphManager<D: Clone> {
 }
 
 impl<D: Clone> PetgraphStableDiGraphManager<D> {
+    /// Creates a new empty graph manager.
     pub fn new() -> Self {
         Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
     }

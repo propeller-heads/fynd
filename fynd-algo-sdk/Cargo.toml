@@ -1,0 +1,12 @@
+[package]
+name = "fynd-algo-sdk"
+version.workspace = true
+edition = "2021"
+description = "SDK for implementing Fynd competition algorithm submissions"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+fynd-core = { workspace = true, features = ["experimental"] }
+tokio = { workspace = true }

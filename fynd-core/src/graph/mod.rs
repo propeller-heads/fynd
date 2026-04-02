@@ -84,14 +84,19 @@ impl<'a, D> Path<'a, D> {
     }
 }
 
+/// Errors that can occur during graph operations.
 #[derive(Error, Debug)]
 pub enum GraphError {
+    /// A token address was not found as a node in the graph.
     #[error("Token not found in graph: {0:?}")]
     TokenNotFound(Address),
+    /// One or more components were not found in the graph.
     #[error("Components not found in graph: {0:?}")]
     ComponentsNotFound(Vec<ComponentId>),
+    /// One or more components have fewer than two tokens and cannot be added.
     #[error("Components with less then 2 tokens cannot be added: {0:?}")]
     InvalidComponents(Vec<ComponentId>),
+    /// No edge connecting the given token pair was found for the specified component.
     #[cfg(test)] // only used in set_edge_weight which is only tested atm
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),

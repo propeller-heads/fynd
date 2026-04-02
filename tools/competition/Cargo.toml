@@ -1,0 +1,21 @@
+[package]
+name = "fynd-competition"
+version.workspace = true
+edition = "2021"
+description = "Competition harness for Fynd algorithm submissions"
+
+[dependencies]
+fynd-core = { workspace = true }
+fynd-algo-sdk = { workspace = true }
+libloading = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "fynd-competition"
+path = "src/main.rs"

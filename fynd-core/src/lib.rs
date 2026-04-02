@@ -44,9 +44,17 @@ pub mod worker_pool;
 pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
-pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
+pub use algorithm::{
+    most_liquid::DepthAndPrice, Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm,
+};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
+/// Types for the competition harness and algorithm SDK.
+/// Not stable API — may change without notice.
+#[cfg(feature = "experimental")]
+pub use graph::{
+    petgraph::StableDiGraph, EdgeWeightUpdaterWithDerived, PetgraphStableDiGraphManager,
+};
 pub use price_guard::config::PriceGuardConfig;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 pub use types::{
@@ -55,8 +63,10 @@ pub use types::{
     QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
     SolveResult, Swap, TaskId, Transaction, UserTransferType,
 };
+#[cfg(feature = "experimental")]
+pub use worker_pool::{pool::WorkerPoolConfig, registry::SpawnerHandle};
 pub use worker_pool::{
-    pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
+    pool::{WorkerPool, WorkerPoolBuilder},
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };

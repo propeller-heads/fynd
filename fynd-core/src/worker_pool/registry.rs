@@ -16,6 +16,51 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+pub use spawner_handle::SpawnerHandle;
+mod spawner_handle {
+    use std::thread::JoinHandle;
+
+    use super::{spawn_workers_generic, AlgorithmConfig, SpawnWorkersParams};
+
+    /// Type-erased algorithm spawner for dynamic loading.
+    ///
+    /// Wraps a factory closure so that algorithm plugins loaded via `libloading` can
+    /// hand back a single heap-allocated object that the harness can call without knowing
+    /// the concrete algorithm type.
+    pub struct SpawnerHandle {
+        inner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync>,
+        name: String,
+    }
+
+    impl SpawnerHandle {
+        /// Creates a new `SpawnerHandle` from a factory closure.
+        ///
+        /// The `factory` is called once per worker thread to construct the algorithm instance.
+        pub fn new<A, F>(algorithm_name: impl Into<String>, factory: F) -> Self
+        where
+            A: crate::algorithm::Algorithm + 'static,
+            A::GraphManager: crate::feed::events::MarketEventHandler
+                + crate::graph::EdgeWeightUpdaterWithDerived,
+            F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
+        {
+            let name = algorithm_name.into();
+            Self { name, inner: Box::new(move |params| spawn_workers_generic(params, &factory)) }
+        }
+
+        /// Returns the algorithm name associated with this handle.
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        /// Spawns worker threads using the encapsulated factory.
+        ///
+        /// Consumes the handle; the returned join handles own the worker threads.
+        pub(crate) fn spawn(self, params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+            (self.inner)(params)
+        }
+    }
+}
+
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -73,15 +118,12 @@ impl UnknownAlgorithmError {
 /// Determines how a worker pool spawns its workers.
 ///
 /// - `Registry`: looks up a built-in algorithm by name.
-/// - `Custom`: uses a caller-supplied factory closure, bypassing the registry.
+/// - `Custom`: uses a [`SpawnerHandle`] loaded from a participant `.so`.
 pub(crate) enum AlgorithmSpawner {
     /// Spawn workers using a built-in algorithm looked up by name.
     Registry { algorithm: String },
-    /// Spawn workers using a custom factory function (type-erased).
-    Custom {
-        algorithm: String,
-        spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync>,
-    },
+    /// Spawn workers using a type-erased handle from a dynamically loaded library.
+    Custom(SpawnerHandle),
 }
 
 impl std::fmt::Debug for AlgorithmSpawner {
@@ -91,16 +133,16 @@ impl std::fmt::Debug for AlgorithmSpawner {
                 .debug_struct("Registry")
                 .field("algorithm", algorithm)
                 .finish(),
-            Self::Custom { algorithm, .. } => f
+            Self::Custom(handle) => f
                 .debug_struct("Custom")
-                .field("algorithm", algorithm)
+                .field("algorithm", &handle.name())
                 .finish(),
         }
     }
 }
 
 impl AlgorithmSpawner {
-    /// Spawns workers, dispatching to the registry or custom spawner as appropriate.
+    /// Spawns workers, dispatching to the built-in registry or the custom handle.
     pub(crate) fn spawn(
         self,
         params: SpawnWorkersParams,
@@ -111,14 +153,15 @@ impl AlgorithmSpawner {
                 "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 _ => Err(UnknownAlgorithmError { name: algorithm }),
             },
-            Self::Custom { spawner, .. } => Ok(spawner(params)),
+            Self::Custom(handle) => Ok(handle.spawn(params)),
         }
     }
 
     /// Returns the algorithm name associated with this spawner.
     pub(crate) fn algorithm_name(&self) -> &str {
         match self {
-            Self::Registry { algorithm } | Self::Custom { algorithm, .. } => algorithm,
+            Self::Registry { algorithm } => algorithm,
+            Self::Custom(handle) => handle.name(),
         }
     }
 }
@@ -316,28 +359,21 @@ mod tests {
 
         // Using MostLiquid anyway for simplicity - not to have to define a new algorithm from
         // scratch
-        let spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync> =
-            Box::new(|p| {
-                let factory = |config: AlgorithmConfig| {
-                    MostLiquidAlgorithm::with_config(config)
-                        .expect("invalid config in test custom spawner")
-                };
-                spawn_workers_generic(p, &factory)
-            });
+        let handle = SpawnerHandle::new("my_custom_algo", |config: AlgorithmConfig| {
+            MostLiquidAlgorithm::with_config(config).expect("invalid config in test custom spawner")
+        });
 
-        let workers = AlgorithmSpawner::Custom { algorithm: "my_custom_algo".to_string(), spawner }
-            .spawn(SpawnWorkersParams {
-                algorithm: "my_custom_algo".to_string(),
-                num_workers: 2,
-                algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None)
-                    .unwrap(),
-                task_rx,
-                market_data,
-                derived_data,
-                event_rx: event_tx.subscribe(),
-                derived_event_rx: derived_event_tx.subscribe(),
-                shutdown_tx: shutdown_tx.clone(),
-            });
+        let workers = AlgorithmSpawner::Custom(handle).spawn(SpawnWorkersParams {
+            algorithm: "my_custom_algo".to_string(),
+            num_workers: 2,
+            algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None).unwrap(),
+            task_rx,
+            market_data,
+            derived_data,
+            event_rx: event_tx.subscribe(),
+            derived_event_rx: derived_event_tx.subscribe(),
+            shutdown_tx: shutdown_tx.clone(),
+        });
 
         assert!(workers.is_ok());
         assert_eq!(workers.unwrap().len(), 2);

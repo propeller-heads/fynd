@@ -33,5 +33,10 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 alloy = { workspace = true, features = ["sol-types"] }
 
+[features]
+## Exposes types needed by the competition harness and `fynd-algo-sdk`.
+## Not stable API — may change without notice.
+experimental = []
+
 [dev-dependencies]
 rstest.workspace = true

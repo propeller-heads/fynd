@@ -3337,6 +3337,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fynd-algo-sdk"
+version = "0.45.0"
+dependencies = [
+ "fynd-core",
+ "tokio",
+]
+
+[[package]]
 name = "fynd-benchmark"
 version = "0.45.0"
 dependencies = [
@@ -3373,6 +3381,29 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "fynd-competition"
+version = "0.45.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fynd-algo-sdk",
+ "fynd-core",
+ "libloading",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "fynd-competition-naive"
+version = "0.45.0"
+dependencies = [
+ "fynd-algo-sdk",
 ]
 
 [[package]]
@@ -4281,6 +4312,16 @@ name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libm"

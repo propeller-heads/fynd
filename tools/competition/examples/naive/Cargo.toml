@@ -1,0 +1,11 @@
+[package]
+name = "fynd-competition-naive"
+version.workspace = true
+edition = "2021"
+description = "Reference competition submission — naive path selection"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fynd-algo-sdk = { workspace = true }
