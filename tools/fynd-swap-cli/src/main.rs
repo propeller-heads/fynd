@@ -352,11 +352,12 @@ async fn main() -> anyhow::Result<()> {
             let router_addr = Address::try_from(info.router_address().as_ref())
                 .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             if cli.execute {
+                // Approve the full unlimited amount to Permit2 so future swaps don't re-approve.
                 ensure_approval(
                     &client,
                     &signer,
                     sell_token_bytes.clone(),
-                    amount.clone(),
+                    max_uint160(),
                     UserTransferType::TransferFromPermit2,
                     sender,
                 )
