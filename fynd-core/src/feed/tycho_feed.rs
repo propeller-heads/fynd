@@ -140,6 +140,7 @@ impl TychoFeed {
                 )?
                 .auth_key(self.config.tycho_api_key.clone())
                 .skip_state_decode_failures(true)
+                .min_token_quality(self.config.min_token_quality as u32)
                 .set_tokens(all_tokens.clone())
                 .await
                 .build()
