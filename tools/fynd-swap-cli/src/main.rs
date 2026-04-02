@@ -24,10 +24,10 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
-    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus,
-    Order, OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle,
-    QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides,
-    UserTransferType,
+    AllowanceCheck, ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient,
+    FyndClientBuilder, HealthStatus, Order, OrderSide, PermitDetails as FyndPermitDetails,
+    PermitSingle as FyndPermitSingle, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
+    SigningHints, StorageOverrides, UserTransferType,
 };
 use num_bigint::BigUint;
 use tracing::info;
@@ -174,20 +174,19 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
     }
 }
 
-/// Check allowance and, if insufficient, submit and mine an ERC-20 approval.
-///
-/// `transfer_type` controls the spender: `TransferFrom` -> router, `TransferFromPermit2` ->
-/// Permit2 contract. Resolves the spender address via `GET /v1/info`.
+/// Submit an ERC-20 approval, optionally skipping or customising the allowance check.
 async fn ensure_approval(
     client: &FyndClient,
     signer: &PrivateKeySigner,
     sell_token: Bytes,
     amount: BigUint,
+    allowance_check: AllowanceCheck,
     transfer_type: UserTransferType,
     sender: Address,
 ) -> anyhow::Result<()> {
     println!("Checking ERC-20 allowance...");
-    let params = ApprovalParams::new(sell_token, amount, true).with_transfer_type(transfer_type);
+    let params =
+        ApprovalParams::new(sell_token, amount, allowance_check).with_transfer_type(transfer_type);
     let hints = SigningHints::default().with_sender(sender);
     let Some(approval_payload) = client.approval(&params, &hints).await? else {
         println!("Allowance sufficient, no approval needed.");
@@ -337,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
                     &signer,
                     sell_token_bytes.clone(),
                     amount.clone(),
+                    AllowanceCheck::AtLeast(amount.clone()),
                     UserTransferType::TransferFrom,
                     sender,
                 )
@@ -352,12 +352,14 @@ async fn main() -> anyhow::Result<()> {
             let router_addr = Address::try_from(info.router_address().as_ref())
                 .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             if cli.execute {
-                // Approve the full unlimited amount to Permit2 so future swaps don't re-approve.
+                // Check against the swap amount but approve max — subsequent swaps won't
+                // need re-approval even after Permit2 deducts from the ERC-20 allowance.
                 ensure_approval(
                     &client,
                     &signer,
                     sell_token_bytes.clone(),
                     max_uint160(),
+                    AllowanceCheck::AtLeast(amount.clone()),
                     UserTransferType::TransferFromPermit2,
                     sender,
                 )
