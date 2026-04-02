@@ -1,6 +1,6 @@
 {
   "name": "@kayibal/fynd-client",
-  "version": "0.46.0",
+  "version": "0.46.1",
   "description": "TypeScript client for the Fynd DEX router",
   "repository": {
     "type": "git",

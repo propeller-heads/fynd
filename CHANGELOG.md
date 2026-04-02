@@ -1,3 +1,10 @@
+## [0.46.1](https://github.com/propeller-heads/fynd/compare/0.46.0...0.46.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* set min token quality filter on tycho stream ([e71fae0](https://github.com/propeller-heads/fynd/commit/e71fae0d5dcfeb845af6222b47ef76b4a6b4eaee))
+
 ## [0.46.0](https://github.com/propeller-heads/fynd/compare/0.45.0...0.46.0) (2026-04-02)
 
 
