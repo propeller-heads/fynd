@@ -35,7 +35,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use fynd_rpc::{
     builder::{parse_chain, FyndRPCBuilder},
-    config::{defaults, BlacklistConfig, WorkerPoolsConfig},
+    config::{defaults, BlocklistConfig, WorkerPoolsConfig},
     protocols::fetch_protocol_systems,
 };
 mod cli;
@@ -281,21 +281,21 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
-    if let Some(blacklist_path) = &args.blacklist_config {
-        let default_blacklist_path = std::path::Path::new("blacklist.toml");
-        let blacklist =
-            if blacklist_path.as_path() == default_blacklist_path && !blacklist_path.exists() {
+    if let Some(blocklist_path) = &args.blocklist_config {
+        let default_blocklist_path = std::path::Path::new("blocklist.toml");
+        let blocklist =
+            if blocklist_path.as_path() == default_blocklist_path && !blocklist_path.exists() {
                 warn!(
-                    "blacklist.toml not found; using built-in defaults. \
-                     Set --blacklist-config or BLACKLIST_CONFIG to use a custom config."
+                    "blocklist.toml not found; using built-in defaults. \
+                     Set --blocklist-config or Blocklist_CONFIG to use a custom config."
                 );
-                BlacklistConfig::builtin_default()
+                BlocklistConfig::builtin_default()
             } else {
-                BlacklistConfig::load_from_file(blacklist_path).map_err(|e| {
-                    SolverError::SetupError(format!("failed to load blacklist config: {}", e))
+                BlocklistConfig::load_from_file(blocklist_path).map_err(|e| {
+                    SolverError::SetupError(format!("failed to load blocklist config: {}", e))
                 })?
             };
-        builder = builder.blacklist(blacklist);
+        builder = builder.blocklist(blocklist);
     }
 
     // Build and start solver
