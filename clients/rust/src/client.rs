@@ -851,8 +851,8 @@ where
                         }
                         let settled_amount =
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
-                        let gas_cost = BigUint::from(receipt.gas_used)
-                            * BigUint::from(receipt.effective_gas_price);
+                        let gas_cost = BigUint::from(receipt.gas_used) *
+                            BigUint::from(receipt.effective_gas_price);
                         return Ok(SettledOrder::new(Some(tx_hash), settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
@@ -888,8 +888,8 @@ where
     /// 1. Calls [`info()`](Self::info) to resolve the spender address from `params.transfer_type`.
     /// 2. If `params.allowance_check` is [`AllowanceCheck::AtLeast`], checks the current ERC-20
     ///    allowance and returns `None` if it meets the threshold (skipping nonce and fee
-    ///    resolution). With [`AllowanceCheck::Skip`] the check is skipped and the approval
-    ///    payload is always built.
+    ///    resolution). With [`AllowanceCheck::Skip`] the check is skipped and the approval payload
+    ///    is always built.
     /// 3. Resolves nonce and EIP-1559 fees via `hints` (same semantics as
     ///    [`swap_payload`](Self::swap_payload)).
     /// 4. Encodes the `approve(spender, amount)` calldata using the ERC-20 ABI.
@@ -1067,8 +1067,8 @@ where
                             };
                             return Err(FyndError::TransactionReverted(reason));
                         }
-                        let gas_cost = BigUint::from(receipt.gas_used)
-                            * BigUint::from(receipt.effective_gas_price);
+                        let gas_cost = BigUint::from(receipt.gas_used) *
+                            BigUint::from(receipt.effective_gas_price);
                         return Ok(MinedTx::new(tx_hash, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,

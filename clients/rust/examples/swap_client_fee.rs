@@ -29,8 +29,9 @@ use alloy::{
 };
 use bytes::Bytes;
 use fynd_client::{
-    ApprovalParams, ClientFeeParams, EncodingOptions, ExecutionOptions, FyndClientBuilder, Order,
-    OrderSide, QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints,
+    AllowanceCheck, ApprovalParams, ClientFeeParams, EncodingOptions, ExecutionOptions,
+    FyndClientBuilder, Order, OrderSide, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
+    SigningHints,
 };
 use num_bigint::BigUint;
 
@@ -81,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ApprovalParams::new(
                 Bytes::copy_from_slice(sell_token.as_slice()),
                 BigUint::from(SELL_AMOUNT),
-                true,
+                AllowanceCheck::AtLeast(BigUint::from(SELL_AMOUNT)),
             ),
             &SigningHints::default(),
         )

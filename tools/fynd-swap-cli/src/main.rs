@@ -408,8 +408,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Amount in:           {}", quote.amount_in());
     println!("Amount out:          {}", quote.amount_out());
     println!("Amount out net gas:  {}", quote.amount_out_net_gas());
-    println!("Token in:            {}", format!("0x{}", hex::encode(&sell_token_bytes)));
-    println!("Token out:           {}", format!("0x{}", hex::encode(&buy_token_bytes)));
+    println!("Token in:            0x{}", hex::encode(&sell_token_bytes));
+    println!("Token out:           0x{}", hex::encode(&buy_token_bytes));
     println!("Gas estimate:        {}", quote.gas_estimate());
     println!("Solve time:          {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
