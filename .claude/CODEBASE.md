@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 38fd36e488349fb300a2cf6ca74184f1377adb77 -->
+<!-- docs-synced-at: 55b446762d25462cf184f9ea653050ae0a0b8dbd -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -121,7 +121,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 - `cargo +nightly fmt --all --check` — format check
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client` — doc build (broken links, missing docs)
 - OpenAPI drift: `cargo run -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`
-- TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @fynd/client run test`
+- TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test`
 
 ## Related Repositories
 
