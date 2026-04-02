@@ -839,7 +839,7 @@ where
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
                         let gas_cost = BigUint::from(receipt.gas_used) *
                             BigUint::from(receipt.effective_gas_price);
-                        return Ok(SettledOrder::new(settled_amount, gas_cost));
+                        return Ok(SettledOrder::new(Some(tx_hash), settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
                 }
@@ -1115,7 +1115,7 @@ where
             None
         };
         let gas_cost = BigUint::from(gas_used) * BigUint::from(tx_eip1559.max_fee_per_gas);
-        let settled = SettledOrder::new(settled_amount, gas_cost);
+        let settled = SettledOrder::new(None, settled_amount, gas_cost);
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move { Ok(settled) })))
     }
