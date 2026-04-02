@@ -98,6 +98,7 @@ The factory closure receives an `AlgorithmConfig` (hop limits, timeout) and retu
 
 ```bash
 export TYCHO_API_KEY="your-api-key"
+export RPC_URL="https://your-rpc-provider.com"
 ```
 
 ### Run

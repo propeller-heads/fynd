@@ -39,7 +39,7 @@ This modular architecture allows users to:
 │                         Async I/O - Non-blocking                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                           RouterApi                                  │   │
-│  │    POST /v1/quote            GET /v1/health          GET /metrics    │   │
+│  │  POST /v1/quote    GET /v1/health    GET /v1/info    GET /metrics    │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 └──────────────────────────────────┼──────────────────────────────────────────┘
                                    │
@@ -142,6 +142,7 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 
 * `POST /v1/quote` -- Submit quote requests
 * `GET /v1/health` -- Health check (data freshness, derived data readiness, pool count)
+* `GET /v1/info` -- Instance info (chain ID, router address, Permit2 address)
 * `GET /metrics` -- Prometheus metrics (separate server, port 9898)
 
 ***

@@ -27,7 +27,7 @@
 
 * [API](reference/api.md)
 * [Architecture](ARCHITECTURE.md)
-* [Performance](benchmark-results.md)
+* [Performance](reference/benchmark-results.md)
 
 ## Rust API Reference
 

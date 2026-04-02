@@ -1,4 +1,4 @@
-# TypeScript Client (`@fynd/client`)
+# TypeScript Client (`@kayibal/fynd-client`)
 
 TypeScript client for the Fynd RPC API. Lives in `clients/typescript/` as a pnpm workspace with
 two packages.
@@ -13,7 +13,7 @@ clients/typescript/
     src/
       schema.d.ts             # Auto-generated from clients/openapi.json
       index.ts                # Re-exports
-  client/                     # @fynd/client — typed HTTP client
+  client/                     # @kayibal/fynd-client — typed HTTP client
     src/
       client.ts               # FyndClient — main client class
       types.ts                # Public types (QuoteRequest, QuoteResponse, etc.)
@@ -36,9 +36,9 @@ pnpm --dir clients/typescript install --frozen-lockfile
 pnpm --dir clients/typescript --filter @fynd/autogen run build
 
 # Typecheck, lint, test the client
-pnpm --dir clients/typescript --filter @fynd/client run typecheck
-pnpm --dir clients/typescript --filter @fynd/client run lint
-pnpm --dir clients/typescript --filter @fynd/client run test
+pnpm --dir clients/typescript --filter @kayibal/fynd-client run typecheck
+pnpm --dir clients/typescript --filter @kayibal/fynd-client run lint
+pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
 ```
 
 ## Examples
@@ -64,5 +64,5 @@ TYCHO_API_KEY=<key> ./scripts/run-all-examples.sh
 - ESM only (`"type": "module"`)
 - Tooling: `oxlint` for linting, `vitest` for tests, `tsc` for type checking
 - Colocated test files (`*.test.ts` next to source)
-- `@fynd/client` depends on `@fynd/autogen` for schema types
+- `@kayibal/fynd-client` depends on `@fynd/autogen` for schema types
 - When adding/changing RPC endpoints, update: Rust types → OpenAPI spec → autogen → client mapping

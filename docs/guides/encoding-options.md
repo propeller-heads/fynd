@@ -15,7 +15,7 @@ For full details on how the TychoRouter contract works, see the
 
 | Field               | Type              | Required | Default           | Description                                                                                                     |
 |---------------------|-------------------|----------|-------------------|-----------------------------------------------------------------------------------------------------------------|
-| `slippage`          | `float`           | yes      | —                 | Slippage tolerance as a fraction (e.g. `0.005` = 0.5%). Applied to the quoted output to compute `minAmountOut`. |
+| `slippage`          | `string`          | yes      | —                 | Slippage tolerance as a decimal string (e.g. `"0.005"` = 0.5%). Applied to the quoted output to compute `minAmountOut`. |
 | `transfer_type`     | `string`          | no       | `"transfer_from"` | How the router receives your input tokens. See [transfer types](#transfer-types).                               |
 | `permit`            | `PermitSingle`    | no       | —                 | Permit2 authorization. Required when `transfer_type` is `"transfer_from_permit2"`.                              |
 | `permit2_signature` | `string`          | no       | —                 | Hex-encoded 65-byte signature over the permit. Required when `permit` is set.                                   |
@@ -51,11 +51,11 @@ permit needed — tokens must have been deposited into the vault beforehand. See
 
 The `slippage` value is a decimal fraction:
 
-| Value   | Meaning |
-|---------|---------|
-| `0.001` | 0.1%    |
-| `0.005` | 0.5%    |
-| `0.01`  | 1%      |
+| Value     | Meaning |
+|-----------|---------|
+| `"0.001"` | 0.1%    |
+| `"0.005"` | 0.5%    |
+| `"0.01"`  | 1%      |
 
 Fynd computes `minAmountOut = quotedAmountOut * (1 - slippage)` and encodes it into the transaction.
 If on-chain execution produces less than `minAmountOut`, the transaction reverts.

@@ -6,7 +6,7 @@ and provide typed quote/health interfaces.
 | Client | Location | Package | Language ecosystem |
 |---|---|---|---|
 | [Rust](#rust-client) | `clients/rust/` | `fynd-client` (Cargo workspace member) | reqwest + alloy |
-| [TypeScript](#typescript-client) | `clients/typescript/` | `@fynd/client` (pnpm workspace) | fetch + viem |
+| [TypeScript](#typescript-client) | `clients/typescript/` | `@kayibal/fynd-client` (pnpm workspace) | fetch + viem |
 
 ## OpenAPI Spec
 
@@ -30,7 +30,7 @@ Crate name: `fynd-client` (workspace member at `clients/rust/`).
 | `client.rs` | `FyndClient` + `FyndClientBuilder`. Quote, sign, execute flow. Retry with exponential backoff |
 | `types.rs` | Client-side types (`Order`, `Quote`, `QuoteParams`, `HealthStatus`, etc.) — independent from wire DTOs |
 | `mapping.rs` | Converts between client types and `fynd-rpc-types` wire DTOs |
-| `signing.rs` | EIP-712 signing: `SignablePayload`, `FyndPayload`, `SignedOrder`, `ExecutionReceipt` |
+| `signing.rs` | EIP-712 signing: `SwapPayload`, `FyndPayload`, `SignedSwap`, `TxReceipt`, `SignedApproval` |
 | `error.rs` | `FyndError` with `ErrorCode` enum and `is_retryable()` classification |
 
 ### Key Types
@@ -46,8 +46,11 @@ FyndClientBuilder::new(fynd_url, rpc_url)
 **`FyndClient`**
 - `quote(params: QuoteParams) -> Result<Quote, FyndError>` — request a swap quote
 - `health() -> Result<HealthStatus, FyndError>` — check solver health
-- `sign(quote, signer, hints) -> Result<SignedOrder, FyndError>` — EIP-712 sign a quote
-- `execute(signed_order, options) -> Result<ExecutionReceipt, FyndError>` — submit on-chain
+- `info() -> Result<InstanceInfo, FyndError>` — fetch static instance metadata (cached)
+- `swap_payload(quote, signer, hints) -> Result<SwapPayload, FyndError>` — EIP-712 sign a quote
+- `execute_swap(signed_swap, options) -> Result<TxReceipt, FyndError>` — submit swap on-chain
+- `approval(params: ApprovalParams) -> Result<Option<SignedApproval>, FyndError>` — build and sign an ERC-20 approval if needed
+- `execute_approval(approval: SignedApproval) -> Result<TxReceipt, FyndError>` — broadcast a signed approval
 
 **`RetryConfig`** — Exponential backoff for transient failures. Default: 3 attempts, 100ms initial, 2s max.
 
@@ -69,7 +72,7 @@ pnpm workspace at `clients/typescript/` with two packages:
 
 - **`@fynd/autogen`** (`autogen/`) — Generated types from `openapi-typescript`. `schema.d.ts` is
   auto-generated; do not edit manually.
-- **`@fynd/client`** (`client/`) — Typed HTTP client: `FyndClient`, signing, Permit2, error types.
+- **`@kayibal/fynd-client`** (`client/`) — Typed HTTP client: `FyndClient`, signing, Permit2, error types.
 
 ### Build & Test
 

@@ -35,5 +35,5 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 | **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   |
 | **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots |
 | **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Slower per request; benefits less from pre-scoring |
-| **Default config**     | 2-3 hops, 5+3 workers (see `worker_pools.toml`)                     | 5 hops, 3 workers                                  |
+| **Default config**     | _(not in default `worker_pools.toml`)_                              | 2 hops, 3 workers (see `worker_pools.toml`)        |
 | **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode)    |
