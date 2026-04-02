@@ -186,21 +186,23 @@ async fn ensure_approval(
     transfer_type: UserTransferType,
     sender: Address,
 ) -> anyhow::Result<()> {
+    println!("Checking ERC-20 allowance...");
     let params = ApprovalParams::new(sell_token, amount, true).with_transfer_type(transfer_type);
     let hints = SigningHints::default().with_sender(sender);
     let Some(approval_payload) = client.approval(&params, &hints).await? else {
-        return Ok(()); // allowance already sufficient
+        println!("Allowance sufficient, no approval needed.");
+        return Ok(());
     };
-    info!("Submitting approval transaction...");
+    println!("Allowance insufficient — submitting approval transaction...");
     let sig = signer
         .sign_hash(&approval_payload.signing_hash())
         .await?;
     let signed = SignedApproval::assemble(approval_payload, sig);
     let receipt = client.execute_approval(signed).await?;
-    tokio::time::timeout(Duration::from_secs(120), receipt)
+    let mined = tokio::time::timeout(Duration::from_secs(120), receipt)
         .await
         .map_err(|_| anyhow::anyhow!("timed out waiting for approval to be mined"))??;
-    info!("Approval confirmed.");
+    println!("Approved! (tx: {:#x})", mined.tx_hash());
     Ok(())
 }
 
@@ -385,7 +387,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let order = Order::new(
         sell_token_bytes.clone(),
-        buy_token_bytes,
+        buy_token_bytes.clone(),
         amount.clone(),
         OrderSide::Sell,
         sender_bytes,
@@ -399,17 +401,19 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("\n========== Quote ==========");
-    println!("Status:            {:?}", quote.status());
-    println!("Amount in:         {}", quote.amount_in());
-    println!("Amount out:        {}", quote.amount_out());
-    println!("Amount out net gas:{}", quote.amount_out_net_gas());
-    println!("Gas estimate:      {}", quote.gas_estimate());
-    println!("Solve time:        {}ms", quote.solve_time_ms());
+    println!("Status:              {:?}", quote.status());
+    println!("Amount in:           {}", quote.amount_in());
+    println!("Amount out:          {}", quote.amount_out());
+    println!("Amount out net gas:  {}", quote.amount_out_net_gas());
+    println!("Token in:            {}", format!("0x{}", hex::encode(&sell_token_bytes)));
+    println!("Token out:           {}", format!("0x{}", hex::encode(&buy_token_bytes)));
+    println!("Gas estimate:        {}", quote.gas_estimate());
+    println!("Solve time:          {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
-                "  {}. {} -> {} via {} (pool: {})",
+                "  {}. 0x{} -> 0x{} via {} (pool: {})",
                 i + 1,
                 hex::encode(swap.token_in()),
                 hex::encode(swap.token_out()),
@@ -442,7 +446,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Build execution options ───────────────────────────────────────────────
     let exec_options = if cli.execute {
-        info!("Submitting on-chain transaction...");
+        println!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
         let overrides = if dry_run_spenders.is_empty() {
@@ -473,7 +477,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.execute {
-        println!("\nSwap executed on-chain!");
+        if let Some(hash) = settled.tx_hash() {
+            println!("\nSwap executed on-chain! (tx: {hash:#x})");
+        } else {
+            println!("\nSwap executed on-chain!");
+        }
     } else {
         println!("\nSimulation successful!");
     }
