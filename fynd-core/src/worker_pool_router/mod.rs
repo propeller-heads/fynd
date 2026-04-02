@@ -86,8 +86,7 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     price_guard: Option<PriceGuard>,
     /// Server-side default config for the price guard.
-    /// Used when a request does not include per-request overrides.
-    price_guard_config: PriceGuardConfig,
+    price_guard_config: Option<PriceGuardConfig>,
 }
 
 impl WorkerPoolRouter {
@@ -97,19 +96,13 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self {
-            solver_pools,
-            config,
-            encoder,
-            price_guard: None,
-            price_guard_config: PriceGuardConfig::default(),
-        }
+        Self { solver_pools, config, encoder, price_guard: None, price_guard_config: None }
     }
 
     /// Enables price guard validation with a custom configuration.
     pub fn with_price_guard(mut self, price_guard: PriceGuard, config: PriceGuardConfig) -> Self {
         self.price_guard = Some(price_guard);
-        self.price_guard_config = config;
+        self.price_guard_config = Some(config);
         self
     }
 
@@ -156,11 +149,16 @@ impl WorkerPoolRouter {
         // Validate against external prices if enabled.
         // Per-request config overrides the server default.
         if let Some(ref guard) = self.price_guard {
-            let config = request
-                .options()
-                .price_guard()
-                .cloned()
-                .unwrap_or(self.price_guard_config.clone());
+            let config = if let Some(request_config) = request.options().price_guard() {
+                debug!("using request price guard config: {:?}", request_config);
+                request_config.clone()
+            } else if let Some(default_config) = &self.price_guard_config {
+                debug!("using default price guard config: {:?}", default_config);
+                default_config.clone()
+            } else {
+                return Err(SolveError::Internal("no price guard config available".to_string()));
+            };
+
             match guard.validate(order_quotes, &config) {
                 Ok(validated) => order_quotes = validated,
                 Err(e) => {
