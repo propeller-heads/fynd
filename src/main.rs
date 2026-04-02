@@ -281,22 +281,16 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
-    if let Some(blocklist_path) = &args.blocklist_config {
-        let default_blocklist_path = std::path::Path::new("blocklist.toml");
-        let blocklist =
-            if blocklist_path.as_path() == default_blocklist_path && !blocklist_path.exists() {
-                warn!(
-                    "blocklist.toml not found; using built-in defaults. \
-                     Set --blocklist-config or Blocklist_CONFIG to use a custom config."
-                );
-                BlocklistConfig::builtin_default()
-            } else {
-                BlocklistConfig::load_from_file(blocklist_path).map_err(|e| {
-                    SolverError::SetupError(format!("failed to load blocklist config: {}", e))
-                })?
-            };
-        builder = builder.blocklist(blocklist);
-    }
+    let blocklist = match &args.blocklist_config {
+        Some(path) => BlocklistConfig::load_from_file(path)
+            .map_err(|e| {
+                SolverError::SetupError(format!("failed to load blocklist config: {}", e))
+            })?
+            .into_components(),
+        None => tycho_simulation::utils::default_blocklist(),
+    };
+
+    builder = builder.blocklist(blocklist);
 
     // Build and start solver
     let solver = builder

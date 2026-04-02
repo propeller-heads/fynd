@@ -123,7 +123,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Tycho
-tycho-simulation = ">=0.254.0"
+# tycho-simulation = ">=0.251.1"
+# tycho-simulation = { path = "../tycho-simulation" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", rev = "75b61ce67eeac857289977a7d53b428bad99d352" }
 tycho-execution = ">=0.171.2"
 typetag = "0.2"
 
