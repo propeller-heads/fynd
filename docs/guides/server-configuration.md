@@ -8,7 +8,7 @@ Reference for all Fynd server flags, worker pool tuning, blacklisting, logging, 
 
 ## Run options
 
-All on-chain protocols are fetched from Tycho RPC by default, so `--protocols` is optional. The `--tycho-url` also defaults to the Fynd endpoint for the selected chain.
+All on-chain protocols available on your configured Tycho endpoint are fetched by default, so `--protocols` is optional. The `--tycho-url` also defaults to the Fynd endpoint for the selected chain.
 
 ```bash
 cargo run --release -- serve
@@ -73,12 +73,12 @@ Run `cargo run --release -- serve --help` for the full list.
 
 ### Optional
 
-| Flag                               | Env Var               | Default                    | Description                                                                                                                                                                                                    |
-| ---------------------------------- | --------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--rpc-url`                        | `RPC_URL`             | `https://eth.llamarpc.com` | Ethereum RPC endpoint. Use a dedicated endpoint in production.                                                                                                                                                 |
-| `--tycho-url`                      | `TYCHO_URL`           | _(chain-specific)_         | Tycho URL. Defaults to the Fynd endpoint for the selected chain (e.g. `tycho-fynd-ethereum.propellerheads.xyz`).                                                                                               |
+| Flag | Env Var | Default | <div style="width:30%">Description</div> |
+| ---- | ------- | ------- | ----------------------------------------- |
+| `--rpc-url`                        | `RPC_URL`             | `https://eth.llamarpc.com` | Node RPC endpoint for the target chain. Use a dedicated endpoint in production.                                                                                                                                |
+| `--tycho-url`                      | `TYCHO_URL`           | _(chain-specific)_         | Tycho URL. Defaults to the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain.                                                       |
 | `--chain`                          | —                     | `Ethereum`                 | Target chain                                                                                                                                                                                                   |
-| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols are fetched from Tycho RPC. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`). |
+| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`). |
 | `--http-host`                      | `HTTP_HOST`           | `0.0.0.0`                  | HTTP bind address                                                                                                                                                                                              |
 | `--http-port`                      | `HTTP_PORT`           | `3000`                     | API port                                                                                                                                                                                                       |
 | `--min-tvl`                        | —                     | `10.0`                     | Minimum pool TVL in native token (ETH)                                                                                                                                                                         |
@@ -96,31 +96,15 @@ Run `cargo run --release -- serve --help` for the full list.
 
 ## Worker pools (`worker_pools.toml`)
 
-Worker pools control solver thread count and routing strategies. The default config ships with three pools:
+Worker pools control solver thread count and routing strategies. The default config ships with one pool:
 
 ```toml
 # worker_pools.toml
-[pools.most_liquid_2_hops_fast]
-algorithm = "most_liquid"
-num_workers = 5
-task_queue_capacity = 1000
-max_hops = 2
-timeout_ms = 100
-max_routes = 50
-
-[pools.most_liquid_3_hops]
-algorithm = "most_liquid"
-num_workers = 3
-task_queue_capacity = 1000
-min_hops = 2
-max_hops = 3
-timeout_ms = 5000
-
-[pools.bellman_ford_5_hops]
+[pools.bellman_ford_2_hops]
 algorithm = "bellman_ford"
 num_workers = 3
 task_queue_capacity = 1000
-max_hops = 5
+max_hops = 2
 timeout_ms = 500
 ```
 
@@ -128,22 +112,15 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 ### Worker pool fields
 
-| Field                 | Default         | Description                                                            |
-| --------------------- | --------------- | ---------------------------------------------------------------------- |
-| `algorithm`           | `"most_liquid"` | Algorithm used for the pool                                            |
+| Field | Default | <div style="width:40%">Description</div> |
+| ----- | ------- | ---------------------------------------- |
+| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"` or `"bellman_ford"`)      |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
 | `max_hops`            | `3`             | Maximum number of hops permitted for routing                           |
 | `timeout_ms`          | `100`           | Maximum time in milliseconds allowed per order processing in this pool |
 | `max_routes`          | _(no limit)_    | Maximum number of candidate routes to evaluate per order               |
-
-### Tuning tips
-
-* **More workers** = more orders can be solved concurrently. Each worker is a dedicated OS thread, so avoid exceeding your CPU core count across all pools.
-* **Lower `max_hops`** = faster solves but may miss better multi-hop routes.
-* **Higher `max_hops`** = explores deeper routes but takes longer. Pair with a higher `timeout_ms`.
-* **The "fast + deep" pattern** (default config) gives quick responses from the 2-hop pool while the 3-hop pool searches for better routes in the background.
 
 To use a custom config file:
 
@@ -183,5 +160,21 @@ RUST_LOG=info,fynd_core=trace cargo run --release -- serve ...
 ```
 
 ### Prometheus metrics
+
+***
+
+## Tuning tips
+
+### Worker pools
+
+* **More workers** = more orders can be solved concurrently. Each worker is a dedicated OS thread, so avoid exceeding your CPU core count across all pools.
+* **Lower `max_hops`** = faster solves but may miss better multi-hop routes.
+* **Higher `max_hops`** = explores deeper routes but takes longer. Pair with a higher `timeout_ms`.
+* **Multiple pools** with different `max_hops` and `timeout_ms` let you trade off speed vs. route quality — e.g. a fast 2-hop pool alongside a slower 3-hop pool.
+* **Lower `max_routes`** = more predictable latency on large graphs, at the cost of potentially missing a better route.
+
+### Request routing
+
+* **Lower `--worker-router-min-responses`** = faster response with multiple pools — set to `1` to return as soon as the first pool finishes, at the cost of potentially missing a better result from a slower pool.
 
 Metrics are exposed at `http://localhost:9898/metrics` (always on). Scrape this endpoint with Prometheus or any compatible tool. Available metrics: solve duration, response counts, failure types, and pool performance.

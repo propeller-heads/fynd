@@ -152,15 +152,19 @@ cargo run -p fynd-benchmark --release -- compare \
 | `--url-b`         | `http://localhost:3001`   | Solver B (candidate) URL               |
 | `--label-a`       | `main`                    | Label for solver A in output           |
 | `--label-b`       | `branch`                  | Label for solver B in output           |
-| `-n`              | `100`                     | Number of requests to send             |
+| `-n`              | `500`                     | Number of requests to send             |
 | `--requests-file` | _(none)_                  | Path to JSON file with custom requests |
 | `--output`        | `comparison_results.json` | Path for full results JSON             |
 | `--timeout-ms`    | `15000`                   | Per-request timeout in milliseconds    |
 | `--seed`          | `42`                      | Random seed for reproducibility        |
 
+### Net-of-Gas Comparison
+
+The compare tool uses the server-computed `amount_out_net_gas` field for net-of-gas output comparison. This value represents the output amount minus gas cost denominated in the output token, calculated by the solver. It works for all token pairs.
+
 ### Output
 
-Prints a summary table to stdout showing win/loss counts and bps differences. Writes detailed per-request results to the output JSON file. Positive bps diffs mean solver B returned more output than solver A.
+Prints a summary table to stdout showing win/loss counts and bps differences (both gross and net-of-gas). Writes detailed per-request results to the output JSON file. Positive bps diffs mean solver B returned more output than solver A.
 
 ***
 
@@ -233,9 +237,21 @@ Pass `--output-file` to export the full results as JSON for further analysis.
 
 ***
 
-## Custom Request Templates
+## Request Data
 
-By default, the load test uses a single WETH→USDC swap and the compare tool generates random requests from a built-in set of token pairs. Both commands accept `--requests-file` to supply custom requests.
+By default, the load test uses a single WETH→USDC swap and the compare tool samples from a built-in set of 50 real aggregator trades. Both commands accept `--requests-file` to supply custom requests.
+
+### Downloading More Trades
+
+For broader coverage, download a larger set of real aggregator trades (10k):
+
+```bash
+cargo run -p fynd-benchmark --release -- download-trades
+```
+
+Then use it with either command via `--requests-file aggregator_trades_10k.json`.
+
+### Custom Request Format
 
 The file should be a JSON array of quote request bodies:
 
