@@ -11,9 +11,16 @@ icon: rectangle-terminal
 
 {% tabs %}
 {% tab title="Docker Compose" %}
-**Prerequisites:** Docker
+**Prerequisites:** 
+* **Docker**: [install Docker](https://docs.docker.com/engine/install/)
+* **Tycho API key**: [get one here](https://t.me/fynd_portal_bot)
 
-The [docker-compose.swap.yml](https://github.com/propeller-heads/fynd/blob/main/docker-compose.swap.yml) file in the repo root starts a Fynd server and drops you into a shell with `fynd-swap-cli` pre-installed — no local build required.
+Get the [docker-compose.swap.yml](https://github.com/propeller-heads/fynd/blob/main/docker-compose.swap.yml) file:
+```bash
+curl -o docker-compose.swap.yml https://raw.githubusercontent.com/propeller-heads/fynd/main/docker-compose.swap.yml
+```
+
+Start the server and drop into a shell with `fynd-swap-cli` pre-installed:
 
 ```bash
 export TYCHO_API_KEY=your_tycho_api_key
