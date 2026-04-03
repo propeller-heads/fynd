@@ -166,15 +166,25 @@ impl SignedSwap {
 /// The result of a successfully mined or simulated swap transaction.
 ///
 /// Returned by awaiting an [`ExecutionReceipt`]. For dry-run executions
-/// ([`ExecutionOptions::dry_run`](crate::ExecutionOptions)), `tx_receipt` is `None`.
+/// ([`ExecutionOptions::dry_run`](crate::ExecutionOptions)), `tx_hash` and `tx_receipt` are `None`.
 pub struct SettledOrder {
+    tx_hash: Option<B256>,
     settled_amount: Option<BigUint>,
     gas_cost: BigUint,
 }
 
 impl SettledOrder {
-    pub(crate) fn new(settled_amount: Option<BigUint>, gas_cost: BigUint) -> Self {
-        Self { settled_amount, gas_cost }
+    pub(crate) fn new(
+        tx_hash: Option<B256>,
+        settled_amount: Option<BigUint>,
+        gas_cost: BigUint,
+    ) -> Self {
+        Self { tx_hash, settled_amount, gas_cost }
+    }
+
+    /// The transaction hash of the mined swap. `None` for dry-run simulations.
+    pub fn tx_hash(&self) -> Option<B256> {
+        self.tx_hash
     }
 
     /// The total amount of `token_out` actually received by the receiver, summed across all

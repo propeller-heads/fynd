@@ -24,10 +24,10 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
 use fynd_client::{
-    ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient, FyndClientBuilder, HealthStatus,
-    Order, OrderSide, PermitDetails as FyndPermitDetails, PermitSingle as FyndPermitSingle,
-    QuoteOptions, QuoteParams, SignedApproval, SignedSwap, SigningHints, StorageOverrides,
-    UserTransferType,
+    AllowanceCheck, ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient,
+    FyndClientBuilder, HealthStatus, Order, OrderSide, PermitDetails as FyndPermitDetails,
+    PermitSingle as FyndPermitSingle, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
+    SigningHints, StorageOverrides, UserTransferType,
 };
 use num_bigint::BigUint;
 use tracing::info;
@@ -174,33 +174,34 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
     }
 }
 
-/// Check allowance and, if insufficient, submit and mine an ERC-20 approval.
-///
-/// `transfer_type` controls the spender: `TransferFrom` -> router, `TransferFromPermit2` ->
-/// Permit2 contract. Resolves the spender address via `GET /v1/info`.
+/// Submit an ERC-20 approval, optionally skipping or customising the allowance check.
 async fn ensure_approval(
     client: &FyndClient,
     signer: &PrivateKeySigner,
     sell_token: Bytes,
     amount: BigUint,
+    allowance_check: AllowanceCheck,
     transfer_type: UserTransferType,
     sender: Address,
 ) -> anyhow::Result<()> {
-    let params = ApprovalParams::new(sell_token, amount, true).with_transfer_type(transfer_type);
+    println!("Checking ERC-20 allowance...");
+    let params =
+        ApprovalParams::new(sell_token, amount, allowance_check).with_transfer_type(transfer_type);
     let hints = SigningHints::default().with_sender(sender);
     let Some(approval_payload) = client.approval(&params, &hints).await? else {
-        return Ok(()); // allowance already sufficient
+        println!("Allowance sufficient, no approval needed.");
+        return Ok(());
     };
-    info!("Submitting approval transaction...");
+    println!("Allowance insufficient — submitting approval transaction...");
     let sig = signer
         .sign_hash(&approval_payload.signing_hash())
         .await?;
     let signed = SignedApproval::assemble(approval_payload, sig);
     let receipt = client.execute_approval(signed).await?;
-    tokio::time::timeout(Duration::from_secs(120), receipt)
+    let mined = tokio::time::timeout(Duration::from_secs(120), receipt)
         .await
         .map_err(|_| anyhow::anyhow!("timed out waiting for approval to be mined"))??;
-    info!("Approval confirmed.");
+    println!("Approved! (tx: {:#x})", mined.tx_hash());
     Ok(())
 }
 
@@ -335,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
                     &signer,
                     sell_token_bytes.clone(),
                     amount.clone(),
+                    AllowanceCheck::AtLeast(amount.clone()),
                     UserTransferType::TransferFrom,
                     sender,
                 )
@@ -350,11 +352,14 @@ async fn main() -> anyhow::Result<()> {
             let router_addr = Address::try_from(info.router_address().as_ref())
                 .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             if cli.execute {
+                // Check against the swap amount but approve max — subsequent swaps won't
+                // need re-approval even after Permit2 deducts from the ERC-20 allowance.
                 ensure_approval(
                     &client,
                     &signer,
                     sell_token_bytes.clone(),
                     amount.clone(),
+                    AllowanceCheck::AtLeast(amount.clone()),
                     UserTransferType::TransferFromPermit2,
                     sender,
                 )
@@ -385,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let order = Order::new(
         sell_token_bytes.clone(),
-        buy_token_bytes,
+        buy_token_bytes.clone(),
         amount.clone(),
         OrderSide::Sell,
         sender_bytes,
@@ -399,17 +404,19 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("\n========== Quote ==========");
-    println!("Status:            {:?}", quote.status());
-    println!("Amount in:         {}", quote.amount_in());
-    println!("Amount out:        {}", quote.amount_out());
-    println!("Amount out net gas:{}", quote.amount_out_net_gas());
-    println!("Gas estimate:      {}", quote.gas_estimate());
-    println!("Solve time:        {}ms", quote.solve_time_ms());
+    println!("Status:              {:?}", quote.status());
+    println!("Amount in:           {}", quote.amount_in());
+    println!("Amount out:          {}", quote.amount_out());
+    println!("Amount out net gas:  {}", quote.amount_out_net_gas());
+    println!("Token in:            0x{}", hex::encode(&sell_token_bytes));
+    println!("Token out:           0x{}", hex::encode(&buy_token_bytes));
+    println!("Gas estimate:        {}", quote.gas_estimate());
+    println!("Solve time:          {}ms", quote.solve_time_ms());
     if let Some(route) = quote.route() {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
-                "  {}. {} -> {} via {} (pool: {})",
+                "  {}. 0x{} -> 0x{} via {} (pool: {})",
                 i + 1,
                 hex::encode(swap.token_in()),
                 hex::encode(swap.token_out()),
@@ -442,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Build execution options ───────────────────────────────────────────────
     let exec_options = if cli.execute {
-        info!("Submitting on-chain transaction...");
+        println!("Submitting on-chain transaction...");
         ExecutionOptions::default()
     } else {
         let overrides = if dry_run_spenders.is_empty() {
@@ -473,7 +480,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.execute {
-        println!("\nSwap executed on-chain!");
+        if let Some(hash) = settled.tx_hash() {
+            println!("\nSwap executed on-chain! (tx: {hash:#x})");
+        } else {
+            println!("\nSwap executed on-chain!");
+        }
     } else {
         println!("\nSimulation successful!");
     }

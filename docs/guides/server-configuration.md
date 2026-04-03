@@ -31,7 +31,7 @@ Specify protocols explicitly:
 
 ```bash
 cargo run --release -- serve \
-  --protocols uniswap_v2,uniswap_v3,vm:curve
+  --protocols uniswap_v2,uniswap_v3,ekubo_v3,fluid_v1
 ```
 
 See the full [list of available protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).

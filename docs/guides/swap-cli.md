@@ -106,7 +106,7 @@ fynd-swap-cli --execute
 
 ## Execute on-chain (Permit2)
 
-Add `--execute --transfer-type transfer-from-permit2`. The CLI checks the Permit2 allowance and submits an approval transaction first if needed, then reads the current nonce, builds the EIP-712 permit, signs it, and submits the swap.
+Add `--execute --transfer-type transfer-from-permit2`. The CLI checks whether the ERC-20 allowance to the Permit2 contract is sufficient for the swap. If not, it approves the maximum amount so subsequent swaps do not require re-approval. It then reads the current nonce, builds the EIP-712 permit, signs it, and submits the swap.
 
 ```bash
 export RPC_URL=https://your-rpc-provider.com/v1/your_key

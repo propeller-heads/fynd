@@ -73,8 +73,8 @@
 //! ```
 
 pub use client::{
-    ApprovalParams, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig, SigningHints,
-    StorageOverrides,
+    AllowanceCheck, ApprovalParams, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig,
+    SigningHints, StorageOverrides,
 };
 pub use error::{ErrorCode, FyndError};
 pub use signing::{

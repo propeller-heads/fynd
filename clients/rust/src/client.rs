@@ -274,12 +274,25 @@ impl Default for ExecutionOptions {
 // APPROVAL PARAMS
 // ============================================================================
 
+/// Controls whether [`FyndClient::approval`] checks the current on-chain allowance before
+/// building an approval transaction.
+pub enum AllowanceCheck {
+    /// Always build the approval payload — do not read the current allowance.
+    Skip,
+    /// Return `None` (no approval needed) if the current allowance is ≥ the given threshold.
+    ///
+    /// Pass the minimum amount required for the operation. For standard ERC-20 flows this is the
+    /// same as the approve amount; for Permit2 it can be the swap amount while the actual
+    /// approval is for a larger value (e.g. `max_uint160`) to avoid re-approving every swap.
+    AtLeast(BigUint),
+}
+
 /// Parameters for [`FyndClient::approval`].
 pub struct ApprovalParams {
     token: bytes::Bytes,
-    amount: num_bigint::BigUint,
+    amount: BigUint,
+    allowance_check: AllowanceCheck,
     transfer_type: UserTransferType,
-    check_allowance: bool,
 }
 
 impl ApprovalParams {
@@ -288,11 +301,12 @@ impl ApprovalParams {
     /// Defaults to a standard ERC-20 approval against the router contract.
     /// Use [`with_transfer_type`](Self::with_transfer_type) to approve the Permit2 contract
     /// instead.
-    ///
-    /// When `check_allowance` is `true`, [`FyndClient::approval`] checks the on-chain allowance
-    /// first and returns `None` if it is already sufficient.
-    pub fn new(token: bytes::Bytes, amount: num_bigint::BigUint, check_allowance: bool) -> Self {
-        Self { token, amount, transfer_type: UserTransferType::TransferFrom, check_allowance }
+    pub fn new(
+        token: bytes::Bytes,
+        amount: num_bigint::BigUint,
+        allowance_check: AllowanceCheck,
+    ) -> Self {
+        Self { token, amount, allowance_check, transfer_type: UserTransferType::TransferFrom }
     }
 
     /// Override the transfer type (and thus the spender contract).
@@ -839,7 +853,7 @@ where
                             compute_settled_amount(&receipt, &token_out_addr, &receiver_addr);
                         let gas_cost = BigUint::from(receipt.gas_used) *
                             BigUint::from(receipt.effective_gas_price);
-                        return Ok(SettledOrder::new(settled_amount, gas_cost));
+                        return Ok(SettledOrder::new(Some(tx_hash), settled_amount, gas_cost));
                     }
                     None => tokio::time::sleep(Duration::from_secs(2)).await,
                 }
@@ -871,9 +885,11 @@ where
     /// Build an unsigned EIP-1559 `approve(spender, amount)` transaction for the given token,
     /// or `None` if the allowance is already sufficient.
     ///
-    /// 1. Calls [`info()`](Self::info) to resolve the spender address from `params.spender`.
-    /// 2. If `params.check_allowance` is `true`, checks the current ERC-20 allowance and returns
-    ///    `None` immediately if it is already sufficient (skipping nonce and fee resolution).
+    /// 1. Calls [`info()`](Self::info) to resolve the spender address from `params.transfer_type`.
+    /// 2. If `params.allowance_check` is [`AllowanceCheck::AtLeast`], checks the current ERC-20
+    ///    allowance and returns `None` if it meets the threshold (skipping nonce and fee
+    ///    resolution). With [`AllowanceCheck::Skip`] the check is skipped and the approval payload
+    ///    is always built.
     /// 3. Resolves nonce and EIP-1559 fees via `hints` (same semantics as
     ///    [`swap_payload`](Self::swap_payload)).
     /// 4. Encodes the `approve(spender, amount)` calldata using the ERC-20 ABI.
@@ -906,7 +922,7 @@ where
         let amount_u256 = mapping::biguint_to_u256(&params.amount);
 
         // Check allowance before any other RPC calls so we can return early.
-        if params.check_allowance {
+        if let AllowanceCheck::AtLeast(min) = &params.allowance_check {
             let call_data =
                 erc20::allowanceCall { owner: sender, spender: spender_addr }.abi_encode();
             let req = alloy::rpc::types::TransactionRequest {
@@ -924,7 +940,7 @@ where
             } else {
                 alloy::primitives::U256::ZERO
             };
-            if current_allowance >= amount_u256 {
+            if current_allowance >= mapping::biguint_to_u256(min) {
                 return Ok(None);
             }
         }
@@ -1115,7 +1131,7 @@ where
             None
         };
         let gas_cost = BigUint::from(gas_used) * BigUint::from(tx_eip1559.max_fee_per_gas);
-        let settled = SettledOrder::new(settled_amount, gas_cost);
+        let settled = SettledOrder::new(None, settled_amount, gas_cost);
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move { Ok(settled) })))
     }
@@ -1942,14 +1958,14 @@ mod tests {
         let params = ApprovalParams::new(
             bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             num_bigint::BigUint::from(1_000_000u64),
-            false,
+            AllowanceCheck::Skip,
         );
 
         let payload = client
             .approval(&params, &hints)
             .await
             .expect("approval should succeed")
-            .expect("should build payload when check_allowance is false");
+            .expect("should build payload when AllowanceCheck::Skip");
 
         // Verify function selector is approve(address,uint256) = 0x095ea7b3.
         let selector = &payload.tx().input[0..4];
@@ -1996,7 +2012,7 @@ mod tests {
         let params = ApprovalParams::new(
             bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             num_bigint::BigUint::from(500_000u64),
-            true,
+            AllowanceCheck::AtLeast(num_bigint::BigUint::from(500_000u64)),
         );
 
         let result = client
@@ -2046,7 +2062,7 @@ mod tests {
         let params = ApprovalParams::new(
             bytes::Bytes::copy_from_slice(&[0xdd; 20]),
             num_bigint::BigUint::from(500_000u64),
-            true,
+            AllowanceCheck::AtLeast(num_bigint::BigUint::from(500_000u64)),
         );
 
         let result = client
