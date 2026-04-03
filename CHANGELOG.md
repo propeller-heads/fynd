@@ -1,3 +1,11 @@
+## [0.47.0](https://github.com/propeller-heads/fynd/compare/0.46.1...0.47.0) (2026-04-03)
+
+
+### Features
+
+* **client:** allow flexibility in approval check ([049f674](https://github.com/propeller-heads/fynd/commit/049f674833a99b34fb9db6b63ea6c64d787a7048))
+* **swap-cli:** approve unlimited amount for Permit2 to streamline future swaps ([c224fb2](https://github.com/propeller-heads/fynd/commit/c224fb2ad4ec853eae510f5124e8a22ae12c1ac6))
+
 ## [0.46.1](https://github.com/propeller-heads/fynd/compare/0.46.0...0.46.1) (2026-04-02)
 
 
