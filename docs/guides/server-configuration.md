@@ -11,26 +11,26 @@ Reference for all Fynd server flags, worker pool tuning, blocklist configuration
 All on-chain protocols available on your configured Tycho endpoint are fetched by default, so `--protocols` is optional. The `--tycho-url` also defaults to the Fynd endpoint for the selected chain.
 
 ```bash
-cargo run --release -- serve
+fynd serve
 ```
 
 To run on a different chain:
 
 ```bash
-cargo run --release -- serve --chain base
+fynd serve --chain base
 ```
 
 `--rpc-url` defaults to the public endpoint `https://eth.llamarpc.com`. For production, use a dedicated endpoint:
 
 ```bash
-cargo run --release -- serve \
+fynd serve \
   --rpc-url https://your-rpc-provider.com/v1/your_key
 ```
 
 Specify protocols explicitly:
 
 ```bash
-cargo run --release -- serve \
+fynd serve \
   --protocols uniswap_v2,uniswap_v3,vm:curve
 ```
 
@@ -41,14 +41,14 @@ See the full [list of available protocols](https://docs.propellerheads.xyz/tycho
 Include RFQ (Request-for-Quote) protocols alongside on-chain protocols. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific RFQ protocols:
 
 ```bash
-cargo run --release -- serve \
+fynd serve \
   --protocols all_onchain,rfq:bebop
 ```
 
 Or specify both on-chain and RFQ protocols explicitly:
 
 ```bash
-cargo run --release -- serve \
+fynd serve \
   --protocols uniswap_v2,uniswap_v3,rfq:bebop
 ```
 
@@ -63,7 +63,7 @@ cargo run --release -- serve \
 
 ## Flag reference
 
-Run `cargo run --release -- serve --help` for the full list.
+Run `fynd serve --help` for the full list.
 
 ### Required
 
@@ -125,7 +125,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 To use a custom config file:
 
 ```bash
-cargo run --release -- serve -w my_worker_pools.toml
+fynd serve -w my_worker_pools.toml
 ```
 
 ## Blocklist config
@@ -133,7 +133,7 @@ cargo run --release -- serve -w my_worker_pools.toml
 By default, Fynd loads `blocklist.toml` from the working directory. The default excludes components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)). Override with `--blocklist-config`:
 
 ```bash
-cargo run --release -- serve --blocklist-config my_blocklist.toml
+fynd serve --blocklist-config my_blocklist.toml
 ```
 
 The config file uses a `[blocklist]` section listing component IDs to exclude:
@@ -153,16 +153,16 @@ Control log verbosity with `RUST_LOG`:
 
 ```bash
 # Minimal output
-RUST_LOG=warn cargo run --release -- serve ...
+RUST_LOG=warn fynd serve ...
 
 # Default (recommended)
-RUST_LOG=fynd=info cargo run --release -- serve ...
+RUST_LOG=fynd=info fynd serve ...
 
 # Debug solver internals
-RUST_LOG=info,fynd_core=debug cargo run --release -- serve ...
+RUST_LOG=info,fynd_core=debug fynd serve ...
 
 # Trace-level (very verbose, not recommended)
-RUST_LOG=info,fynd_core=trace cargo run --release -- serve ...
+RUST_LOG=info,fynd_core=trace fynd serve ...
 ```
 
 ### Prometheus metrics
