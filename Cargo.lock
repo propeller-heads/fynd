@@ -7570,7 +7570,7 @@ dependencies = [
 [[package]]
 name = "tycho-simulation"
 version = "0.254.0"
-source = "git+https://github.com/propeller-heads/tycho-simulation.git?rev=97ec04b30698e74189c481b26a289589798f06c9#97ec04b30698e74189c481b26a289589798f06c9"
+source = "git+https://github.com/propeller-heads/tycho-simulation.git?rev=6d7fe51138632ccdec4fb8d661357ac6dd6a3627#6d7fe51138632ccdec4fb8d661357ac6dd6a3627"
 dependencies = [
  "alloy",
  "alloy-chains",
