@@ -51,6 +51,7 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tycho_simulation::utils::default_blocklist;
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
@@ -287,7 +288,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
                 SolverError::SetupError(format!("failed to load blocklist config: {}", e))
             })?
             .into_components(),
-        None => tycho_simulation::utils::default_blocklist(),
+        None => default_blocklist(),
     };
 
     builder = builder.blocklist(blocklist);
