@@ -61,4 +61,4 @@ COPY --from=builder /app/target/release/fynd-swap-cli /usr/local/bin/fynd-swap-c
 
 EXPOSE 3000 9898
 
-ENTRYPOINT ["/usr/local/bin/fynd", "serve"]
+ENTRYPOINT ["/usr/local/bin/fynd"]

@@ -53,7 +53,7 @@ docker run \
   -e TYCHO_API_KEY=your-api-key \
   -e RUST_LOG=fynd=info \
   -p 3000:3000 -p 9898:9898 \
-  ghcr.io/propeller-heads/fynd
+  ghcr.io/propeller-heads/fynd serve
 ```
 {% endtab %}
 
