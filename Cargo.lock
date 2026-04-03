@@ -3303,7 +3303,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3338,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "alloy",
  "bytes",
@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3409,7 +3409,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.45.0"
+version = "0.46.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7469,9 +7469,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.151.0"
+version = "0.153.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77f13e4bff5abe0b8e18c519e604af2df7c897260b0b5250ceddb26eaf4ded19"
+checksum = "93ba71c393d7236d79055c72c0d6101822a0a64487ede90cb9b023ebaaa05af3"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7488,6 +7488,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-tungstenite 0.20.1",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber 0.3.23",
@@ -7498,9 +7499,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.151.0"
+version = "0.153.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7027b8b0f32772c4d8fcad1772d77152672d706f139004438a3c8d5f6f22252e"
+checksum = "11988023320d8623bd339d4239297fbd0a42e0307d9c46a1fd9f6afbf4b7b6c0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7525,9 +7526,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.151.0"
+version = "0.153.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c34b23220362591dbe418f7cabae6d1a5d963212ccedcd629134a0c83937269"
+checksum = "a1bbf96296aeb6b6739c169be162a5abb2a9f6fc78fe45f6f9b3b0779a8b6092"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7568,9 +7569,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.251.1"
+version = "0.254.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b00857ca975c4c63f4bfa8c3ba7ef034b1a91979650867d5da03cb92cb101a7e"
+checksum = "a45273d02955b2144e0f5405c14539c030352cae61acad85b5ac71ff27635959"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -7605,6 +7606,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
+ "toml",
  "tracing",
  "tycho-client",
  "tycho-common",

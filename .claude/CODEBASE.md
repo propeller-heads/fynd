@@ -97,7 +97,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
-| `BLACKLIST_CONFIG` | Blacklist config file (default: `blacklist.toml`) |
+| `BLOCKLIST_CONFIG` | Blocklist config file (default: `blocklist.toml`) |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 
 ### CLI Commands
@@ -112,7 +112,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | File | Purpose |
 |---|---|
 | `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout. Optional — binary falls back to embedded defaults if not found |
-| `blacklist.toml` | Pool IDs to exclude from routing. Optional — binary falls back to embedded defaults if not found |
+| `blocklist.toml` | Pool IDs to exclude from routing. Optional — binary falls back to embedded defaults if not found |
 
 ## Testing
 

@@ -8,7 +8,7 @@ infrastructure.
 | Module | Description |
 |---|---|
 | `builder.rs` | `FyndRPCBuilder` wraps `FyndBuilder`, adds HTTP server config. `FyndRPC` struct runs the server with graceful shutdown |
-| `config.rs` | `WorkerPoolsConfig` (TOML loader), `BlacklistConfig`, `defaults` module re-exporting `fynd-core` defaults + HTTP-specific ones |
+| `config.rs` | `WorkerPoolsConfig` (TOML loader), `BlocklistConfig`, `defaults` module re-exporting `fynd-core` defaults + HTTP-specific ones |
 | `protocols.rs` | `fetch_protocol_systems()` — paginated Tycho RPC call to discover available protocols |
 | `api/` | HTTP endpoint handlers and OpenAPI documentation |
 

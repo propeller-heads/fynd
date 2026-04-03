@@ -1,3 +1,24 @@
+## [0.46.1](https://github.com/propeller-heads/fynd/compare/0.46.0...0.46.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* set min token quality filter on tycho stream ([e71fae0](https://github.com/propeller-heads/fynd/commit/e71fae0d5dcfeb845af6222b47ef76b4a6b4eaee))
+
+## [0.46.0](https://github.com/propeller-heads/fynd/compare/0.45.0...0.46.0) (2026-04-02)
+
+
+### Features
+
+* add blocklisted_components setter to FyndBuilder ([c4d29b0](https://github.com/propeller-heads/fynd/commit/c4d29b0627ede8cb50acf1ce8a8a74d23c680a25))
+* add missing components to blocklist ([3c90845](https://github.com/propeller-heads/fynd/commit/3c90845d39c3f506fd24bea3a9e250a6a07e1a45))
+* move blocklist to tycho-simulation ([46bda43](https://github.com/propeller-heads/fynd/commit/46bda43c7d0824b4f670b016b6a9a4f63d052271))
+
+
+### Bug Fixes
+
+* remove dependency mentioned twice from cargo.lock ([84dce5b](https://github.com/propeller-heads/fynd/commit/84dce5b548bd00739cfd691df90bbc10dc03ad18))
+
 ## [0.45.0](https://github.com/propeller-heads/fynd/compare/0.44.1...0.45.0) (2026-04-01)
 
 

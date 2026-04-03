@@ -289,7 +289,7 @@ pub struct FyndBuilder {
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
-    blacklisted_components: HashSet<String>,
+    blocklisted_components: HashSet<String>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -318,7 +318,7 @@ impl FyndBuilder {
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
             reconnect_delay: defaults::RECONNECT_DELAY,
-            blacklisted_components: HashSet::new(),
+            blocklisted_components: HashSet::new(),
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -380,9 +380,9 @@ impl FyndBuilder {
         self
     }
 
-    /// Replaces the set of component addresses that are excluded from routing.
-    pub fn blacklisted_components(mut self, components: HashSet<String>) -> Self {
-        self.blacklisted_components = components;
+    /// Sets component IDs to exclude from the Tycho stream.
+    pub fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+        self.blocklisted_components = components;
         self
     }
 
@@ -486,7 +486,7 @@ impl FyndBuilder {
         .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality)
         .traded_n_days_ago(self.traded_n_days_ago)
-        .blacklisted_components(self.blacklisted_components);
+        .blocklisted_components(self.blocklisted_components);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
