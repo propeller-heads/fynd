@@ -358,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
                     &client,
                     &signer,
                     sell_token_bytes.clone(),
-                    max_uint160(),
+                    amount.clone(),
                     AllowanceCheck::AtLeast(amount.clone()),
                     UserTransferType::TransferFromPermit2,
                     sender,
