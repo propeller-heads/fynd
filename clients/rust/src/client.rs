@@ -87,7 +87,7 @@ impl Default for RetryConfig {
 /// RPC node during [`FyndClient::swap_payload`].
 ///
 /// Build via the setter methods; all options are unset by default.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SigningHints {
     sender: Option<Address>,
     nonce: Option<u64>,
@@ -248,6 +248,7 @@ fn bytes_to_b256(b: &Bytes) -> Result<B256, FyndError> {
 // ============================================================================
 
 /// Options controlling the behaviour of [`FyndClient::execute_swap`].
+#[derive(Clone)]
 pub struct ExecutionOptions {
     /// When `true`, simulate the transaction via `eth_call` and `estimate_gas` instead of
     /// broadcasting it. The returned [`ExecutionReceipt`] resolves immediately with the
@@ -288,6 +289,7 @@ pub enum AllowanceCheck {
 }
 
 /// Parameters for [`FyndClient::approval`].
+#[derive(Clone)]
 pub struct ApprovalParams {
     token: bytes::Bytes,
     amount: BigUint,

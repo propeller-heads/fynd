@@ -377,6 +377,7 @@ pub enum OrderSide {
 ///
 /// Addresses are raw 20-byte values (`bytes::Bytes`). The amount is denominated
 /// in the smallest unit of the input token (e.g. wei for ETH, atomic units for ERC-20).
+#[derive(Debug, Clone)]
 pub struct Order {
     token_in: Bytes,
     token_out: Bytes,
@@ -441,7 +442,7 @@ impl Order {
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
 /// Build via the builder methods; unset options use server defaults.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QuoteOptions {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) min_responses: Option<usize>,
@@ -495,6 +496,7 @@ impl QuoteOptions {
 }
 
 /// All inputs needed to call [`FyndClient::quote`](crate::FyndClient::quote).
+#[derive(Debug, Clone)]
 pub struct QuoteParams {
     pub(crate) order: Order,
     pub(crate) options: QuoteOptions,
@@ -883,6 +885,7 @@ impl BatchQuote {
 }
 
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+#[derive(Debug, Clone)]
 pub struct InstanceInfo {
     /// Router contract address (20 raw bytes).
     router_address: bytes::Bytes,
@@ -918,7 +921,7 @@ impl InstanceInfo {
 }
 
 /// Health information from the Fynd RPC server's `/v1/health` endpoint.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HealthStatus {
     healthy: bool,
     last_update_ms: u64,

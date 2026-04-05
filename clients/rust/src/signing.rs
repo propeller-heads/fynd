@@ -167,6 +167,7 @@ impl SignedSwap {
 ///
 /// Returned by awaiting an [`ExecutionReceipt`]. For dry-run executions
 /// ([`ExecutionOptions::dry_run`](crate::ExecutionOptions)), `tx_hash` and `tx_receipt` are `None`.
+#[derive(Debug, Clone)]
 pub struct SettledOrder {
     tx_hash: Option<B256>,
     settled_amount: Option<BigUint>,
@@ -318,6 +319,7 @@ impl SignedApproval {
 // ============================================================================
 
 /// The result of a successfully mined transaction (non-swap).
+#[derive(Debug, Clone)]
 pub struct MinedTx {
     tx_hash: B256,
     gas_cost: BigUint,
