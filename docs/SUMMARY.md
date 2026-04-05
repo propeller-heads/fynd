@@ -7,6 +7,7 @@
 
 * [Overview](README.md)
 * [Quickstart](get-started/quickstart/README.md)
+* [Quickstart (Frontend)](get-started/quickstart-frontend/README.md)
 
 ## Guides
 
