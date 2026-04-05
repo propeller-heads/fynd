@@ -31,8 +31,10 @@ use tracing::{debug, warn};
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order,
-    OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
+    encoding::encoder::Encoder,
+    price_guard::{config::PriceGuardConfig, guard::PriceGuard},
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -81,6 +83,10 @@ pub struct WorkerPoolRouter {
     config: WorkerPoolRouterConfig,
     /// Encoder for encoding solutions into on-chain transactions.
     encoder: Encoder,
+    /// Validates solution outputs against external price sources.
+    price_guard: Option<PriceGuard>,
+    /// Server-side default config for the price guard.
+    price_guard_config: Option<PriceGuardConfig>,
 }
 
 impl WorkerPoolRouter {
@@ -90,7 +96,14 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder }
+        Self { solver_pools, config, encoder, price_guard: None, price_guard_config: None }
+    }
+
+    /// Enables price guard validation with a custom configuration.
+    pub fn with_price_guard(mut self, price_guard: PriceGuard, config: PriceGuardConfig) -> Self {
+        self.price_guard = Some(price_guard);
+        self.price_guard_config = Some(config);
+        self
     }
 
     /// Returns the number of registered solver pools.
@@ -132,6 +145,28 @@ impl WorkerPoolRouter {
             .into_iter()
             .map(|responses| self.select_best(&responses, request.options()))
             .collect();
+
+        // Validate against external prices if enabled.
+        // Per-request config overrides the server default.
+        if let Some(ref guard) = self.price_guard {
+            let config = if let Some(request_config) = request.options().price_guard() {
+                debug!("using request price guard config: {:?}", request_config);
+                request_config.clone()
+            } else if let Some(default_config) = &self.price_guard_config {
+                debug!("using default price guard config: {:?}", default_config);
+                default_config.clone()
+            } else {
+                return Err(SolveError::Internal("no price guard config available".to_string()));
+            };
+
+            match guard.validate(order_quotes, &config) {
+                Ok(validated) => order_quotes = validated,
+                Err(e) => {
+                    warn!(error = %e, "price guard validation error");
+                    return Err(SolveError::Internal(e.to_string()));
+                }
+            }
+        }
 
         // Encode solutions if encoding_options is set
         if let Some(encoding_options) = request.options().encoding_options() {
@@ -263,6 +298,7 @@ impl WorkerPoolRouter {
                 SolveError::NoRouteFound { .. } => "no_route",
                 SolveError::QueueFull => "queue_full",
                 SolveError::Internal(_) => "internal",
+                SolveError::PriceCheckFailed { .. } => "price_check_failed",
                 _ => "other",
             };
             counter!("worker_router_solver_failures_total", "pool" => pool_name.clone(), "error_type" => error_type).increment(1);

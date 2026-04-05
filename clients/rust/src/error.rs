@@ -60,7 +60,9 @@ impl ErrorCode {
             "QUEUE_FULL" | "SERVICE_OVERLOADED" | "STALE_DATA" | "NOT_READY" => {
                 Self::ServiceUnavailable
             }
-            "ALGORITHM_ERROR" | "INTERNAL_ERROR" | "FAILED_ENCODING" => Self::ServerError,
+            "ALGORITHM_ERROR" | "INTERNAL_ERROR" | "FAILED_ENCODING" | "PRICE_CHECK_FAILED" => {
+                Self::ServerError
+            }
             "NOT_FOUND" => Self::NotFound,
             other => Self::Unknown(other.to_string()),
         }

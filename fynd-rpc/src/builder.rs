@@ -158,6 +158,18 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Enables the price guard with a custom configuration.
+    ///
+    /// The `enabled` field in the config controls whether validation runs.
+    /// When enabled, default providers are auto-registered if none were added
+    /// manually.
+    pub fn with_price_guard_config(mut self, config: fynd_core::PriceGuardConfig) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .price_guard_config(config);
+        self
+    }
+
     /// Assemble all components and return a running [`FyndRPC`] server handle.
     ///
     /// Starts all worker pools and binds the HTTP listener. Returns an error if any component

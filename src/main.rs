@@ -297,6 +297,14 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
             };
         builder = builder.blocklist(blocklist);
     }
+    builder = builder.with_price_guard_config(
+        fynd_core::PriceGuardConfig::default()
+            .with_enabled(args.enable_price_guard)
+            .with_lower_tolerance_bps(args.price_guard_lower_tolerance_bps)
+            .with_upper_tolerance_bps(args.price_guard_upper_tolerance_bps)
+            .with_allow_on_provider_error(args.price_guard_allow_on_provider_error)
+            .with_allow_on_token_price_not_found(args.price_guard_allow_on_token_not_found),
+    );
 
     // Build and start solver
     let solver = builder

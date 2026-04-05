@@ -33,6 +33,10 @@ use crate::{
         TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    price_guard::{
+        config::PriceGuardConfig, guard::PriceGuard, provider::PriceProvider,
+        provider_registry::PriceProviderRegistry,
+    },
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -294,6 +298,8 @@ pub struct FyndBuilder {
     router_min_responses: usize,
     encoder: Option<Encoder>,
     pools: Vec<PoolEntry>,
+    price_guard_config: PriceGuardConfig,
+    price_providers: Vec<Box<dyn PriceProvider>>,
 }
 
 impl FyndBuilder {
@@ -323,6 +329,8 @@ impl FyndBuilder {
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
             pools: Vec::new(),
+            price_guard_config: PriceGuardConfig::default(),
+            price_providers: Vec::new(),
         }
     }
 
@@ -446,6 +454,39 @@ impl FyndBuilder {
         self
     }
 
+    /// Registers the built-in price providers (Hyperliquid + Binance).
+    ///
+    /// Called automatically during [`build`](Self::build) if no providers have been
+    /// registered and the price guard is not disabled. To use only custom
+    /// providers, call [`register_price_provider`](Self::register_price_provider)
+    /// before `build()` and the defaults will be skipped.
+    pub fn add_default_price_providers(self) -> Self {
+        self.register_price_provider(Box::new(
+            crate::price_guard::hyperliquid::HyperliquidProvider::default(),
+        ))
+        .register_price_provider(Box::new(
+            crate::price_guard::binance_ws::BinanceWsProvider::default(),
+        ))
+    }
+
+    /// Registers a custom price provider for the price guard.
+    ///
+    /// The provider's [`start`](PriceProvider::start) method is called during
+    /// [`build`](Self::build) with the shared market data.
+    pub fn register_price_provider(mut self, provider: Box<dyn PriceProvider>) -> Self {
+        self.price_providers.push(provider);
+        self
+    }
+
+    /// Sets the server-side default [`PriceGuardConfig`].
+    ///
+    /// This config is used when a quote request does not include per-request
+    /// price guard overrides. Defaults to [`PriceGuardConfig::default`].
+    pub fn price_guard_config(mut self, config: PriceGuardConfig) -> Self {
+        self.price_guard_config = config;
+        self
+    }
+
     /// Adds a named pool using the given [`PoolConfig`].
     pub fn add_pool(mut self, name: impl Into<String>, config: &PoolConfig) -> Self {
         self.pools.push(PoolEntry::BuiltIn {
@@ -466,9 +507,14 @@ impl FyndBuilder {
     /// # Errors
     ///
     /// Returns [`SolverBuildError`] if any component fails to initialize.
-    pub fn build(self) -> Result<Solver, SolverBuildError> {
+    pub fn build(mut self) -> Result<Solver, SolverBuildError> {
         if self.pools.is_empty() {
             return Err(SolverBuildError::NoPools);
+        }
+
+        // Add built-in providers if none were explicitly registered.
+        if self.price_providers.is_empty() {
+            self = self.add_default_price_providers();
         }
 
         let market_data = Arc::new(tokio::sync::RwLock::new(SharedMarketData::new()));
@@ -591,10 +637,23 @@ impl FyndBuilder {
         let chain = self.chain;
         let router_address = encoder.router_address().clone();
 
+        // Start price providers and construct the guard.
+        // Providers are started even when `enabled: false` so caches stay warm
+        // for per-request opt-in. The `enabled` flag only controls whether
+        // validation runs at request time.
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
-        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+
+        let mut registry = PriceProviderRegistry::new();
+        let mut worker_handles = Vec::new();
+        for mut provider in self.price_providers {
+            worker_handles.push(provider.start(Arc::clone(&market_data)));
+            registry = registry.register(provider);
+        }
+        let price_guard = PriceGuard::new(registry, worker_handles);
+        router = router.with_price_guard(price_guard, self.price_guard_config);
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = tycho_feed.run().await {

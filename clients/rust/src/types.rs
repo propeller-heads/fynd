@@ -438,6 +438,12 @@ impl Order {
     }
 }
 
+/// Per-request overrides for price guard validation.
+///
+/// All fields are optional. When `None`, the server's configured defaults are used.
+/// Re-exported from `fynd-rpc-types` for wire compatibility.
+pub use fynd_rpc_types::PriceGuardConfig;
+
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
 /// Build via the builder methods; unset options use server defaults.
@@ -447,6 +453,7 @@ pub struct QuoteOptions {
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
     pub(crate) encoding_options: Option<EncodingOptions>,
+    pub(crate) price_guard: Option<PriceGuardConfig>,
 }
 
 impl QuoteOptions {
@@ -478,6 +485,16 @@ impl QuoteOptions {
         self
     }
 
+    /// Override server-side price guard defaults for this request.
+    ///
+    /// When the server has the price guard enabled, this allows per-request
+    /// tuning of tolerance thresholds and fail-open behavior. Fields left as
+    /// `None` in [`PriceGuardConfig`] inherit the server defaults.
+    pub fn with_price_guard(mut self, config: PriceGuardConfig) -> Self {
+        self.price_guard = Some(config);
+        self
+    }
+
     /// The configured timeout in milliseconds, or `None` if using the server default.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -491,6 +508,11 @@ impl QuoteOptions {
     /// The configured gas cap, or `None` if no cap was set.
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
+    }
+
+    /// Per-request price guard overrides, or `None` if using server defaults.
+    pub fn price_guard(&self) -> Option<&PriceGuardConfig> {
+        self.price_guard.as_ref()
     }
 }
 
@@ -533,6 +555,8 @@ pub enum QuoteStatus {
     Timeout,
     /// No solver workers are initialised yet (e.g. market data not loaded).
     NotReady,
+    /// The solution failed external price validation.
+    PriceCheckFailed,
 }
 
 /// Ethereum block at which a quote was computed.
