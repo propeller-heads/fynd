@@ -73,54 +73,7 @@ pub struct BlocklistConfig {
     components: HashSet<String>,
 }
 
-/// The default blocklist configuration embedded at compile time.
-///
-/// Keep in sync with the repo-root `blocklist.toml` (the user-facing example config).
-/// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
-/// and the file lives outside the `fynd-rpc` package directory.
-const DEFAULT_BLOCKLIST_TOML: &str = r#"
-[blocklist]
-components = [
-    # AMPL pools - AMPL is a rebasing token that breaks simulation assumptions
-    # UniswapV3 AMPL/WETH
-    "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
-    # UniswapV2 AMPL/WETH
-    "0xc5be99a02c6857f9eac67bbce58df5572498f40c",
-    # Fluid Lite pools with broken simulation (ENG-5696)
-    "0x32aa6f5c6f771b39d383c6e36d7ef0702a28e32ad64671c059f41547b82ef0ef",
-    "0x7f31b44f032f125bb465c161343fccfdc88fee8dc94c068f6430d2345d80f1d1",
-    # Curve yETH/WETH — exploited Nov 2025 ($9M), broken invariant, pool insolvent
-    "0x69accb968b19a53790f43e57558f5e443a91af22",
-    # Fluid syrupUSDC/USDC — ERC-4626 vault token, simulation can't track accumulating rate
-    "0x79eea4a1be86c43a9a9c4384b0b28a07af24ae29",
-    # Curve weETH/WETH (StableSwapNG) — MissingAccount error, oracle deps not in simulated state
-    "0xdb74dfdd3bb46be8ce6c33dc9d82777bcfc3ded5",
-    # "Dollars" (USD, 0xd233d1f6) token pools — fake stablecoin with mispriced reserves
-    # UniswapV2 LINK/"Dollars"
-    "0x81a8bd7f2b29cee72aae18da9b4637acf4bc125a",
-    # UniswapV2 MKR/"Dollars"
-    "0xa16a3cbc92d77b720a851d33a91890c4fbfb0299",
-    # UniswapV2 DAI/"Dollars" (last trade Sep 2020)
-    "0x1d1126cc2c77384448913b41fbf308563aae1f16",
-    # UniswapV2 WETH/"Dollars" (1938 WETH locked, mispriced)
-    "0x582e3da39948c6339433008703211ad2c13eb2ac",
-]
-"#;
-
 impl BlocklistConfig {
-    /// Returns the built-in default blocklist embedded in the binary.
-    ///
-    /// This is the repo-root `blocklist.toml` baked in at compile time.
-    pub fn builtin_default() -> Self {
-        #[derive(Deserialize)]
-        struct Wrapper {
-            blocklist: BlocklistConfig,
-        }
-        let wrapper: Wrapper =
-            toml::from_str(DEFAULT_BLOCKLIST_TOML).expect("built-in blocklist.toml is valid TOML");
-        wrapper.blocklist
-    }
-
     /// Load blocklist configuration from a TOML file.
     ///
     /// The TOML file should have a `[blocklist]` section:
@@ -143,7 +96,8 @@ impl BlocklistConfig {
         Ok(wrapper.blocklist)
     }
 
-    pub(crate) fn into_components(self) -> HashSet<String> {
+    /// Consumes the struct and returns the underlying set of components.
+    pub fn into_components(self) -> HashSet<String> {
         self.components
     }
 }
@@ -156,15 +110,6 @@ mod tests {
     fn test_builtin_default_does_not_panic() {
         let config = WorkerPoolsConfig::builtin_default();
         assert!(!config.pools().is_empty(), "built-in config must have at least one pool");
-    }
-
-    #[test]
-    fn test_blocklist_builtin_default_does_not_panic() {
-        let config = BlocklistConfig::builtin_default();
-        assert!(
-            !config.components.is_empty(),
-            "built-in blocklist must have at least one component"
-        );
     }
 
     #[test]

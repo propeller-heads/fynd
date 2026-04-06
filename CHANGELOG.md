@@ -1,3 +1,15 @@
+## [0.48.0](https://github.com/propeller-heads/fynd/compare/0.47.0...0.48.0) (2026-04-06)
+
+
+### Features
+
+* fallback to tycho simulation blocklist defaults ([727eef8](https://github.com/propeller-heads/fynd/commit/727eef8e02960b39d0381eabeb9da5e57fafa992))
+
+
+### Bug Fixes
+
+* update tycho simulation version ([c9109b9](https://github.com/propeller-heads/fynd/commit/c9109b9baa2e50c6f66ae80f05284bb8b96bc7a3))
+
 ## [0.47.0](https://github.com/propeller-heads/fynd/compare/0.46.1...0.47.0) (2026-04-03)
 
 

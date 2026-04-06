@@ -87,7 +87,7 @@ Run `cargo run --release -- serve --help` for the full list.
 | `--worker-router-timeout-ms`       | —                     | `100`                      | Default solve timeout (ms)                                                                                                                                                                                     |
 | `--worker-router-min-responses`    | —                     | `0`                        | Early return threshold (0 = wait for all pools)                                                                                                                                                                |
 | `-w, --worker-pools-config`        | `WORKER_POOLS_CONFIG` | `worker_pools.toml`        | Worker pools config file path                                                                                                                                                                                  |
-| `--blocklist-config`               | `BLOCKLIST_CONFIG`    | `blocklist.toml`           | Path to blocklist TOML config file. Components listed here are excluded from the Tycho stream.                                                                                                                                                                                     |
+| `--blocklist-config`               | `BLOCKLIST_CONFIG`    | [tycho-simulation default](https://github.com/propeller-heads/tycho-simulation/blob/main/blocklist.toml)                          | Path to blocklist TOML config file. Components listed here are excluded from the Tycho stream.                                                                                                                                                                                     |
 | `--disable-tls`                    | —                     | `false`                    | Disable TLS for Tycho connection                                                                                                                                                                               |
 | `--min-token-quality`              | —                     | `100`                      | Minimum [token quality](https://docs.propellerheads.xyz/tycho/overview/concepts#token) filter                                                                                                                  |
 | `--gas-refresh-interval-secs`      | —                     | `30`                       | Gas price refresh interval                                                                                                                                                                                     |
@@ -130,7 +130,7 @@ cargo run --release -- serve -w my_worker_pools.toml
 
 ## Blocklist config
 
-By default, Fynd loads `blocklist.toml` from the working directory. The default excludes components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)). Override with `--blocklist-config`:
+By default, Fynd loads `blocklist.toml` from tycho-simulation. The default excludes components with known simulation issues (e.g., [rebasing tokens on UniswapV3 pools](https://docs.uniswap.org/concepts/protocol/integration-issues)). Override with `--blocklist-config`:
 
 ```bash
 cargo run --release -- serve --blocklist-config my_blocklist.toml
