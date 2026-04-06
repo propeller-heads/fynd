@@ -9,9 +9,9 @@ use fynd_rpc_types::OrderQuote;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus, Order,
-        OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams, QuoteStatus,
-        Route, Swap, Transaction, UserTransferType,
+        BackendKind, BatchQuote, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown,
+        HealthStatus, Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions,
+        QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -58,6 +58,58 @@ pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::QuoteReque
     let order = dto::Order::try_from(params.order)?;
     let options = dto::QuoteOptions::try_from(params.options)?;
     Ok(dto::QuoteRequest::new(vec![order]).with_options(options))
+}
+
+/// Converts [`BatchQuoteParams`] into a DTO request plus per-order `(token_out, receiver)` metadata.
+///
+/// The metadata vec is index-aligned with the DTO orders and must be threaded through to
+/// [`dto_to_quotes`] so each response quote gets the correct token/receiver fields.
+pub(crate) fn batch_quote_params_to_dto(
+    params: BatchQuoteParams,
+) -> Result<(dto::QuoteRequest, Vec<(bytes::Bytes, bytes::Bytes)>), FyndError> {
+    if params.orders.is_empty() {
+        return Err(FyndError::Protocol("batch_quote requires at least one order".into()));
+    }
+    let options = dto::QuoteOptions::try_from(params.options)?;
+    let mut dto_orders = Vec::with_capacity(params.orders.len());
+    let mut order_meta = Vec::with_capacity(params.orders.len());
+    for order in params.orders {
+        let token_out = order.token_out().clone();
+        let receiver = order.receiver().unwrap_or_else(|| order.sender()).clone();
+        dto_orders.push(dto::Order::try_from(order)?);
+        order_meta.push((token_out, receiver));
+    }
+    let request = dto::QuoteRequest::new(dto_orders).with_options(options);
+    Ok((request, order_meta))
+}
+
+/// Maps a batch DTO response to client [`Quote`]s using per-order metadata.
+///
+/// `order_meta` must be index-aligned with the request orders produced by
+/// [`batch_quote_params_to_dto`]. Returns an error if the response order count differs from
+/// the request order count.
+pub(crate) fn dto_to_quotes(
+    ds: dto::Quote,
+    order_meta: Vec<(bytes::Bytes, bytes::Bytes)>,
+) -> Result<Vec<Quote>, FyndError> {
+    let solve_time_ms = ds.solve_time_ms();
+    let order_quotes = ds.into_orders();
+    if order_quotes.len() != order_meta.len() {
+        return Err(FyndError::Protocol(format!(
+            "server returned {} quotes but {} were requested",
+            order_quotes.len(),
+            order_meta.len()
+        )));
+    }
+    order_quotes
+        .into_iter()
+        .zip(order_meta)
+        .map(|(oq, (token_out, receiver))| {
+            let mut quote = dto_to_quote(oq, token_out, receiver)?;
+            quote.solve_time_ms = solve_time_ms;
+            Ok(quote)
+        })
+        .collect()
 }
 
 impl TryFrom<Order> for dto::Order {
@@ -697,5 +749,108 @@ mod tests {
         let opts = EncodingOptions::new(0.005);
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
         assert!(dto_opts.client_fee_params().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // batch_quote_params_to_dto
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_quote_params_to_dto_empty_orders_errors() {
+        use crate::types::{BatchQuoteParams, QuoteOptions};
+
+        let params = BatchQuoteParams::new(vec![], QuoteOptions::default());
+        assert!(matches!(batch_quote_params_to_dto(params), Err(FyndError::Protocol(_))));
+    }
+
+    #[test]
+    fn batch_quote_params_to_dto_extracts_per_order_meta() {
+        use crate::types::{BatchQuoteParams, Order, OrderSide, QuoteOptions};
+
+        let token_in_a = Bytes::copy_from_slice(&[0xaa; 20]);
+        let token_out_a = Bytes::copy_from_slice(&[0xbb; 20]);
+        let sender_a = Bytes::copy_from_slice(&[0xcc; 20]);
+        let receiver_a = Bytes::copy_from_slice(&[0xdd; 20]);
+
+        let token_in_b = Bytes::copy_from_slice(&[0x11; 20]);
+        let token_out_b = Bytes::copy_from_slice(&[0x22; 20]);
+        let sender_b = Bytes::copy_from_slice(&[0x33; 20]);
+
+        let order_a = Order::new(
+            token_in_a,
+            token_out_a.clone(),
+            BigUint::from(1_000u32),
+            OrderSide::Sell,
+            sender_a.clone(),
+            Some(receiver_a.clone()),
+        );
+        let order_b = Order::new(
+            token_in_b,
+            token_out_b.clone(),
+            BigUint::from(2_000u32),
+            OrderSide::Sell,
+            sender_b.clone(),
+            None, // receiver defaults to sender
+        );
+
+        let params = BatchQuoteParams::new(vec![order_a, order_b], QuoteOptions::default());
+        let (request, meta) = batch_quote_params_to_dto(params).unwrap();
+
+        assert_eq!(request.orders().len(), 2);
+        assert_eq!(meta.len(), 2);
+
+        let (tok_out_0, rec_0) = &meta[0];
+        assert_eq!(tok_out_0.as_ref(), token_out_a.as_ref());
+        assert_eq!(rec_0.as_ref(), receiver_a.as_ref());
+
+        let (tok_out_1, rec_1) = &meta[1];
+        assert_eq!(tok_out_1.as_ref(), token_out_b.as_ref());
+        // no explicit receiver → defaults to sender
+        assert_eq!(rec_1.as_ref(), sender_b.as_ref());
+    }
+
+    // -----------------------------------------------------------------------
+    // dto_to_quotes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dto_to_quotes_count_mismatch_errors() {
+        let oq = sample_dto_order_quote();
+        let dto_quote = dto::Quote::new(vec![oq], BigUint::from(100_000u32), 42);
+        // supply two metadata entries for one response quote
+        let meta = vec![
+            (Bytes::new(), Bytes::new()),
+            (Bytes::new(), Bytes::new()),
+        ];
+        assert!(matches!(dto_to_quotes(dto_quote, meta), Err(FyndError::Protocol(_))));
+    }
+
+    #[test]
+    fn dto_to_quotes_maps_per_order_meta_and_solve_time() {
+        let oq_a = sample_dto_order_quote();
+        let oq_b = sample_dto_order_quote();
+        let solve_ms = 77u64;
+        let dto_quote = dto::Quote::new(vec![oq_a, oq_b], BigUint::from(200_000u32), solve_ms);
+
+        let token_out_a = Bytes::copy_from_slice(&[0xaa; 20]);
+        let receiver_a = Bytes::copy_from_slice(&[0xbb; 20]);
+        let token_out_b = Bytes::copy_from_slice(&[0xcc; 20]);
+        let receiver_b = Bytes::copy_from_slice(&[0xdd; 20]);
+
+        let meta = vec![
+            (token_out_a.clone(), receiver_a.clone()),
+            (token_out_b.clone(), receiver_b.clone()),
+        ];
+
+        let quotes = dto_to_quotes(dto_quote, meta).unwrap();
+        assert_eq!(quotes.len(), 2);
+
+        assert_eq!(quotes[0].token_out().as_ref(), token_out_a.as_ref());
+        assert_eq!(quotes[0].receiver().as_ref(), receiver_a.as_ref());
+        assert_eq!(quotes[0].solve_time_ms(), solve_ms);
+
+        assert_eq!(quotes[1].token_out().as_ref(), token_out_b.as_ref());
+        assert_eq!(quotes[1].receiver().as_ref(), receiver_b.as_ref());
+        assert_eq!(quotes[1].solve_time_ms(), solve_ms);
     }
 }

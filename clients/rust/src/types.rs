@@ -509,6 +509,26 @@ impl QuoteParams {
     }
 }
 
+/// All inputs needed to call [`FyndClient::batch_quote`](crate::FyndClient::batch_quote).
+///
+/// Submits multiple orders in a single request. All orders share the same [`QuoteOptions`].
+/// The response preserves the input order: `quotes[i]` corresponds to `orders[i]`.
+#[derive(Debug, Clone)]
+pub struct BatchQuoteParams {
+    pub(crate) orders: Vec<Order>,
+    pub(crate) options: QuoteOptions,
+}
+
+impl BatchQuoteParams {
+    /// Create a batch request from a list of orders and shared solving options.
+    ///
+    /// `orders` must be non-empty. Each order is solved independently by the server;
+    /// the response vec has the same length and index alignment as the input.
+    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
+        Self { orders, options }
+    }
+}
+
 // ============================================================================
 // RESPONSE TYPES
 // ============================================================================
