@@ -267,8 +267,8 @@ impl PriceProvider for BinanceWsProvider {
             .read()
             .map_err(|e| PriceProviderError::Unavailable(format!("ticker cache poisoned: {e}")))?;
 
-        let lookup = Self::resolve_price(&cache, &sym_in, &sym_out).ok_or_else(|| {
-            PriceProviderError::TokenNotFound { address: format!("{sym_in}/{sym_out}") }
+        let lookup = Self::resolve_price(&cache, &sym_in, &sym_out).ok_or({
+            PriceProviderError::PriceNotFound { token_in: sym_in, token_out: sym_out }
         })?;
 
         check_staleness(lookup.timestamp_ms)?;
