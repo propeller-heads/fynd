@@ -18,12 +18,14 @@ use reqwest::Client as HttpClient;
 use crate::{
     error::FyndError,
     mapping,
-    mapping::dto_to_batch_quote,
     signing::{
         compute_settled_amount, ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx,
         SettledOrder, SignedApproval, SignedSwap, SwapPayload, TxReceipt,
     },
-    types::{BackendKind, HealthStatus, InstanceInfo, Quote, QuoteParams, UserTransferType},
+    types::{
+        BackendKind, BatchQuoteParams, HealthStatus, InstanceInfo, Quote, QuoteParams,
+        UserTransferType,
+    },
 };
 // ============================================================================
 // RETRY CONFIG
@@ -87,7 +89,7 @@ impl Default for RetryConfig {
 /// RPC node during [`FyndClient::swap_payload`].
 ///
 /// Build via the setter methods; all options are unset by default.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SigningHints {
     sender: Option<Address>,
     nonce: Option<u64>,
@@ -248,6 +250,7 @@ fn bytes_to_b256(b: &Bytes) -> Result<B256, FyndError> {
 // ============================================================================
 
 /// Options controlling the behaviour of [`FyndClient::execute_swap`].
+#[derive(Clone)]
 pub struct ExecutionOptions {
     /// When `true`, simulate the transaction via `eth_call` and `estimate_gas` instead of
     /// broadcasting it. The returned [`ExecutionReceipt`] resolves immediately with the
@@ -276,6 +279,7 @@ impl Default for ExecutionOptions {
 
 /// Controls whether [`FyndClient::approval`] checks the current on-chain allowance before
 /// building an approval transaction.
+#[derive(Clone)]
 pub enum AllowanceCheck {
     /// Always build the approval payload — do not read the current allowance.
     Skip,
@@ -288,6 +292,7 @@ pub enum AllowanceCheck {
 }
 
 /// Parameters for [`FyndClient::approval`].
+#[derive(Clone)]
 pub struct ApprovalParams {
     token: bytes::Bytes,
     amount: BigUint,
@@ -600,16 +605,58 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_quote: fynd_rpc_types::Quote = response.json().await?;
-        let solve_time_ms = dto_quote.solve_time_ms();
-        let batch_quote = dto_to_batch_quote(dto_quote, token_out, receiver)?;
+        mapping::map_quote_response(dto_quote, vec![(token_out, receiver)])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| FyndError::Protocol("server returned empty quote list".into()))
+    }
 
-        let mut quote = batch_quote
-            .quotes()
-            .first()
-            .cloned()
-            .ok_or_else(|| FyndError::Protocol("Received empty quote".into()))?;
-        quote.solve_time_ms = solve_time_ms;
-        Ok(quote)
+    /// Request quotes for multiple swap orders in a single round-trip.
+    ///
+    /// All orders share the same [`crate::QuoteOptions`]. The returned vec is index-aligned with
+    /// the input: `quotes[i]` corresponds to `params.orders[i]`. For any error response, the entire
+    /// request is considered for a retry. Partial responses are not returned.
+    ///
+    /// Retries automatically on transient failures according to the client's [`RetryConfig`].
+    pub async fn batch_quote(&self, params: BatchQuoteParams) -> Result<Vec<Quote>, FyndError> {
+        let (dto_request, order_meta) = mapping::batch_quote_params_to_dto(params)?;
+
+        let mut delay = self.retry.initial_backoff;
+        for attempt in 0..self.retry.max_attempts {
+            match self
+                .request_batch_quote(&dto_request, order_meta.clone())
+                .await
+            {
+                Ok(quotes) => return Ok(quotes),
+                Err(e) if e.is_retryable() && attempt + 1 < self.retry.max_attempts => {
+                    tracing::debug!(attempt, "batch_quote request failed, retrying");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(self.retry.max_backoff);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(FyndError::Protocol("retry loop exhausted without result".into()))
+    }
+
+    async fn request_batch_quote(
+        &self,
+        dto_request: &fynd_rpc_types::QuoteRequest,
+        order_meta: Vec<(Bytes, Bytes)>,
+    ) -> Result<Vec<Quote>, FyndError> {
+        let url = format!("{}/v1/quote", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .json(dto_request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
+            return Err(mapping::dto_error_to_fynd(dto_err));
+        }
+        let dto_quote: fynd_rpc_types::Quote = response.json().await?;
+        mapping::map_quote_response(dto_quote, order_meta)
     }
 
     /// Get the health status of the Fynd RPC server.

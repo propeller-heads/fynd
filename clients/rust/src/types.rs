@@ -377,6 +377,7 @@ pub enum OrderSide {
 ///
 /// Addresses are raw 20-byte values (`bytes::Bytes`). The amount is denominated
 /// in the smallest unit of the input token (e.g. wei for ETH, atomic units for ERC-20).
+#[derive(Debug, Clone)]
 pub struct Order {
     token_in: Bytes,
     token_out: Bytes,
@@ -441,7 +442,7 @@ impl Order {
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
 /// Build via the builder methods; unset options use server defaults.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QuoteOptions {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) min_responses: Option<usize>,
@@ -495,6 +496,7 @@ impl QuoteOptions {
 }
 
 /// All inputs needed to call [`FyndClient::quote`](crate::FyndClient::quote).
+#[derive(Debug, Clone)]
 pub struct QuoteParams {
     pub(crate) order: Order,
     pub(crate) options: QuoteOptions,
@@ -504,6 +506,26 @@ impl QuoteParams {
     /// Create a new request from a list of orders and optional solver options.
     pub fn new(order: Order, options: QuoteOptions) -> Self {
         Self { order, options }
+    }
+}
+
+/// All inputs needed to call [`FyndClient::batch_quote`](crate::FyndClient::batch_quote).
+///
+/// Submits multiple orders in a single request. All orders share the same [`QuoteOptions`].
+/// The response preserves the input order: `quotes[i]` corresponds to `orders[i]`.
+#[derive(Debug, Clone)]
+pub struct BatchQuoteParams {
+    pub(crate) orders: Vec<Order>,
+    pub(crate) options: QuoteOptions,
+}
+
+impl BatchQuoteParams {
+    /// Create a batch request from a list of orders and shared solving options.
+    ///
+    /// `orders` must be non-empty. Each order is solved independently by the server;
+    /// the response vec has the same length and index alignment as the input.
+    pub fn new(orders: Vec<Order>, options: QuoteOptions) -> Self {
+        Self { orders, options }
     }
 }
 
@@ -865,24 +887,8 @@ impl Quote {
     }
 }
 
-/// The solver's response to a [`QuoteParams`] request, containing quotes for every order.
-#[derive(Debug)]
-pub(crate) struct BatchQuote {
-    quotes: Vec<Quote>,
-}
-
-impl BatchQuote {
-    /// Quotes for each order, in the same order as the request.
-    pub fn quotes(&self) -> &[Quote] {
-        &self.quotes
-    }
-
-    pub(crate) fn new(quotes: Vec<Quote>) -> Self {
-        Self { quotes }
-    }
-}
-
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+#[derive(Debug, Clone)]
 pub struct InstanceInfo {
     /// Router contract address (20 raw bytes).
     router_address: bytes::Bytes,
@@ -918,7 +924,7 @@ impl InstanceInfo {
 }
 
 /// Health information from the Fynd RPC server's `/v1/health` endpoint.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HealthStatus {
     healthy: bool,
     last_update_ms: u64,
