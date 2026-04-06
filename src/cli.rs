@@ -125,13 +125,13 @@ pub struct ServeArgs {
     pub price_guard_upper_tolerance_bps: u32,
 
     /// Allow solutions through when all price providers error (network issues, API down).
-    /// Default: true.
-    #[arg(long, default_value_t = true)]
+    /// Default: false.
+    #[arg(long, default_value_t = false)]
     pub price_guard_allow_on_provider_error: bool,
 
     /// Allow solutions through when no provider has a price for the token pair.
-    /// Default: true.
-    #[arg(long, default_value_t = true)]
+    /// Default: false.
+    #[arg(long, default_value_t = false)]
     pub price_guard_allow_on_token_not_found: bool,
 }
 
