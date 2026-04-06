@@ -613,14 +613,11 @@ where
 
     /// Request quotes for multiple swap orders in a single round-trip.
     ///
-    /// All orders share the same [`QuoteOptions`]. The returned vec is index-aligned with the
-    /// input: `quotes[i]` corresponds to `params.orders[i]`.
+    /// All orders share the same [`crate::QuoteOptions`]. The returned vec is index-aligned with
+    /// the input: `quotes[i]` corresponds to `params.orders[i]`.
     ///
     /// Retries automatically on transient failures according to the client's [`RetryConfig`].
-    pub async fn batch_quote(
-        &self,
-        params: BatchQuoteParams,
-    ) -> Result<Vec<Quote>, FyndError> {
+    pub async fn batch_quote(&self, params: BatchQuoteParams) -> Result<Vec<Quote>, FyndError> {
         let (dto_request, order_meta) = mapping::batch_quote_params_to_dto(params)?;
 
         let mut delay = self.retry.initial_backoff;

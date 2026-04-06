@@ -60,7 +60,8 @@ pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::QuoteReque
     Ok(dto::QuoteRequest::new(vec![order]).with_options(options))
 }
 
-/// Converts [`BatchQuoteParams`] into a DTO request plus per-order `(token_out, receiver)` metadata.
+/// Converts [`BatchQuoteParams`] into a DTO request plus per-order `(token_out, receiver)`
+/// metadata.
 ///
 /// The metadata vec is index-aligned with the DTO orders and must be threaded through to
 /// [`map_quote_response`] so each response quote gets the correct token/receiver fields.
@@ -75,7 +76,10 @@ pub(crate) fn batch_quote_params_to_dto(
     let mut order_meta = Vec::with_capacity(params.orders.len());
     for order in params.orders {
         let token_out = order.token_out().clone();
-        let receiver = order.receiver().unwrap_or_else(|| order.sender()).clone();
+        let receiver = order
+            .receiver()
+            .unwrap_or_else(|| order.sender())
+            .clone();
         dto_orders.push(dto::Order::try_from(order)?);
         order_meta.push((token_out, receiver));
     }
@@ -83,8 +87,6 @@ pub(crate) fn batch_quote_params_to_dto(
     Ok((request, order_meta))
 }
 
-/// Maps a batch DTO response to client [`Quote`]s using per-order metadata.
-///
 impl TryFrom<Order> for dto::Order {
     type Error = FyndError;
 
@@ -807,10 +809,7 @@ mod tests {
         let oq = sample_dto_order_quote();
         let dto_quote = dto::Quote::new(vec![oq], BigUint::from(100_000u32), 42);
         // supply two metadata entries for one response quote
-        let meta = vec![
-            (Bytes::new(), Bytes::new()),
-            (Bytes::new(), Bytes::new()),
-        ];
+        let meta = vec![(Bytes::new(), Bytes::new()), (Bytes::new(), Bytes::new())];
         assert!(matches!(map_quote_response(dto_quote, meta), Err(FyndError::Protocol(_))));
     }
 
