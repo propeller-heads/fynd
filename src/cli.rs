@@ -102,7 +102,7 @@ pub struct ServeArgs {
 
     /// Path to blocklist TOML config file. Components listed here are excluded from the
     /// Tycho stream.
-    #[arg(long, env, default_value = "blocklist.toml")]
+    #[arg(long, env)]
     pub blocklist_config: Option<PathBuf>,
 
     /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
@@ -153,6 +153,7 @@ mod cli_tests {
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, 20.0);
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
+        assert_eq!(args.blocklist_config, None);
     }
 
     #[test]
@@ -181,6 +182,7 @@ mod cli_tests {
         assert_eq!(args.reconnect_delay_secs, 5);
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
+        assert_eq!(args.blocklist_config, None);
     }
 
     #[test]

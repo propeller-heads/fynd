@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
@@ -9,7 +13,7 @@ use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
-    config::{defaults, BlocklistConfig, PoolConfig},
+    config::{defaults, PoolConfig},
 };
 
 /// Builder that assembles Fynd and returns a running server handle.
@@ -139,10 +143,10 @@ impl FyndRPCBuilder {
     }
 
     /// Sets the blocklist configuration for filtering components.
-    pub fn blocklist(mut self, blocklist: BlocklistConfig) -> Self {
+    pub fn blocklist(mut self, blocklist: HashSet<String>) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blocklisted_components(blocklist.into_components());
+            .blocklisted_components(blocklist);
         self
     }
 
