@@ -1,3 +1,16 @@
+## [0.49.0](https://github.com/propeller-heads/fynd/compare/0.48.0...0.49.0) (2026-04-06)
+
+
+### Features
+
+* **fynd-client:** add batch_quote method for multi-order requests ([fd20117](https://github.com/propeller-heads/fynd/commit/fd20117019b47b00cbde21fba867d5a604096fc2))
+* **fynd-client:** derive Clone on all public structs ([894d877](https://github.com/propeller-heads/fynd/commit/894d877d5cd2ce01daa3683869d7a10d2eba1806))
+
+
+### Bug Fixes
+
+* **fynd-client:** fix fmt, doc link, and orphaned comment ([a548513](https://github.com/propeller-heads/fynd/commit/a54851356a103ec4562ddc2dc4f4ec12840fade8))
+
 ## [0.48.0](https://github.com/propeller-heads/fynd/compare/0.47.0...0.48.0) (2026-04-06)
 
 
