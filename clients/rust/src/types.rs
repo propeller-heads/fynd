@@ -887,23 +887,6 @@ impl Quote {
     }
 }
 
-/// The solver's response to a [`QuoteParams`] request, containing quotes for every order.
-#[derive(Debug)]
-pub(crate) struct BatchQuote {
-    quotes: Vec<Quote>,
-}
-
-impl BatchQuote {
-    /// Quotes for each order, in the same order as the request.
-    pub fn quotes(&self) -> &[Quote] {
-        &self.quotes
-    }
-
-    pub(crate) fn new(quotes: Vec<Quote>) -> Self {
-        Self { quotes }
-    }
-}
-
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
 #[derive(Debug, Clone)]
 pub struct InstanceInfo {

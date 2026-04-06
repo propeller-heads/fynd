@@ -9,9 +9,9 @@ use fynd_rpc_types::OrderQuote;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuote, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown,
-        HealthStatus, Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions,
-        QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
+        BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
+        Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
+        QuoteStatus, Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -63,7 +63,7 @@ pub(crate) fn quote_params_to_dto(params: QuoteParams) -> Result<dto::QuoteReque
 /// Converts [`BatchQuoteParams`] into a DTO request plus per-order `(token_out, receiver)` metadata.
 ///
 /// The metadata vec is index-aligned with the DTO orders and must be threaded through to
-/// [`dto_to_quotes`] so each response quote gets the correct token/receiver fields.
+/// [`map_quote_response`] so each response quote gets the correct token/receiver fields.
 pub(crate) fn batch_quote_params_to_dto(
     params: BatchQuoteParams,
 ) -> Result<(dto::QuoteRequest, Vec<(bytes::Bytes, bytes::Bytes)>), FyndError> {
@@ -85,33 +85,6 @@ pub(crate) fn batch_quote_params_to_dto(
 
 /// Maps a batch DTO response to client [`Quote`]s using per-order metadata.
 ///
-/// `order_meta` must be index-aligned with the request orders produced by
-/// [`batch_quote_params_to_dto`]. Returns an error if the response order count differs from
-/// the request order count.
-pub(crate) fn dto_to_quotes(
-    ds: dto::Quote,
-    order_meta: Vec<(bytes::Bytes, bytes::Bytes)>,
-) -> Result<Vec<Quote>, FyndError> {
-    let solve_time_ms = ds.solve_time_ms();
-    let order_quotes = ds.into_orders();
-    if order_quotes.len() != order_meta.len() {
-        return Err(FyndError::Protocol(format!(
-            "server returned {} quotes but {} were requested",
-            order_quotes.len(),
-            order_meta.len()
-        )));
-    }
-    order_quotes
-        .into_iter()
-        .zip(order_meta)
-        .map(|(oq, (token_out, receiver))| {
-            let mut quote = dto_to_quote(oq, token_out, receiver)?;
-            quote.solve_time_ms = solve_time_ms;
-            Ok(quote)
-        })
-        .collect()
-}
-
 impl TryFrom<Order> for dto::Order {
     type Error = FyndError;
 
@@ -231,23 +204,23 @@ impl From<UserTransferType> for dto::UserTransferType {
 // DTO FORMAT → CLIENT TYPES
 // ============================================================================
 
-pub(crate) fn dto_to_quote(
-    ds: OrderQuote,
+fn order_quote_to_quote(
+    order_quote: OrderQuote,
     token_out: bytes::Bytes,
     receiver: bytes::Bytes,
 ) -> Result<Quote, FyndError> {
-    let status = QuoteStatus::from(ds.status());
-    let route = ds
+    let status = QuoteStatus::from(order_quote.status());
+    let route = order_quote
         .route()
         .cloned()
         .map(Route::try_from)
         .transpose()?;
-    let block = BlockInfo::from(ds.block().clone());
-    let transaction = ds
+    let block = BlockInfo::from(order_quote.block().clone());
+    let transaction = order_quote
         .transaction()
         .cloned()
         .map(Transaction::from);
-    let fee_breakdown = ds.fee_breakdown().map(|fb| {
+    let fee_breakdown = order_quote.fee_breakdown().map(|fb| {
         FeeBreakdown::new(
             fb.router_fee().clone(),
             fb.client_fee().clone(),
@@ -256,15 +229,15 @@ pub(crate) fn dto_to_quote(
         )
     });
     Ok(Quote::new(
-        ds.order_id().to_string(),
+        order_quote.order_id().to_string(),
         status,
         BackendKind::Fynd,
         route,
-        ds.amount_in().clone(),
-        ds.amount_out().clone(),
-        ds.gas_estimate().clone(),
-        ds.amount_out_net_gas().clone(),
-        ds.price_impact_bps(),
+        order_quote.amount_in().clone(),
+        order_quote.amount_out().clone(),
+        order_quote.gas_estimate().clone(),
+        order_quote.amount_out_net_gas().clone(),
+        order_quote.price_impact_bps(),
         block,
         token_out,
         receiver,
@@ -283,17 +256,33 @@ impl From<dto::Transaction> for Transaction {
     }
 }
 
-pub(crate) fn dto_to_batch_quote(
-    ds: dto::Quote,
-    token_out: bytes::Bytes,
-    receiver: bytes::Bytes,
-) -> Result<BatchQuote, FyndError> {
-    let quotes = ds
-        .into_orders()
+/// Maps a quote response to client [`Quote`]s using per-order `(token_out, receiver)` metadata.
+///
+/// `order_meta` must be index-aligned with the orders in the original request. Returns an error
+/// if the response order count differs from `order_meta.len()`. `solve_time_ms` from the response
+/// is propagated to every returned quote.
+pub(crate) fn map_quote_response(
+    response: dto::Quote,
+    order_meta: Vec<(bytes::Bytes, bytes::Bytes)>,
+) -> Result<Vec<Quote>, FyndError> {
+    let solve_time_ms = response.solve_time_ms();
+    let order_quotes = response.into_orders();
+    if order_quotes.len() != order_meta.len() {
+        return Err(FyndError::Protocol(format!(
+            "server returned {} quotes but {} were requested",
+            order_quotes.len(),
+            order_meta.len()
+        )));
+    }
+    order_quotes
         .into_iter()
-        .map(|os| dto_to_quote(os, token_out.clone(), receiver.clone()))
-        .collect::<Result<Vec<Quote>, _>>()?;
-    Ok(BatchQuote::new(quotes))
+        .zip(order_meta)
+        .map(|(oq, (token_out, receiver))| {
+            let mut quote = order_quote_to_quote(oq, token_out, receiver)?;
+            quote.solve_time_ms = solve_time_ms;
+            Ok(quote)
+        })
+        .collect()
 }
 
 impl From<dto::QuoteStatus> for QuoteStatus {
@@ -545,7 +534,7 @@ mod tests {
     #[test]
     fn quote_from_dto() {
         let ds = sample_dto_order_quote();
-        let quote = dto_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
+        let quote = order_quote_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(quote.order_id(), "test-order-id");
         assert!(matches!(quote.status(), QuoteStatus::Success));
         assert!(matches!(quote.backend(), BackendKind::Fynd));
@@ -810,11 +799,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // dto_to_quotes
+    // map_quote_response
     // -----------------------------------------------------------------------
 
     #[test]
-    fn dto_to_quotes_count_mismatch_errors() {
+    fn map_quote_response_count_mismatch_errors() {
         let oq = sample_dto_order_quote();
         let dto_quote = dto::Quote::new(vec![oq], BigUint::from(100_000u32), 42);
         // supply two metadata entries for one response quote
@@ -822,11 +811,11 @@ mod tests {
             (Bytes::new(), Bytes::new()),
             (Bytes::new(), Bytes::new()),
         ];
-        assert!(matches!(dto_to_quotes(dto_quote, meta), Err(FyndError::Protocol(_))));
+        assert!(matches!(map_quote_response(dto_quote, meta), Err(FyndError::Protocol(_))));
     }
 
     #[test]
-    fn dto_to_quotes_maps_per_order_meta_and_solve_time() {
+    fn map_quote_response_maps_per_order_meta_and_solve_time() {
         let oq_a = sample_dto_order_quote();
         let oq_b = sample_dto_order_quote();
         let solve_ms = 77u64;
@@ -842,7 +831,7 @@ mod tests {
             (token_out_b.clone(), receiver_b.clone()),
         ];
 
-        let quotes = dto_to_quotes(dto_quote, meta).unwrap();
+        let quotes = map_quote_response(dto_quote, meta).unwrap();
         assert_eq!(quotes.len(), 2);
 
         assert_eq!(quotes[0].token_out().as_ref(), token_out_a.as_ref());

@@ -18,7 +18,6 @@ use reqwest::Client as HttpClient;
 use crate::{
     error::FyndError,
     mapping,
-    mapping::dto_to_batch_quote,
     signing::{
         compute_settled_amount, ApprovalPayload, ExecutionReceipt, FyndPayload, MinedTx,
         SettledOrder, SignedApproval, SignedSwap, SwapPayload, TxReceipt,
@@ -280,6 +279,7 @@ impl Default for ExecutionOptions {
 
 /// Controls whether [`FyndClient::approval`] checks the current on-chain allowance before
 /// building an approval transaction.
+#[derive(Clone)]
 pub enum AllowanceCheck {
     /// Always build the approval payload — do not read the current allowance.
     Skip,
@@ -605,16 +605,10 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_quote: fynd_rpc_types::Quote = response.json().await?;
-        let solve_time_ms = dto_quote.solve_time_ms();
-        let batch_quote = dto_to_batch_quote(dto_quote, token_out, receiver)?;
-
-        let mut quote = batch_quote
-            .quotes()
-            .first()
-            .cloned()
-            .ok_or_else(|| FyndError::Protocol("Received empty quote".into()))?;
-        quote.solve_time_ms = solve_time_ms;
-        Ok(quote)
+        mapping::map_quote_response(dto_quote, vec![(token_out, receiver)])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| FyndError::Protocol("server returned empty quote list".into()))
     }
 
     /// Request quotes for multiple swap orders in a single round-trip.
@@ -664,7 +658,7 @@ where
             return Err(mapping::dto_error_to_fynd(dto_err));
         }
         let dto_quote: fynd_rpc_types::Quote = response.json().await?;
-        mapping::dto_to_quotes(dto_quote, order_meta)
+        mapping::map_quote_response(dto_quote, order_meta)
     }
 
     /// Get the health status of the Fynd RPC server.
