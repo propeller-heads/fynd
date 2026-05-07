@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 # Fynd integration
 fynd-client = { workspace = true }
+erc20-overrides = { workspace = true }
 
 # Async + HTTP
 tokio = { workspace = true }

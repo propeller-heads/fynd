@@ -2951,6 +2951,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "erc20-overrides"
+version = "0.56.1"
+dependencies = [
+ "alloy",
+ "anyhow",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3354,13 +3362,14 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.53.0"
+version = "0.56.1"
 dependencies = [
  "alloy",
  "anyhow",
  "bytes",
  "clap",
  "csv",
+ "erc20-overrides",
  "fastrand",
  "fynd-client",
  "num-bigint",
@@ -3428,6 +3437,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "erc20-overrides",
  "fynd-client",
  "num-bigint",
  "reqwest 0.12.28",

@@ -1,7 +1,9 @@
-//! ERC-20 helpers: balance/allowance slot detection via eth_call + state overrides.
+//! ERC-20 balance/allowance storage-slot detection for `eth_call` overrides.
 //!
-//! Uses brute-force probing (slots 0..=20) which works on any node without the
-//! debug namespace, unlike `EVMBalanceSlotDetector` which requires `debug_traceCall`.
+//! Brute-force probes slots `0..=MAX_PROBE_SLOT` by writing a sentinel value
+//! into a candidate slot and reading it back via `balanceOf` / `allowance`. Works
+//! on any node — unlike `EVMBalanceSlotDetector`, which needs the `debug`
+//! namespace.
 
 use alloy::{
     network::Ethereum,

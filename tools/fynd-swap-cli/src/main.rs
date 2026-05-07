@@ -33,7 +33,8 @@ use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-mod erc20;
+use erc20_overrides as erc20;
+
 mod permit2;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────

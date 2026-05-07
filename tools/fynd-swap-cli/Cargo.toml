@@ -6,6 +6,7 @@ description = "CLI for quoting and executing token swaps via the Fynd solver"
 
 [dependencies]
 fynd-client        = { workspace = true }
+erc20-overrides    = { workspace = true }
 tokio              = { workspace = true }
 clap               = { workspace = true }
 alloy              = { workspace = true, features = ["signer-local"] }

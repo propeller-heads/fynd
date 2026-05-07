@@ -1,0 +1,10 @@
+[package]
+name = "erc20-overrides"
+version.workspace = true
+edition = "2021"
+description = "Brute-force ERC-20 balance/allowance storage-slot detection for eth_call state overrides"
+license = "MIT"
+
+[dependencies]
+alloy = { workspace = true }
+anyhow = { workspace = true }
