@@ -64,20 +64,35 @@ impl TryFrom<&OrderQuote> for Solution {
             .output_token()
             .ok_or_else(|| SolveError::FailedEncoding("route has no output token".to_string()))?;
 
+        let token_map = route.tokens();
+        let lookup_token = |addr: &Bytes| {
+            token_map
+                .get(addr)
+                .cloned()
+                .ok_or_else(|| {
+                    SolveError::FailedEncoding(format!(
+                        "token {addr:?} not found in route's token map; \
+                     algorithm must populate Route::with_tokens for every swap token"
+                    ))
+                })
+        };
         let swaps = route
             .swaps()
             .iter()
             .map(|s| {
-                Swap::new(
+                let token_in = lookup_token(s.token_in())?;
+                let token_out = lookup_token(s.token_out())?;
+                Ok(Swap::new(
                     s.protocol_component().clone(),
-                    s.token_in().clone(),
-                    s.token_out().clone(),
+                    token_in,
+                    token_out,
+                    s.gas_estimate().clone(),
                 )
                 .with_split(*s.split())
                 .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
-                .with_estimated_amount_in(s.amount_in().clone())
+                .with_estimated_amount_in(s.amount_in().clone()))
             })
-            .collect();
+            .collect::<Result<Vec<_>, SolveError>>()?;
 
         Ok(Solution::new(
             quote.sender().clone(),
@@ -168,6 +183,7 @@ impl Encoder {
             .into_iter()
             .zip(to_encode)
         {
+            quotes[idx].set_gas_estimate(encoded_solution.estimated_gas().clone());
             let (transaction, fee_breakdown) =
                 self.encode_tycho_router_call(encoded_solution, &solution, &encoding_options)?;
             quotes[idx].set_transaction(transaction);
@@ -382,6 +398,8 @@ impl From<EncodingError> for SolveError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use num_bigint::BigUint;
     use tycho_execution::encoding::{
         errors::EncodingError,
@@ -399,8 +417,8 @@ mod tests {
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
-    fn make_route_swap_addrs(token_in: Address, token_out: Address) -> crate::types::Swap {
-        let make_token = |addr: Address| Token {
+    fn make_token(addr: Address) -> Token {
+        Token {
             address: addr,
             symbol: "T".to_string(),
             decimals: 18,
@@ -408,7 +426,10 @@ mod tests {
             gas: vec![],
             chain: SimChain::Ethereum,
             quality: 100,
-        };
+        }
+    }
+
+    fn make_route_swap_addrs(token_in: Address, token_out: Address) -> crate::types::Swap {
         let tin = make_token(token_in.clone());
         let tout = make_token(token_out.clone());
         // Component ID must be a valid address for the USV2 swap encoder
@@ -424,6 +445,25 @@ mod tests {
             component(pool_addr, &[tin, tout]),
             Box::new(MockProtocolSim::default()),
         )
+    }
+
+    /// Builds a `Route` with both swaps and the token map populated, mirroring
+    /// what the algorithms do in production.
+    fn make_route_with_tokens(pairs: &[(Address, Address)]) -> crate::types::Route {
+        let mut tokens = HashMap::new();
+        let swaps = pairs
+            .iter()
+            .map(|(tin, tout)| {
+                tokens
+                    .entry(tin.clone())
+                    .or_insert_with(|| make_token(tin.clone()));
+                tokens
+                    .entry(tout.clone())
+                    .or_insert_with(|| make_token(tout.clone()));
+                make_route_swap_addrs(tin.clone(), tout.clone())
+            })
+            .collect();
+        crate::types::Route::new(swaps).with_tokens(tokens)
     }
 
     fn make_address(byte: u8) -> Address {
@@ -512,11 +552,8 @@ mod tests {
 
     #[test]
     fn test_try_from_maps_tokens_and_amounts() {
-        let quote =
-            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
-                make_address(0x01),
-                make_address(0x02),
-            )]));
+        let quote = make_order_quote()
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
         let solution = Solution::try_from(&quote).unwrap();
 
@@ -529,9 +566,9 @@ mod tests {
 
     #[test]
     fn test_try_from_multi_hop_uses_boundary_swap_tokens() {
-        let quote = make_order_quote().with_route(crate::types::Route::new(vec![
-            make_route_swap_addrs(make_address(0x01), make_address(0x02)),
-            make_route_swap_addrs(make_address(0x02), make_address(0x03)),
+        let quote = make_order_quote().with_route(make_route_with_tokens(&[
+            (make_address(0x01), make_address(0x02)),
+            (make_address(0x02), make_address(0x03)),
         ]));
 
         let solution = Solution::try_from(&quote).unwrap();
@@ -577,11 +614,8 @@ mod tests {
     #[tokio::test]
     async fn test_encode_sets_transaction_on_successful_solution() {
         let encoder = real_encoder();
-        let quote =
-            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
-                make_address(0x01),
-                make_address(0x02),
-            )]));
+        let quote = make_order_quote()
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
         let encoding_options = EncodingOptions::new(0.01);
 
@@ -600,11 +634,8 @@ mod tests {
     #[tokio::test]
     async fn test_encode_with_client_fee_params() {
         let encoder = real_encoder();
-        let quote =
-            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
-                make_address(0x01),
-                make_address(0x02),
-            )]));
+        let quote = make_order_quote()
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
         let fee = crate::ClientFeeParams::new(
             100,
@@ -630,11 +661,8 @@ mod tests {
     #[tokio::test]
     async fn test_encode_without_client_fee_produces_transaction() {
         let encoder = real_encoder();
-        let quote =
-            make_order_quote().with_route(crate::types::Route::new(vec![make_route_swap_addrs(
-                make_address(0x01),
-                make_address(0x02),
-            )]));
+        let quote = make_order_quote()
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
         let encoding_options = EncodingOptions::new(0.01);
 

@@ -196,6 +196,8 @@ where
                 let gas_price = result.gas_price().clone();
                 let route = result.into_route();
 
+                // This is a first naive approach to getting the total gas of this quote
+                // A finer estimation is done during encoding
                 let gas_estimate = route.total_gas();
                 let amount_in = if order.is_sell() {
                     order.amount().clone()
