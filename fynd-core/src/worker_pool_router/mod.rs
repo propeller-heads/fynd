@@ -439,6 +439,8 @@ impl WorkerPoolRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rstest::rstest;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::{
@@ -490,6 +492,8 @@ mod tests {
         };
         let tin = make_address(0x01);
         let tout = make_address(0x02);
+        let tin_token = make_token(tin.clone());
+        let tout_token = make_token(tout.clone());
         let swap = Swap::new(
             "pool-1".to_string(),
             "uniswap_v2".to_string(),
@@ -500,10 +504,13 @@ mod tests {
             BigUint::from(50_000u64),
             component(
                 "0x0000000000000000000000000000000000000001",
-                &[make_token(tin), make_token(tout)],
+                &[tin_token.clone(), tout_token.clone()],
             ),
             Box::new(MockProtocolSim::default()),
         );
+        let mut tokens = HashMap::new();
+        tokens.insert(tin, tin_token);
+        tokens.insert(tout, tout_token);
         let quote = OrderQuote::new(
             "test-order".to_string(),
             QuoteStatus::Success,
@@ -516,7 +523,7 @@ mod tests {
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
         )
-        .with_route(Route::new(vec![swap]));
+        .with_route(Route::new(vec![swap]).with_tokens(tokens));
         SingleOrderQuote::new(quote, 5)
     }
 

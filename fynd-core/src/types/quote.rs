@@ -21,13 +21,10 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
-use tycho_simulation::{
-    tycho_common::models::Address,
-    tycho_core::{
-        models::{protocol::ProtocolComponent, token::Token},
-        simulation::protocol_sim::ProtocolSim,
-        Bytes,
-    },
+use tycho_simulation::tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token, Address},
+    simulation::protocol_sim::ProtocolSim,
+    Bytes,
 };
 use uuid::Uuid;
 
@@ -929,12 +926,26 @@ impl BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     swaps: Vec<Swap>,
+    /// Full `Token` objects keyed by address, populated by the algorithm that
+    /// built the route. Skipped during (de)serialization — only the in-process
+    /// encoding path consumes it; wire consumers receive an empty map and
+    /// should not rely on it.
+    #[serde(skip, default)]
+    tokens: HashMap<Bytes, Token>,
 }
 
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
     pub fn new(swaps: Vec<Swap>) -> Self {
-        Self { swaps }
+        Self { swaps, tokens: HashMap::new() }
+    }
+
+    /// Attaches a token map (address → full `Token`) to the route. The encoder
+    /// uses this to convert each swap's `token_in`/`token_out` addresses back
+    /// into the full `Token` objects required by `tycho-execution`.
+    pub fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
+        self.tokens = tokens;
+        self
     }
 
     /// Returns the swaps in this route.
@@ -945,6 +956,12 @@ impl Route {
     /// Consumes the route and returns its swaps.
     pub fn into_swaps(self) -> Vec<Swap> {
         self.swaps
+    }
+
+    /// Returns the token map attached to this route. Empty unless populated via
+    /// [`Route::with_tokens`].
+    pub fn tokens(&self) -> &HashMap<Bytes, Token> {
+        &self.tokens
     }
 }
 

@@ -358,6 +358,7 @@ impl MostLiquidAlgorithm {
 
         // Track state overrides for pools we've already swapped through.
         let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut tokens: HashMap<Address, Token> = HashMap::new();
 
         for (address_in, edge_data, address_out) in path.iter() {
             // Get token and component data for the simulation call
@@ -410,13 +411,19 @@ impl MostLiquidAlgorithm {
                 component.clone(),
                 state.clone_box(),
             ));
+            tokens
+                .entry(token_in.address.clone())
+                .or_insert_with(|| token_in.clone());
+            tokens
+                .entry(token_out.address.clone())
+                .or_insert_with(|| token_out.clone());
 
             state_overrides.insert(component_id, result.new_state);
             current_amount = result.amount;
         }
 
         // Calculate net amount out (output - gas cost in output token terms)
-        let route = Route::new(swaps);
+        let route = Route::new(swaps).with_tokens(tokens);
         let output_amount = route
             .swaps()
             .last()

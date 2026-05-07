@@ -579,6 +579,7 @@ impl Algorithm for BellmanFordAlgorithm {
         let path_edges = Self::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
 
         let mut swaps = Vec::with_capacity(path_edges.len());
+        let mut tokens: HashMap<Address, Token> = HashMap::new();
         for (from_node, to_node, component_id) in &path_edges {
             let token_in = token_map
                 .get(from_node)
@@ -616,9 +617,15 @@ impl Algorithm for BellmanFordAlgorithm {
                 component.clone(),
                 sim_state.clone_box(),
             ));
+            tokens
+                .entry(token_in.address.clone())
+                .or_insert_with(|| token_in.clone());
+            tokens
+                .entry(token_out.address.clone())
+                .or_insert_with(|| token_out.clone());
         }
 
-        let route = Route::new(swaps);
+        let route = Route::new(swaps).with_tokens(tokens);
         let final_amount_out = amount[out_idx].clone();
 
         let gas_price = gas_price_wei.unwrap_or_default();
