@@ -1,13 +1,26 @@
 //! Report generator: CSV export + markdown summary.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 
 use crate::types::{AuditRow, RowStatus};
 
+/// Derive ETH-denominated error from a row's `error_gas` and `gas_price_wei`.
+/// Returns `None` if the row didn't produce a measurable error (no quote /
+/// reverted simulation).
+pub(crate) fn error_eth(row: &AuditRow) -> Option<f64> {
+    let gas = row.error_gas?;
+    Some(gas as f64 * biguint_to_f64(&row.gas_price_wei) / 1e18)
+}
+
+fn biguint_to_f64(b: &BigUint) -> f64 {
+    b.to_f64().unwrap_or(0.0)
+}
+
 /// Top-level summary statistics over the successful rows.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Summary {
     pub attempted: usize,
     pub succeeded: usize,
@@ -25,116 +38,66 @@ pub struct Summary {
 }
 
 pub fn summarize(rows: &[AuditRow]) -> Summary {
-    let attempted = rows.len();
-    let mut succeeded = 0;
-    let mut no_quote = 0;
-    let mut no_encoding = 0;
-    let mut simulation_reverted = 0;
+    let mut summary = Summary { attempted: rows.len(), ..Default::default() };
     for r in rows {
         match r.status {
-            RowStatus::Success => succeeded += 1,
-            RowStatus::NoQuote => no_quote += 1,
-            RowStatus::NoEncoding => no_encoding += 1,
-            RowStatus::SimulationReverted => simulation_reverted += 1,
+            RowStatus::Success => summary.succeeded += 1,
+            RowStatus::NoQuote => summary.no_quote += 1,
+            RowStatus::NoEncoding => summary.no_encoding += 1,
+            RowStatus::SimulationReverted => summary.simulation_reverted += 1,
         }
     }
 
-    let successful_errors: Vec<f64> = rows
+    let successes: Vec<&AuditRow> = rows
         .iter()
         .filter(|r| r.status == RowStatus::Success)
-        .filter_map(|r| r.error_eth)
         .collect();
-
-    if successful_errors.is_empty() {
-        return Summary {
-            attempted,
-            succeeded,
-            no_quote,
-            no_encoding,
-            simulation_reverted,
-            mean_error_eth: 0.0,
-            median_error_eth: 0.0,
-            p95_abs_error_eth: 0.0,
-            mean_abs_pct: 0.0,
-            over_charged: 0,
-            under_charged: 0,
-            sum_signed_eth: 0.0,
-            sum_abs_eth: 0.0,
-        };
+    let errors: Vec<f64> = successes
+        .iter()
+        .filter_map(|r| error_eth(r))
+        .collect();
+    if errors.is_empty() {
+        return summary;
     }
 
-    let mean_error_eth = mean(&successful_errors);
-    let median_error_eth = median(&successful_errors);
-
-    let abs_errors: Vec<f64> = successful_errors
-        .iter()
-        .map(|x| x.abs())
-        .collect();
-    let p95_abs_error_eth = percentile(&abs_errors, 95.0);
-    let sum_abs_eth = abs_errors.iter().sum();
-    let sum_signed_eth = successful_errors.iter().sum();
-
-    let over_charged = successful_errors
+    let abs_errors: Vec<f64> = errors.iter().map(|x| x.abs()).collect();
+    summary.mean_error_eth = mean(&errors);
+    summary.median_error_eth = median(&errors);
+    summary.p95_abs_error_eth = percentile(&abs_errors, 95.0);
+    summary.sum_abs_eth = abs_errors.iter().sum();
+    summary.sum_signed_eth = errors.iter().sum();
+    summary.over_charged = errors
         .iter()
         .filter(|x| **x > 0.0)
         .count();
-    let under_charged = successful_errors
+    summary.under_charged = errors
         .iter()
         .filter(|x| **x < 0.0)
         .count();
 
-    let pct: Vec<f64> = rows
+    let pct: Vec<f64> = successes
         .iter()
-        .filter(|r| r.status == RowStatus::Success)
         .filter_map(|r| {
             let actual = r.actual_gas? as f64;
-            let err_eth = r.error_eth?;
-            let price_wei = r
-                .gas_price_wei
-                .to_string()
-                .parse::<f64>()
-                .ok()?;
-            let actual_cost_eth = actual * price_wei / 1e18;
-            if actual_cost_eth == 0.0 {
-                None
-            } else {
-                Some((err_eth / actual_cost_eth).abs() * 100.0)
-            }
+            let err_eth = error_eth(r)?;
+            let actual_cost_eth = actual * biguint_to_f64(&r.gas_price_wei) / 1e18;
+            (actual_cost_eth != 0.0).then(|| (err_eth / actual_cost_eth).abs() * 100.0)
         })
         .collect();
-    let mean_abs_pct = if pct.is_empty() { 0.0 } else { mean(&pct) };
+    summary.mean_abs_pct = if pct.is_empty() { 0.0 } else { mean(&pct) };
 
-    Summary {
-        attempted,
-        succeeded,
-        no_quote,
-        no_encoding,
-        simulation_reverted,
-        mean_error_eth,
-        median_error_eth,
-        p95_abs_error_eth,
-        mean_abs_pct,
-        over_charged,
-        under_charged,
-        sum_signed_eth,
-        sum_abs_eth,
-    }
+    summary
 }
 
 fn mean(xs: &[f64]) -> f64 {
-    let sum: f64 = xs.iter().sum();
-    sum / xs.len() as f64
+    xs.iter().sum::<f64>() / xs.len() as f64
 }
 
 fn median(xs: &[f64]) -> f64 {
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| {
-        a.partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
-    #[allow(clippy::manual_is_multiple_of)]
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (v[n / 2 - 1] + v[n / 2]) / 2.0
     } else {
         v[n / 2]
@@ -143,10 +106,7 @@ fn median(xs: &[f64]) -> f64 {
 
 fn percentile(xs: &[f64], p: f64) -> f64 {
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| {
-        a.partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
     let rank = (p / 100.0) * (n - 1) as f64;
     let lo = rank.floor() as usize;
@@ -159,67 +119,20 @@ fn percentile(xs: &[f64], p: f64) -> f64 {
     }
 }
 
-/// Write `results.csv` with one row per trade.
+/// Write `results.csv` with one row per trade. `AuditRow` derives `Serialize`
+/// so the column layout is whatever serde produces — keep field order on the
+/// struct stable if downstream tooling reads by position.
 pub fn write_csv(path: &Path, rows: &[AuditRow]) -> anyhow::Result<()> {
     let mut wtr = csv::Writer::from_path(path)?;
-    wtr.write_record([
-        "token_in",
-        "token_out",
-        "amount_in",
-        "gas_estimate",
-        "actual_gas",
-        "gas_price_wei",
-        "error_gas",
-        "error_wei",
-        "error_eth",
-        "status",
-        "error_reason",
-        "num_swaps",
-        "protocols",
-    ])?;
     for r in rows {
-        wtr.write_record([
-            r.token_in.clone(),
-            r.token_out.clone(),
-            r.amount_in.clone(),
-            r.gas_estimate
-                .as_ref()
-                .map(BigUint::to_string)
-                .unwrap_or_default(),
-            r.actual_gas
-                .map(|g| g.to_string())
-                .unwrap_or_default(),
-            r.gas_price_wei.to_string(),
-            r.error_gas
-                .map(|g| g.to_string())
-                .unwrap_or_default(),
-            r.error_wei
-                .map(|w| w.to_string())
-                .unwrap_or_default(),
-            r.error_eth
-                .map(|e| format!("{e:.12}"))
-                .unwrap_or_default(),
-            match r.status {
-                RowStatus::Success => "success",
-                RowStatus::NoQuote => "no_quote",
-                RowStatus::NoEncoding => "no_encoding",
-                RowStatus::SimulationReverted => "simulation_reverted",
-            }
-            .to_string(),
-            r.error_reason
-                .clone()
-                .unwrap_or_default(),
-            r.num_swaps
-                .map(|n| n.to_string())
-                .unwrap_or_default(),
-            r.protocols.clone().unwrap_or_default(),
-        ])?;
+        wtr.serialize(r)?;
     }
     wtr.flush()?;
     Ok(())
 }
 
 /// Aggregate stats over a slice of *successful* rows. Empty input yields zeros.
+#[derive(Default)]
 struct GroupStats {
     count: usize,
     under: usize,
@@ -235,7 +148,7 @@ fn group_stats(rows: &[&AuditRow]) -> GroupStats {
     let mut under = 0usize;
     let mut over = 0usize;
     for r in rows {
-        let Some(err_eth) = r.error_eth else { continue };
+        let Some(err_eth) = error_eth(r) else { continue };
         let Some(actual) = r.actual_gas else { continue };
         errors_eth.push(err_eth);
         if err_eth > 0.0 {
@@ -243,26 +156,14 @@ fn group_stats(rows: &[&AuditRow]) -> GroupStats {
         } else if err_eth < 0.0 {
             under += 1;
         }
-        let price = r
-            .gas_price_wei
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-        let actual_cost = actual as f64 * price / 1e18;
+        let actual_cost = actual as f64 * biguint_to_f64(&r.gas_price_wei) / 1e18;
         if actual_cost > 0.0 {
             pcts.push((err_eth / actual_cost).abs() * 100.0);
         }
     }
     let count = errors_eth.len();
     if count == 0 {
-        return GroupStats {
-            count: 0,
-            under: 0,
-            over: 0,
-            mean_pct: 0.0,
-            mean_error_eth: 0.0,
-            sum_error_eth: 0.0,
-        };
+        return GroupStats::default();
     }
     GroupStats {
         count,
@@ -271,15 +172,6 @@ fn group_stats(rows: &[&AuditRow]) -> GroupStats {
         mean_pct: if pcts.is_empty() { 0.0 } else { mean(&pcts) },
         mean_error_eth: mean(&errors_eth),
         sum_error_eth: errors_eth.iter().sum(),
-    }
-}
-
-/// Categorise a successful row by route shape.
-fn route_shape_label(r: &AuditRow) -> &'static str {
-    match r.num_swaps {
-        Some(1) => "single",
-        Some(n) if n > 1 => "sequential",
-        _ => "unknown",
     }
 }
 
@@ -301,74 +193,36 @@ fn write_group_row(out: &mut String, label: &str, s: &GroupStats) -> std::fmt::R
     )
 }
 
-fn write_route_shape_breakdown(out: &mut String, successes: &[&AuditRow]) -> std::fmt::Result {
-    use std::fmt::Write;
-    writeln!(out, "\n## By route shape")?;
+/// Group `rows` by the label produced by `group_fn`, then write one stats row
+/// per non-empty group. Rows where `group_fn` returns `None` are skipped.
+fn write_breakdown<F>(out: &mut String, rows: &[&AuditRow], group_fn: F) -> std::fmt::Result
+where
+    F: Fn(&AuditRow) -> Option<String>,
+{
+    let mut by_group: BTreeMap<String, Vec<&AuditRow>> = BTreeMap::new();
+    for r in rows {
+        if let Some(label) = group_fn(r) {
+            by_group
+                .entry(label)
+                .or_default()
+                .push(*r);
+        }
+    }
     write_group_table_header(out)?;
-    for label in ["single", "sequential"] {
-        let group: Vec<&AuditRow> = successes
-            .iter()
-            .copied()
-            .filter(|r| route_shape_label(r) == label)
-            .collect();
-        let stats = group_stats(&group);
+    for (label, group) in &by_group {
+        let stats = group_stats(group);
         write_group_row(out, label, &stats)?;
     }
     Ok(())
 }
 
-fn write_protocol_breakdown(out: &mut String, successes: &[&AuditRow]) -> std::fmt::Result {
-    use std::fmt::Write;
-
-    // Single-hop: clean per-protocol attribution (1 row → 1 protocol).
-    writeln!(out, "\n## By protocol — single-hop only")?;
-    let single: Vec<&AuditRow> = successes
-        .iter()
-        .copied()
-        .filter(|r| r.num_swaps == Some(1))
-        .collect();
-    let mut by_protocol: std::collections::BTreeMap<String, Vec<&AuditRow>> =
-        std::collections::BTreeMap::new();
-    for r in &single {
-        if let Some(p) = r.protocols.as_deref() {
-            by_protocol
-                .entry(p.to_string())
-                .or_default()
-                .push(*r);
-        }
+/// Categorise a successful row by route shape.
+fn route_shape_label(r: &AuditRow) -> Option<&'static str> {
+    match r.num_swaps {
+        Some(1) => Some("single"),
+        Some(n) if n > 1 => Some("sequential"),
+        _ => None,
     }
-    write_group_table_header(out)?;
-    for (proto, rows) in &by_protocol {
-        let stats = group_stats(rows);
-        write_group_row(out, proto, &stats)?;
-    }
-
-    // Sequential: group by full protocol sequence (no double-counting).
-    let sequential: Vec<&AuditRow> = successes
-        .iter()
-        .copied()
-        .filter(|r| matches!(r.num_swaps, Some(n) if n > 1))
-        .collect();
-    if sequential.is_empty() {
-        return Ok(());
-    }
-    writeln!(out, "\n## By protocol sequence — sequential routes")?;
-    let mut by_seq: std::collections::BTreeMap<String, Vec<&AuditRow>> =
-        std::collections::BTreeMap::new();
-    for r in &sequential {
-        if let Some(p) = r.protocols.as_deref() {
-            by_seq
-                .entry(p.to_string())
-                .or_default()
-                .push(*r);
-        }
-    }
-    write_group_table_header(out)?;
-    for (seq, rows) in &by_seq {
-        let stats = group_stats(rows);
-        write_group_row(out, seq, &stats)?;
-    }
-    Ok(())
 }
 
 /// Write `report.md` with the aggregate table and worst-10 trades.
@@ -388,11 +242,7 @@ pub fn write_markdown(
         &mut out,
         "**Gas price used:** {} wei ({:.2} gwei)",
         gas_price_wei,
-        gas_price_wei
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0) /
-            1e9
+        biguint_to_f64(gas_price_wei) / 1e9
     )?;
     if let Some(p) = eth_price_usd {
         writeln!(&mut out, "**ETH price (context only, not used in math):** ${p:.2}")?;
@@ -444,17 +294,8 @@ pub fn write_markdown(
         .iter()
         .filter(|r| r.status == RowStatus::Success)
         .collect();
-    successes.sort_by(|a, b| {
-        b.error_eth
-            .map(|e| e.abs())
-            .unwrap_or(0.0)
-            .partial_cmp(
-                &a.error_eth
-                    .map(|e| e.abs())
-                    .unwrap_or(0.0),
-            )
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let abs_err = |r: &&AuditRow| error_eth(r).unwrap_or(0.0).abs();
+    successes.sort_by(|a, b| abs_err(b).total_cmp(&abs_err(a)));
     for r in successes.iter().take(10) {
         writeln!(
             &mut out,
@@ -469,12 +310,35 @@ pub fn write_markdown(
             r.actual_gas
                 .map(|g| g.to_string())
                 .unwrap_or_default(),
-            r.error_eth.unwrap_or(0.0)
+            error_eth(r).unwrap_or(0.0)
         )?;
     }
 
-    write_route_shape_breakdown(&mut out, &successes)?;
-    write_protocol_breakdown(&mut out, &successes)?;
+    writeln!(&mut out, "\n## By route shape")?;
+    write_breakdown(&mut out, &successes, |r| route_shape_label(r).map(String::from))?;
+
+    writeln!(&mut out, "\n## By protocol — single-hop only")?;
+    write_breakdown(&mut out, &successes, |r| {
+        if r.num_swaps == Some(1) {
+            r.protocols.clone()
+        } else {
+            None
+        }
+    })?;
+
+    let any_seq = successes
+        .iter()
+        .any(|r| matches!(r.num_swaps, Some(n) if n > 1));
+    if any_seq {
+        writeln!(&mut out, "\n## By protocol sequence — sequential routes")?;
+        write_breakdown(&mut out, &successes, |r| {
+            if matches!(r.num_swaps, Some(n) if n > 1) {
+                r.protocols.clone()
+            } else {
+                None
+            }
+        })?;
+    }
 
     writeln!(&mut out, "\n## Interpretation")?;
     writeln!(
@@ -494,7 +358,8 @@ pub fn write_markdown(
 mod tests {
     use super::*;
 
-    fn row(status: RowStatus, error_eth: Option<f64>, actual: Option<u64>) -> AuditRow {
+    /// `error_gas` of 50_000 at 20 gwei → +0.001 ETH; -100_000 → -0.002 ETH.
+    fn row(status: RowStatus, error_gas: Option<i128>, actual: Option<u64>) -> AuditRow {
         AuditRow {
             token_in: "0xa".into(),
             token_out: "0xb".into(),
@@ -502,9 +367,7 @@ mod tests {
             gas_estimate: Some(BigUint::from(200_000u64)),
             actual_gas: actual,
             gas_price_wei: BigUint::from(20_000_000_000u64),
-            error_gas: None,
-            error_wei: None,
-            error_eth,
+            error_gas,
             status,
             error_reason: None,
             num_swaps: None,
@@ -515,8 +378,8 @@ mod tests {
     #[test]
     fn summarize_counts_statuses() {
         let rows = vec![
-            row(RowStatus::Success, Some(0.001), Some(150_000)),
-            row(RowStatus::Success, Some(-0.002), Some(220_000)),
+            row(RowStatus::Success, Some(50_000), Some(150_000)),
+            row(RowStatus::Success, Some(-100_000), Some(220_000)),
             row(RowStatus::NoQuote, None, None),
             row(RowStatus::SimulationReverted, None, None),
         ];
@@ -541,7 +404,7 @@ mod tests {
     fn write_csv_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("results.csv");
-        let rows = vec![row(RowStatus::Success, Some(0.001), Some(150_000))];
+        let rows = vec![row(RowStatus::Success, Some(50_000), Some(150_000))];
         write_csv(&path, &rows).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("success"));
@@ -555,7 +418,7 @@ mod tests {
         let path = dir.path().join("report.md");
         let mut rows = Vec::new();
         for _ in 0..80 {
-            rows.push(row(RowStatus::Success, Some(0.0), Some(200_000)));
+            rows.push(row(RowStatus::Success, Some(0), Some(200_000)));
         }
         for _ in 0..21 {
             rows.push(row(RowStatus::NoQuote, None, None));
@@ -572,7 +435,7 @@ mod tests {
         let path = dir.path().join("report.md");
         let mut rows = Vec::new();
         for _ in 0..95 {
-            rows.push(row(RowStatus::Success, Some(0.0), Some(200_000)));
+            rows.push(row(RowStatus::Success, Some(0), Some(200_000)));
         }
         for _ in 0..5 {
             rows.push(row(RowStatus::NoQuote, None, None));

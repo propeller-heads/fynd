@@ -99,31 +99,29 @@ impl Simulator {
     /// `gas_used` exactly from `SettledOrder::gas_cost()` by dividing. The audit
     /// applies its own gas-price snapshot to `gas_used` downstream.
     pub async fn simulate(&self, client: &FyndClient, quote: &Quote) -> SimOutcome {
-        let Some(tx) = quote.transaction() else {
-            return SimOutcome::Reverted { reason: "quote has no transaction".to_string() };
-        };
-        let router = match Address::try_from(tx.to().as_ref()) {
-            Ok(a) => a,
-            Err(e) => return SimOutcome::Reverted { reason: format!("bad to addr: {e}") },
-        };
-        let token_in_bytes = match quote
+        match self.try_simulate(client, quote).await {
+            Ok(actual_gas) => SimOutcome::Ok { actual_gas },
+            Err(reason) => SimOutcome::Reverted { reason },
+        }
+    }
+
+    async fn try_simulate(&self, client: &FyndClient, quote: &Quote) -> Result<u64, String> {
+        let tx = quote
+            .transaction()
+            .ok_or_else(|| "quote has no transaction".to_string())?;
+        let router =
+            Address::try_from(tx.to().as_ref()).map_err(|e| format!("bad to addr: {e}"))?;
+        let token_in_bytes = quote
             .route()
             .and_then(|r| r.swaps().first())
             .map(|s| s.token_in().clone())
-        {
-            Some(b) => b,
-            None => return SimOutcome::Reverted { reason: "quote has no route".into() },
-        };
-        let token_in = match Address::try_from(token_in_bytes.as_ref()) {
-            Ok(a) => a,
-            Err(e) => return SimOutcome::Reverted { reason: format!("bad token_in: {e}") },
-        };
+            .ok_or_else(|| "quote has no route".to_string())?;
+        let token_in =
+            Address::try_from(token_in_bytes.as_ref()).map_err(|e| format!("bad token_in: {e}"))?;
 
-        let overrides =
-            match build_fynd_overrides(&self.provider, self.sender, token_in, router).await {
-                Ok(o) => o,
-                Err(e) => return SimOutcome::Reverted { reason: format!("overrides: {e}") },
-            };
+        let overrides = build_fynd_overrides(&self.provider, self.sender, token_in, router)
+            .await
+            .map_err(|e| format!("overrides: {e}"))?;
 
         // Pin gas_limit to the block limit so `swap_payload` doesn't fall back to
         // calling `estimate_gas` *without* overrides (which would revert — our
@@ -140,13 +138,10 @@ impl Simulator {
             .with_max_priority_fee_per_gas(MAX_FEE_PER_GAS_WEI)
             .with_gas_limit(30_000_000);
 
-        let payload = match client
+        let payload = client
             .swap_payload(quote.clone(), &hints)
             .await
-        {
-            Ok(p) => p,
-            Err(e) => return SimOutcome::Reverted { reason: format!("swap_payload: {e}") },
-        };
+            .map_err(|e| format!("swap_payload: {e}"))?;
         let signed = SignedSwap::assemble(payload, Signature::test_signature());
 
         let options = ExecutionOptions {
@@ -154,26 +149,18 @@ impl Simulator {
             storage_overrides: Some(overrides),
             fetch_revert_reason: false,
         };
-        let receipt = match client
+        let receipt = client
             .execute_swap(signed, &options)
             .await
-        {
-            Ok(r) => r,
-            Err(e) => return SimOutcome::Reverted { reason: format!("execute_swap: {e}") },
-        };
-        let settled = match receipt.await {
-            Ok(s) => s,
-            Err(e) => return SimOutcome::Reverted { reason: format!("receipt: {e}") },
-        };
+            .map_err(|e| format!("execute_swap: {e}"))?;
+        let settled = receipt
+            .await
+            .map_err(|e| format!("receipt: {e}"))?;
 
         // gas_cost = gas_used * MAX_FEE_PER_GAS_WEI (exact). Divide to recover gas_used.
-        let divisor = BigUint::from(MAX_FEE_PER_GAS_WEI);
-        let gas_used_big = settled.gas_cost() / &divisor;
-        match gas_used_big.to_u64() {
-            Some(gas_used) => SimOutcome::Ok { actual_gas: gas_used },
-            None => {
-                SimOutcome::Reverted { reason: format!("gas_used overflows u64: {gas_used_big}") }
-            }
-        }
+        let gas_used_big = settled.gas_cost() / BigUint::from(MAX_FEE_PER_GAS_WEI);
+        gas_used_big
+            .to_u64()
+            .ok_or_else(|| format!("gas_used overflows u64: {gas_used_big}"))
     }
 }

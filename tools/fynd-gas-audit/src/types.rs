@@ -2,6 +2,7 @@
 
 use num_bigint::BigUint;
 use serde::Serialize;
+use serde_with::{serde_as, DisplayFromStr};
 
 /// A trade sampled from the aggregator dataset, ready to quote.
 #[derive(Debug, Clone, Serialize)]
@@ -27,18 +28,25 @@ pub enum RowStatus {
 }
 
 /// One row of the output CSV / aggregate table.
+///
+/// `error_wei` and `error_eth` are not stored — derive them from `error_gas`
+/// and `gas_price_wei` at the point of consumption (see `report::error_eth`).
+///
+/// `BigUint` fields use `DisplayFromStr` so they serialise as decimal strings
+/// in CSV (the default serde representation is a sequence of u32 digits, which
+/// the csv crate can't put in a column).
+#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRow {
     pub token_in: String,
     pub token_out: String,
     pub amount_in: String,
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub gas_estimate: Option<BigUint>, // None if no quote
-    pub actual_gas: Option<u64>,       // None if quote or simulation failed
-    pub gas_price_wei: BigUint,        // constant across the run
-    pub error_gas: Option<i128>,       // estimate - actual
-    pub error_wei: Option<i128>,       /* error_gas * gas_price (can overflow in theory, but in
-                                        * practice fits) */
-    pub error_eth: Option<f64>, // error_wei / 1e18, convenience view
+    pub actual_gas: Option<u64>, // None if quote or simulation failed
+    #[serde_as(as = "DisplayFromStr")]
+    pub gas_price_wei: BigUint, // constant across the run
+    pub error_gas: Option<i128>, // estimate - actual
     pub status: RowStatus,
     pub error_reason: Option<String>,
     /// Number of swaps in the chosen route. None when no route was returned.
@@ -47,14 +55,6 @@ pub struct AuditRow {
     /// Comma-joined list of protocol identifiers used by the route, in order.
     /// E.g. `"uniswap_v3,vm:balancer_v2"`. None when no route was returned.
     pub protocols: Option<String>,
-}
-
-/// Paths to the generated artifacts.
-#[derive(Debug)]
-pub struct Artifacts {
-    pub trades_json: String,
-    pub results_csv: String,
-    pub report_md: String,
 }
 
 #[cfg(test)]

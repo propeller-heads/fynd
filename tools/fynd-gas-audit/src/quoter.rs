@@ -60,24 +60,10 @@ impl Quoter {
     }
 
     pub async fn quote(&self, trade: &AuditTrade) -> QuoteOutcome {
-        let token_in = match parse_hex_bytes(&trade.token_in) {
-            Ok(b) => b,
-            Err(e) => return QuoteOutcome::Error(format!("bad token_in: {e}")),
+        let order = match build_order(trade) {
+            Ok(o) => o,
+            Err(e) => return QuoteOutcome::Error(e),
         };
-        let token_out = match parse_hex_bytes(&trade.token_out) {
-            Ok(b) => b,
-            Err(e) => return QuoteOutcome::Error(format!("bad token_out: {e}")),
-        };
-        let sender = match parse_hex_bytes(&trade.sender) {
-            Ok(b) => b,
-            Err(e) => return QuoteOutcome::Error(format!("bad sender: {e}")),
-        };
-        let amount = match BigUint::from_str(&trade.amount_in) {
-            Ok(a) => a,
-            Err(e) => return QuoteOutcome::Error(format!("bad amount: {e}")),
-        };
-
-        let order = Order::new(token_in, token_out, amount, OrderSide::Sell, sender, None);
         let opts = QuoteOptions::default()
             .with_timeout_ms(self.timeout_ms)
             .with_encoding_options(EncodingOptions::new(self.slippage));
@@ -100,6 +86,14 @@ impl Quoter {
             Err(e) => QuoteOutcome::Error(e.to_string()),
         }
     }
+}
+
+fn build_order(trade: &AuditTrade) -> Result<Order, String> {
+    let token_in = parse_hex_bytes(&trade.token_in).map_err(|e| format!("bad token_in: {e}"))?;
+    let token_out = parse_hex_bytes(&trade.token_out).map_err(|e| format!("bad token_out: {e}"))?;
+    let sender = parse_hex_bytes(&trade.sender).map_err(|e| format!("bad sender: {e}"))?;
+    let amount = BigUint::from_str(&trade.amount_in).map_err(|e| format!("bad amount: {e}"))?;
+    Ok(Order::new(token_in, token_out, amount, OrderSide::Sell, sender, None))
 }
 
 fn parse_hex_bytes(s: &str) -> anyhow::Result<Bytes> {

@@ -3,17 +3,13 @@
 //!
 //! See `README.md` for usage.
 
-mod cost;
 mod quoter;
 mod report;
 mod sampler;
 mod simulator;
 mod types;
 
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{path::PathBuf, str::FromStr};
 
 use alloy::{
     network::Ethereum,
@@ -22,13 +18,14 @@ use alloy::{
 };
 use anyhow::{Context, Result};
 use clap::Parser;
+use num_traits::ToPrimitive;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
     quoter::{QuoteOutcome, Quoter},
     simulator::{SimOutcome, Simulator},
-    types::{Artifacts, AuditRow, RowStatus},
+    types::{AuditRow, RowStatus},
 };
 
 #[derive(Parser)]
@@ -176,15 +173,15 @@ async fn main() -> Result<()> {
             }
         };
 
-        let (error_gas, error_wei, error_eth) = match (&gas_estimate, actual_gas) {
-            (Some(est), Some(actual)) => match cost::compute(est, actual, &gas_price_wei) {
-                Ok(b) => (Some(b.error_gas), Some(b.error_wei), Some(b.error_eth)),
-                Err(e) => {
-                    warn!("cost overflow: {e}");
-                    (None, None, None)
+        let error_gas = match (&gas_estimate, actual_gas) {
+            (Some(est), Some(actual)) => match est.to_i128() {
+                Some(e) => Some(e - i128::from(actual)),
+                None => {
+                    warn!("gas_estimate overflows i128: {est}");
+                    None
                 }
             },
-            _ => (None, None, None),
+            _ => None,
         };
 
         rows.push(AuditRow {
@@ -195,8 +192,6 @@ async fn main() -> Result<()> {
             actual_gas,
             gas_price_wei: gas_price_wei.clone(),
             error_gas,
-            error_wei,
-            error_eth,
             status,
             error_reason,
             num_swaps,
@@ -205,37 +200,19 @@ async fn main() -> Result<()> {
     }
 
     // 6. Write artifacts.
-    let artifacts = Artifacts {
-        trades_json: trades_json_path.display().to_string(),
-        results_csv: cli
-            .out_dir
-            .join("results.csv")
-            .display()
-            .to_string(),
-        report_md: cli
-            .out_dir
-            .join("report.md")
-            .display()
-            .to_string(),
-    };
-
-    report::write_csv(Path::new(&artifacts.results_csv), &rows)?;
+    let results_csv = cli.out_dir.join("results.csv");
+    let report_md = cli.out_dir.join("report.md");
+    report::write_csv(&results_csv, &rows)?;
 
     let eth_price_usd = fetch_eth_price_via_fynd(&quoter)
         .await
         .ok();
     let summary = report::summarize(&rows);
-    report::write_markdown(
-        Path::new(&artifacts.report_md),
-        &gas_price_wei,
-        eth_price_usd,
-        &summary,
-        &rows,
-    )?;
+    report::write_markdown(&report_md, &gas_price_wei, eth_price_usd, &summary, &rows)?;
 
-    info!("wrote {}", artifacts.trades_json);
-    info!("wrote {}", artifacts.results_csv);
-    info!("wrote {}", artifacts.report_md);
+    info!("wrote {}", trades_json_path.display());
+    info!("wrote {}", results_csv.display());
+    info!("wrote {}", report_md.display());
     Ok(())
 }
 
