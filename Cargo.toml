@@ -82,6 +82,7 @@ members = [
     "clients/rust",
     "tools/benchmark",
     "tools/fynd-swap-cli",
+    "tools/fynd-gas-audit",
 ]
 resolver = "2"
 

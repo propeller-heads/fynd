@@ -8,3 +8,6 @@ scale_results*.json
 .env
 .claude/worktrees/
 .claude/plans/
+
+# fynd-gas-audit output artifacts
+tools/fynd-gas-audit/out/

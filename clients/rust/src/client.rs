@@ -197,6 +197,8 @@ impl SigningHints {
 pub struct StorageOverrides {
     /// address (20 bytes) → { slot (32 bytes) → value (32 bytes) }
     slots: HashMap<Bytes, HashMap<Bytes, Bytes>>,
+    /// address (20 bytes) → native balance in wei
+    balances: HashMap<Bytes, BigUint>,
 }
 
 impl StorageOverrides {
@@ -212,12 +214,23 @@ impl StorageOverrides {
             .insert(slot, value);
     }
 
-    /// Merge all slot overrides from `other` into `self`.
+    /// Override the native (ETH) balance of an account for dry-run simulation.
+    ///
+    /// Useful when simulating transactions from a synthetic sender that has no real ETH —
+    /// many nodes (e.g. reth) reject `eth_estimateGas` if the sender cannot afford
+    /// `gas_limit * max_fee_per_gas`.
+    pub fn set_native_balance(&mut self, address: Bytes, wei: BigUint) {
+        self.balances.insert(address, wei);
+    }
+
+    /// Merge all slot and balance overrides from `other` into `self`. Balances in `other`
+    /// take precedence on conflict.
     pub fn merge(&mut self, other: StorageOverrides) {
         for (address, slots) in other.slots {
             let entry = self.slots.entry(address).or_default();
             entry.extend(slots);
         }
+        self.balances.extend(other.balances);
     }
 }
 
@@ -230,6 +243,13 @@ fn storage_overrides_to_alloy(so: &StorageOverrides) -> Result<StateOverride, Fy
             .map(|(slot, val)| Ok((bytes_to_b256(slot)?, bytes_to_b256(val)?)))
             .collect::<Result<alloy::primitives::map::B256HashMap<B256>, FyndError>>()?;
         result.insert(addr, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
+    }
+    for (addr_bytes, wei) in &so.balances {
+        let addr = mapping::bytes_to_alloy_address(addr_bytes)?;
+        let entry = result
+            .entry(addr)
+            .or_insert_with(AccountOverride::default);
+        entry.balance = Some(mapping::biguint_to_u256(wei));
     }
     Ok(result)
 }
