@@ -11,9 +11,7 @@ use alloy::{
     providers::{Provider, RootProvider},
 };
 use bytes::Bytes;
-use erc20_overrides::{
-    allowance_slot_at, balance_slot_at, find_allowance_slot, find_balance_slot,
-};
+use erc20_overrides::{allowance_slot_at, balance_slot_at, find_allowance_slot, find_balance_slot};
 use fynd_client::{
     ExecutionOptions, FyndClient, Quote, SignedSwap, SigningHints, StorageOverrides,
 };
@@ -173,10 +171,9 @@ impl Simulator {
         let gas_used_big = settled.gas_cost() / &divisor;
         match gas_used_big.to_u64() {
             Some(gas_used) => SimOutcome::Ok { actual_gas: gas_used },
-            None => SimOutcome::Reverted {
-                reason: format!("gas_used overflows u64: {gas_used_big}"),
-            },
+            None => {
+                SimOutcome::Reverted { reason: format!("gas_used overflows u64: {gas_used_big}") }
+            }
         }
     }
 }
-

@@ -23,6 +23,7 @@ use alloy::{
 use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
+use erc20_overrides as erc20;
 use fynd_client::{
     AllowanceCheck, ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient,
     FyndClientBuilder, HealthStatus, Order, OrderSide, PermitDetails as FyndPermitDetails,
@@ -32,8 +33,6 @@ use fynd_client::{
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-
-use erc20_overrides as erc20;
 
 mod permit2;
 

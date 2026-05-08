@@ -1,11 +1,10 @@
 # fynd-gas-audit
 
-One-shot tool that quotes real aggregator trades through a local Fynd instance,
-simulates each on mainnet via `eth_estimateGas` with storage + balance overrides,
-and reports — in ETH — how far Fynd's quote-time `gas_estimate` drifts from the
-actual gas a transaction would consume.
-
-Branch: `tl/fynd-gas-audit`. Spec: `docs/superpowers/specs/2026-04-23-fynd-gas-estimation-audit-design.md` (local-only). Plan: `docs/superpowers/plans/2026-04-23-fynd-gas-audit.md` (local-only).
+Tool that quotes real aggregator trades through a local Fynd instance,
+simulates each on mainnet via `FyndClient::execute_swap` in dry-run mode (an
+`eth_call` against the fully-assembled signed transaction with storage + balance
+overrides), and reports — in ETH — how far Fynd's quote-time `gas_estimate`
+drifts from the actual gas a transaction would consume.
 
 ---
 
@@ -26,9 +25,16 @@ the bias.
    ```bash
    TYCHO_API_KEY=supersecrettoken \
    RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
-     cargo run --release -p fynd -- serve
+      cargo run --release -p fynd -- serve -w tools/fynd-gas-audit/single_swaps.toml
    ```
    Wait until `/v1/health` reports `healthy=true, derived_data_ready=true`.
+
+   `single_swaps.toml` is a worker config tailored to this audit: it pins
+   `max_hops=1` on both `most_liquid` and `bellman_ford` pools so every
+   sampled trade resolves to a single-hop swap. Use it when you want to
+   isolate per-protocol gas accuracy without multi-hop overhead confounding the
+   numbers. Drop the `-w` flag to fall back to Fynd's default
+   `worker_pools.toml`, which allows multi-hop routing.
 2. Run the audit in a second terminal:
    ```bash
    RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
@@ -45,56 +51,89 @@ CLI flags: `--n`, `--max-per-pair`, `--seed`, `--dataset`, `--fynd-url`,
 
 ---
 
-## Findings from the 2026-04-23 run
+## Findings from the 2026-05-07 run (single-hop, n=500)
 
-At the time of the audit, mainnet gas price was unusually low (0.44 gwei).
-Absolute ETH numbers scale linearly with gas price — the **relative** figures
-are the ones that matter.
+This run used `single_swaps.toml` (1-hop only, both `most_liquid` and
+`bellman_ford` pools) so the error attribution is per-protocol with no
+multi-hop overhead in the way. Mainnet gas price at the time was 0.47 gwei. Absolute ETH numbers
+scale linearly with gas price — the **relative** figures are the ones that
+matter.
 
-**Sample yield (100 trades attempted):**
+**Sample yield (500 trades attempted):**
 
 | outcome | count |
 |---|---|
-| success (quote + simulation) | 46 |
-| Fynd returned no route | 44 |
-| simulation reverted | 10 |
+| success (quote + simulation) | 157 |
+| Fynd returned no route | 312 |
+| simulation reverted | 31 |
 
-**Gas accuracy on the 46 successful trades:**
+The no-quote rate (~62%) is high because pinning `max_hops=1` rules out every
+trade whose only routable path needs an intermediate token. The 31 simulation
+reverts are tokens whose balance/allowance storage slots the simulator's
+brute-force probe (slots 0..=20) couldn't locate — proxy patterns or
+non-Solidity-default storage layouts, biased toward small-caps. See
+limitation #2.
+
+**Gas accuracy on the 157 successful trades:**
 
 | metric | value |
 |---|---|
-| Trades where Fynd **under**-estimated | **45 / 46** |
-| Trades where Fynd over-estimated | 1 / 46 |
-| Mean \|error\| / actual cost | **36.78%** |
-| Mean signed error (ETH) | -0.000044 |
-| Sum of signed error (46 trades, ETH) | -0.002043 |
+| Trades where Fynd **under**-estimated | **157 / 157** |
+| Trades where Fynd over-estimated | 0 / 157 |
+| Mean \|error\| / actual cost | **37.98%** |
+| Median signed error (ETH) | -0.000036 |
+| Mean signed error (ETH) | -0.000040 |
+| P95 absolute error (ETH) | 0.000079 |
+| Sum of signed error (157 trades, ETH) | -0.006225 |
 
-**Headline:** Fynd is systematically low by ~37% on gas. Essentially no
-over-estimates in the sample.
+**Headline:** Fynd is systematically low by ~38% on gas. **Zero** over-estimates
+in the sample.
+
+**By protocol** (single-hop isolates the simulator under test):
+
+| protocol | n | mean \|error\| / cost |
+|---|---|---|
+| ekubo_v3 | 8 | **89.95%** |
+| pancakeswap_v3 | 1 | 44.50% |
+| uniswap_v4 | 40 | 40.63% |
+| uniswap_v3 | 83 | 36.80% |
+| uniswap_v2 | 23 | 21.55% |
+| pancakeswap_v2 | 1 | 11.71% |
+| sushiswap_v2 | 1 | 11.00% |
+
+Constant-product AMMs (uniswap_v2, sushi/pancake v2) sit in the 11–22% band;
+tick-aware AMMs (uniswap v3/v4) are roughly 2× worse at 37–41%; ekubo_v3 is
+the heaviest under-estimator at ~90%. Fix gas estimation there first.
 
 **Worst offenders** (from the run's `report.md`):
 
-- `USDT → WBTC` and reverse: Fynd quotes **19,665 gas**; actual is 188k–235k.
-  That's a **10–12x under-estimate**. Both directions and multiple amounts hit
-  the same wrong value. Smells like a hard-coded or stale entry in the derived
-  gas table for this token pair.
-- `USDC → 5086bf…` (small-cap): 175,098 → 412,734 (2.4×).
-- `WETH → 68749665…` (Pandora / ERC-404): 283,665 → 455,765 (1.6×).
+- **The `19,665` magic constant.** Fynd quotes exactly `19,665` gas on
+  `USDC ↔ USDT` (actual 194k–233k) and `WBTC → USDT` (actual ~187k) — both
+  directions, multiple amounts. **10–12× under-estimate** every time. The
+  same constant hitting multiple unrelated stablecoin/BTC pairs strongly
+  suggests a default-fallback entry in the derived gas table that activates
+  whenever a per-pair lookup misses, rather than a stale entry for one
+  specific pair.
+- `USDC → small-cap`: `132,000` → 280k–305k (~2.3× under). The recurring
+  `132,000` and `134,000` round numbers look like per-protocol static budgets
+  rather than per-swap calculations.
+- `0x467b… → WETH`: `142,000` → 310,170 (2.2× under).
 
-**Pattern:** most of Fynd's estimates cluster on round numbers (132,000,
-151,665, 396,000, 283,665) that look like per-protocol static budgets rather
-than per-swap dynamic calculations. Real executed gas is almost always higher
-because of approvals, storage writes, and router bookkeeping that the static
-budget doesn't model.
+**Pattern:** estimates cluster on round constants (`19,665`, `132,000`,
+`134,000`, `142,000`) that look like per-protocol static budgets, not
+per-swap dynamic costs. Real execution adds approvals, storage writes, and
+router bookkeeping on top of the swap math, and the static budgets don't
+model any of it.
 
 ---
 
-## What the 37% means for route selection
+## What the 38% means for route selection
 
 - **Portfolio bias:** Fynd's `amount_out_net_gas` is consistently
-  over-estimated by roughly 37% of the gas cost. At 0.44 gwei that's
-  rounding-error dollars; at 20 gwei it's real money (~$4/trade on the mean,
-  scaled from the headline -0.000044 ETH).
+  over-estimated by roughly 38% of the gas cost. At 0.47 gwei the per-trade
+  loss is rounding-error dollars; at 20 gwei it scales to ~$4/trade on the
+  mean (the -0.000040 ETH headline times ~43× for the gas-price ratio, at
+  ETH ≈ $2,290).
 - **Per-trade ranking:** a systematic bias doesn't by itself flip the winner,
   but it narrows margins. Higher-liquidity multi-hop routes that cost more gas
   lose ground to lower-liquidity single-hop routes whenever the gas cost is
@@ -102,139 +141,29 @@ budget doesn't model.
   have similar `amount_out`.
 
 Both claims can be checked with the CSV. `error_wei` is signed; group by
-pair to see where the ranking-flip risk concentrates.
+protocol to see where the ranking-flip risk concentrates (Ekubo v3 is the
+clear outlier).
 
 ---
 
 ## Known limitations of the current audit
 
-1. **Fynd's route coverage limits the sample.** With the default
-   `worker_pools.toml` (one Bellman-Ford 2-hop pool), ~44% of aggregator
-   trades return `NoRouteFound`. That's realism — those are trades real users
-   brought to aggregators, Fynd just can't serve them — but it biases the 46
-   surviving trades toward common-token pairs.
+1. **`single_swaps.toml` ↔ no-quote rate trade-off.** With `max_hops=1`, ~62%
+   of the 500 sampled aggregator trades return `NoRouteFound` because the only
+   routable path needs an intermediate token (most multi-hop trades go via
+   WETH/USDC). That's the cost of clean per-protocol attribution. Drop the
+   `-w` flag and rerun against the default `worker_pools.toml` (2-hop) to
+   recover most of those trades — at the price of mixing protocols within a
+   route, which makes the per-protocol breakdown meaningless.
 2. **Non-standard ERC-20 tokens break slot detection.** The simulator's
    balance/allowance slot probe (brute-force slots 0..=20) misses tokens that
-   use proxy patterns or non-Solidity-default storage layouts (10 trades
-   reverted for this reason on the 100-trade run). These are biased toward
-   small-caps.
+   use proxy patterns or non-Solidity-default storage layouts (31 trades
+   reverted for this reason on the 500-trade run, ~6%). These are biased
+   toward small-caps.
 3. **Gas price is a single snapshot.** We multiply every trade by
    `eth_gasPrice()` at the start of the run. Mainnet gas varies tick-to-tick,
    but for comparing estimate-vs-actual *on the same trade* this doesn't
    matter — the price cancels out of relative error.
-4. **No signed transactions.** The simulator uses `provider.estimate_gas()`
-   on the quote's calldata directly. This is correct because
-   `quote.transaction().data()` is complete (the Tycho router does its
-   authorization inside the calldata, not via an outer EIP-1559 signature).
-   Verified in `clients/rust/src/client.rs::fynd_swap_payload` — it just
-   copies the bytes through. If encoding ever starts injecting an outer
-   signature, this assumption breaks and everything reverts.
-5. **`eth_estimateGas` is itself an estimate.** Nodes binary-search for a
-   gas limit that works; results are typically within hundreds of gas of
-   actual execution, never thousands. Plenty accurate for the errors we're
-   measuring (tens of thousands of gas).
-6. **Worker pool count.** The audit runs against whatever `worker_pools.toml`
-   the user has enabled. Different pools = different routes = different
-   `gas_estimate`. Rerunning with a 3-hop pool or multiple algorithms
-   competing may change the numbers.
-
----
-
-## Research next steps
-
-The next person should triage findings in this order. Highest-leverage first.
-
-### 1. Investigate the USDT↔WBTC 19,665 gas constant
-
-Fynd returns `gas_estimate=19665` for both directions of USDT↔WBTC at wildly
-different amounts (61M, 2B, 3500 USDT). Actual gas on all of them is 180k–350k.
-19,665 is the Ethereum intrinsic transaction cost (21,000) minus 1,335 —
-specifically matches the `21000 - 1335 = 19665` formula some gas tables use
-for "storage refund reduced baseline." That smells like a stale or
-misconfigured entry.
-
-Start here: `fynd-core/src/derived/computations/token_gas_price.rs`. The
-computation walks Fynd's derived graph to produce per-token gas costs in
-output-token terms. Check:
-- Is there a path-discovery bug that's returning the intrinsic-tx baseline
-  when no simulation path is available?
-- Is there an edge case where `buy_gas_units` from
-  `GraphManager::simulate` returns near-zero for the USDT/WBTC pair?
-- Trace a single-hop swap from USDT→WBTC through a specific pool (Uniswap
-  v3 0.3% or 1%) and compare `pool.gas_cost` to the aggregate
-  `route.total_gas()`.
-
-### 2. Characterise the static-budget pattern
-
-Fynd's estimates repeatedly land on exact values: 120,000, 132,000, 151,665,
-175,098, 264,000, 283,665, 396,000. These look like per-protocol fixed costs
-summed up across hops.
-
-Check `tycho-simulation` (the dependency Fynd pulls protocol simulators from):
-- Each protocol (UniswapV2, UniswapV3, Balancer, Curve, etc.) exposes a
-  `gas_cost()` — likely a hard-coded constant, not a per-swap computed value.
-- If the constant is correct for one realistic swap shape but ignores the
-  actual swap's storage writes, intermediate approvals, etc., the error pattern
-  matches exactly what we see.
-
-Proposed experiment: instrument the tool to log `route.swaps()[*].gas_estimate`
-per hop for each successful trade, then compare to per-hop actual gas by
-simulating hop-by-hop. That'll localise whether error is per-protocol-uniform
-or concentrated in specific protocols.
-
-### 3. Compute a per-token gas model
-
-Instead of per-protocol constants, model per-token additive costs:
-- WETH wrap/unwrap ~40k
-- ERC-20 approval (first time, zero → max): 46k; subsequent: 26k
-- ERC-20 transfer into user slot: ~21k (cold SSTORE on first-ever, 5k otherwise)
-- Rebasing / fee-on-transfer tokens: variable, often 70k+
-- Proxy tokens (USDC, USDT): +~2–4k per call
-
-Can be derived empirically: run this audit with a larger sample, fit per-token
-intercepts via least squares on `actual_gas − route_baseline`, feed back into
-Fynd's gas table. Even a crude lookup for the top 20 tokens should halve the
-error.
-
-### 4. Check whether the bias affects route selection in practice
-
-On the 46 successful trades, `amount_out_net_gas` is over-estimated by
-~0.37 × gas_cost. In output-token terms that's tiny at 0.44 gwei. Simulate
-what happens at 20 gwei and 50 gwei:
-- Pick a trade where Fynd's chosen route was *close* to a rejected
-  alternative.
-- Recompute both routes' `amount_out_net_gas` using actual gas instead of
-  estimated.
-- Does the winner flip? How often?
-
-`fynd-core/src/worker_pool_router/mod.rs` lines 143–354 have the ranking
-code. `price_guard/guard.rs` also filters on net-gas; worth verifying
-neither is sensitive to the bias direction (low estimate → more routes
-pass the guard).
-
-### 5. Cover more of the long tail
-
-44/100 trades in the canonical dataset got `NoRouteFound`. That's a separate
-finding (not about gas accuracy, but about route coverage). Options:
-- Add a second worker pool in `worker_pools.toml` — 3-hop Bellman-Ford, or
-  Most-Liquid — and rerun. Sample shifts, yield should improve.
-- Filter the dataset to pairs the Fynd instance can route before sampling —
-  this gives cleaner accuracy numbers but loses the "real aggregator traffic"
-  property.
-- The current tool treats `NoRouteFound` as a row in the CSV with
-  `status=no_quote`, so no code changes needed to slice the data either way.
-
-### 6. Sanity-check the gas-price snapshot
-
-The audit reads `eth_gasPrice()` once and uses it everywhere. At 0.44 gwei
-the absolute ETH numbers look small enough to be confusing. Two things to
-verify:
-- Is `eth_gasPrice` on ithaca returning a base fee, a priority fee, or the
-  sum? Most nodes return base + tip, but ithaca's value is suspiciously low.
-- Cross-check with `eth_feeHistory` and pick e.g. the p50 base fee over
-  the last 100 blocks to get a stable number.
-
-Fixing this only changes the ETH magnitude, not the 37% relative finding.
 
 ---
 
@@ -245,17 +174,18 @@ Fixing this only changes the ETH magnitude, not the 37% relative finding.
 | types | `src/types.rs` | `AuditTrade`, `RowStatus`, `AuditRow`, `Artifacts` |
 | sampler | `src/sampler.rs` | Parses the 10k aggregator dataset, stratified cap-per-pair sampling with deterministic seed |
 | quoter | `src/quoter.rs` | `FyndClient` wrapper; one `POST /v1/quote` per trade |
-| simulator | `src/simulator.rs` | Brute-force ERC-20 slot detection (copied from `fynd-swap-cli/src/erc20.rs`), balance + ETH overrides, direct `provider.estimate_gas()` |
+| simulator | `src/simulator.rs` | Builds `StorageOverrides` (balance + allowance via the shared `erc20-overrides` crate, plus a huge native-ETH balance), then routes through `FyndClient::execute_swap` in dry-run mode (signs with `Signature::test_signature()`; recovers `gas_used` from the returned `SettledOrder::gas_cost()`) |
 | cost | `src/cost.rs` | Signed `i128` arithmetic: estimate − actual, times gas price, to wei and ETH |
 | report | `src/report.rs` | CSV writer + markdown generator with aggregate table, worst-10, high-exclusion finding |
 | main | `src/main.rs` | CLI parsing (clap), dataset download, orchestration loop, ETH-price-via-Fynd for the report header |
 
 Invariants worth preserving when extending:
 
-- The simulator never signs. If this ever becomes necessary (e.g. to support
-  a future encoding that needs a user signature), the architecture has to
-  split into a quote phase and a sign+simulate phase — currently everything
-  is one stateless `provider.estimate_gas`.
+- The simulator only ever signs with `Signature::test_signature()`, and only
+  because `FyndClient::execute_swap` requires a `SignedSwap` shape. The
+  server's dry-run path discards it. If a future encoding starts validating
+  the outer signature on the dry-run path, this tool has to either gain
+  access to a real key or grow a sign+simulate split — today it's stateless.
 - `AuditRow` fields use `Option<_>` so the CSV row always has the same column
   count regardless of status. Don't drop the `Option` — preserves the
   "every sampled trade appears in the CSV" invariant.
@@ -263,22 +193,3 @@ Invariants worth preserving when extending:
   without also computing per-trade actuals at per-trade timestamps; the
   relative comparison is only clean under a shared price.
 
----
-
-## How to redo the 2026-04-23 run exactly
-
-```bash
-# terminal 1
-TYCHO_API_KEY=supersecrettoken \
-RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
-  cargo run --release -p fynd -- serve
-
-# terminal 2, after Fynd is healthy
-RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
-  cargo run --release -p fynd-gas-audit -- \
-    --n 100 --max-per-pair 20 --seed 42
-```
-
-Output will be at `tools/fynd-gas-audit/out/`. Seed 42 reproduces the same
-100-trade sample; gas price will differ (it's taken live); simulations will
-differ because mainnet state has moved.

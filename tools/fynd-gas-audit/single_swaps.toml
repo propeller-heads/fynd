@@ -1,0 +1,17 @@
+# config for single swaps (1 hop) for gas audit
+[pools.most_liquid_1_hop]
+algorithm = "most_liquid"
+num_workers = 1
+task_queue_capacity = 1000
+max_hops = 1
+timeout_ms = 5000
+max_routes = 50
+
+
+[pools.bellman_ford_1_hop]
+algorithm = "bellman_ford"
+num_workers = 1
+task_queue_capacity = 1000
+max_hops = 1
+timeout_ms = 5000
+max_routes = 50

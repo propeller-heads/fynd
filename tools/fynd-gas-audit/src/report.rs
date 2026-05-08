@@ -212,9 +212,7 @@ pub fn write_csv(path: &Path, rows: &[AuditRow]) -> anyhow::Result<()> {
             r.num_swaps
                 .map(|n| n.to_string())
                 .unwrap_or_default(),
-            r.protocols
-                .clone()
-                .unwrap_or_default(),
+            r.protocols.clone().unwrap_or_default(),
         ])?;
     }
     wtr.flush()?;
@@ -287,15 +285,14 @@ fn route_shape_label(r: &AuditRow) -> &'static str {
 
 fn write_group_table_header(out: &mut String) -> std::fmt::Result {
     use std::fmt::Write;
-    writeln!(out, "\n| group | n | under | over | mean \\|err\\|/cost | mean err (ETH) | sum err (ETH) |")?;
+    writeln!(
+        out,
+        "\n| group | n | under | over | mean \\|err\\|/cost | mean err (ETH) | sum err (ETH) |"
+    )?;
     writeln!(out, "|---|---|---|---|---|---|---|")
 }
 
-fn write_group_row(
-    out: &mut String,
-    label: &str,
-    s: &GroupStats,
-) -> std::fmt::Result {
+fn write_group_row(out: &mut String, label: &str, s: &GroupStats) -> std::fmt::Result {
     use std::fmt::Write;
     writeln!(
         out,
@@ -304,10 +301,7 @@ fn write_group_row(
     )
 }
 
-fn write_route_shape_breakdown(
-    out: &mut String,
-    successes: &[&AuditRow],
-) -> std::fmt::Result {
+fn write_route_shape_breakdown(out: &mut String, successes: &[&AuditRow]) -> std::fmt::Result {
     use std::fmt::Write;
     writeln!(out, "\n## By route shape")?;
     write_group_table_header(out)?;
@@ -323,10 +317,7 @@ fn write_route_shape_breakdown(
     Ok(())
 }
 
-fn write_protocol_breakdown(
-    out: &mut String,
-    successes: &[&AuditRow],
-) -> std::fmt::Result {
+fn write_protocol_breakdown(out: &mut String, successes: &[&AuditRow]) -> std::fmt::Result {
     use std::fmt::Write;
 
     // Single-hop: clean per-protocol attribution (1 row → 1 protocol).
@@ -366,7 +357,10 @@ fn write_protocol_breakdown(
         std::collections::BTreeMap::new();
     for r in &sequential {
         if let Some(p) = r.protocols.as_deref() {
-            by_seq.entry(p.to_string()).or_default().push(*r);
+            by_seq
+                .entry(p.to_string())
+                .or_default()
+                .push(*r);
         }
     }
     write_group_table_header(out)?;
