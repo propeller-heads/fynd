@@ -7,12 +7,12 @@ use num_traits::ToPrimitive;
 
 use crate::types::{AuditRow, RowStatus};
 
-/// Derive ETH-denominated error from a row's `error_gas` and `gas_price_wei`.
+/// Derive wei-denominated error from a row's `error_gas` and `gas_price_wei`.
 /// Returns `None` if the row didn't produce a measurable error (no quote /
 /// reverted simulation).
-pub(crate) fn error_eth(row: &AuditRow) -> Option<f64> {
+pub(crate) fn error_wei(row: &AuditRow) -> Option<f64> {
     let gas = row.error_gas?;
-    Some(gas as f64 * biguint_to_f64(&row.gas_price_wei) / 1e18)
+    Some(gas as f64 * biguint_to_f64(&row.gas_price_wei))
 }
 
 fn biguint_to_f64(b: &BigUint) -> f64 {
@@ -27,14 +27,13 @@ pub struct Summary {
     pub no_quote: usize,
     pub no_encoding: usize,
     pub simulation_reverted: usize,
-    pub mean_error_eth: f64,
-    pub median_error_eth: f64,
-    pub p95_abs_error_eth: f64,
+    pub mean_error_wei: f64,
+    pub median_error_wei: f64,
+    pub p95_abs_error_wei: f64,
     pub mean_abs_pct: f64,
     pub over_charged: usize,
     pub under_charged: usize,
-    pub sum_signed_eth: f64,
-    pub sum_abs_eth: f64,
+    pub sum_signed_wei: f64,
 }
 
 pub fn summarize(rows: &[AuditRow]) -> Summary {
@@ -54,18 +53,17 @@ pub fn summarize(rows: &[AuditRow]) -> Summary {
         .collect();
     let errors: Vec<f64> = successes
         .iter()
-        .filter_map(|r| error_eth(r))
+        .filter_map(|r| error_wei(r))
         .collect();
     if errors.is_empty() {
         return summary;
     }
 
     let abs_errors: Vec<f64> = errors.iter().map(|x| x.abs()).collect();
-    summary.mean_error_eth = mean(&errors);
-    summary.median_error_eth = median(&errors);
-    summary.p95_abs_error_eth = percentile(&abs_errors, 95.0);
-    summary.sum_abs_eth = abs_errors.iter().sum();
-    summary.sum_signed_eth = errors.iter().sum();
+    summary.mean_error_wei = mean(&errors);
+    summary.median_error_wei = median(&errors);
+    summary.p95_abs_error_wei = percentile(&abs_errors, 95.0);
+    summary.sum_signed_wei = errors.iter().sum();
     summary.over_charged = errors
         .iter()
         .filter(|x| **x > 0.0)
@@ -79,9 +77,9 @@ pub fn summarize(rows: &[AuditRow]) -> Summary {
         .iter()
         .filter_map(|r| {
             let actual = r.actual_gas? as f64;
-            let err_eth = error_eth(r)?;
-            let actual_cost_eth = actual * biguint_to_f64(&r.gas_price_wei) / 1e18;
-            (actual_cost_eth != 0.0).then(|| (err_eth / actual_cost_eth).abs() * 100.0)
+            let err_wei = error_wei(r)?;
+            let actual_cost_wei = actual * biguint_to_f64(&r.gas_price_wei);
+            (actual_cost_wei != 0.0).then(|| (err_wei / actual_cost_wei).abs() * 100.0)
         })
         .collect();
     summary.mean_abs_pct = if pct.is_empty() { 0.0 } else { mean(&pct) };
@@ -138,30 +136,30 @@ struct GroupStats {
     under: usize,
     over: usize,
     mean_pct: f64,
-    mean_error_eth: f64,
-    sum_error_eth: f64,
+    mean_error_wei: f64,
+    sum_error_wei: f64,
 }
 
 fn group_stats(rows: &[&AuditRow]) -> GroupStats {
-    let mut errors_eth: Vec<f64> = Vec::new();
+    let mut errors_wei: Vec<f64> = Vec::new();
     let mut pcts: Vec<f64> = Vec::new();
     let mut under = 0usize;
     let mut over = 0usize;
     for r in rows {
-        let Some(err_eth) = error_eth(r) else { continue };
+        let Some(err_wei) = error_wei(r) else { continue };
         let Some(actual) = r.actual_gas else { continue };
-        errors_eth.push(err_eth);
-        if err_eth > 0.0 {
+        errors_wei.push(err_wei);
+        if err_wei > 0.0 {
             over += 1;
-        } else if err_eth < 0.0 {
+        } else if err_wei < 0.0 {
             under += 1;
         }
-        let actual_cost = actual as f64 * biguint_to_f64(&r.gas_price_wei) / 1e18;
+        let actual_cost = actual as f64 * biguint_to_f64(&r.gas_price_wei);
         if actual_cost > 0.0 {
-            pcts.push((err_eth / actual_cost).abs() * 100.0);
+            pcts.push((err_wei / actual_cost).abs() * 100.0);
         }
     }
-    let count = errors_eth.len();
+    let count = errors_wei.len();
     if count == 0 {
         return GroupStats::default();
     }
@@ -170,8 +168,8 @@ fn group_stats(rows: &[&AuditRow]) -> GroupStats {
         under,
         over,
         mean_pct: if pcts.is_empty() { 0.0 } else { mean(&pcts) },
-        mean_error_eth: mean(&errors_eth),
-        sum_error_eth: errors_eth.iter().sum(),
+        mean_error_wei: mean(&errors_wei),
+        sum_error_wei: errors_wei.iter().sum(),
     }
 }
 
@@ -179,7 +177,7 @@ fn write_group_table_header(out: &mut String) -> std::fmt::Result {
     use std::fmt::Write;
     writeln!(
         out,
-        "\n| group | n | under | over | mean \\|err\\|/cost | mean err (ETH) | sum err (ETH) |"
+        "\n| group | n | under | over | mean \\|err\\|/cost | mean err (wei) | sum err (wei) |"
     )?;
     writeln!(out, "|---|---|---|---|---|---|---|")
 }
@@ -188,8 +186,8 @@ fn write_group_row(out: &mut String, label: &str, s: &GroupStats) -> std::fmt::R
     use std::fmt::Write;
     writeln!(
         out,
-        "| {} | {} | {} | {} | {:.2}% | {:+.6} | {:+.6} |",
-        label, s.count, s.under, s.over, s.mean_pct, s.mean_error_eth, s.sum_error_eth
+        "| {} | {} | {} | {} | {:.2}% | {:+.0} | {:+.0} |",
+        label, s.count, s.under, s.over, s.mean_pct, s.mean_error_wei, s.sum_error_wei
     )
 }
 
@@ -267,9 +265,9 @@ pub fn write_markdown(
     writeln!(&mut out, "\n## Aggregate error")?;
     writeln!(&mut out, "\n| metric | value |")?;
     writeln!(&mut out, "|---|---|")?;
-    writeln!(&mut out, "| Mean signed error (ETH) | {:+.6} |", summary.mean_error_eth)?;
-    writeln!(&mut out, "| Median signed error (ETH) | {:+.6} |", summary.median_error_eth)?;
-    writeln!(&mut out, "| P95 absolute error (ETH) | {:.6} |", summary.p95_abs_error_eth)?;
+    writeln!(&mut out, "| Mean signed error (wei) | {:+.0} |", summary.mean_error_wei)?;
+    writeln!(&mut out, "| Median signed error (wei) | {:+.0} |", summary.median_error_wei)?;
+    writeln!(&mut out, "| P95 absolute error (wei) | {:.0} |", summary.p95_abs_error_wei)?;
     writeln!(&mut out, "| Mean \\|error\\| / actual cost | {:.2}% |", summary.mean_abs_pct)?;
     writeln!(
         &mut out,
@@ -281,25 +279,24 @@ pub fn write_markdown(
         "| Trades under-charged | {} / {} |",
         summary.under_charged, summary.succeeded
     )?;
-    writeln!(&mut out, "| Sum of signed error (ETH) | {:+.6} |", summary.sum_signed_eth)?;
-    writeln!(&mut out, "| Sum of absolute error (ETH) | {:.6} |", summary.sum_abs_eth)?;
+    writeln!(&mut out, "| Sum of signed error (wei) | {:+.0} |", summary.sum_signed_wei)?;
 
     writeln!(&mut out, "\n## Worst 10 trades by absolute error")?;
     writeln!(
         &mut out,
-        "\n| token_in | token_out | amount_in | gas_estimate | actual_gas | error_eth |"
+        "\n| token_in | token_out | amount_in | gas_estimate | actual_gas | error_wei |"
     )?;
     writeln!(&mut out, "|---|---|---|---|---|---|")?;
     let mut successes: Vec<&AuditRow> = rows
         .iter()
         .filter(|r| r.status == RowStatus::Success)
         .collect();
-    let abs_err = |r: &&AuditRow| error_eth(r).unwrap_or(0.0).abs();
+    let abs_err = |r: &&AuditRow| error_wei(r).unwrap_or(0.0).abs();
     successes.sort_by(|a, b| abs_err(b).total_cmp(&abs_err(a)));
     for r in successes.iter().take(10) {
         writeln!(
             &mut out,
-            "| {} | {} | {} | {} | {} | {:+.6} |",
+            "| {} | {} | {} | {} | {} | {:+.0} |",
             r.token_in,
             r.token_out,
             r.amount_in,
@@ -310,7 +307,7 @@ pub fn write_markdown(
             r.actual_gas
                 .map(|g| g.to_string())
                 .unwrap_or_default(),
-            error_eth(r).unwrap_or(0.0)
+            error_wei(r).unwrap_or(0.0)
         )?;
     }
 
@@ -396,8 +393,8 @@ mod tests {
     fn summarize_empty_returns_zeros() {
         let s = summarize(&[row(RowStatus::NoQuote, None, None)]);
         assert_eq!(s.succeeded, 0);
-        assert_eq!(s.mean_error_eth, 0.0);
-        assert_eq!(s.sum_abs_eth, 0.0);
+        assert_eq!(s.mean_error_wei, 0.0);
+        assert_eq!(s.sum_signed_wei, 0.0);
     }
 
     #[test]

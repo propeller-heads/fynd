@@ -29,8 +29,8 @@ pub enum RowStatus {
 
 /// One row of the output CSV / aggregate table.
 ///
-/// `error_wei` and `error_eth` are not stored — derive them from `error_gas`
-/// and `gas_price_wei` at the point of consumption (see `report::error_eth`).
+/// `error_wei` is not stored — derive it from `error_gas` and `gas_price_wei`
+/// at the point of consumption (see `report::error_wei`).
 ///
 /// `BigUint` fields use `DisplayFromStr` so they serialise as decimal strings
 /// in CSV (the default serde representation is a sequence of u32 digits, which

@@ -11,10 +11,9 @@ drifts from the actual gas a transaction would consume.
 ## Why this audit exists
 
 Fynd ranks route candidates by `amount_out_net_gas = amount_out − gas_cost`. If
-`gas_estimate` is biased, that ranking is biased: a systematically-low
-`gas_estimate` makes every route look cheaper than it is, which flatters
-routes in a way that doesn't reflect execution economics. This tool quantifies
-the bias.
+`gas_estimate` is biased, the ranking is biased: a systematically-low
+`gas_estimate` makes every route look cheaper than it actually executes. This
+tool quantifies the bias.
 
 ---
 
@@ -48,6 +47,12 @@ the bias.
 CLI flags: `--n`, `--max-per-pair`, `--seed`, `--dataset`, `--fynd-url`,
 `--rpc-url`, `--out-dir`, `--sender`. Defaults produce the canonical
 100-trade audit.
+
+**Vary `--seed` between runs.** It defaults to `42` for reproducibility, but
+that means back-to-back runs draw the same sample. If you're using the audit
+to validate a gas-estimation change, sticking to one seed lets you overfit to
+that specific 100-trade slice. Pass a fresh `--seed` (e.g. `--seed $RANDOM`)
+each time you want a fresh, independent draw from the 10k dataset.
 
 ---
 
@@ -178,7 +183,7 @@ clear outlier).
 | sampler | `src/sampler.rs` | Parses the 10k aggregator dataset, stratified cap-per-pair sampling with deterministic seed |
 | quoter | `src/quoter.rs` | `FyndClient` wrapper; one `POST /v1/quote` per trade |
 | simulator | `src/simulator.rs` | Builds `StorageOverrides` (balance + allowance via the shared `erc20-overrides` crate, plus a huge native-ETH balance), then routes through `FyndClient::execute_swap` in dry-run mode (signs with `Signature::test_signature()`; recovers `gas_used` from the returned `SettledOrder::gas_cost()`) |
-| report | `src/report.rs` | CSV writer (via serde) + markdown generator with aggregate table, worst-10, high-exclusion finding. `error_eth` for each row is derived on the fly from `error_gas × gas_price_wei` rather than stored on `AuditRow` |
+| report | `src/report.rs` | CSV writer (via serde) + markdown generator with aggregate table, worst-10, high-exclusion finding. `error_wei` for each row is derived on the fly from `error_gas × gas_price_wei` rather than stored on `AuditRow` |
 | main | `src/main.rs` | CLI parsing (clap), dataset download, orchestration loop, ETH-price-via-Fynd for the report header |
 
 Invariants worth preserving when extending:

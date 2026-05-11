@@ -3,19 +3,20 @@ name = "fynd-swap-cli"
 version.workspace = true
 edition = "2021"
 description = "CLI for quoting and executing token swaps via the Fynd solver"
+license = "MIT"
 
 [dependencies]
-fynd-client        = { workspace = true }
-erc20-overrides    = { workspace = true }
-tokio              = { workspace = true }
-clap               = { workspace = true }
-alloy              = { workspace = true, features = ["signer-local"] }
-bytes              = { workspace = true }
-num-bigint         = { workspace = true }
-anyhow             = { workspace = true }
-tracing            = { workspace = true }
+fynd-client = { workspace = true }
+erc20-overrides = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+alloy = { workspace = true, features = ["signer-local"] }
+bytes = { workspace = true }
+num-bigint = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-reqwest            = { version = "0.12" }
+reqwest = { version = "0.12" }
 
 [[bin]]
 name = "fynd-swap-cli"

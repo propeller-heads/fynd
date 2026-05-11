@@ -933,8 +933,7 @@ pub struct Route {
     swaps: Vec<Swap>,
     /// Full `Token` objects keyed by address, populated by the algorithm that
     /// built the route. Skipped during (de)serialization — only the in-process
-    /// encoding path consumes it; wire consumers receive an empty map and
-    /// should not rely on it.
+    /// encoding path consumes it.
     #[serde(skip, default)]
     tokens: HashMap<Bytes, Token>,
 }
@@ -948,7 +947,7 @@ impl Route {
     /// Attaches a token map (address → full `Token`) to the route. The encoder
     /// uses this to convert each swap's `token_in`/`token_out` addresses back
     /// into the full `Token` objects required by `tycho-execution`.
-    pub fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
+    pub(crate) fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
         self.tokens = tokens;
         self
     }
@@ -965,7 +964,7 @@ impl Route {
 
     /// Returns the token map attached to this route. Empty unless populated via
     /// [`Route::with_tokens`].
-    pub fn tokens(&self) -> &HashMap<Bytes, Token> {
+    pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
         &self.tokens
     }
 }
