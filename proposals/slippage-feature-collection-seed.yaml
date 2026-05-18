@@ -1,0 +1,158 @@
+goal: >
+  Build an offline feature-collection dataset to predict quote-to-execution drift
+  (replay-based slippage decay across 1..10 blocks) for Fynd-quoted DEX routes on
+  Ethereum and Base. Serves the revert-rate measurement epic
+  (ENG-5986): predicting when route decay exceeds slippage tolerance predicts reverts.
+
+constraints:
+  - Label source is Fynd replay only (simulated decay, no realized-landing labels)
+  - v1 data sources restricted to Tycho, Fynd internals, and CoinGecko (lightweight API)
+  - CEX feeds and Dune onchain flow deferred to v2 — schema must accommodate them without refactor
+  - Consumer is offline research — no latency budget
+  - Feature snapshots must be point-in-time at quote block X (no look-ahead)
+  - "Chains: Ethereum mainnet + Base (Arbitrum and Optimism deferred to v2)"
+  - "Trade source v1: Fynd's own quotes; v2 adds aggregator trade sampling from Dune/Allium"
+  - "Isolation: exploratory work must NOT merge to main. All Fynd code changes live in \
+    feature sub-branches that aggregate into a release branch (e.g. explore/slippage-features). \
+    Nothing merges to main during the entire lifecycle of this exploration. Code quality and \
+    best practices still apply — findings and code will serve as reference for the full \
+    implementation later."
+
+acceptance_criteria:
+  - Dataset contains (quote_id, block_X, route, feature_vector, replay_decay[k=1..10]) tuples covering >= 1 week of Fynd quotes
+  - All 7 v1 feature families populated (Fynd quote-context, Fynd algorithm/config, pool state, token/pair, route topology, chain/env, temporal)
+  - v3/v4 pools expose marginal liquidity at active tick and concentration Gini, not just raw TVL
+  - Pair classification stored as both bucket {stable-stable, stable-large, large-large, mid, stable-meme} and continuous mcap features
+  - Chain ID and is_L2 flag stored as features
+  - Feature computation deterministic given (block, route, external snapshots)
+  - Dataset loadable in pandas/polars for exploratory notebooks
+  - Schema has nullable extension points for v2 families (CEX dynamics, onchain flow, priors)
+
+ontology_schema:
+  name: SlippageFeatureDataset
+  description: >
+    Per-quote feature records with Fynd replay decay labels, for offline exploratory
+    analysis of quote-to-execution drift on EVM DEX routes. Schema designed with
+    nullable extension points for v2 feature families (CEX, Dune, priors).
+  fields:
+    # === Core identifiers ===
+    - name: quote_id
+      type: string
+      description: Unique identifier of the Fynd quote event
+    - name: block_number
+      type: number
+      description: Block height X at quote time
+    - name: chain_id
+      type: number
+      description: EVM chain identifier
+
+    # === v1 Feature families ===
+    - name: route
+      type: object
+      description: Multi-hop route spec — tokens, pools, splits, hop count, gas estimate, pool-type mix
+    - name: fynd_context
+      type: object
+      description: Solver-candidate features — n_alternatives, gap_to_second_best, score_dispersion, quoted_amount_in, quoted_amount_out, requested_slippage_tolerance
+    - name: fynd_algorithm
+      type: object
+      description: Algorithm type and key settings used for this quote (from Confluence doc insight)
+    - name: pool_state
+      type: array
+      description: Per-hop pool features — reserves, tvl_usd, fee_tier, pool_type, active_tick_marginal_liquidity (v3/v4), concentration_gini, bottleneck_flag, curve_A, imbalance_ratio
+    - name: token_pair
+      type: object
+      description: Per-token mcap/fdv/age/category (CoinGecko), pair_bucket, continuous (log_mcap_ratio, min_mcap, max_mcap)
+    - name: route_topology
+      type: object
+      description: hop_count, split_count, gas_estimate, pool_type_mix
+    - name: chain_env
+      type: object
+      description: base_fee, priority_gas_p50, priority_gas_p95, is_l2, sequencer_lag
+    - name: temporal
+      type: object
+      description: hour_of_day, day_of_week, minutes_since_hour
+
+    # === v2 extension points (nullable in v1) ===
+    - name: cex_dynamics
+      type: object
+      description: "[v2] Realized vol/skew/kurtosis, cex_dex_spread, short_term_trend. Null in v1."
+    - name: onchain_flow
+      type: object
+      description: "[v2] Pool OFI, VWAP_deviation, swap_count, aggregator_share. Null in v1."
+    - name: priors
+      type: object
+      description: "[v2] Historical route-class decay, pool decay sensitivity. Null in v1."
+
+    # === Label ===
+    - name: label_decay
+      type: array
+      description: Replay-based quote-to-exec drift for k in {1..10}. Binary revert derivable from decay vs tolerance.
+
+evaluation_principles:
+  - name: point_in_time_integrity
+    description: No look-ahead; all features derivable from info available at block X
+    weight: 0.30
+  - name: feature_completeness
+    description: All 7 v1 families populated; v2 fields present as nullable columns
+    weight: 0.25
+  - name: cross_chain_coverage
+    description: Dataset spans Ethereum and Base with chain_id as a feature; Arbitrum/Optimism deferred to v2
+    weight: 0.15
+  - name: reproducibility
+    description: Deterministic feature computation given (block, route, external snapshots)
+    weight: 0.15
+  - name: v2_extensibility
+    description: Adding CEX/Dune/priors requires populating existing nullable columns, not schema changes
+    weight: 0.15
+
+exit_conditions:
+  - name: dataset_ready
+    description: ">= 1 week of quotes collected, all v1 feature families populated, spot-checked across Ethereum and Base"
+    criteria: Sampled 20+ records per chain validate schema
+  - name: schema_locked
+    description: 7 v1 families stable; v2 extension points present as nullable columns
+    criteria: CEX/Dune/priors columns exist but are null
+  - name: research_handoff
+    description: Exploratory notebook loads dataset, computes decay-vs-feature correlations, identifies top-K predictors
+    criteria: First correlation report produced
+
+metadata:
+  project_type: brownfield
+  ambiguity_score: 0.12
+  interview_date: "2026-05-17"
+  refined_date: "2026-05-18"
+  jira_epic: ENG-5986
+  jira_stories_v1:
+    - ENG-5987  # Instrument Fynd replay to emit structured decay labels (10 blocks, + algorithm/config)
+    - ENG-5988  # Build pool-state feature extractor via Tycho
+    - ENG-5989  # Build token and pair classification pipeline (CoinGecko)
+    - ENG-5992  # Assemble feature dataset with PIT integrity validation (7 families)
+    - ENG-5993  # Exploratory correlation analysis and top-K predictor report
+  jira_stories_v2:
+    - ENG-5990  # Integrate CEX dynamics features (deferred)
+    - ENG-5991  # Build onchain flow features from Dune (deferred)
+  confluence_doc: https://propeller-heads.atlassian.net/wiki/spaces/DEFI/pages/3672244234/Measure+Fynd+Revert+Rate
+  confluence_doc_critique:
+    - "Missing: continuous decay signal — binary revert loses gradient information"
+    - "Missing: feature engineering for prediction — doc is measurement-only"
+    - "Missing: cross-chain comparison strategy"
+    - "Good catch we missed: algorithm/settings as a feature"
+    - "Different trade source: doc samples from aggregator tables; we replay Fynd quotes"
+  context_references:
+    - path: "./"
+      role: primary
+      summary: Fynd solver with replay engine that observes solution decay across blocks
+    - path: "Tycho API"
+      role: reference
+      summary: Per-pool state (reserves, ticks, TVL, fee tier) across EVM chains
+    - path: "CoinGecko API"
+      role: reference
+      summary: Token market cap, FDV, age for pair classification
+  existing_patterns:
+    - Fynd replay engine emits solution-decay observations
+    - Tycho integration present for pool state snapshots
+    - Offline research workflow consumes parquet/arrow datasets
+  existing_dependencies:
+    - Fynd solver + replay engine (internal)
+    - Tycho client (TYCHO_API_KEY)
+    - CoinGecko API (lightweight, for token metadata only)
