@@ -5,10 +5,10 @@
 //! - Updates SharedMarketData (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use tokio::{
-    sync::{broadcast, mpsc, oneshot, RwLock},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
@@ -25,7 +25,7 @@ use tycho_simulation::{
 use crate::{
     feed::{
         events::MarketEvent,
-        market_data::{SharedMarketData, SharedMarketDataRef},
+        market_data::SharedMarketDataRef,
         protocol_registry::{register_exchanges, register_rfq},
         DataFeedError, TychoFeedConfig,
     },
@@ -45,7 +45,7 @@ pub(crate) struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
-    market_data: Arc<RwLock<SharedMarketData>>,
+    market_data: SharedMarketDataRef,
     /// Event broadcaster.
     event_tx: broadcast::Sender<MarketEvent>,
     /// Signal channel to notify the gas price worker to refresh gas price.
@@ -403,10 +403,9 @@ impl TychoFeed {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, env, sync::Arc};
+    use std::{collections::HashMap, env};
 
     use num_bigint::BigUint;
-    use tokio::sync::RwLock;
     use tycho_simulation::{
         protocol::models::{ProtocolComponent, Update},
         tycho_common::{
@@ -420,14 +419,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::feed::{
-        market_data::{SharedMarketData, SharedMarketDataRef},
-        TychoFeedConfig,
-    };
+    use crate::feed::{market_data::SharedMarketDataRef, TychoFeedConfig};
 
-    /// Creates a new shared market data instance wrapped in Arc<RwLock<>>.
+    /// Creates a new shared market data instance.
     fn new_shared_market_data() -> SharedMarketDataRef {
-        Arc::new(RwLock::new(SharedMarketData::new()))
+        SharedMarketDataRef::new_shared()
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

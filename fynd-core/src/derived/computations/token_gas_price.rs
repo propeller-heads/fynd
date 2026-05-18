@@ -1258,12 +1258,14 @@ mod tests {
         let usdc = token(1, "USDC");
 
         // Create market without gas price set
-        let mut market = SharedMarketData::new();
+        let mut market_inner = SharedMarketData::new();
         let comp = component("pool", &[eth.clone(), usdc.clone()]);
-        market.upsert_components(std::iter::once(comp));
-        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
-        market.upsert_tokens([eth.clone(), usdc.clone()]);
-        let market = SharedMarketData::new_shared();
+        market_inner.upsert_components(std::iter::once(comp));
+        market_inner
+            .update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market_inner.upsert_tokens([eth.clone(), usdc.clone()]);
+        let market =
+            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market_inner)));
 
         // Compute spot prices
         let derived = DerivedData::new_shared();

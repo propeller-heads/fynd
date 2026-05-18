@@ -310,11 +310,10 @@ struct AssetCtx {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::RwLock;
     use tycho_simulation::{evm::tycho_models::Chain, tycho_common::models::token::Token};
 
     use super::*;
-    use crate::feed::market_data::SharedMarketData;
+    use crate::feed::market_data::{SharedMarketData, SharedMarketDataRef};
 
     fn make_token(address: Address, symbol: &str, decimals: u32) -> Token {
         Token {
@@ -500,9 +499,10 @@ mod tests {
         let pepe = make_token(pepe_addr.clone(), "PEPE", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market_data = SharedMarketData::new();
-        market_data.upsert_tokens([pepe, usdc]);
-        let market_data = Arc::new(RwLock::new(market_data));
+        let mut market = SharedMarketData::new();
+        market.upsert_tokens([pepe, usdc]);
+        let market_data =
+            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
 
         let mut provider = HyperliquidProvider::default();
         let _handle = provider.start(market_data);
@@ -531,9 +531,10 @@ mod tests {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market_data = SharedMarketData::new();
-        market_data.upsert_tokens([weth, usdc]);
-        let market_data = Arc::new(RwLock::new(market_data));
+        let mut market = SharedMarketData::new();
+        market.upsert_tokens([weth, usdc]);
+        let market_data =
+            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
 
         let mut provider = HyperliquidProvider::default();
         let _handle = provider.start(market_data);

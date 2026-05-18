@@ -305,7 +305,7 @@ mod tests {
     use fynd_core::{
         derived::SharedDerivedDataRef,
         encoding::encoder::Encoder,
-        feed::market_data::{SharedMarketData, SharedMarketDataRef},
+        feed::market_data::SharedMarketDataRef,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
     use serde_json::Value;
@@ -341,8 +341,7 @@ mod tests {
     }
 
     fn make_test_state() -> AppState {
-        let market_data: SharedMarketDataRef =
-            Arc::new(tokio::sync::RwLock::new(SharedMarketData::new()));
+        let market_data: SharedMarketDataRef = SharedMarketDataRef::new_shared();
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
 
@@ -352,8 +351,7 @@ mod tests {
         let encoder = Encoder::new(Chain::Ethereum, registry).expect("encoder should build");
 
         let router = WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), encoder);
-        let health_tracker =
-            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
+        let health_tracker = HealthTracker::new(market_data.clone(), Arc::clone(&derived_data));
 
         let router_address =
             Bytes::from(hex::decode("fD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap());

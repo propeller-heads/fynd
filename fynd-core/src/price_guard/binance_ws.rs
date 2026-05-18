@@ -653,7 +653,6 @@ struct SymbolInfo {
 mod tests {
     use std::str::FromStr;
 
-    use tokio::sync::RwLock;
     use tycho_simulation::evm::tycho_models::Chain;
 
     use super::*;
@@ -758,7 +757,7 @@ mod tests {
 
     /// Creates a `BinanceWsWorker` that writes to the given ticker cache.
     fn make_worker(price_cache: &PriceCache) -> BinanceWsWorker {
-        let market_data = Arc::new(RwLock::new(SharedMarketData::new()));
+        let market_data = crate::feed::market_data::SharedMarketDataRef::new_shared();
         BinanceWsWorker {
             price_cache: Arc::clone(price_cache),
             token_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1208,9 +1207,11 @@ mod tests {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market_data = SharedMarketData::new();
-        market_data.upsert_tokens([weth, usdc]);
-        let market_data = Arc::new(RwLock::new(market_data));
+        let mut market_inner = SharedMarketData::new();
+        market_inner.upsert_tokens([weth, usdc]);
+        let market_data = crate::feed::market_data::SharedMarketDataRef::new(std::sync::Arc::new(
+            tokio::sync::RwLock::new(market_inner),
+        ));
 
         let mut provider = BinanceWsProvider::default();
         let _handle = provider.start(market_data);

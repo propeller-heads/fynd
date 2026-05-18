@@ -715,10 +715,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::collections::HashSet;
 
     use rstest::rstest;
-    use tokio::sync::RwLock;
     use tycho_simulation::{
         tycho_core::simulation::protocol_sim::Price,
         tycho_ethereum::gas::{BlockGasPrice, GasPrice},
@@ -741,7 +740,7 @@ mod tests {
     };
 
     fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
-        Arc::new(RwLock::new(market))
+        SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
     /// Creates a SharedDerivedDataRef with token prices set for testing.
@@ -760,7 +759,7 @@ mod tests {
 
         let mut derived_data = DerivedData::new();
         derived_data.set_token_prices(token_prices, vec![], 1, true);
-        Arc::new(RwLock::new(derived_data))
+        std::sync::Arc::new(tokio::sync::RwLock::new(derived_data))
     }
     // ==================== try_score_path Tests ====================
 

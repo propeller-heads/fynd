@@ -483,14 +483,14 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::collections::HashMap;
 
-    use tokio::sync::{broadcast, RwLock};
+    use tokio::sync::broadcast;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{component, setup_market, token, MockProtocolSim},
-        feed::market_data::SharedMarketData,
+        feed::market_data::{SharedMarketData, SharedMarketDataRef},
         types::BlockInfo,
     };
 
@@ -595,7 +595,7 @@ mod tests {
     ///
     /// Used to trigger `TotalFailure` in spot_price computation (full recompute with
     /// all components missing sim_state → succeeded == 0 → failure).
-    fn market_with_component_no_sim_state() -> Arc<RwLock<SharedMarketData>> {
+    fn market_with_component_no_sim_state() -> SharedMarketDataRef {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let pool = component("pool", &[eth.clone(), usdc.clone()]);
@@ -605,12 +605,12 @@ mod tests {
         market.upsert_components(std::iter::once(pool));
         // Note: no update_states() — simulation state is intentionally absent
         market.upsert_tokens([eth, usdc]);
-        Arc::new(RwLock::new(market))
+        SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
     /// Creates a market with two pools: one with sim state (pool succeeds) and one without (pool
     /// fails). Used to trigger partial spot price failure.
-    fn market_with_mixed_sim_states() -> Arc<RwLock<SharedMarketData>> {
+    fn market_with_mixed_sim_states() -> SharedMarketDataRef {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let dai = token(3, "DAI");
@@ -625,14 +625,14 @@ mod tests {
         market
             .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc, dai]);
-        Arc::new(RwLock::new(market))
+        SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
     /// Creates a market WITH sim_state but WITHOUT gas_price.
     ///
     /// Spot price computation succeeds (MockProtocolSim works), but token_price
     /// computation fails with `MissingDependency("gas_price")`.
-    fn market_with_sim_state_no_gas_price() -> Arc<RwLock<SharedMarketData>> {
+    fn market_with_sim_state_no_gas_price() -> SharedMarketDataRef {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let pool = component("pool", &[eth.clone(), usdc.clone()]);
@@ -643,7 +643,7 @@ mod tests {
         market.upsert_components(std::iter::once(pool));
         market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc]);
-        Arc::new(RwLock::new(market))
+        SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
     #[tokio::test]

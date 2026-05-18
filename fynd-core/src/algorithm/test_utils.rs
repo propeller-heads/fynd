@@ -1,10 +1,9 @@
 //! Shared test utilities for algorithm tests.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
-use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_core::{
         dto::ProtocolStateDelta,
@@ -23,7 +22,7 @@ use tycho_simulation::{
 
 use crate::{
     algorithm::most_liquid::DepthAndPrice,
-    feed::market_data::SharedMarketData,
+    feed::market_data::{SharedMarketData, SharedMarketDataRef},
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     types::{quote::OrderSide, BlockInfo, Order},
 };
@@ -311,13 +310,12 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
     .with_id("test-order".to_string())
 }
 
-/// Sets up market with components and a graph. Returns (market_lock, graph_manager).
+/// Sets up market with components and a graph. Returns (market_ref, graph_manager).
 ///
-/// The market is wrapped in `Arc<RwLock<...>>` for use with `find_best_route`.
-/// Use `market_read(&market_lock)` to get a `SharedMarketData` for other tests.
+/// Use `market_read(&market_ref)` to get a `SharedMarketData` reference for other tests.
 pub fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<DepthAndPrice>) {
+) -> (SharedMarketDataRef, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = SharedMarketData::new();
     let mut component_weights = HashMap::new();
 
@@ -368,15 +366,16 @@ pub fn setup_market(
             .unwrap();
     }
 
-    (Arc::new(RwLock::new(market)), graph_manager)
+    (SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
 }
 
 /// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
-/// Returns the guard which derefs to `&SharedMarketData`.
+/// Returns the guard which derefs to `&SharedMarketData` via `Deref`.
 pub fn market_read(
-    lock: &Arc<RwLock<SharedMarketData>>,
-) -> tokio::sync::RwLockReadGuard<'_, SharedMarketData> {
-    lock.try_read()
+    market: &SharedMarketDataRef,
+) -> crate::feed::market_data::MarketDataReadGuard<'_> {
+    market
+        .try_read_blocking()
         .expect("lock should not be contested in test")
 }
 

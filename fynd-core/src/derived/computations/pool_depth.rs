@@ -352,7 +352,7 @@ mod tests {
             store::DerivedData,
             types::{PoolDepthKey, SpotPrices},
         },
-        feed::market_data::SharedMarketData,
+        feed::market_data::SharedMarketDataRef,
     };
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_handles_empty_market() {
-        let market = SharedMarketData::new_shared();
+        let market = SharedMarketDataRef::new_shared();
         let derived = DerivedData::new_shared();
         derived
             .try_write()
@@ -790,7 +790,7 @@ mod tests {
         let usdc = token(0x02, "USDC");
 
         // Empty market — no simulation state
-        let market = SharedMarketData::new_shared();
+        let market = SharedMarketDataRef::new_shared();
         let derived = DerivedData::new_shared();
         derived
             .try_write()

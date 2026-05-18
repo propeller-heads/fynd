@@ -192,7 +192,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, setup_market, token, MockProtocolSim},
         derived::store::DerivedData,
-        feed::market_data::SharedMarketData,
+        feed::market_data::SharedMarketDataRef,
     };
 
     #[test]
@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn handles_empty_market() {
-        let market_ref = SharedMarketData::new_shared();
+        let market_ref = SharedMarketDataRef::new_shared();
         let derived_ref = DerivedData::new_shared();
         let changed = ChangedComponents::default();
 
