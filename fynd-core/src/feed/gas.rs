@@ -71,18 +71,14 @@ impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use num_bigint::BigUint;
-    use tokio::sync::{oneshot, RwLock};
+    use tokio::sync::oneshot;
     use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 
     use super::*;
-    use crate::feed::market_data::SharedMarketData;
 
     /// Mock client that returns errors for the first `fail_count` calls,
     /// then succeeds with a fixed gas price.
@@ -119,7 +115,7 @@ mod tests {
     }
 
     fn shared_market_data() -> SharedMarketDataRef {
-        Arc::new(RwLock::new(SharedMarketData::new()))
+        SharedMarketDataRef::new_shared()
     }
 
     /// Helper: send one signal and wait for the ack (with timeout).
@@ -141,7 +137,7 @@ mod tests {
     async fn fetch_error_does_not_crash_and_acks_oneshot() {
         let market_data = shared_market_data();
         let (mut fetcher, signal_tx) =
-            GasPriceFetcher::new(MockFeePriceGetter::new(1), Arc::clone(&market_data));
+            GasPriceFetcher::new(MockFeePriceGetter::new(1), market_data.clone());
 
         let handle = tokio::spawn(async move { fetcher.run().await });
 
@@ -187,7 +183,7 @@ mod tests {
         let market_data = shared_market_data();
         // Fail 3 times, then succeed
         let (mut fetcher, signal_tx) =
-            GasPriceFetcher::new(MockFeePriceGetter::new(3), Arc::clone(&market_data));
+            GasPriceFetcher::new(MockFeePriceGetter::new(3), market_data.clone());
 
         let handle = tokio::spawn(async move { fetcher.run().await });
 

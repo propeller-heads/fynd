@@ -25,7 +25,7 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        market_data::SharedMarketDataRef,
+        market_data::{SharedMarketDataRef, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
@@ -128,7 +128,11 @@ where
     }
 
     /// Returns a quote for an order.
-    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderQuote, SolveError> {
+    pub async fn quote(
+        &mut self,
+        order: &Order,
+        state_label: Option<StateLabel>,
+    ) -> Result<SingleOrderQuote, SolveError> {
         let start_time = Instant::now();
 
         // Log order details once at entry
@@ -176,14 +180,21 @@ where
             )
         };
 
+        let (market_ref, effective_label) = match state_label {
+            None => {
+                let label = StateLabel::new(block_info.hash().to_string());
+                (self.market_data.clone(), label)
+            }
+            Some(ref label) => (
+                self.market_data
+                    .with_label(label.clone()),
+                label.clone(),
+            ),
+        };
+
         let result = self
             .algorithm
-            .find_best_route(
-                graph,
-                self.market_data.clone(),
-                Some(self.derived_data.clone()),
-                order,
-            )
+            .find_best_route(graph, market_ref, Some(self.derived_data.clone()), order)
             .await;
 
         let order_quote = match result {
@@ -239,6 +250,7 @@ where
                     self.algorithm.name().to_string(),
                     Bytes::from(order.sender().as_ref()),
                     Bytes::from(order.effective_receiver().as_ref()),
+                    effective_label,
                 )
                 .with_route(route)
                 .with_gas_price(gas_price)
@@ -476,8 +488,9 @@ where
 
                             // Process the task
                             let result = {
+                                let label = task.state_label().cloned();
                                 let order = task.order();
-                                self.quote(order).await
+                                self.quote(order, label).await
                             };
 
                             if let Err(ref e) = result {

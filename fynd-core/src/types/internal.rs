@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::{Order, SingleOrderQuote};
+use crate::feed::market_data::StateLabel;
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;
@@ -20,6 +21,8 @@ pub struct SolveTask {
     id: TaskId,
     /// The order request to process.
     order: Order,
+    /// Optional labeled market state to solve against.
+    state_label: Option<StateLabel>,
     /// Channel to send the result back.
     response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
@@ -27,9 +30,19 @@ pub struct SolveTask {
 }
 
 impl SolveTask {
-    /// Creates a new solve task.
+    /// Creates a new solve task with no label (uses base Tycho state).
     pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
-        Self { id, order, response_tx, created_at: Instant::now() }
+        Self::new_with_label(id, order, None, response_tx)
+    }
+
+    /// Creates a new solve task targeting a specific labeled market state.
+    pub fn new_with_label(
+        id: TaskId,
+        order: Order,
+        state_label: Option<StateLabel>,
+        response_tx: oneshot::Sender<SolveResult>,
+    ) -> Self {
+        Self { id, order, state_label, response_tx, created_at: Instant::now() }
     }
 
     /// Returns the task ID.
@@ -40,6 +53,11 @@ impl SolveTask {
     /// Returns the order to process.
     pub fn order(&self) -> &Order {
         &self.order
+    }
+
+    /// Returns the state label to solve against, if any.
+    pub fn state_label(&self) -> Option<&StateLabel> {
+        self.state_label.as_ref()
     }
 
     /// Returns how long this task has been waiting.
@@ -160,5 +178,51 @@ impl SolveError {
     /// Creates a [`SolveError::MarketDataStale`] with the data age in milliseconds.
     pub fn market_data_stale(age_ms: u64) -> Self {
         Self::MarketDataStale { age_ms }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+    use tokio::sync::oneshot;
+    use tycho_simulation::tycho_core::models::Address;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        feed::market_data::StateLabel,
+        types::{Order, OrderSide},
+    };
+
+    fn make_order() -> Order {
+        Order::new(
+            Address::from([0x01; 20]),
+            Address::from([0x02; 20]),
+            BigUint::from(1000u64),
+            OrderSide::Sell,
+            Address::from([0xAA; 20]),
+        )
+    }
+
+    #[test]
+    fn test_new_has_no_label() {
+        let (tx, _rx) = oneshot::channel();
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), tx);
+        assert_eq!(task.state_label(), None);
+    }
+
+    #[test]
+    fn test_new_with_label_some() {
+        let (tx, _rx) = oneshot::channel();
+        let label = StateLabel::new("block:999");
+        let task = SolveTask::new_with_label(Uuid::new_v4(), make_order(), Some(label.clone()), tx);
+        assert_eq!(task.state_label(), Some(&label));
+    }
+
+    #[test]
+    fn test_new_with_label_none() {
+        let (tx, _rx) = oneshot::channel();
+        let task = SolveTask::new_with_label(Uuid::new_v4(), make_order(), None, tx);
+        assert_eq!(task.state_label(), None);
     }
 }

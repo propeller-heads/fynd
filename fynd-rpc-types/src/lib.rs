@@ -1678,6 +1678,8 @@ mod conversions {
 
     impl From<fynd_core::OrderQuote> for OrderQuote {
         fn from(core: fynd_core::OrderQuote) -> Self {
+            // state_label is intentionally not included in the wire format
+            // (see QuoteOptions::state_label doc)
             let order_id = core.order_id().to_string();
             let status = core.status().into();
             let amount_in = core.amount_in().clone();

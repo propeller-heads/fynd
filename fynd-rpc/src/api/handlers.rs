@@ -299,13 +299,11 @@ pub async fn get_prices(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use actix_web::{test, web, App, HttpResponse};
     use fynd_core::{
         derived::SharedDerivedDataRef,
         encoding::encoder::Encoder,
-        feed::market_data::{SharedMarketData, SharedMarketDataRef},
+        feed::market_data::SharedMarketDataRef,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
     use serde_json::Value;
@@ -341,10 +339,9 @@ mod tests {
     }
 
     fn make_test_state() -> AppState {
-        let market_data: SharedMarketDataRef =
-            Arc::new(tokio::sync::RwLock::new(SharedMarketData::new()));
+        let market_data = SharedMarketDataRef::new_shared();
         let derived_data: SharedDerivedDataRef =
-            Arc::new(tokio::sync::RwLock::new(Default::default()));
+            std::sync::Arc::new(tokio::sync::RwLock::new(Default::default()));
 
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
             .add_default_encoders(None)
@@ -353,7 +350,7 @@ mod tests {
 
         let router = WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), encoder);
         let health_tracker =
-            HealthTracker::new(Arc::clone(&market_data), Arc::clone(&derived_data));
+            HealthTracker::new(market_data.clone(), std::sync::Arc::clone(&derived_data));
 
         let router_address =
             Bytes::from(hex::decode("fD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap());

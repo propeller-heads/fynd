@@ -223,7 +223,7 @@ mod tests {
     use super::{PriceGuard, PriceGuardError};
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
-        feed::market_data::SharedMarketDataRef,
+        feed::market_data::{SharedMarketDataRef, StateLabel},
         price_guard::{
             config::PriceGuardConfig,
             provider::{ExternalPrice, PriceProvider, PriceProviderError},
@@ -331,6 +331,7 @@ mod tests {
             "test".to_string(),
             Bytes::from([0xAA; 20].as_slice()),
             Bytes::from([0xBB; 20].as_slice()),
+            StateLabel::new("test-block".to_string()),
         )
         .with_route(Route::new(vec![weth_usdc_swap()]))
     }

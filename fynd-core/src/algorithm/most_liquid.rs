@@ -567,7 +567,7 @@ impl Algorithm for MostLiquidAlgorithm {
             if market.gas_price().is_none() {
                 return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
             }
-            let market_subset = market.extract_subset(&component_ids);
+            let market_subset = market.extract_subset_with_overlay(&component_ids);
             drop(market);
             market_subset
         };
@@ -741,7 +741,7 @@ mod tests {
     };
 
     fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
-        Arc::new(RwLock::new(market))
+        SharedMarketDataRef::new(Arc::new(RwLock::new(market)))
     }
 
     /// Creates a SharedDerivedDataRef with token prices set for testing.
@@ -1430,7 +1430,7 @@ mod tests {
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Remove the component but keep tokens and graph
-        let mut market_write = market.try_write().unwrap();
+        let mut market_write = market.try_write_blocking().unwrap();
         market_write.remove_components([&"pool1".to_string()]);
         drop(market_write);
 
@@ -1732,7 +1732,7 @@ mod tests {
 
         let (market, manager) =
             setup_market(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
-        let mut market_write = market.try_write().unwrap();
+        let mut market_write = market.try_write_blocking().unwrap();
 
         // Set a non-zero gas price so gas cost exceeds tiny output
         // gas_cost = 50_000 * (1_000_000 + 1_000_000) = 100_000_000_000 >> 2 wei output

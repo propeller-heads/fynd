@@ -7,7 +7,9 @@
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::{types::internal::SolveTask, Order, SingleOrderQuote, SolveError};
+use crate::{
+    feed::market_data::StateLabel, types::internal::SolveTask, Order, SingleOrderQuote, SolveError,
+};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -51,6 +53,26 @@ impl TaskQueueHandle {
             .map_err(|_| SolveError::QueueFull)?;
 
         // Wait for response
+        response_rx
+            .await
+            .map_err(|_| SolveError::Internal("worker dropped response channel".to_string()))?
+    }
+
+    /// Enqueues a solve request targeting the given labeled market state.
+    ///
+    /// Pass `None` to use the base Tycho state.
+    pub async fn enqueue_with_label(
+        &self,
+        order: Order,
+        state_label: Option<StateLabel>,
+    ) -> Result<SingleOrderQuote, SolveError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let task_id = Uuid::new_v4();
+        let task = SolveTask::new_with_label(task_id, order, state_label, response_tx);
+        self.sender
+            .send(task)
+            .await
+            .map_err(|_| SolveError::QueueFull)?;
         response_rx
             .await
             .map_err(|_| SolveError::Internal("worker dropped response channel".to_string()))?
@@ -122,7 +144,10 @@ mod tests {
     use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
-    use crate::{BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote};
+    use crate::{
+        feed::market_data::StateLabel, BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus,
+        SingleOrderQuote,
+    };
 
     // -------------------------------------------------------------------------
     // Test Helpers
@@ -156,6 +181,7 @@ mod tests {
                 "test".to_string(),
                 Bytes::from(make_address(0xAA).as_ref()),
                 Bytes::from(make_address(0xAA).as_ref()),
+                StateLabel::new("test-block".to_string()),
             ),
             5,
         )
@@ -505,5 +531,62 @@ mod tests {
             .await
             .expect("should receive response");
         assert!(matches!(result, Err(SolveError::Timeout { elapsed_ms: 100 })));
+    }
+
+    // -------------------------------------------------------------------------
+    // enqueue_with_label Tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_enqueue_with_label_preserves_label() {
+        let queue = TaskQueue::new(TaskQueueConfig { capacity: 10 });
+        let handle = queue.handle();
+        let receiver = queue.into_receiver();
+
+        let label = StateLabel::new("block:12345".to_string());
+        let expected_label = label.clone();
+
+        let worker = tokio::spawn(async move {
+            let task = receiver
+                .recv()
+                .await
+                .expect("should receive task");
+            assert_eq!(task.state_label(), Some(&expected_label));
+            task.respond(Ok(make_single_quote()));
+        });
+
+        let result = handle
+            .enqueue_with_label(make_order(), Some(label))
+            .await;
+
+        worker
+            .await
+            .expect("worker should complete");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_with_label_none_has_no_label() {
+        let queue = TaskQueue::new(TaskQueueConfig { capacity: 10 });
+        let handle = queue.handle();
+        let receiver = queue.into_receiver();
+
+        let worker = tokio::spawn(async move {
+            let task = receiver
+                .recv()
+                .await
+                .expect("should receive task");
+            assert_eq!(task.state_label(), None);
+            task.respond(Ok(make_single_quote()));
+        });
+
+        let result = handle
+            .enqueue_with_label(make_order(), None)
+            .await;
+
+        worker
+            .await
+            .expect("worker should complete");
+        assert!(result.is_ok());
     }
 }

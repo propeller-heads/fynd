@@ -32,7 +32,7 @@ use tycho_simulation::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
-use crate::{price_guard::config::PriceGuardConfig, AlgorithmError};
+use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
 
 // ============================================================================
 // REQUEST TYPES
@@ -86,6 +86,11 @@ pub struct QuoteOptions {
     /// Options for encoding the solution into an on-chain transaction.
     /// If `None`, the solution is returned without an encoded transaction.
     encoding_options: Option<EncodingOptions>,
+    /// Solve against this labeled market state. `None` → base Tycho state.
+    ///
+    /// Set programmatically only — excluded from JSON serialization/deserialization.
+    #[serde(skip)]
+    state_label: Option<StateLabel>,
 }
 
 impl QuoteOptions {
@@ -113,6 +118,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Targets a specific labeled market state for solving.
+    pub fn with_state_label(mut self, label: StateLabel) -> Self {
+        self.state_label = Some(label);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -131,6 +142,11 @@ impl QuoteOptions {
     /// Returns the encoding options.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// Returns the labeled market state to solve against, if set.
+    pub fn state_label(&self) -> Option<&StateLabel> {
+        self.state_label.as_ref()
     }
 }
 
@@ -696,6 +712,8 @@ pub struct OrderQuote {
     sender: Bytes,
     /// Address of the receiver.
     receiver: Bytes,
+    /// Market state label used when this quote was computed.
+    state_label: StateLabel,
 }
 
 impl OrderQuote {
@@ -711,6 +729,7 @@ impl OrderQuote {
         algorithm: String,
         sender: Bytes,
         receiver: Bytes,
+        state_label: StateLabel,
     ) -> Self {
         Self {
             order_id,
@@ -728,6 +747,7 @@ impl OrderQuote {
             fee_breakdown: None,
             sender,
             receiver,
+            state_label,
         }
     }
 
@@ -843,6 +863,11 @@ impl OrderQuote {
     /// Returns the receiver address.
     pub fn receiver(&self) -> &Bytes {
         &self.receiver
+    }
+
+    /// Returns the market state label used when this quote was computed.
+    pub fn state_label(&self) -> &StateLabel {
+        &self.state_label
     }
 }
 

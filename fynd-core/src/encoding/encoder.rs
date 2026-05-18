@@ -396,6 +396,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
+        feed::market_data::StateLabel,
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
@@ -442,6 +443,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            StateLabel::new("test-block".to_string()),
         )
     }
 
@@ -503,6 +505,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            StateLabel::new("test-block".to_string()),
         );
 
         let result = Solution::try_from(&quote);
@@ -555,6 +558,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            StateLabel::new("test-block".to_string()),
         );
 
         let encoding_options = EncodingOptions::new(0.01);

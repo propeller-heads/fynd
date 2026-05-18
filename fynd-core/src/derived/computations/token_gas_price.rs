@@ -1263,7 +1263,8 @@ mod tests {
         market.upsert_components(std::iter::once(comp));
         market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth.clone(), usdc.clone()]);
-        let market = SharedMarketData::new_shared();
+        let market =
+            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
 
         // Compute spot prices
         let derived = DerivedData::new_shared();

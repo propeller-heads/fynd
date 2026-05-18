@@ -28,12 +28,11 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
-use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, SolveError,
+    encoding::encoder::Encoder, feed::market_data::StateLabel, price_guard::guard::PriceGuard,
+    worker_pool::task_queue::TaskQueueHandle, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -72,6 +71,59 @@ pub(crate) struct OrderResponses {
     /// Solver pools that failed with their respective errors (pool_name, error).
     /// This captures all error types: timeouts, no routes, algorithm errors, etc.
     failed_solvers: Vec<(String, SolveError)>,
+}
+
+/// Builds a `NoRouteFound` [`OrderQuote`] when `rank_quotes` returns empty but at least one
+/// (non-success) quote exists. Block/address/label context is borrowed from `any_q`.
+fn make_fallback_quote(responses: &OrderResponses, any_q: &OrderQuote) -> OrderQuote {
+    counter!("worker_router_orders_total", "status" => "no_route").increment(1);
+    OrderQuote::new(
+        responses.order_id.clone(),
+        QuoteStatus::NoRouteFound,
+        any_q.amount_in().clone(),
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BigUint::ZERO,
+        any_q.block().clone(),
+        String::new(),
+        any_q.sender().clone(),
+        any_q.receiver().clone(),
+        any_q.state_label().clone(),
+    )
+}
+
+/// Derives a [`SolveError`] from `failed_solvers` when no quotes were produced at all.
+///
+/// Returns `Timeout` when every solver timed out, `NotReady` when every solver was not
+/// ready, and `NoRouteFound` in all other cases (including an empty failure list).
+fn error_from_failures(responses: &OrderResponses) -> SolveError {
+    let all_timeouts = !responses.failed_solvers.is_empty() &&
+        responses
+            .failed_solvers
+            .iter()
+            .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
+    let all_not_ready = !responses.failed_solvers.is_empty() &&
+        responses
+            .failed_solvers
+            .iter()
+            .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
+
+    if all_timeouts {
+        counter!("worker_router_orders_total", "status" => "timeout").increment(1);
+        let mut elapsed_ms = 0u64;
+        for (_, e) in &responses.failed_solvers {
+            if let SolveError::Timeout { elapsed_ms: ms } = e {
+                elapsed_ms = elapsed_ms.max(*ms);
+            }
+        }
+        SolveError::Timeout { elapsed_ms }
+    } else if all_not_ready {
+        counter!("worker_router_orders_total", "status" => "not_ready").increment(1);
+        SolveError::NotReady(responses.order_id.clone())
+    } else {
+        counter!("worker_router_orders_total", "status" => "no_route").increment(1);
+        SolveError::NoRouteFound { order_id: responses.order_id.clone() }
+    }
 }
 
 /// Orchestrates multiple solver pools to find the best quote.
@@ -131,20 +183,34 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
+        let state_label = request.options().state_label().cloned();
+
         // Process each order independently in parallel
         let order_futures: Vec<_> = request
             .orders()
             .iter()
-            .map(|order| self.solve_order(order.clone(), deadline, min_responses))
+            .map(|order| {
+                self.solve_order(order.clone(), state_label.clone(), deadline, min_responses)
+            })
             .collect();
 
         let order_responses = futures::future::join_all(order_futures).await;
 
-        // Rank quotes for each order (sorted by amount_out_net_gas descending)
-        let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
+        // Rank quotes for each order (sorted by amount_out_net_gas descending).
+        // Returns Err when every solver failed and no OrderQuote context is available.
+        let ranked_quotes = order_responses
             .into_iter()
-            .map(|responses| self.rank_quotes(&responses, request.options()))
-            .collect();
+            .map(|responses| {
+                let ranked = self.rank_quotes(&responses, request.options());
+                if !ranked.is_empty() {
+                    return Ok(ranked);
+                }
+                match responses.quotes.first() {
+                    Some((_, any_q)) => Ok(vec![make_fallback_quote(&responses, any_q)]),
+                    None => Err(error_from_failures(&responses)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Validate against external prices when the client explicitly enables it.
         let price_guard_config = request
@@ -195,6 +261,7 @@ impl WorkerPoolRouter {
     async fn solve_order(
         &self,
         order: Order,
+        state_label: Option<StateLabel>,
         deadline: Instant,
         min_responses: usize,
     ) -> OrderResponses {
@@ -211,9 +278,12 @@ impl WorkerPoolRouter {
                 let order_clone = order.clone();
                 let pool_name = pool.name().to_string();
                 let queue = pool.queue().clone();
+                let label = state_label.clone();
 
                 async move {
-                    let result = queue.enqueue(order_clone).await;
+                    let result = queue
+                        .enqueue_with_label(order_clone, label)
+                        .await;
                     (pool_name, result)
                 }
             })
@@ -327,9 +397,8 @@ impl WorkerPoolRouter {
 
     /// Returns all valid quotes for an order, ranked by `amount_out_net_gas` descending.
     ///
-    /// If no valid quotes exist, returns a single-element vec with a placeholder
-    /// (`NoRouteFound` or `Timeout`) so that downstream always has at least one
-    /// candidate per order.
+    /// Returns an empty vec when no valid quotes exist; callers are responsible for
+    /// constructing the appropriate fallback quote.
     fn rank_quotes(&self, responses: &OrderResponses, options: &QuoteOptions) -> Vec<OrderQuote> {
         let mut valid_quotes: Vec<_> = responses
             .quotes
@@ -349,83 +418,22 @@ impl WorkerPoolRouter {
                 .cmp(a.amount_out_net_gas())
         });
 
-        if !valid_quotes.is_empty() {
-            counter!("worker_router_orders_total", "status" => "success").increment(1);
-            let (pool_name, best) = valid_quotes[0];
-            counter!("worker_router_best_quote_pool", "pool" => pool_name.clone()).increment(1);
-            debug!(
-                order_id = %best.order_id(),
-                number_of_candidates = valid_quotes.len(),
-                "ranked quotes"
-            );
-            return valid_quotes
-                .into_iter()
-                .map(|(_, q)| q.clone())
-                .collect();
+        if valid_quotes.is_empty() {
+            return vec![];
         }
 
-        // No valid quote found - return a NoRouteFound response
-        // Try to get any response to extract block info, or create a placeholder
-        let fallback = if let Some((_, any_q)) = responses.quotes.first() {
-            counter!("worker_router_orders_total", "status" => "no_route").increment(1);
-            OrderQuote::new(
-                responses.order_id.clone(),
-                QuoteStatus::NoRouteFound,
-                any_q.amount_in().clone(),
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                any_q.block().clone(),
-                String::new(),
-                any_q.sender().clone(),
-                any_q.receiver().clone(),
-            )
-        } else {
-            // No responses at all - determine status from failure types
-            let status = if responses.failed_solvers.is_empty() {
-                QuoteStatus::NoRouteFound
-            } else {
-                // If all failures are timeouts, report as Timeout
-                // Otherwise report as NoRouteFound (more general failure)
-                let all_timeouts = responses
-                    .failed_solvers
-                    .iter()
-                    .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
-                let all_not_ready = responses
-                    .failed_solvers
-                    .iter()
-                    .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
-                if all_timeouts {
-                    QuoteStatus::Timeout
-                } else if all_not_ready {
-                    QuoteStatus::NotReady
-                } else {
-                    QuoteStatus::NoRouteFound
-                }
-            };
-
-            // Record status metric
-            let status_label = match status {
-                QuoteStatus::Timeout => "timeout",
-                QuoteStatus::NotReady => "not_ready",
-                _ => "no_route",
-            };
-            counter!("worker_router_orders_total", "status" => status_label).increment(1);
-
-            OrderQuote::new(
-                responses.order_id.clone(),
-                status,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BlockInfo::new(0, String::new(), 0),
-                String::new(),
-                Bytes::default(),
-                Bytes::default(),
-            )
-        };
-        vec![fallback]
+        counter!("worker_router_orders_total", "status" => "success").increment(1);
+        let (pool_name, best) = valid_quotes[0];
+        counter!("worker_router_best_quote_pool", "pool" => pool_name.clone()).increment(1);
+        debug!(
+            order_id = %best.order_id(),
+            number_of_candidates = valid_quotes.len(),
+            "ranked quotes"
+        );
+        valid_quotes
+            .into_iter()
+            .map(|(_, q)| q.clone())
+            .collect()
     }
 
     /// Returns the effective timeout for a request.
@@ -453,7 +461,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
         types::internal::SolveTask,
-        EncodingOptions, OrderSide, Route, SingleOrderQuote, Swap,
+        BlockInfo, EncodingOptions, OrderSide, Route, SingleOrderQuote, Swap,
     };
 
     fn default_encoder() -> Encoder {
@@ -515,6 +523,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            StateLabel::new("test-block".to_string()),
         )
         .with_route(Route::new(vec![swap]));
         SingleOrderQuote::new(quote, 5)
@@ -634,15 +643,8 @@ mod tests {
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = worker_router.quote(request).await;
-        assert!(result.is_ok());
-
-        let quote = result.unwrap();
-        // Should timeout and return NoRouteFound or Timeout status
-        assert_eq!(quote.orders().len(), 1);
-        assert!(matches!(
-            quote.orders()[0].status(),
-            QuoteStatus::Timeout | QuoteStatus::NoRouteFound
-        ));
+        // All solvers timed out — propagate as SolveError rather than a fake quote.
+        assert!(matches!(result, Err(SolveError::Timeout { .. })));
 
         drop(worker_router);
         worker.abort();
@@ -712,6 +714,7 @@ mod tests {
                     "test".to_string(),
                     Bytes::from(make_address(0xAA).as_ref()),
                     Bytes::from(make_address(0xAA).as_ref()),
+                    StateLabel::new("test-block".to_string()),
                 ),
             )],
             failed_solvers: vec![],
@@ -724,7 +727,13 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &options);
+        let ranked = worker_router.rank_quotes(&responses, &options);
+        let result = if ranked.is_empty() {
+            let (_, any_q) = responses.quotes.first().unwrap();
+            vec![make_fallback_quote(&responses, any_q)]
+        } else {
+            ranked
+        };
 
         if should_pass {
             assert_eq!(result[0].status(), QuoteStatus::Success);
@@ -747,38 +756,31 @@ mod tests {
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = worker_router.quote(request).await;
-        assert!(result.is_ok());
-
-        let quote = result.unwrap();
-        assert_eq!(quote.orders().len(), 1);
-        // Should be NoRouteFound since the only solver returned an error
-        assert_eq!(quote.orders()[0].status(), QuoteStatus::NoRouteFound);
+        // All solvers returned SolveError — propagate as Err rather than a fake quote.
+        assert!(matches!(result, Err(SolveError::NoRouteFound { .. })));
 
         drop(worker_router);
         worker.abort();
     }
 
     #[test]
-    fn test_rank_quotes_all_timeouts_returns_timeout_status() {
+    fn test_error_from_failures_all_timeouts() {
         let responses = OrderResponses {
             order_id: "test".to_string(),
             quotes: vec![],
             failed_solvers: vec![
-                ("pool_a".to_string(), SolveError::Timeout { elapsed_ms: 100 }),
-                ("pool_b".to_string(), SolveError::Timeout { elapsed_ms: 100 }),
+                ("pool_a".to_string(), SolveError::Timeout { elapsed_ms: 80 }),
+                ("pool_b".to_string(), SolveError::Timeout { elapsed_ms: 120 }),
             ],
         };
 
-        let worker_router =
-            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status(), QuoteStatus::Timeout);
+        let err = error_from_failures(&responses);
+        // Returns the worst-case elapsed time across all timed-out solvers.
+        assert!(matches!(err, SolveError::Timeout { elapsed_ms: 120 }));
     }
 
     #[test]
-    fn test_rank_quotes_mixed_failures_returns_no_route_found() {
+    fn test_error_from_failures_mixed_returns_no_route_found() {
         let responses = OrderResponses {
             order_id: "test".to_string(),
             quotes: vec![],
@@ -788,25 +790,17 @@ mod tests {
             ],
         };
 
-        let worker_router =
-            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        let err = error_from_failures(&responses);
+        assert!(matches!(err, SolveError::NoRouteFound { .. }));
     }
 
     #[test]
-    fn test_rank_quotes_no_failures_returns_no_route_found() {
+    fn test_error_from_failures_empty_returns_no_route_found() {
         let responses =
             OrderResponses { order_id: "test".to_string(), quotes: vec![], failed_solvers: vec![] };
 
-        let worker_router =
-            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        let err = error_from_failures(&responses);
+        assert!(matches!(err, SolveError::NoRouteFound { .. }));
     }
 
     #[test]
@@ -827,6 +821,7 @@ mod tests {
                         "test".to_string(),
                         Bytes::from(make_address(0xAA).as_ref()),
                         Bytes::from(make_address(0xAA).as_ref()),
+                        StateLabel::new("test-block".to_string()),
                     ),
                 ),
                 (
@@ -842,6 +837,7 @@ mod tests {
                         "test".to_string(),
                         Bytes::from(make_address(0xAA).as_ref()),
                         Bytes::from(make_address(0xAA).as_ref()),
+                        StateLabel::new("test-block".to_string()),
                     ),
                 ),
             ],
@@ -855,5 +851,52 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(*result[0].amount_out_net_gas(), BigUint::from(950u64));
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
+    }
+
+    /// Verifies that a `state_label` set on `QuoteOptions` reaches the worker via
+    /// `enqueue_with_label` — i.e. the `SolveTask` queued to the pool carries the
+    /// correct label.
+    #[tokio::test]
+    async fn test_state_label_threads_to_worker() {
+        let (tx, rx) = async_channel::bounded::<SolveTask>(10);
+        let handle = TaskQueueHandle::from_sender(tx);
+
+        // Capture the received task's label in a shared slot before responding.
+        let received_label: std::sync::Arc<tokio::sync::Mutex<Option<Option<StateLabel>>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let received_label_clone = received_label.clone();
+
+        let worker = tokio::spawn(async move {
+            while let Ok(task) = rx.recv().await {
+                let label = task.state_label().cloned();
+                *received_label_clone.lock().await = Some(label);
+                task.respond(Ok(make_single_quote(900)));
+            }
+        });
+
+        let worker_router = WorkerPoolRouter::new(
+            vec![SolverPoolHandle::new("pool", handle)],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+
+        let label = StateLabel::new("block:42");
+        let options = QuoteOptions::default().with_state_label(label.clone());
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let result = worker_router.quote(request).await;
+        assert!(result.is_ok(), "quote should succeed");
+
+        drop(worker_router);
+        worker.abort();
+
+        let captured = received_label.lock().await;
+        assert_eq!(
+            captured
+                .as_ref()
+                .expect("worker should have received a task"),
+            &Some(label),
+            "state_label must be threaded through to the SolveTask"
+        );
     }
 }

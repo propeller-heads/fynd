@@ -390,7 +390,7 @@ impl Algorithm for BellmanFordAlgorithm {
                 })
                 .collect();
 
-            let market_subset = market.extract_subset(&component_ids);
+            let market_subset = market.extract_subset_with_overlay(&component_ids);
 
             (token_map, market_subset)
         };
@@ -679,7 +679,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, order, token, MockProtocolSim},
         derived::{types::TokenGasPrices, DerivedData},
-        feed::market_data::SharedMarketData,
+        feed::market_data::{SharedMarketData, SharedMarketDataRef},
         graph::GraphManager,
         types::quote::OrderSide,
     };
@@ -689,7 +689,7 @@ mod tests {
     /// Sets up market and graph with `()` edge weights for BellmanFord tests.
     fn setup_market_bf(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-    ) -> (Arc<RwLock<SharedMarketData>>, PetgraphStableDiGraphManager<()>) {
+    ) -> (SharedMarketDataRef, PetgraphStableDiGraphManager<()>) {
         let mut market = SharedMarketData::new();
 
         market.update_gas_price(BlockGasPrice {
@@ -711,7 +711,7 @@ mod tests {
         let mut graph_manager = PetgraphStableDiGraphManager::default();
         graph_manager.initialize_graph(&market.component_topology());
 
-        (Arc::new(RwLock::new(market)), graph_manager)
+        (SharedMarketDataRef::new(Arc::new(RwLock::new(market))), graph_manager)
     }
 
     fn setup_derived_with_token_prices(
