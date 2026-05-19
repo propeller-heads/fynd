@@ -65,7 +65,10 @@ impl ChangedComponents {
 
 use super::{
     computation::DerivedComputation,
-    computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+    computations::{
+        PoolDepthComputation, PoolDepthComputation5Pct, SpotPriceComputation,
+        TokenGasPriceComputation,
+    },
     error::ComputationError,
     events::DerivedDataEvent,
     store::DerivedData,
@@ -91,6 +94,8 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for pool depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
+    /// Slippage threshold for 5% pool depth computation (0.0 < threshold < 1.0).
+    depth_5pct_slippage_threshold: f64,
 }
 
 impl ComputationManagerConfig {
@@ -135,7 +140,12 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
+        Self {
+            gas_token: Address::zero(20),
+            max_hop: 2,
+            depth_slippage_threshold: 0.01,
+            depth_5pct_slippage_threshold: 0.05,
+        }
     }
 }
 
@@ -149,8 +159,10 @@ pub struct ComputationManager {
     token_price_computation: TokenGasPriceComputation,
     /// Spot price computation.
     spot_price_computation: SpotPriceComputation,
-    /// Pool depth computation.
+    /// Pool depth computation (1% slippage).
     pool_depth_computation: PoolDepthComputation,
+    /// Pool depth computation (5% slippage).
+    pool_depth_5pct_computation: PoolDepthComputation5Pct,
     /// Event broadcaster for derived data updates.
     event_tx: broadcast::Sender<DerivedDataEvent>,
 }
@@ -166,6 +178,8 @@ impl ComputationManager {
         market_data: MarketData,
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let pool_depth_computation = PoolDepthComputation::new(config.depth_slippage_threshold)?;
+        let pool_depth_5pct_computation =
+            PoolDepthComputation5Pct::new(config.depth_5pct_slippage_threshold)?;
         let (event_tx, event_rx) = broadcast::channel(64);
 
         Ok((
@@ -177,6 +191,7 @@ impl ComputationManager {
                     .with_gas_token(config.gas_token),
                 spot_price_computation: SpotPriceComputation::new(),
                 pool_depth_computation,
+                pool_depth_5pct_computation,
                 event_tx,
             },
             event_rx,
@@ -329,13 +344,19 @@ impl ComputationManager {
                         computation_id: PoolDepthComputation::ID,
                         block,
                     });
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation5Pct::ID,
+                        block,
+                    });
                 // Cannot proceed with token prices if spot prices failed
                 return;
             }
         }
 
         // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
-        let (token_prices_result, pool_depths_result) = tokio::join!(
+        let (token_prices_result, pool_depths_result, pool_depths_5pct_result) = tokio::join!(
             async {
                 let start = Instant::now();
                 let result = self
@@ -351,10 +372,19 @@ impl ComputationManager {
                     .compute(&self.market_data, &self.store, changed)
                     .await;
                 (result, start.elapsed())
+            },
+            async {
+                let start = Instant::now();
+                let result = self
+                    .pool_depth_5pct_computation
+                    .compute(&self.market_data, &self.store, changed)
+                    .await;
+                (result, start.elapsed())
             }
         );
         let (token_prices_result, token_elapsed) = token_prices_result;
         let (pool_depths_result, depth_elapsed) = pool_depths_result;
+        let (pool_depths_5pct_result, depth_5pct_elapsed) = pool_depths_5pct_result;
 
         // Update store with remaining results
         let mut store_write = self.store.write().await;
@@ -434,6 +464,50 @@ impl ComputationManager {
                     .event_tx
                     .send(DerivedDataEvent::ComputationFailed {
                         computation_id: PoolDepthComputation::ID,
+                        block,
+                    });
+            }
+        }
+
+        match pool_depths_5pct_result {
+            Ok(output) => {
+                let count = output.data.len();
+                if output.has_failures() {
+                    warn!(
+                        count,
+                        failed = output.failed_items.len(),
+                        "pool depths 5pct partial failures"
+                    );
+                    for item in &output.failed_items {
+                        debug!(key = %item.key, error = %item.error, "pool depth 5pct failed item");
+                    }
+                } else {
+                    info!(
+                        count,
+                        elapsed_ms = depth_5pct_elapsed.as_millis(),
+                        "pool depths 5pct computed"
+                    );
+                }
+                store_write.set_pool_depths_5pct(
+                    output.data,
+                    output.failed_items.clone(),
+                    block,
+                    changed.is_full_recompute,
+                );
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationComplete {
+                        computation_id: PoolDepthComputation5Pct::ID,
+                        block,
+                        failed_items: output.failed_items,
+                    });
+            }
+            Err(e) => {
+                warn!(error = ?e, "pool depth 5pct computation failed");
+                let _ = self
+                    .event_tx
+                    .send(DerivedDataEvent::ComputationFailed {
+                        computation_id: PoolDepthComputation5Pct::ID,
                         block,
                     });
             }

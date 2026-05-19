@@ -8,6 +8,6 @@ pub mod pool_depth;
 pub mod spot_price;
 pub mod token_gas_price;
 
-pub use pool_depth::PoolDepthComputation;
+pub use pool_depth::{PoolDepthComputation, PoolDepthComputation5Pct};
 pub use spot_price::SpotPriceComputation;
 pub use token_gas_price::TokenGasPriceComputation;

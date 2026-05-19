@@ -72,6 +72,262 @@ impl PoolDepthComputation {
     }
 }
 
+/// Shared computation logic used by both the 1% and 5% pool depth computations.
+///
+/// Extracted to avoid duplicating the depth computation algorithm across multiple
+/// `DerivedComputation` implementations that differ only in slippage threshold and
+/// store accessor.
+async fn compute_pool_depths(
+    slippage_threshold: f64,
+    market: &MarketData,
+    store: &SharedDerivedDataRef,
+    changed: &ChangedComponents,
+    existing_depths: Option<&PoolDepths>,
+) -> Result<ComputationOutput<PoolDepths>, ComputationError> {
+    // Read derived data from store
+    let spot_prices = {
+        let store_guard = store.read().await;
+        store_guard
+            .spot_prices()
+            .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
+            .clone()
+    };
+
+    let mut pool_depths = if changed.is_full_recompute {
+        PoolDepths::new()
+    } else {
+        existing_depths
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // Remove pool depths for removed components.
+    for component_id in &changed.removed {
+        pool_depths.retain(|key, _| &key.0 != component_id);
+    }
+
+    // Snapshot market data under brief lock.
+    let (snapshot, components_to_compute) = {
+        let market_guard = market.read().await;
+        let topology = market_guard.component_topology();
+
+        // Determine which components need (re)computation.
+        let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
+            topology.keys().cloned().collect()
+        } else {
+            changed
+                .added
+                .keys()
+                .chain(changed.updated.iter())
+                .cloned()
+                .collect()
+        };
+
+        let component_ids: HashSet<ComponentId> = components_to_compute
+            .iter()
+            .cloned()
+            .collect();
+        let snapshot: MarketState = market_guard.extract_subset(&component_ids);
+
+        (snapshot, components_to_compute)
+    };
+
+    let topology = snapshot.component_topology();
+    let tokens = snapshot.token_registry_ref();
+
+    let mut succeeded = 0usize;
+    let mut failed_items: Vec<FailedItem> = Vec::new();
+
+    for component_id in &components_to_compute {
+        // Get token addresses: changed.added for new components, topology for existing
+        let token_addresses = changed
+            .added
+            .get(component_id)
+            .or_else(|| topology.get(component_id));
+
+        let Some(token_addresses) = token_addresses else {
+            continue; // Component might have been removed in the meantime
+        };
+
+        let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
+            warn!(component_id, "missing simulation state, skipping pool");
+            pool_depths.retain(|key, _| &key.0 != component_id);
+            for perm in token_addresses.iter().permutations(2) {
+                failed_items.push(FailedItem {
+                    key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                    error: FailedItemError::MissingSimulationState,
+                });
+            }
+            continue;
+        };
+
+        let pool_tokens: Result<Vec<_>, _> = token_addresses
+            .iter()
+            .map(|addr| tokens.get(addr).ok_or(addr))
+            .collect();
+        let Ok(pool_tokens) = pool_tokens else {
+            warn!(component_id, "missing token metadata, skipping pool");
+            pool_depths.retain(|key, _| &key.0 != component_id);
+            for perm in token_addresses.iter().permutations(2) {
+                failed_items.push(FailedItem {
+                    key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                    error: FailedItemError::MissingTokenMetadata,
+                });
+            }
+            continue;
+        };
+
+        for perm in pool_tokens.iter().permutations(2) {
+            let (token_in, token_out) = (*perm[0], *perm[1]);
+            let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+
+            // Look up precomputed spot price
+            let Some(spot_price) = spot_prices.get(&key) else {
+                warn!(
+                    component_id,
+                    token_in = %token_in.address,
+                    token_out = %token_out.address,
+                    "missing spot price, skipping pair"
+                );
+                pool_depths.remove(&key);
+                failed_items.push(FailedItem {
+                    key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                    error: FailedItemError::MissingSpotPrice,
+                });
+                continue;
+            };
+
+            let min_price = spot_price * (1.0 - slippage_threshold);
+
+            // Price is a raw fraction (numerator/denominator) that query_pool_swap
+            // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
+            // the f64→u128 multiply at a fixed precision scale and absorb the decimal
+            // adjustment into the BigUint denominator.
+            const SCALE_EXP: i32 = 18;
+            let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
+            let denominator_exp = SCALE_EXP + decimal_diff;
+            if denominator_exp < 0 {
+                warn!(
+                    component_id,
+                    token_in = %token_in.address,
+                    token_out = %token_out.address,
+                    "extreme decimal mismatch ({}→{}), skipping pair",
+                    token_in.decimals, token_out.decimals
+                );
+                pool_depths.remove(&key);
+                failed_items.push(FailedItem {
+                    key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                    error: FailedItemError::ExtremeDecimalMismatch {
+                        from: token_in.decimals,
+                        to: token_out.decimals,
+                    },
+                });
+                continue;
+            }
+
+            let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
+            let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
+
+            if numerator.is_zero() {
+                debug!(
+                    component_id,
+                    token_in = %token_in.address,
+                    token_out = %token_out.address,
+                    spot_price,
+                    "spot price too small to compute depth, skipping pair"
+                );
+                pool_depths.remove(&key);
+                failed_items.push(FailedItem {
+                    key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                    error: FailedItemError::SpotPriceTooSmall(*spot_price),
+                });
+                continue;
+            }
+
+            let limit_price = Price::new(numerator, denominator);
+
+            let params = QueryPoolSwapParams::new(
+                token_in.clone(),
+                token_out.clone(),
+                SwapConstraint::TradeLimitPrice {
+                    limit: limit_price,
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            );
+
+            let depth_result = match sim_state.query_pool_swap(&params) {
+                Ok(swap) => Ok(swap),
+                Err(SimulationError::FatalError(msg))
+                    if msg == "query_pool_swap not implemented" =>
+                {
+                    query_pool_swap(sim_state, &params)
+                }
+                Err(SimulationError::InvalidInput(msg, _))
+                    if msg.contains("does not support TradeLimitPrice") =>
+                {
+                    query_pool_swap(sim_state, &params)
+                }
+                Err(e) => Err(e),
+            }
+            .map(|swap| swap.amount_in().clone())
+            .map_err(|e| {
+                ComputationError::SimulationFailed(format!(
+                    "query_pool_swap failed for {}/{}: {e}",
+                    token_in.address, token_out.address
+                ))
+            });
+
+            match depth_result {
+                Ok(depth) => {
+                    pool_depths.insert(key, depth);
+                    succeeded += 1;
+                }
+                Err(e) => {
+                    // Diagnostic: probe with 1 unit to understand why depth search failed
+                    let probe_info = sim_state
+                        .get_amount_out(BigUint::from(1u32), token_in, token_out)
+                        .map(|r| format!("amount_out={}", r.amount))
+                        .unwrap_or_else(|e| format!("sim_error={e}"));
+                    let limits_info = sim_state
+                        .get_limits(token_in.address.clone(), token_out.address.clone())
+                        .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
+                        .unwrap_or_else(|e| format!("limits_error={e}"));
+                    debug!(
+                        component_id,
+                        token_in = %token_in.address,
+                        token_out = %token_out.address,
+                        spot_price,
+                        min_price,
+                        probe_info,
+                        limits_info,
+                        error = %e,
+                        "pool depth failed, skipping pair"
+                    );
+                    pool_depths.remove(&key);
+                    failed_items.push(FailedItem {
+                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
+                        error: FailedItemError::SimulationFailed(format!(
+                            "{e}: {probe_info}, {limits_info}"
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
+    debug!(
+        succeeded,
+        failed = failed_items.len(),
+        total = pool_depths.len(),
+        "pool depth computation complete"
+    );
+    Span::current().record("updated_pool_depths", pool_depths.len());
+
+    Ok(ComputationOutput::with_failures(pool_depths, failed_items))
+}
+
 #[async_trait]
 impl DerivedComputation for PoolDepthComputation {
     type Output = PoolDepths;
@@ -85,255 +341,66 @@ impl DerivedComputation for PoolDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // Read derived data from store
-        let (spot_prices, mut pool_depths) = {
-            let store_guard = store.read().await;
-            // Get precomputed spot prices (required dependency).
-            let spot_prices = store_guard
-                .spot_prices()
-                .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
-                .clone();
-            // Start with existing depths (or empty for full recompute).
-            let pool_depths = if changed.is_full_recompute {
-                PoolDepths::new()
-            } else {
-                store_guard
-                    .pool_depths()
-                    .cloned()
-                    .unwrap_or_default()
-            };
-            (spot_prices, pool_depths)
-        };
+        let existing = store
+            .read()
+            .await
+            .pool_depths()
+            .cloned();
+        compute_pool_depths(self.slippage_threshold, market, store, changed, existing.as_ref())
+            .await
+    }
+}
 
-        // Remove pool depths for removed components.
-        for component_id in &changed.removed {
-            pool_depths.retain(|key, _| &key.0 != component_id);
+/// Computes pool depths at a 5% slippage threshold.
+///
+/// Identical to [`PoolDepthComputation`] but with a fixed 5% threshold, stored
+/// separately as `pool_depths_5pct`. Used as a feature for the slippage prediction model.
+#[derive(Debug)]
+pub struct PoolDepthComputation5Pct {
+    slippage_threshold: f64,
+}
+
+impl Default for PoolDepthComputation5Pct {
+    fn default() -> Self {
+        Self { slippage_threshold: 0.05 }
+    }
+}
+
+impl PoolDepthComputation5Pct {
+    /// Creates a new 5% pool depth computation with the given threshold.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfiguration` if slippage_threshold is not in (0, 1).
+    pub fn new(slippage_threshold: f64) -> Result<Self, ComputationError> {
+        if !(slippage_threshold > 0.0 && slippage_threshold < 1.0) {
+            return Err(ComputationError::InvalidConfiguration(format!(
+                "slippage_threshold must be between 0 and 1 exclusive, got {slippage_threshold}"
+            )));
         }
+        Ok(Self { slippage_threshold })
+    }
+}
 
-        // Snapshot market data under brief lock.
-        let (snapshot, components_to_compute) = {
-            let market_guard = market.read().await;
-            let topology = market_guard.component_topology();
+#[async_trait]
+impl DerivedComputation for PoolDepthComputation5Pct {
+    type Output = PoolDepths;
 
-            // Determine which components need (re)computation.
-            let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
-                topology.keys().cloned().collect()
-            } else {
-                changed
-                    .added
-                    .keys()
-                    .chain(changed.updated.iter())
-                    .cloned()
-                    .collect()
-            };
+    const ID: ComputationId = "pool_depths_5pct";
 
-            let component_ids: HashSet<ComponentId> = components_to_compute
-                .iter()
-                .cloned()
-                .collect();
-            let snapshot: MarketState = market_guard.extract_subset(&component_ids);
-
-            (snapshot, components_to_compute)
-        };
-
-        let topology = snapshot.component_topology();
-        let tokens = snapshot.token_registry_ref();
-
-        let mut succeeded = 0usize;
-        let mut failed_items: Vec<FailedItem> = Vec::new();
-
-        for component_id in &components_to_compute {
-            // Get token addresses: changed.added for new components, topology for existing
-            let token_addresses = changed
-                .added
-                .get(component_id)
-                .or_else(|| topology.get(component_id));
-
-            let Some(token_addresses) = token_addresses else {
-                continue; // Component might have been removed in the meantime
-            };
-
-            let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
-                warn!(component_id, "missing simulation state, skipping pool");
-                pool_depths.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: FailedItemError::MissingSimulationState,
-                    });
-                }
-                continue;
-            };
-
-            let pool_tokens: Result<Vec<_>, _> = token_addresses
-                .iter()
-                .map(|addr| tokens.get(addr).ok_or(addr))
-                .collect();
-            let Ok(pool_tokens) = pool_tokens else {
-                warn!(component_id, "missing token metadata, skipping pool");
-                pool_depths.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: FailedItemError::MissingTokenMetadata,
-                    });
-                }
-                continue;
-            };
-
-            for perm in pool_tokens.iter().permutations(2) {
-                let (token_in, token_out) = (*perm[0], *perm[1]);
-                let key =
-                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
-
-                // Look up precomputed spot price
-                let Some(spot_price) = spot_prices.get(&key) else {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "missing spot price, skipping pair"
-                    );
-                    pool_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::MissingSpotPrice,
-                    });
-                    continue;
-                };
-
-                let min_price = spot_price * (1.0 - self.slippage_threshold);
-
-                // Price is a raw fraction (numerator/denominator) that query_pool_swap
-                // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
-                // the f64→u128 multiply at a fixed precision scale and absorb the decimal
-                // adjustment into the BigUint denominator.
-                const SCALE_EXP: i32 = 18;
-                let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-                let denominator_exp = SCALE_EXP + decimal_diff;
-                if denominator_exp < 0 {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "extreme decimal mismatch ({}→{}), skipping pair",
-                        token_in.decimals, token_out.decimals
-                    );
-                    pool_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::ExtremeDecimalMismatch {
-                            from: token_in.decimals,
-                            to: token_out.decimals,
-                        },
-                    });
-                    continue;
-                }
-
-                let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-                let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-
-                if numerator.is_zero() {
-                    debug!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        spot_price,
-                        "spot price too small to compute depth, skipping pair"
-                    );
-                    pool_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::SpotPriceTooSmall(*spot_price),
-                    });
-                    continue;
-                }
-
-                let limit_price = Price::new(numerator, denominator);
-
-                let params = QueryPoolSwapParams::new(
-                    token_in.clone(),
-                    token_out.clone(),
-                    SwapConstraint::TradeLimitPrice {
-                        limit: limit_price,
-                        tolerance: 0.0,
-                        min_amount_in: None,
-                        max_amount_in: None,
-                    },
-                );
-
-                let depth_result = match sim_state.query_pool_swap(&params) {
-                    Ok(swap) => Ok(swap),
-                    Err(SimulationError::FatalError(msg))
-                        if msg == "query_pool_swap not implemented" =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(SimulationError::InvalidInput(msg, _))
-                        if msg.contains("does not support TradeLimitPrice") =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(e) => Err(e),
-                }
-                .map(|swap| swap.amount_in().clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!(
-                        "query_pool_swap failed for {}/{}: {e}",
-                        token_in.address, token_out.address
-                    ))
-                });
-
-                match depth_result {
-                    Ok(depth) => {
-                        pool_depths.insert(key, depth);
-                        succeeded += 1;
-                    }
-                    Err(e) => {
-                        // Diagnostic: probe with 1 unit to understand why depth search failed
-                        let probe_info = sim_state
-                            .get_amount_out(BigUint::from(1u32), token_in, token_out)
-                            .map(|r| format!("amount_out={}", r.amount))
-                            .unwrap_or_else(|e| format!("sim_error={e}"));
-                        let limits_info = sim_state
-                            .get_limits(token_in.address.clone(), token_out.address.clone())
-                            .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
-                            .unwrap_or_else(|e| format!("limits_error={e}"));
-                        debug!(
-                            component_id,
-                            token_in = %token_in.address,
-                            token_out = %token_out.address,
-                            spot_price,
-                            min_price,
-                            probe_info,
-                            limits_info,
-                            error = %e,
-                            "pool depth failed, skipping pair"
-                        );
-                        pool_depths.remove(&key);
-                        failed_items.push(FailedItem {
-                            key: format!(
-                                "{}/{}/{}",
-                                component_id, token_in.address, token_out.address
-                            ),
-                            error: FailedItemError::SimulationFailed(format!(
-                                "{e}: {probe_info}, {limits_info}"
-                            )),
-                        });
-                    }
-                }
-            }
-        }
-
-        debug!(
-            succeeded,
-            failed = failed_items.len(),
-            total = pool_depths.len(),
-            "pool depth computation complete"
-        );
-        Span::current().record("updated_pool_depths", pool_depths.len());
-
-        Ok(ComputationOutput::with_failures(pool_depths, failed_items))
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_pool_depths))]
+    async fn compute(
+        &self,
+        market: &MarketData,
+        store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        let existing = store
+            .read()
+            .await
+            .pool_depths_5pct()
+            .cloned();
+        compute_pool_depths(self.slippage_threshold, market, store, changed, existing.as_ref())
+            .await
     }
 }
 
@@ -885,6 +952,70 @@ mod tests {
                     matches!(&item.error, FailedItemError::SimulationFailed(_))),
             "should have ComputationFailed failure, got: {:?}",
             output.failed_items
+        );
+    }
+
+    #[test]
+    fn computation_5pct_id() {
+        assert_eq!(PoolDepthComputation5Pct::ID, "pool_depths_5pct");
+    }
+
+    #[test]
+    fn default_5pct_slippage_is_five_percent() {
+        let comp = PoolDepthComputation5Pct::default();
+        assert!((comp.slippage_threshold - 0.05).abs() < f64::EPSILON);
+    }
+
+    /// Verifies that querying a real UniV2 pool with 5% slippage produces a larger
+    /// depth than 1% slippage. Uses the Brent solver fallback (same path as
+    /// `compute_pool_depths`) to ensure the slippage threshold actually controls depth.
+    #[test]
+    fn test_5pct_depth_exceeds_1pct_depth() {
+        use alloy::primitives::U256;
+        use tycho_simulation::evm::{
+            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
+        };
+
+        let token_in = token_with_decimals(0x01, "WETH", 18);
+        let token_out = token_with_decimals(0x02, "USDC", 6);
+
+        let reserve_in = U256::from(5_000u64) * U256::from(10u64).pow(U256::from(18u64));
+        let reserve_out = U256::from(10_000_000u64) * U256::from(10u64).pow(U256::from(6u64));
+        let univ2 = UniswapV2State::new(reserve_in, reserve_out);
+
+        let spot_price = univ2
+            .spot_price(&token_in, &token_out)
+            .expect("spot_price should succeed");
+
+        let depth_for_slippage = |slippage: f64| -> BigUint {
+            let min_price = spot_price * (1.0 - slippage);
+            let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
+            let numerator = BigUint::from((min_price * 10_f64.powi(18)) as u128);
+            let denominator = BigUint::from(10u64).pow((18 + decimal_diff) as u32);
+            let limit_price = Price::new(numerator, denominator);
+
+            let params = QueryPoolSwapParams::new(
+                token_in.clone(),
+                token_out.clone(),
+                SwapConstraint::TradeLimitPrice {
+                    limit: limit_price,
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            );
+
+            let result = query_pool_swap(&univ2, &params).expect("query_pool_swap should succeed");
+            result.amount_in().clone()
+        };
+
+        let depth_1pct = depth_for_slippage(0.01);
+        let depth_5pct = depth_for_slippage(0.05);
+
+        assert!(!depth_1pct.is_zero(), "1% depth should be non-zero");
+        assert!(
+            depth_5pct > depth_1pct,
+            "5% depth ({depth_5pct}) should exceed 1% depth ({depth_1pct})"
         );
     }
 }

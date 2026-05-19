@@ -35,6 +35,9 @@ pub struct DerivedData {
     pool_depths: Option<ComputedValue<PoolDepths>>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     pool_depths_failed: HashMap<PoolDepthKey, (u64, FailedItemError)>,
+    pool_depths_5pct: Option<ComputedValue<PoolDepths>>,
+    /// Persistent failure map for 5% depth: key → (block, error).
+    pool_depths_5pct_failed: HashMap<PoolDepthKey, (u64, FailedItemError)>,
     spot_prices: Option<ComputedValue<SpotPrices>>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError)>,
@@ -68,6 +71,7 @@ impl DerivedData {
         self.token_prices_block().is_some() &&
             self.token_prices_deps_block().is_some() &&
             self.pool_depths_block().is_some() &&
+            self.pool_depths_5pct_block().is_some() &&
             self.spot_prices_block().is_some()
     }
 
@@ -228,6 +232,63 @@ impl DerivedData {
     }
 
     // -------------------------------------------------------------------------
+    // Pool Depths (5%)
+    // -------------------------------------------------------------------------
+
+    /// Returns pool depths at 5% slippage if computed.
+    pub fn pool_depths_5pct(&self) -> Option<&PoolDepths> {
+        self.pool_depths_5pct
+            .as_ref()
+            .map(|v| &v.data)
+    }
+
+    /// Returns the block at which 5% pool depths were last computed.
+    pub fn pool_depths_5pct_block(&self) -> Option<u64> {
+        self.pool_depths_5pct
+            .as_ref()
+            .map(|v| v.block)
+    }
+
+    /// Sets 5% pool depths, merging failures for incremental runs.
+    pub fn set_pool_depths_5pct(
+        &mut self,
+        depths: PoolDepths,
+        failed_items: Vec<FailedItem>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        let new_failures: HashMap<PoolDepthKey, (u64, FailedItemError)> = failed_items
+            .into_iter()
+            .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
+            .collect();
+
+        if is_full_recompute {
+            self.pool_depths_5pct_failed = new_failures;
+        } else {
+            self.pool_depths_5pct_failed
+                .retain(|k, _| !depths.contains_key(k));
+            self.pool_depths_5pct_failed
+                .extend(new_failures);
+        }
+
+        self.pool_depths_5pct = Some(ComputedValue { data: depths, block });
+    }
+
+    /// Returns `(block, error)` for this key if it failed in a past 5% pool depth
+    /// computation, or `None` if it succeeded or was not attempted.
+    pub fn pool_depth_5pct_failure(&self, key: &PoolDepthKey) -> Option<(u64, &FailedItemError)> {
+        self.pool_depths_5pct_failed
+            .get(key)
+            .map(|(block, error)| (*block, error))
+    }
+
+    /// Clears 5% pool depths and their failure map.
+    pub fn clear_pool_depths_5pct(&mut self) {
+        self.pool_depths_5pct = None;
+        self.pool_depths_5pct_failed.clear();
+    }
+
+    // -------------------------------------------------------------------------
     // Spot Prices
     // -------------------------------------------------------------------------
 
@@ -301,6 +362,8 @@ impl DerivedData {
         self.token_prices_deps = None;
         self.pool_depths = None;
         self.pool_depths_failed.clear();
+        self.pool_depths_5pct = None;
+        self.pool_depths_5pct_failed.clear();
         self.spot_prices = None;
         self.spot_prices_failed.clear();
     }
@@ -363,6 +426,9 @@ mod tests {
         assert!(!store.derived_data_ready());
 
         store.set_pool_depths(Default::default(), vec![], 9, true);
+        assert!(!store.derived_data_ready());
+
+        store.set_pool_depths_5pct(Default::default(), vec![], 9, true);
         assert!(store.derived_data_ready());
     }
 
