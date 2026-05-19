@@ -29,3 +29,7 @@ tycho-simulation = { workspace = true }
 [[bin]]
 name = "node-resim"
 path = "src/bin/node_resim.rs"
+
+[[bin]]
+name = "assemble"
+path = "src/bin/assemble.rs"

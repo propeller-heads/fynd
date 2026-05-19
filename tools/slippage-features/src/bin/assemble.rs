@@ -1,0 +1,1153 @@
+//! Feature assembly binary: joins quote log, hop decay, and route decay
+//! parquet sources into a unified analysis dataset with computed features.
+
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+};
+
+use arrow::{
+    array::{
+        ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder, UInt64Builder,
+    },
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
+use clap::Parser;
+use parquet::{
+    arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
+    basic::Compression,
+    file::properties::WriterProperties,
+};
+use tracing::{info, warn};
+
+#[derive(Parser)]
+#[command(
+    name = "assemble",
+    about = "Join decay parquets + features into unified dataset"
+)]
+struct Args {
+    /// Path to quote log parquet directory
+    #[arg(long)]
+    quote_log_dir: PathBuf,
+
+    /// Path to hop decay parquet directory (from Tycho resim)
+    #[arg(long)]
+    hop_decay_dir: PathBuf,
+
+    /// Path to route decay parquet directory (from node resim)
+    #[arg(long)]
+    route_decay_dir: PathBuf,
+
+    /// Output directory for unified dataset
+    #[arg(long)]
+    output_dir: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// Parsed records from each parquet source
+// ---------------------------------------------------------------------------
+
+struct QuoteLogRow {
+    quote_id: String,
+    solver_id: String,
+    request_id: String,
+    block_number: u64,
+    chain_id: u64,
+    amount_in: String,
+    amount_out: String,
+    gas_estimate: u64,
+    algorithm_type: String,
+    route_json: String,
+}
+
+// All fields are read from parquet; some are only used during aggregation.
+#[allow(dead_code)]
+struct HopDecayRow {
+    quote_id: String,
+    solver_id: String,
+    block_offset: u32,
+    hop_index: u32,
+    component_id: String,
+    protocol: String,
+    hop_amount_out: String,
+    hop_decay_bps: f64,
+    route_total_amount_out: String,
+    route_decay_bps: f64,
+}
+
+struct RouteDecayRow {
+    quote_id: String,
+    solver_id: String,
+    block_offset: u32,
+    eth_call_amount_out: String,
+    eth_call_gas_used: u64,
+    eth_call_success: bool,
+    eth_call_decay_bps: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Unified output record
+// ---------------------------------------------------------------------------
+
+struct UnifiedRecord {
+    // Join keys
+    quote_id: String,
+    solver_id: String,
+    request_id: String,
+
+    // From quote log
+    block_number: u64,
+    chain_id: u64,
+    amount_in: String,
+    amount_out: String,
+    gas_estimate: u64,
+    algorithm_type: String,
+
+    // Hop decay (aggregated per block_offset)
+    block_offset: u32,
+    max_hop_decay_bps: f64,
+    route_decay_bps: f64,
+
+    // Route decay (from node resim)
+    eth_call_amount_out: Option<String>,
+    eth_call_gas_used: Option<u64>,
+    eth_call_success: Option<bool>,
+    eth_call_decay_bps: Option<f64>,
+
+    // Computed: route topology
+    hop_count: u32,
+    split_count: u32,
+
+    // Computed: chain/env
+    is_l2: bool,
+
+    // Computed: temporal
+    hour_of_day: Option<u32>,
+    day_of_week: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Parquet readers
+// ---------------------------------------------------------------------------
+
+fn read_parquet_files_from_dir(dir: &std::path::Path) -> anyhow::Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+
+    let entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "parquet")
+        })
+        .collect();
+
+    if entries.is_empty() {
+        warn!(dir = %dir.display(), "no parquet files found");
+        return Ok(batches);
+    }
+
+    for entry in &entries {
+        let path = entry.path();
+        info!(path = %path.display(), "reading parquet file");
+
+        let file = std::fs::File::open(&path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+
+        for batch_result in reader {
+            batches.push(batch_result?);
+        }
+    }
+
+    Ok(batches)
+}
+
+fn parse_quote_log_rows(batches: &[RecordBatch]) -> Vec<QuoteLogRow> {
+    use arrow::array::AsArray;
+
+    let mut rows = Vec::new();
+
+    for batch in batches {
+        let quote_ids = batch
+            .column_by_name("quote_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let solver_ids = batch
+            .column_by_name("solver_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let request_ids = batch
+            .column_by_name("request_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let block_numbers = batch
+            .column_by_name("block_number")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>());
+        let chain_ids = batch
+            .column_by_name("chain_id")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>());
+        let amounts_in = batch
+            .column_by_name("amount_in")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let amounts_out = batch
+            .column_by_name("amount_out")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let gas_estimates = batch
+            .column_by_name("gas_estimate")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>());
+        let algorithm_types = batch
+            .column_by_name("algorithm_type")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let route_jsons = batch
+            .column_by_name("route_json")
+            .and_then(|c| c.as_string_opt::<i32>());
+
+        let (
+            Some(quote_ids),
+            Some(solver_ids),
+            Some(request_ids),
+            Some(block_numbers),
+            Some(chain_ids),
+            Some(amounts_in),
+            Some(amounts_out),
+            Some(gas_estimates),
+            Some(algorithm_types),
+            Some(route_jsons),
+        ) = (
+            quote_ids,
+            solver_ids,
+            request_ids,
+            block_numbers,
+            chain_ids,
+            amounts_in,
+            amounts_out,
+            gas_estimates,
+            algorithm_types,
+            route_jsons,
+        )
+        else {
+            warn!("missing expected columns in quote log batch, skipping");
+            continue;
+        };
+
+        for row in 0..batch.num_rows() {
+            rows.push(QuoteLogRow {
+                quote_id: quote_ids.value(row).to_string(),
+                solver_id: solver_ids.value(row).to_string(),
+                request_id: request_ids.value(row).to_string(),
+                block_number: block_numbers.value(row),
+                chain_id: chain_ids.value(row),
+                amount_in: amounts_in.value(row).to_string(),
+                amount_out: amounts_out.value(row).to_string(),
+                gas_estimate: gas_estimates.value(row),
+                algorithm_type: algorithm_types.value(row).to_string(),
+                route_json: route_jsons.value(row).to_string(),
+            });
+        }
+    }
+
+    rows
+}
+
+fn parse_hop_decay_rows(batches: &[RecordBatch]) -> Vec<HopDecayRow> {
+    use arrow::array::AsArray;
+
+    let mut rows = Vec::new();
+
+    for batch in batches {
+        let quote_ids = batch
+            .column_by_name("quote_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let solver_ids = batch
+            .column_by_name("solver_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let block_offsets = batch
+            .column_by_name("block_offset")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt32Type>());
+        let hop_indices = batch
+            .column_by_name("hop_index")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt32Type>());
+        let component_ids = batch
+            .column_by_name("component_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let protocols = batch
+            .column_by_name("protocol")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let hop_amounts_out = batch
+            .column_by_name("hop_amount_out")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let hop_decay_bps_arr = batch
+            .column_by_name("hop_decay_bps")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::Float64Type>());
+        let route_total_amounts_out = batch
+            .column_by_name("route_total_amount_out")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let route_decay_bps_arr = batch
+            .column_by_name("route_decay_bps")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::Float64Type>());
+
+        let (
+            Some(quote_ids),
+            Some(solver_ids),
+            Some(block_offsets),
+            Some(hop_indices),
+            Some(component_ids),
+            Some(protocols),
+            Some(hop_amounts_out),
+            Some(hop_decay_bps_arr),
+            Some(route_total_amounts_out),
+            Some(route_decay_bps_arr),
+        ) = (
+            quote_ids,
+            solver_ids,
+            block_offsets,
+            hop_indices,
+            component_ids,
+            protocols,
+            hop_amounts_out,
+            hop_decay_bps_arr,
+            route_total_amounts_out,
+            route_decay_bps_arr,
+        )
+        else {
+            warn!("missing expected columns in hop decay batch, skipping");
+            continue;
+        };
+
+        for row in 0..batch.num_rows() {
+            rows.push(HopDecayRow {
+                quote_id: quote_ids.value(row).to_string(),
+                solver_id: solver_ids.value(row).to_string(),
+                block_offset: block_offsets.value(row),
+                hop_index: hop_indices.value(row),
+                component_id: component_ids.value(row).to_string(),
+                protocol: protocols.value(row).to_string(),
+                hop_amount_out: hop_amounts_out.value(row).to_string(),
+                hop_decay_bps: hop_decay_bps_arr.value(row),
+                route_total_amount_out: route_total_amounts_out.value(row).to_string(),
+                route_decay_bps: route_decay_bps_arr.value(row),
+            });
+        }
+    }
+
+    rows
+}
+
+fn parse_route_decay_rows(batches: &[RecordBatch]) -> Vec<RouteDecayRow> {
+    use arrow::array::AsArray;
+
+    let mut rows = Vec::new();
+
+    for batch in batches {
+        let quote_ids = batch
+            .column_by_name("quote_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let solver_ids = batch
+            .column_by_name("solver_id")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let block_offsets = batch
+            .column_by_name("block_offset")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt32Type>());
+        let eth_call_amounts_out = batch
+            .column_by_name("eth_call_amount_out")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let eth_call_gas_used_arr = batch
+            .column_by_name("eth_call_gas_used")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>());
+        let eth_call_success_arr = batch
+            .column_by_name("eth_call_success")
+            .and_then(|c| c.as_boolean_opt());
+        let eth_call_decay_bps_arr = batch
+            .column_by_name("eth_call_decay_bps")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::Float64Type>());
+
+        let (
+            Some(quote_ids),
+            Some(solver_ids),
+            Some(block_offsets),
+            Some(eth_call_amounts_out),
+            Some(eth_call_gas_used_arr),
+            Some(eth_call_success_arr),
+            Some(eth_call_decay_bps_arr),
+        ) = (
+            quote_ids,
+            solver_ids,
+            block_offsets,
+            eth_call_amounts_out,
+            eth_call_gas_used_arr,
+            eth_call_success_arr,
+            eth_call_decay_bps_arr,
+        )
+        else {
+            warn!("missing expected columns in route decay batch, skipping");
+            continue;
+        };
+
+        for row in 0..batch.num_rows() {
+            rows.push(RouteDecayRow {
+                quote_id: quote_ids.value(row).to_string(),
+                solver_id: solver_ids.value(row).to_string(),
+                block_offset: block_offsets.value(row),
+                eth_call_amount_out: eth_call_amounts_out.value(row).to_string(),
+                eth_call_gas_used: eth_call_gas_used_arr.value(row),
+                eth_call_success: eth_call_success_arr.value(row),
+                eth_call_decay_bps: eth_call_decay_bps_arr.value(row),
+            });
+        }
+    }
+
+    rows
+}
+
+// ---------------------------------------------------------------------------
+// Feature computation
+// ---------------------------------------------------------------------------
+
+/// Extract hop_count and split_count from route JSON.
+///
+/// hop_count = number of swaps in the route.
+/// split_count = number of swaps with a non-zero split ratio, indicating
+/// parallel route legs.
+fn compute_route_topology(route_json: &str) -> (u32, u32) {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(route_json);
+    let Ok(value) = parsed else {
+        return (0, 0);
+    };
+
+    let Some(swaps) = value.get("swaps").and_then(|s| s.as_array()) else {
+        return (0, 0);
+    };
+
+    let hop_count = swaps.len() as u32;
+    let mut split_count: u32 = 0;
+    for swap in swaps {
+        if let Some(split) = swap.get("split").and_then(|s| s.as_f64()) {
+            if split > 0.0 && split < 1.0 {
+                split_count += 1;
+            }
+        }
+    }
+
+    (hop_count, split_count)
+}
+
+const BASE_CHAIN_ID: u64 = 8453;
+
+/// Approximate hour-of-day and day-of-week from block number.
+///
+/// Uses a reference block to estimate the timestamp. This is a rough
+/// approximation (Ethereum mainnet ~12s/block). Returns None if the
+/// block number precedes our reference point.
+fn estimate_temporal_features(block_number: u64, chain_id: u64) -> (Option<u32>, Option<u32>) {
+    // Ethereum mainnet reference: block 17_000_000 ~ 2023-04-12 22:00 UTC
+    // Base reference: block 10_000_000 ~ 2024-04-01 (2s/block)
+    let (ref_block, ref_timestamp, block_time_secs) = if chain_id == BASE_CHAIN_ID {
+        (10_000_000_u64, 1_711_929_600_i64, 2_i64)
+    } else {
+        (17_000_000_u64, 1_681_340_400_i64, 12_i64)
+    };
+
+    if block_number < ref_block {
+        return (None, None);
+    }
+
+    let delta_blocks = block_number - ref_block;
+    let estimated_ts = ref_timestamp + (delta_blocks as i64 * block_time_secs);
+
+    let dt = chrono::DateTime::from_timestamp(estimated_ts, 0);
+    let Some(dt) = dt else {
+        return (None, None);
+    };
+
+    use chrono::Datelike as _;
+    use chrono::Timelike as _;
+
+    let hour = dt.hour();
+    let weekday = dt.weekday().num_days_from_monday(); // 0=Mon, 6=Sun
+
+    (Some(hour), Some(weekday))
+}
+
+// ---------------------------------------------------------------------------
+// Join logic
+// ---------------------------------------------------------------------------
+
+/// Join the three data sources by (quote_id, solver_id) and produce unified
+/// records with computed features.
+fn join_datasets(
+    quote_logs: &[QuoteLogRow],
+    hop_decays: &[HopDecayRow],
+    route_decays: &[RouteDecayRow],
+) -> Vec<UnifiedRecord> {
+    // Index quote logs by (quote_id, solver_id)
+    let mut quote_map: HashMap<(String, String), &QuoteLogRow> = HashMap::new();
+    for ql in quote_logs {
+        quote_map.insert((ql.quote_id.clone(), ql.solver_id.clone()), ql);
+    }
+
+    // Index hop decays by (quote_id, solver_id, block_offset)
+    // We aggregate: max_hop_decay_bps and route_decay_bps per group.
+    struct HopAgg {
+        max_hop_decay_bps: f64,
+        route_decay_bps: f64,
+    }
+
+    let mut hop_map: HashMap<(String, String, u32), HopAgg> = HashMap::new();
+    for hd in hop_decays {
+        let key = (
+            hd.quote_id.clone(),
+            hd.solver_id.clone(),
+            hd.block_offset,
+        );
+        let entry = hop_map.entry(key).or_insert(HopAgg {
+            max_hop_decay_bps: f64::NEG_INFINITY,
+            route_decay_bps: hd.route_decay_bps,
+        });
+        if hd.hop_decay_bps > entry.max_hop_decay_bps {
+            entry.max_hop_decay_bps = hd.hop_decay_bps;
+        }
+        entry.route_decay_bps = hd.route_decay_bps;
+    }
+
+    // Index route decays by (quote_id, solver_id, block_offset)
+    let mut route_map: HashMap<(String, String, u32), &RouteDecayRow> = HashMap::new();
+    for rd in route_decays {
+        route_map.insert(
+            (rd.quote_id.clone(), rd.solver_id.clone(), rd.block_offset),
+            rd,
+        );
+    }
+
+    // Collect all unique (quote_id, solver_id, block_offset) combinations
+    let mut all_keys: Vec<(String, String, u32)> = Vec::new();
+    for key in hop_map.keys() {
+        all_keys.push(key.clone());
+    }
+    for key in route_map.keys() {
+        if !hop_map.contains_key(key) {
+            all_keys.push(key.clone());
+        }
+    }
+    all_keys.sort();
+
+    let mut records = Vec::with_capacity(all_keys.len());
+
+    for (quote_id, solver_id, block_offset) in &all_keys {
+        let ql_key = (quote_id.clone(), solver_id.clone());
+        let Some(ql) = quote_map.get(&ql_key) else {
+            warn!(
+                quote_id = %quote_id,
+                solver_id = %solver_id,
+                "hop/route decay row has no matching quote log entry, skipping"
+            );
+            continue;
+        };
+
+        let full_key = (quote_id.clone(), solver_id.clone(), *block_offset);
+        let hop_agg = hop_map.get(&full_key);
+        let route_decay = route_map.get(&full_key);
+
+        let (hop_count, split_count) = compute_route_topology(&ql.route_json);
+        let is_l2 = ql.chain_id == BASE_CHAIN_ID;
+        let (hour_of_day, day_of_week) = estimate_temporal_features(ql.block_number, ql.chain_id);
+
+        // Token/pair features deferred to CoinGecko integration
+        // TODO: add token_category, pair_volatility_24h, token_market_cap
+
+        records.push(UnifiedRecord {
+            quote_id: quote_id.clone(),
+            solver_id: solver_id.clone(),
+            request_id: ql.request_id.clone(),
+            block_number: ql.block_number,
+            chain_id: ql.chain_id,
+            amount_in: ql.amount_in.clone(),
+            amount_out: ql.amount_out.clone(),
+            gas_estimate: ql.gas_estimate,
+            algorithm_type: ql.algorithm_type.clone(),
+            block_offset: *block_offset,
+            max_hop_decay_bps: hop_agg.map_or(0.0, |h| h.max_hop_decay_bps),
+            route_decay_bps: hop_agg.map_or(0.0, |h| h.route_decay_bps),
+            eth_call_amount_out: route_decay.map(|r| r.eth_call_amount_out.clone()),
+            eth_call_gas_used: route_decay.map(|r| r.eth_call_gas_used),
+            eth_call_success: route_decay.map(|r| r.eth_call_success),
+            eth_call_decay_bps: route_decay.map(|r| r.eth_call_decay_bps),
+            hop_count,
+            split_count,
+            is_l2,
+            hour_of_day,
+            day_of_week,
+        });
+    }
+
+    records
+}
+
+// ---------------------------------------------------------------------------
+// Unified parquet output
+// ---------------------------------------------------------------------------
+
+fn unified_schema() -> Schema {
+    Schema::new(vec![
+        // Join keys
+        Field::new("quote_id", DataType::Utf8, false),
+        Field::new("solver_id", DataType::Utf8, false),
+        Field::new("request_id", DataType::Utf8, false),
+        // Quote log
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("chain_id", DataType::UInt64, false),
+        Field::new("amount_in", DataType::Utf8, false),
+        Field::new("amount_out", DataType::Utf8, false),
+        Field::new("gas_estimate", DataType::UInt64, false),
+        Field::new("algorithm_type", DataType::Utf8, false),
+        // Hop decay (aggregated)
+        Field::new("block_offset", DataType::UInt32, false),
+        Field::new("max_hop_decay_bps", DataType::Float64, false),
+        Field::new("route_decay_bps", DataType::Float64, false),
+        // Route decay (nullable — may not have node resim data)
+        Field::new("eth_call_amount_out", DataType::Utf8, true),
+        Field::new("eth_call_gas_used", DataType::UInt64, true),
+        Field::new("eth_call_success", DataType::Boolean, true),
+        Field::new("eth_call_decay_bps", DataType::Float64, true),
+        // Computed: topology
+        Field::new("hop_count", DataType::UInt32, false),
+        Field::new("split_count", DataType::UInt32, false),
+        // Computed: chain/env
+        Field::new("is_l2", DataType::Boolean, false),
+        // Computed: temporal
+        Field::new("hour_of_day", DataType::UInt32, true),
+        Field::new("day_of_week", DataType::UInt32, true),
+    ])
+}
+
+fn write_unified_parquet(
+    output_dir: &std::path::Path,
+    records: &[UnifiedRecord],
+) -> anyhow::Result<()> {
+    // Partition by chain_id: group records, write one file per chain.
+    let mut by_chain: HashMap<u64, Vec<&UnifiedRecord>> = HashMap::new();
+    for record in records {
+        by_chain
+            .entry(record.chain_id)
+            .or_default()
+            .push(record);
+    }
+
+    for (chain_id, chain_records) in &by_chain {
+        let chain_dir = output_dir.join(format!("chain_id={chain_id}"));
+        std::fs::create_dir_all(&chain_dir)?;
+
+        let path = chain_dir.join("unified.parquet");
+        write_unified_parquet_file(&path, chain_records)?;
+
+        info!(
+            chain_id = chain_id,
+            records = chain_records.len(),
+            path = %path.display(),
+            "wrote unified parquet partition"
+        );
+    }
+
+    Ok(())
+}
+
+fn write_unified_parquet_file(
+    path: &std::path::Path,
+    records: &[&UnifiedRecord],
+) -> anyhow::Result<()> {
+    let schema = Arc::new(unified_schema());
+    let n = records.len();
+
+    let mut quote_id = StringBuilder::with_capacity(n, n * 36);
+    let mut solver_id = StringBuilder::with_capacity(n, n * 20);
+    let mut request_id = StringBuilder::with_capacity(n, n * 36);
+    let mut block_number = UInt64Builder::with_capacity(n);
+    let mut chain_id = UInt64Builder::with_capacity(n);
+    let mut amount_in = StringBuilder::with_capacity(n, n * 32);
+    let mut amount_out = StringBuilder::with_capacity(n, n * 32);
+    let mut gas_estimate = UInt64Builder::with_capacity(n);
+    let mut algorithm_type = StringBuilder::with_capacity(n, n * 20);
+    let mut block_offset = UInt32Builder::with_capacity(n);
+    let mut max_hop_decay_bps = Float64Builder::with_capacity(n);
+    let mut route_decay_bps = Float64Builder::with_capacity(n);
+    let mut eth_call_amount_out = StringBuilder::with_capacity(n, n * 32);
+    let mut eth_call_gas_used = UInt64Builder::with_capacity(n);
+    let mut eth_call_success = BooleanBuilder::with_capacity(n);
+    let mut eth_call_decay_bps = Float64Builder::with_capacity(n);
+    let mut hop_count = UInt32Builder::with_capacity(n);
+    let mut split_count = UInt32Builder::with_capacity(n);
+    let mut is_l2 = BooleanBuilder::with_capacity(n);
+    let mut hour_of_day = UInt32Builder::with_capacity(n);
+    let mut day_of_week = UInt32Builder::with_capacity(n);
+
+    for r in records {
+        quote_id.append_value(&r.quote_id);
+        solver_id.append_value(&r.solver_id);
+        request_id.append_value(&r.request_id);
+        block_number.append_value(r.block_number);
+        chain_id.append_value(r.chain_id);
+        amount_in.append_value(&r.amount_in);
+        amount_out.append_value(&r.amount_out);
+        gas_estimate.append_value(r.gas_estimate);
+        algorithm_type.append_value(&r.algorithm_type);
+        block_offset.append_value(r.block_offset);
+        max_hop_decay_bps.append_value(r.max_hop_decay_bps);
+        route_decay_bps.append_value(r.route_decay_bps);
+
+        match &r.eth_call_amount_out {
+            Some(v) => eth_call_amount_out.append_value(v),
+            None => eth_call_amount_out.append_null(),
+        }
+        match r.eth_call_gas_used {
+            Some(v) => eth_call_gas_used.append_value(v),
+            None => eth_call_gas_used.append_null(),
+        }
+        match r.eth_call_success {
+            Some(v) => eth_call_success.append_value(v),
+            None => eth_call_success.append_null(),
+        }
+        match r.eth_call_decay_bps {
+            Some(v) => eth_call_decay_bps.append_value(v),
+            None => eth_call_decay_bps.append_null(),
+        }
+
+        hop_count.append_value(r.hop_count);
+        split_count.append_value(r.split_count);
+        is_l2.append_value(r.is_l2);
+
+        match r.hour_of_day {
+            Some(v) => hour_of_day.append_value(v),
+            None => hour_of_day.append_null(),
+        }
+        match r.day_of_week {
+            Some(v) => day_of_week.append_value(v),
+            None => day_of_week.append_null(),
+        }
+    }
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(quote_id.finish()),
+        Arc::new(solver_id.finish()),
+        Arc::new(request_id.finish()),
+        Arc::new(block_number.finish()),
+        Arc::new(chain_id.finish()),
+        Arc::new(amount_in.finish()),
+        Arc::new(amount_out.finish()),
+        Arc::new(gas_estimate.finish()),
+        Arc::new(algorithm_type.finish()),
+        Arc::new(block_offset.finish()),
+        Arc::new(max_hop_decay_bps.finish()),
+        Arc::new(route_decay_bps.finish()),
+        Arc::new(eth_call_amount_out.finish()),
+        Arc::new(eth_call_gas_used.finish()),
+        Arc::new(eth_call_success.finish()),
+        Arc::new(eth_call_decay_bps.finish()),
+        Arc::new(hop_count.finish()),
+        Arc::new(split_count.finish()),
+        Arc::new(is_l2.finish()),
+        Arc::new(hour_of_day.finish()),
+        Arc::new(day_of_week.finish()),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let args = Args::parse();
+
+    info!(
+        quote_log_dir = %args.quote_log_dir.display(),
+        hop_decay_dir = %args.hop_decay_dir.display(),
+        route_decay_dir = %args.route_decay_dir.display(),
+        output_dir = %args.output_dir.display(),
+        "starting feature assembly"
+    );
+
+    // Read all three parquet sources
+    let quote_log_batches = read_parquet_files_from_dir(&args.quote_log_dir)?;
+    let hop_decay_batches = read_parquet_files_from_dir(&args.hop_decay_dir)?;
+    let route_decay_batches = read_parquet_files_from_dir(&args.route_decay_dir)?;
+
+    let quote_logs = parse_quote_log_rows(&quote_log_batches);
+    let hop_decays = parse_hop_decay_rows(&hop_decay_batches);
+    let route_decays = parse_route_decay_rows(&route_decay_batches);
+
+    info!(
+        quote_logs = quote_logs.len(),
+        hop_decays = hop_decays.len(),
+        route_decays = route_decays.len(),
+        "loaded source data"
+    );
+
+    if quote_logs.is_empty() {
+        info!("no quote logs found, nothing to assemble");
+        return Ok(());
+    }
+
+    // Join and compute features
+    let unified = join_datasets(&quote_logs, &hop_decays, &route_decays);
+
+    info!(records = unified.len(), "assembled unified dataset");
+
+    // Write output partitioned by chain_id
+    std::fs::create_dir_all(&args.output_dir)?;
+    write_unified_parquet(&args.output_dir, &unified)?;
+
+    info!("feature assembly complete");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use slippage_features::parquet_writer::{
+        write_hop_decay_parquet, write_quote_log_parquet, write_route_decay_parquet,
+        HopDecayRecord, QuoteLogRecord, RouteDecayRecord,
+    };
+
+    use super::*;
+
+    #[test]
+    fn cli_parsing() {
+        let args = Args::parse_from([
+            "assemble",
+            "--quote-log-dir",
+            "/tmp/quotes",
+            "--hop-decay-dir",
+            "/tmp/hops",
+            "--route-decay-dir",
+            "/tmp/routes",
+            "--output-dir",
+            "/tmp/out",
+        ]);
+        assert_eq!(args.quote_log_dir, PathBuf::from("/tmp/quotes"));
+        assert_eq!(args.hop_decay_dir, PathBuf::from("/tmp/hops"));
+        assert_eq!(args.route_decay_dir, PathBuf::from("/tmp/routes"));
+        assert_eq!(args.output_dir, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn route_topology_empty_json() {
+        let (hops, splits) = compute_route_topology("{}");
+        assert_eq!(hops, 0);
+        assert_eq!(splits, 0);
+    }
+
+    #[test]
+    fn route_topology_single_hop() {
+        let json = r#"{"swaps":[{"component_id":"p1","protocol":"uniswap_v2","split":0.0}]}"#;
+        let (hops, splits) = compute_route_topology(json);
+        assert_eq!(hops, 1);
+        assert_eq!(splits, 0);
+    }
+
+    #[test]
+    fn route_topology_multi_hop_with_split() {
+        let json = r#"{"swaps":[
+            {"component_id":"p1","split":0.5},
+            {"component_id":"p2","split":0.5},
+            {"component_id":"p3","split":0.0}
+        ]}"#;
+        let (hops, splits) = compute_route_topology(json);
+        assert_eq!(hops, 3);
+        assert_eq!(splits, 2);
+    }
+
+    #[test]
+    fn route_topology_invalid_json() {
+        let (hops, splits) = compute_route_topology("not json");
+        assert_eq!(hops, 0);
+        assert_eq!(splits, 0);
+    }
+
+    #[test]
+    fn temporal_features_ethereum_mainnet() {
+        // Block 17_001_000 is 1000 blocks after reference (12s each = 12000s)
+        let (hour, day) = estimate_temporal_features(17_001_000, 1);
+        assert!(hour.is_some());
+        assert!(day.is_some());
+    }
+
+    #[test]
+    fn temporal_features_base_l2() {
+        let (hour, day) = estimate_temporal_features(10_001_000, BASE_CHAIN_ID);
+        assert!(hour.is_some());
+        assert!(day.is_some());
+    }
+
+    #[test]
+    fn temporal_features_before_reference_returns_none() {
+        let (hour, day) = estimate_temporal_features(1_000, 1);
+        assert!(hour.is_none());
+        assert!(day.is_none());
+    }
+
+    #[test]
+    fn is_l2_for_base_chain() {
+        assert_eq!(BASE_CHAIN_ID, 8453);
+    }
+
+    fn make_test_data() -> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+        let quote_dir = tempfile::tempdir().expect("create quote dir");
+        let hop_dir = tempfile::tempdir().expect("create hop dir");
+        let route_dir = tempfile::tempdir().expect("create route dir");
+
+        let quote_records = vec![QuoteLogRecord {
+            quote_id: "q-1".to_string(),
+            solver_id: "solver-a".to_string(),
+            request_id: "req-1".to_string(),
+            is_winner: true,
+            block_number: 17_500_000,
+            chain_id: 1,
+            amount_in: "1000".to_string(),
+            amount_out: "990".to_string(),
+            gas_estimate: 100_000,
+            algorithm_type: "most_liquid".to_string(),
+            n_alternatives: 2,
+            gap_to_second_best_bps: None,
+            slippage_tolerance: None,
+            route_json: r#"{"swaps":[{"component_id":"p1","protocol":"uniswap_v2","split":0.0},{"component_id":"p2","protocol":"curve","split":0.0}]}"#.to_string(),
+            calldata_hex: "abcd".to_string(),
+        }];
+        write_quote_log_parquet(
+            &quote_dir.path().join("quotes.parquet"),
+            &quote_records,
+        )
+        .expect("write quote log");
+
+        let hop_records = vec![
+            HopDecayRecord {
+                quote_id: "q-1".to_string(),
+                solver_id: "solver-a".to_string(),
+                request_id: "req-1".to_string(),
+                block_offset: 1,
+                hop_index: 0,
+                component_id: "p1".to_string(),
+                protocol: "uniswap_v2".to_string(),
+                hop_amount_out: "995".to_string(),
+                hop_decay_bps: 5.0,
+                depth_at_1pct: None,
+                depth_at_5pct: None,
+                spot_price: None,
+                token_price_in_native: None,
+                fee_tier: None,
+                marginal_liquidity: None,
+                concentration_gini: None,
+                route_total_amount_out: "985".to_string(),
+                route_decay_bps: 15.0,
+            },
+            HopDecayRecord {
+                quote_id: "q-1".to_string(),
+                solver_id: "solver-a".to_string(),
+                request_id: "req-1".to_string(),
+                block_offset: 1,
+                hop_index: 1,
+                component_id: "p2".to_string(),
+                protocol: "curve".to_string(),
+                hop_amount_out: "985".to_string(),
+                hop_decay_bps: 10.0,
+                depth_at_1pct: None,
+                depth_at_5pct: None,
+                spot_price: None,
+                token_price_in_native: None,
+                fee_tier: None,
+                marginal_liquidity: None,
+                concentration_gini: None,
+                route_total_amount_out: "985".to_string(),
+                route_decay_bps: 15.0,
+            },
+        ];
+        write_hop_decay_parquet(
+            &hop_dir.path().join("hops.parquet"),
+            &hop_records,
+        )
+        .expect("write hop decay");
+
+        let route_records = vec![RouteDecayRecord {
+            quote_id: "q-1".to_string(),
+            solver_id: "solver-a".to_string(),
+            request_id: "req-1".to_string(),
+            block_offset: 1,
+            eth_call_amount_out: "984".to_string(),
+            eth_call_gas_used: 150_000,
+            eth_call_success: true,
+            eth_call_revert_reason: None,
+            eth_call_decay_bps: 16.0,
+        }];
+        write_route_decay_parquet(
+            &route_dir.path().join("routes.parquet"),
+            &route_records,
+        )
+        .expect("write route decay");
+
+        (quote_dir, hop_dir, route_dir)
+    }
+
+    #[test]
+    fn join_datasets_produces_unified_records() {
+        let (quote_dir, hop_dir, route_dir) = make_test_data();
+
+        let quote_batches =
+            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
+        let hop_batches =
+            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
+        let route_batches =
+            read_parquet_files_from_dir(&route_dir.path().to_path_buf()).expect("read routes");
+
+        let quotes = parse_quote_log_rows(&quote_batches);
+        let hops = parse_hop_decay_rows(&hop_batches);
+        let routes = parse_route_decay_rows(&route_batches);
+
+        let unified = join_datasets(&quotes, &hops, &routes);
+
+        assert_eq!(unified.len(), 1);
+
+        let r = &unified[0];
+        assert_eq!(r.quote_id, "q-1");
+        assert_eq!(r.solver_id, "solver-a");
+        assert_eq!(r.block_offset, 1);
+
+        // max_hop_decay_bps should be max(5.0, 10.0) = 10.0
+        assert!((r.max_hop_decay_bps - 10.0).abs() < f64::EPSILON);
+        assert!((r.route_decay_bps - 15.0).abs() < f64::EPSILON);
+
+        // Route decay present
+        assert_eq!(r.eth_call_amount_out.as_deref(), Some("984"));
+        assert_eq!(r.eth_call_gas_used, Some(150_000));
+        assert_eq!(r.eth_call_success, Some(true));
+        assert!((r.eth_call_decay_bps.expect("has decay") - 16.0).abs() < f64::EPSILON);
+
+        // Topology: 2 hops, 0 splits
+        assert_eq!(r.hop_count, 2);
+        assert_eq!(r.split_count, 0);
+
+        // Chain/env
+        assert!(!r.is_l2);
+        assert_eq!(r.chain_id, 1);
+
+        // Temporal features should be present for mainnet block 17.5M
+        assert!(r.hour_of_day.is_some());
+        assert!(r.day_of_week.is_some());
+    }
+
+    #[test]
+    fn join_without_route_decay_still_works() {
+        let (quote_dir, hop_dir, _route_dir) = make_test_data();
+
+        let empty_route_dir = tempfile::tempdir().expect("create empty route dir");
+
+        let quote_batches =
+            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
+        let hop_batches =
+            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
+        let route_batches =
+            read_parquet_files_from_dir(&empty_route_dir.path().to_path_buf())
+                .expect("read routes");
+
+        let quotes = parse_quote_log_rows(&quote_batches);
+        let hops = parse_hop_decay_rows(&hop_batches);
+        let routes = parse_route_decay_rows(&route_batches);
+
+        let unified = join_datasets(&quotes, &hops, &routes);
+        assert_eq!(unified.len(), 1);
+
+        let r = &unified[0];
+        assert!(r.eth_call_amount_out.is_none());
+        assert!(r.eth_call_gas_used.is_none());
+        assert!(r.eth_call_success.is_none());
+        assert!(r.eth_call_decay_bps.is_none());
+    }
+
+    #[test]
+    fn unified_parquet_round_trip() {
+        use arrow::array::AsArray;
+
+        let (quote_dir, hop_dir, route_dir) = make_test_data();
+        let output_dir = tempfile::tempdir().expect("create output dir");
+
+        let quote_batches =
+            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
+        let hop_batches =
+            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
+        let route_batches =
+            read_parquet_files_from_dir(&route_dir.path().to_path_buf()).expect("read routes");
+
+        let quotes = parse_quote_log_rows(&quote_batches);
+        let hops = parse_hop_decay_rows(&hop_batches);
+        let routes = parse_route_decay_rows(&route_batches);
+
+        let unified = join_datasets(&quotes, &hops, &routes);
+        write_unified_parquet(&output_dir.path().to_path_buf(), &unified)
+            .expect("write unified parquet");
+
+        // Verify partition directory exists
+        let chain_dir = output_dir.path().join("chain_id=1");
+        assert!(chain_dir.exists());
+
+        let parquet_path = chain_dir.join("unified.parquet");
+        let file = std::fs::File::open(&parquet_path).expect("open parquet");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("build reader");
+        let mut reader = builder.build().expect("build reader");
+
+        let batch = reader.next().expect("has batch").expect("batch ok");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 21);
+
+        let quote_ids = batch
+            .column_by_name("quote_id")
+            .and_then(|c| c.as_string_opt::<i32>())
+            .expect("quote_id column");
+        assert_eq!(quote_ids.value(0), "q-1");
+
+        let hop_counts = batch
+            .column_by_name("hop_count")
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt32Type>())
+            .expect("hop_count column");
+        assert_eq!(hop_counts.value(0), 2);
+    }
+
+    #[test]
+    fn empty_sources_produce_no_output() {
+        let empty1 = tempfile::tempdir().expect("dir");
+        let empty2 = tempfile::tempdir().expect("dir");
+        let empty3 = tempfile::tempdir().expect("dir");
+
+        let q = read_parquet_files_from_dir(&empty1.path().to_path_buf()).expect("read");
+        let h = read_parquet_files_from_dir(&empty2.path().to_path_buf()).expect("read");
+        let r = read_parquet_files_from_dir(&empty3.path().to_path_buf()).expect("read");
+
+        let quotes = parse_quote_log_rows(&q);
+        let hops = parse_hop_decay_rows(&h);
+        let routes = parse_route_decay_rows(&r);
+
+        let unified = join_datasets(&quotes, &hops, &routes);
+        assert!(unified.is_empty());
+    }
+
+    #[test]
+    fn unified_schema_has_expected_field_count() {
+        let schema = unified_schema();
+        assert_eq!(schema.fields().len(), 21);
+    }
+}
