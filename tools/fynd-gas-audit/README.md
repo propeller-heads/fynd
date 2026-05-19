@@ -24,11 +24,11 @@ tool quantifies the bias.
    ```bash
    TYCHO_API_KEY=supersecrettoken \
    RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
-      cargo run --release -p fynd -- serve -w tools/fynd-gas-audit/single_swaps.toml
+      cargo run --release -p fynd -- serve -w tools/fynd-gas-audit/single_hops.toml
    ```
    Wait until `/v1/health` reports `healthy=true, derived_data_ready=true`.
 
-   `single_swaps.toml` is a worker config tailored to this audit: it pins
+   `single_hops.toml` is a worker config tailored to this audit: it pins
    `max_hops=1` on both `most_liquid` and `bellman_ford` pools so every
    sampled trade resolves to a single-hop swap. Use it when you want to
    isolate per-protocol gas accuracy without multi-hop overhead confounding the
@@ -58,7 +58,7 @@ each time you want a fresh, independent draw from the 10k dataset.
 
 ## Findings from the 2026-05-08 run (single-hop, n=500)
 
-This run used `single_swaps.toml` (1-hop only, both `most_liquid` and
+This run used `single_hops.toml` (1-hop only, both `most_liquid` and
 `bellman_ford` pools) so the error attribution is per-protocol with no
 multi-hop overhead in the way. Mainnet gas price at the time was 6.09 gwei.
 Absolute ETH numbers scale linearly with gas price — the **relative** figures
@@ -156,7 +156,7 @@ clear outlier).
 
 ## Known limitations of the current audit
 
-1. **`single_swaps.toml` ↔ no-quote rate trade-off.** With `max_hops=1`, ~62%
+1. **`single_hops.toml` ↔ no-quote rate trade-off.** With `max_hops=1`, ~62%
    of the 500 sampled aggregator trades return `NoRouteFound` because the only
    routable path needs an intermediate token (most multi-hop trades go via
    WETH/USDC). That's the cost of clean per-protocol attribution. Drop the

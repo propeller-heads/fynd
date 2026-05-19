@@ -423,7 +423,7 @@ impl MostLiquidAlgorithm {
         }
 
         // Calculate net amount out (output - gas cost in output token terms)
-        let route = Route::new(swaps).with_tokens(tokens);
+        let route = Route::new(swaps, tokens);
         let output_amount = route
             .swaps()
             .last()

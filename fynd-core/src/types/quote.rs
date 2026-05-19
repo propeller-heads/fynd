@@ -940,16 +940,8 @@ pub struct Route {
 
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
-    pub fn new(swaps: Vec<Swap>) -> Self {
-        Self { swaps, tokens: HashMap::new() }
-    }
-
-    /// Attaches a token map (address → full `Token`) to the route. The encoder
-    /// uses this to convert each swap's `token_in`/`token_out` addresses back
-    /// into the full `Token` objects required by `tycho-execution`.
-    pub(crate) fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
-        self.tokens = tokens;
-        self
+    pub fn new(swaps: Vec<Swap>, tokens: HashMap<Bytes, Token>) -> Self {
+        Self { swaps, tokens }
     }
 
     /// Returns the swaps in this route.
@@ -1416,7 +1408,7 @@ mod tests {
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        Route::new(swaps)
+        Route::new(swaps, HashMap::new())
     }
 
     #[rstest]
@@ -1473,7 +1465,7 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route::new(swaps);
+        let route = Route::new(swaps, HashMap::new());
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 

@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "erc20-overrides"
-version = "0.56.1"
+version = "0.58.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.56.1"
+version = "0.58.0"
 dependencies = [
  "alloy",
  "anyhow",

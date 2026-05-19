@@ -111,7 +111,7 @@ impl Algorithm for DirectPoolAlgorithm {
                 state.clone_box(),
             );
 
-            let route = Route::new(vec![swap]);
+            let route = Route::new(vec![swap], HashMap::new());
             let net_amount_out = BigInt::from(result.amount);
 
             return Ok(RouteResult::new(route, net_amount_out, gas_price));

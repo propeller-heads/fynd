@@ -625,7 +625,7 @@ impl Algorithm for BellmanFordAlgorithm {
                 .or_insert_with(|| token_out.clone());
         }
 
-        let route = Route::new(swaps).with_tokens(tokens);
+        let route = Route::new(swaps, tokens);
         let final_amount_out = amount[out_idx].clone();
 
         let gas_price = gas_price_wei.unwrap_or_default();

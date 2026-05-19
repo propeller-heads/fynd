@@ -17,7 +17,7 @@
 //! cargo run --package fynd-core --example custom_algorithm
 //! ```
 
-use std::{env, str::FromStr, time::Duration};
+use std::{collections::HashMap, env, str::FromStr, time::Duration};
 
 use fynd_core::{
     derived::SharedDerivedDataRef,
@@ -125,7 +125,7 @@ impl Algorithm for DirectPoolAlgorithm {
                 state.clone_box(),
             );
 
-            let route = Route::new(vec![swap]);
+            let route = Route::new(vec![swap], HashMap::new());
             let net_amount_out = BigInt::from(result.amount);
 
             return Ok(RouteResult::new(route, net_amount_out, gas_price));

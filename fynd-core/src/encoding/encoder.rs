@@ -463,7 +463,7 @@ mod tests {
                 make_route_swap_addrs(tin.clone(), tout.clone())
             })
             .collect();
-        crate::types::Route::new(swaps).with_tokens(tokens)
+        crate::types::Route::new(swaps, tokens)
     }
 
     fn make_address(byte: u8) -> Address {
