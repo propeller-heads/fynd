@@ -18,3 +18,4 @@ num-bigint = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = "3"
+tycho-simulation = { workspace = true }

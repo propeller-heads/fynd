@@ -43,10 +43,7 @@ fn parse_bigint_to_f64(s: &str) -> Result<f64, DecayError> {
             if v.is_finite() {
                 Ok(v)
             } else {
-                Err(DecayError::InvalidAmount {
-                    value: s.to_string(),
-                    reason: "not finite".into(),
-                })
+                Err(DecayError::InvalidAmount { value: s.to_string(), reason: "not finite".into() })
             }
         })
 }
@@ -75,9 +72,6 @@ mod tests {
 
     #[test]
     fn zero_quote_output_is_error() {
-        assert!(matches!(
-            compute_decay_bps("0", "100"),
-            Err(DecayError::ZeroQuoteOutput)
-        ));
+        assert!(matches!(compute_decay_bps("0", "100"), Err(DecayError::ZeroQuoteOutput)));
     }
 }
