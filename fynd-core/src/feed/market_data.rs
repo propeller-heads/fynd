@@ -41,8 +41,17 @@ pub type StateLabel = String;
 /// An immutable snapshot of per-component simulation states for one overlay layer.
 pub type OverlayStates = Arc<HashMap<ComponentId, Box<dyn ProtocolSim>>>;
 
+/// A named simulation-state overlay with a block-number expiry.
+pub struct OverlayEntry {
+    /// The overlay pool states (only pools that differ from base state).
+    pub states: OverlayStates,
+    /// Last block number for which this overlay is valid.
+    /// The overlay is automatically evicted before block `valid_until + 1` is applied.
+    pub valid_until: u64,
+}
+
 /// The shared overlay registry: maps each label to its snapshot.
-type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayStates>>>;
+type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
 
 /// Thread-safe handle to shared market data with optional overlay support.
 ///
@@ -91,7 +100,7 @@ impl SharedMarketDataRef {
                 .read()
                 .await
                 .get(label)
-                .cloned()
+                .map(|e| Arc::clone(&e.states))
         } else {
             None
         };
@@ -135,11 +144,12 @@ impl SharedMarketDataRef {
         &self,
         label: StateLabel,
         states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        valid_until: u64,
     ) {
         self.overlays
             .write()
             .await
-            .insert(label, Arc::new(states));
+            .insert(label, OverlayEntry { states: Arc::new(states), valid_until });
     }
 
     /// Removes the overlay for the given label, if it exists.
@@ -153,6 +163,24 @@ impl SharedMarketDataRef {
     /// Clears all overlays.
     pub async fn clear_labeled_states(&self) {
         self.overlays.write().await.clear();
+    }
+
+    /// Atomically evicts stale overlays then applies a block update to base state.
+    ///
+    /// Overlays with `valid_until < new_block_number` are removed under the overlay
+    /// lock before the base write lock is acquired. This guarantees no solver can
+    /// observe new base state alongside an overlay that was built against the previous
+    /// block.
+    pub async fn apply_block_update(
+        &self,
+        new_block_number: u64,
+        update: impl FnOnce(&mut SharedMarketData),
+    ) {
+        self.overlays
+            .write()
+            .await
+            .retain(|_, entry| entry.valid_until >= new_block_number);
+        update(&mut *self.data.write().await);
     }
 
     /// Returns the labels of all registered overlays.
@@ -497,7 +525,7 @@ mod tests {
         );
 
         market_ref
-            .register_labeled_state(label.clone(), states)
+            .register_labeled_state(label.clone(), states, u64::MAX)
             .await;
 
         let labeled_ref = market_ref.with_label(label);
@@ -518,6 +546,7 @@ mod tests {
                     "pool1".to_string(),
                     Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
                 )]),
+                u64::MAX,
             )
             .await;
 
@@ -540,6 +569,7 @@ mod tests {
                     "pool".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
+                u64::MAX,
             )
             .await;
 
@@ -563,6 +593,7 @@ mod tests {
                         format!("pool_{i}"),
                         Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
                     )]),
+                    u64::MAX,
                 )
                 .await;
         }
@@ -588,6 +619,7 @@ mod tests {
                 "pool_x".to_string(),
                 Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
             )]),
+            u64::MAX,
         )
         .await;
 
@@ -628,6 +660,7 @@ mod tests {
                     "pool_ab".to_string(),
                     Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
                 )]),
+                u64::MAX,
             )
             .await;
 
@@ -646,5 +679,61 @@ mod tests {
             .downcast_ref::<MockProtocolSim>()
             .unwrap();
         assert_eq!(mock.spot_price, 99.0, "overlay state should replace base state");
+    }
+
+    #[tokio::test]
+    async fn apply_block_update_evicts_stale_overlays() {
+        let market_ref = SharedMarketDataRef::new_shared();
+
+        // Register two overlays: one valid until block 10, one valid until block 20.
+        market_ref
+            .register_labeled_state(
+                "stale".to_string(),
+                HashMap::from([(
+                    "pool_stale".to_string(),
+                    Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+                )]),
+                10,
+            )
+            .await;
+        market_ref
+            .register_labeled_state(
+                "fresh".to_string(),
+                HashMap::from([(
+                    "pool_fresh".to_string(),
+                    Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                )]),
+                20,
+            )
+            .await;
+
+        // Apply block 11: the "stale" overlay (valid_until=10) must be evicted.
+        market_ref
+            .apply_block_update(11, |_data| {})
+            .await;
+
+        let ids = market_ref.labeled_state_ids().await;
+        assert!(!ids.contains(&"stale".to_string()), "stale overlay must be evicted");
+        assert!(ids.contains(&"fresh".to_string()), "fresh overlay must survive");
+    }
+
+    #[tokio::test]
+    async fn apply_block_update_applies_mutation() {
+        let market_ref = SharedMarketDataRef::new_shared();
+
+        market_ref
+            .apply_block_update(1, |data| {
+                data.update_last_updated(BlockInfo::new(1, "0xabc".to_string(), 0));
+            })
+            .await;
+
+        let guard = market_ref.read().await;
+        assert_eq!(
+            guard
+                .last_updated()
+                .expect("last_updated must be set")
+                .number(),
+            1
+        );
     }
 }
