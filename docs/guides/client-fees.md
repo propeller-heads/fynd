@@ -17,7 +17,9 @@ When you request encoding, the quote response includes a `fee_breakdown` with th
 
 ## Fee breakdown
 
-The on-chain `FeeCalculator` deducts fees from the raw swap output. Fynd mirrors this calculation (identical integer arithmetic) to set `minAmountOut` in the encoded transaction.
+`amount_out` in the quote response is the raw pre-fee swap output — the amount produced by the route before any fees are deducted. It is **not** what the user receives. The amount the user receives on-chain is at least `fee_breakdown.min_amount_received`.
+
+The on-chain `FeeCalculator` deducts fees from `amount_out`. Fynd mirrors this calculation (identical integer arithmetic) to set `minAmountOut` in the encoded transaction.
 
 Given `amount_out` (raw swap output), `client_fee_bps` (0 if none), and `slippage`:
 
