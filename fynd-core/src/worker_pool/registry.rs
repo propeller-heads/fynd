@@ -19,6 +19,8 @@ use std::{
 use tokio::sync::broadcast;
 use tracing::info;
 
+#[cfg(feature = "slippage-features")]
+use crate::observer::SolverObserver;
 use crate::{
     algorithm::{AlgorithmConfig, BellmanFordAlgorithm, MostLiquidAlgorithm},
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
@@ -53,6 +55,9 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Observer for solver instrumentation (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    pub observer: Option<Arc<dyn SolverObserver>>,
 }
 
 /// Error returned when algorithm registration fails.
@@ -192,9 +197,20 @@ where
 
 /// Spawns workers for the MostLiquid algorithm.
 fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
-    let factory = |config: AlgorithmConfig| {
-        MostLiquidAlgorithm::with_config(config)
-            .expect("invalid worker configuration for MostLiquidAlgorithm")
+    #[cfg(feature = "slippage-features")]
+    let observer = params.observer.clone();
+
+    let factory = move |config: AlgorithmConfig| {
+        let algo = MostLiquidAlgorithm::with_config(config)
+            .expect("invalid worker configuration for MostLiquidAlgorithm");
+
+        #[cfg(feature = "slippage-features")]
+        let algo = match observer.clone() {
+            Some(obs) => algo.with_observer(obs),
+            None => algo,
+        };
+
+        algo
     };
     spawn_workers_generic(params, &factory)
 }
@@ -232,6 +248,8 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         }
     }
 
@@ -269,6 +287,8 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         };
 
         let workers =
@@ -309,6 +329,8 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                #[cfg(feature = "slippage-features")]
+                observer: None,
             });
         assert!(registry_err.is_err());
 
@@ -335,6 +357,8 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                #[cfg(feature = "slippage-features")]
+                observer: None,
             });
 
         assert!(workers.is_ok());

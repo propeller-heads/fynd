@@ -169,6 +169,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets the observer for solver instrumentation (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    pub fn with_observer(mut self, observer: Arc<dyn fynd_core::observer::SolverObserver>) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .with_observer(observer);
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -276,6 +285,7 @@ impl FyndRPCBuilder {
             gas_price_worker_handle: gas_price_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
+            market_data: _market_data,
         })
     }
 }
@@ -290,12 +300,18 @@ pub struct FyndRPC {
     gas_price_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    market_data: fynd_core::feed::market_data::SharedMarketDataRef,
 }
 
 impl FyndRPC {
     /// Returns a handle to the HTTP server for graceful shutdown.
     pub fn server_handle(&self) -> ServerHandle {
         self.server_handle.clone()
+    }
+
+    /// Returns a clone of the shared market data reference.
+    pub fn market_data(&self) -> fynd_core::feed::market_data::SharedMarketDataRef {
+        Arc::clone(&self.market_data)
     }
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
@@ -308,6 +324,7 @@ impl FyndRPC {
             mut gas_price_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
+            market_data: _,
         } = self;
 
         info!("HTTP server started");

@@ -1,11 +1,7 @@
 //! Feature assembly binary: joins quote log, hop decay, and route decay
 //! parquet sources into a unified analysis dataset with computed features.
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use arrow::{
     array::{
@@ -23,10 +19,7 @@ use parquet::{
 use tracing::{info, warn};
 
 #[derive(Parser)]
-#[command(
-    name = "assemble",
-    about = "Join decay parquets + features into unified dataset"
-)]
+#[command(name = "assemble", about = "Join decay parquets + features into unified dataset")]
 struct Args {
     /// Path to quote log parquet directory
     #[arg(long)]
@@ -324,7 +317,9 @@ fn parse_hop_decay_rows(batches: &[RecordBatch]) -> Vec<HopDecayRow> {
                 protocol: protocols.value(row).to_string(),
                 hop_amount_out: hop_amounts_out.value(row).to_string(),
                 hop_decay_bps: hop_decay_bps_arr.value(row),
-                route_total_amount_out: route_total_amounts_out.value(row).to_string(),
+                route_total_amount_out: route_total_amounts_out
+                    .value(row)
+                    .to_string(),
                 route_decay_bps: route_decay_bps_arr.value(row),
             });
         }
@@ -388,7 +383,9 @@ fn parse_route_decay_rows(batches: &[RecordBatch]) -> Vec<RouteDecayRow> {
                 quote_id: quote_ids.value(row).to_string(),
                 solver_id: solver_ids.value(row).to_string(),
                 block_offset: block_offsets.value(row),
-                eth_call_amount_out: eth_call_amounts_out.value(row).to_string(),
+                eth_call_amount_out: eth_call_amounts_out
+                    .value(row)
+                    .to_string(),
                 eth_call_gas_used: eth_call_gas_used_arr.value(row),
                 eth_call_success: eth_call_success_arr.value(row),
                 eth_call_decay_bps: eth_call_decay_bps_arr.value(row),
@@ -414,14 +411,20 @@ fn compute_route_topology(route_json: &str) -> (u32, u32) {
         return (0, 0);
     };
 
-    let Some(swaps) = value.get("swaps").and_then(|s| s.as_array()) else {
+    let Some(swaps) = value
+        .get("swaps")
+        .and_then(|s| s.as_array())
+    else {
         return (0, 0);
     };
 
     let hop_count = swaps.len() as u32;
     let mut split_count: u32 = 0;
     for swap in swaps {
-        if let Some(split) = swap.get("split").and_then(|s| s.as_f64()) {
+        if let Some(split) = swap
+            .get("split")
+            .and_then(|s| s.as_f64())
+        {
             if split > 0.0 && split < 1.0 {
                 split_count += 1;
             }
@@ -459,8 +462,7 @@ fn estimate_temporal_features(block_number: u64, chain_id: u64) -> (Option<u32>,
         return (None, None);
     };
 
-    use chrono::Datelike as _;
-    use chrono::Timelike as _;
+    use chrono::{Datelike as _, Timelike as _};
 
     let hour = dt.hour();
     let weekday = dt.weekday().num_days_from_monday(); // 0=Mon, 6=Sun
@@ -494,11 +496,7 @@ fn join_datasets(
 
     let mut hop_map: HashMap<(String, String, u32), HopAgg> = HashMap::new();
     for hd in hop_decays {
-        let key = (
-            hd.quote_id.clone(),
-            hd.solver_id.clone(),
-            hd.block_offset,
-        );
+        let key = (hd.quote_id.clone(), hd.solver_id.clone(), hd.block_offset);
         let entry = hop_map.entry(key).or_insert(HopAgg {
             max_hop_decay_bps: f64::NEG_INFINITY,
             route_decay_bps: hd.route_decay_bps,
@@ -512,10 +510,7 @@ fn join_datasets(
     // Index route decays by (quote_id, solver_id, block_offset)
     let mut route_map: HashMap<(String, String, u32), &RouteDecayRow> = HashMap::new();
     for rd in route_decays {
-        route_map.insert(
-            (rd.quote_id.clone(), rd.solver_id.clone(), rd.block_offset),
-            rd,
-        );
+        route_map.insert((rd.quote_id.clone(), rd.solver_id.clone(), rd.block_offset), rd);
     }
 
     // Collect all unique (quote_id, solver_id, block_offset) combinations
@@ -930,11 +925,8 @@ mod tests {
             route_json: r#"{"swaps":[{"component_id":"p1","protocol":"uniswap_v2","split":0.0},{"component_id":"p2","protocol":"curve","split":0.0}]}"#.to_string(),
             calldata_hex: "abcd".to_string(),
         }];
-        write_quote_log_parquet(
-            &quote_dir.path().join("quotes.parquet"),
-            &quote_records,
-        )
-        .expect("write quote log");
+        write_quote_log_parquet(&quote_dir.path().join("quotes.parquet"), &quote_records)
+            .expect("write quote log");
 
         let hop_records = vec![
             HopDecayRecord {
@@ -978,11 +970,8 @@ mod tests {
                 route_decay_bps: 15.0,
             },
         ];
-        write_hop_decay_parquet(
-            &hop_dir.path().join("hops.parquet"),
-            &hop_records,
-        )
-        .expect("write hop decay");
+        write_hop_decay_parquet(&hop_dir.path().join("hops.parquet"), &hop_records)
+            .expect("write hop decay");
 
         let route_records = vec![RouteDecayRecord {
             quote_id: "q-1".to_string(),
@@ -995,11 +984,8 @@ mod tests {
             eth_call_revert_reason: None,
             eth_call_decay_bps: 16.0,
         }];
-        write_route_decay_parquet(
-            &route_dir.path().join("routes.parquet"),
-            &route_records,
-        )
-        .expect("write route decay");
+        write_route_decay_parquet(&route_dir.path().join("routes.parquet"), &route_records)
+            .expect("write route decay");
 
         (quote_dir, hop_dir, route_dir)
     }
@@ -1008,12 +994,9 @@ mod tests {
     fn join_datasets_produces_unified_records() {
         let (quote_dir, hop_dir, route_dir) = make_test_data();
 
-        let quote_batches =
-            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
-        let hop_batches =
-            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
-        let route_batches =
-            read_parquet_files_from_dir(&route_dir.path().to_path_buf()).expect("read routes");
+        let quote_batches = read_parquet_files_from_dir(quote_dir.path()).expect("read quotes");
+        let hop_batches = read_parquet_files_from_dir(hop_dir.path()).expect("read hops");
+        let route_batches = read_parquet_files_from_dir(route_dir.path()).expect("read routes");
 
         let quotes = parse_quote_log_rows(&quote_batches);
         let hops = parse_hop_decay_rows(&hop_batches);
@@ -1057,13 +1040,10 @@ mod tests {
 
         let empty_route_dir = tempfile::tempdir().expect("create empty route dir");
 
-        let quote_batches =
-            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
-        let hop_batches =
-            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
+        let quote_batches = read_parquet_files_from_dir(quote_dir.path()).expect("read quotes");
+        let hop_batches = read_parquet_files_from_dir(hop_dir.path()).expect("read hops");
         let route_batches =
-            read_parquet_files_from_dir(&empty_route_dir.path().to_path_buf())
-                .expect("read routes");
+            read_parquet_files_from_dir(empty_route_dir.path()).expect("read routes");
 
         let quotes = parse_quote_log_rows(&quote_batches);
         let hops = parse_hop_decay_rows(&hop_batches);
@@ -1086,20 +1066,16 @@ mod tests {
         let (quote_dir, hop_dir, route_dir) = make_test_data();
         let output_dir = tempfile::tempdir().expect("create output dir");
 
-        let quote_batches =
-            read_parquet_files_from_dir(&quote_dir.path().to_path_buf()).expect("read quotes");
-        let hop_batches =
-            read_parquet_files_from_dir(&hop_dir.path().to_path_buf()).expect("read hops");
-        let route_batches =
-            read_parquet_files_from_dir(&route_dir.path().to_path_buf()).expect("read routes");
+        let quote_batches = read_parquet_files_from_dir(quote_dir.path()).expect("read quotes");
+        let hop_batches = read_parquet_files_from_dir(hop_dir.path()).expect("read hops");
+        let route_batches = read_parquet_files_from_dir(route_dir.path()).expect("read routes");
 
         let quotes = parse_quote_log_rows(&quote_batches);
         let hops = parse_hop_decay_rows(&hop_batches);
         let routes = parse_route_decay_rows(&route_batches);
 
         let unified = join_datasets(&quotes, &hops, &routes);
-        write_unified_parquet(&output_dir.path().to_path_buf(), &unified)
-            .expect("write unified parquet");
+        write_unified_parquet(output_dir.path(), &unified).expect("write unified parquet");
 
         // Verify partition directory exists
         let chain_dir = output_dir.path().join("chain_id=1");
@@ -1110,7 +1086,10 @@ mod tests {
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("build reader");
         let mut reader = builder.build().expect("build reader");
 
-        let batch = reader.next().expect("has batch").expect("batch ok");
+        let batch = reader
+            .next()
+            .expect("has batch")
+            .expect("batch ok");
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 21);
 
@@ -1133,9 +1112,9 @@ mod tests {
         let empty2 = tempfile::tempdir().expect("dir");
         let empty3 = tempfile::tempdir().expect("dir");
 
-        let q = read_parquet_files_from_dir(&empty1.path().to_path_buf()).expect("read");
-        let h = read_parquet_files_from_dir(&empty2.path().to_path_buf()).expect("read");
-        let r = read_parquet_files_from_dir(&empty3.path().to_path_buf()).expect("read");
+        let q = read_parquet_files_from_dir(empty1.path()).expect("read");
+        let h = read_parquet_files_from_dir(empty2.path()).expect("read");
+        let r = read_parquet_files_from_dir(empty3.path()).expect("read");
 
         let quotes = parse_quote_log_rows(&q);
         let hops = parse_hop_decay_rows(&h);

@@ -256,9 +256,16 @@ async fn resolve_protocols(
     Ok(protocols)
 }
 
+/// Result of solver setup, including optional slippage feature components.
+struct SetupResult {
+    solver: fynd_rpc::builder::FyndRPC,
+    #[cfg(feature = "slippage-features")]
+    resim_rx: Option<tokio::sync::mpsc::Receiver<fynd_core::observer::QuoteProducedEvent>>,
+}
+
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
-async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
+async fn setup_solver(args: &cli::ServeArgs) -> Result<SetupResult, SolverError> {
     // Load worker pools config, falling back to the built-in defaults when the default path is
     // absent (e.g. `cargo install`, Docker). Custom paths that don't exist still fail fast.
     let default_path = std::path::Path::new("worker_pools.toml");
@@ -330,12 +337,35 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
     builder = builder.blocklist(blocklist);
     builder = builder.price_guard_enabled(args.enable_price_guard);
 
+    // Wire slippage-features observer if enabled.
+    #[cfg(feature = "slippage-features")]
+    let resim_rx =
+        {
+            let output_dir = std::path::PathBuf::from("./slippage-data");
+            std::fs::create_dir_all(&output_dir).map_err(|e| {
+                SolverError::SetupError(format!("failed to create slippage data dir: {e}"))
+            })?;
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1000);
+            let observer = std::sync::Arc::new(
+                slippage_features::quote_log::QuoteLogObserver::new(output_dir.clone(), tx, 100),
+            );
+
+            builder = builder.with_observer(observer);
+            info!("slippage feature collection enabled");
+            Some(rx)
+        };
+
     // Build and start solver
     let solver = builder
         .build()
         .map_err(|e| SolverError::SetupError(format!("failed to start solver: {}", e)))?;
 
-    Ok(solver)
+    Ok(SetupResult {
+        solver,
+        #[cfg(feature = "slippage-features")]
+        resim_rx,
+    })
 }
 
 #[tokio::main]
@@ -347,11 +377,29 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     let _metrics_task = create_metrics_exporter(args.metrics_port);
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
-    let solver = tokio::select! {
+    let setup = tokio::select! {
         result = setup_solver(&args) => result?,
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT received during setup. Exiting.");
             return Ok(());
+        }
+    };
+
+    let solver = setup.solver;
+
+    // Spawn the resim background task when slippage-features is enabled.
+    #[cfg(feature = "slippage-features")]
+    let _resim_handle = {
+        if let Some(rx) = setup.resim_rx {
+            let market_data = solver.market_data();
+            let output_dir = std::path::PathBuf::from("./slippage-data/hop_decay");
+            Some(tokio::spawn(slippage_features::tycho_resim::run_tycho_resim(
+                rx,
+                market_data,
+                output_dir,
+            )))
+        } else {
+            None
         }
     };
 

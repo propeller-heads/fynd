@@ -8,11 +8,15 @@
 //! Pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
 //! or a custom [`Algorithm`](crate::algorithm::Algorithm) implementation (via
 //! [`WorkerPoolBuilder::with_algorithm`]).
+#[cfg(feature = "slippage-features")]
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
+#[cfg(feature = "slippage-features")]
+use crate::observer::SolverObserver;
 use crate::{
     algorithm::AlgorithmConfig,
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
@@ -32,7 +36,6 @@ use crate::{
 };
 
 /// Configuration for the worker pool.
-#[derive(Debug)]
 pub struct WorkerPoolConfig {
     /// Human-readable name for this pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
@@ -45,6 +48,9 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
+    /// Observer for solver instrumentation (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    observer: Option<Arc<dyn SolverObserver>>,
 }
 
 impl WorkerPoolConfig {
@@ -62,6 +68,8 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         }
     }
 }
@@ -122,6 +130,8 @@ impl WorkerPool {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            #[cfg(feature = "slippage-features")]
+            observer: config.observer,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -249,6 +259,13 @@ impl WorkerPoolBuilder {
     /// Sets the task queue capacity.
     pub fn task_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.task_queue_capacity = capacity;
+        self
+    }
+
+    /// Sets the observer for solver instrumentation (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    pub fn observer(mut self, observer: Arc<dyn SolverObserver>) -> Self {
+        self.config.observer = Some(observer);
         self
     }
 

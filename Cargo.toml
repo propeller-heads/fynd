@@ -14,10 +14,13 @@ default = ["metrics"]
 # Disable with `--no-default-features` to omit Actix-Web and the Prometheus
 # recorder from the binary (e.g. for embedded/minimal builds).
 metrics = ["dep:actix-web", "dep:metrics-exporter-prometheus"]
+# Enables slippage decay data collection: observer, quote log, and resim task.
+slippage-features = ["fynd-rpc/slippage-features", "fynd-core/slippage-features", "dep:slippage-features"]
 
 [dependencies]
 fynd-rpc = { workspace = true }
 fynd-core = { workspace = true }
+slippage-features = { path = "tools/slippage-features", optional = true }
 
 # CLI
 clap = { workspace = true }

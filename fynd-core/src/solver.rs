@@ -331,6 +331,8 @@ pub struct FyndBuilder {
     pools: Vec<PoolEntry>,
     price_guard_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
+    #[cfg(feature = "slippage-features")]
+    observer: Option<Arc<dyn crate::observer::SolverObserver>>,
 }
 
 impl FyndBuilder {
@@ -362,6 +364,8 @@ impl FyndBuilder {
             pools: Vec::new(),
             price_guard_enabled: false,
             price_providers: Vec::new(),
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         }
     }
 
@@ -521,6 +525,17 @@ impl FyndBuilder {
         self
     }
 
+    /// Sets the observer for solver instrumentation (slippage-features only).
+    ///
+    /// The observer receives callbacks on every route scored and quote produced.
+    /// It is shared across the `WorkerPoolRouter` and all `MostLiquidAlgorithm`
+    /// instances.
+    #[cfg(feature = "slippage-features")]
+    pub fn with_observer(mut self, observer: Arc<dyn crate::observer::SolverObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Adds a named pool using the given [`PoolConfig`].
     ///
     /// # Errors
@@ -633,18 +648,23 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    WorkerPoolBuilder::new()
+                    let builder = WorkerPoolBuilder::new()
                         .name(name)
                         .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
-                        .task_queue_capacity(task_queue_capacity)
-                        .build(
-                            market_data.clone(),
-                            Arc::clone(&derived_data),
-                            pool_event_rx,
-                            derived_rx,
-                        )?
+                        .task_queue_capacity(task_queue_capacity);
+                    #[cfg(feature = "slippage-features")]
+                    let builder = match &self.observer {
+                        Some(obs) => builder.observer(Arc::clone(obs)),
+                        None => builder,
+                    };
+                    builder.build(
+                        market_data.clone(),
+                        Arc::clone(&derived_data),
+                        pool_event_rx,
+                        derived_rx,
+                    )?
                 }
                 PoolEntry::Custom(custom) => {
                     let algo_cfg = AlgorithmConfig::new(
@@ -692,6 +712,11 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+
+        #[cfg(feature = "slippage-features")]
+        if let Some(obs) = self.observer {
+            router = router.with_observer(obs, chain.id());
+        }
 
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();

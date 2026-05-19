@@ -32,6 +32,7 @@ tycho-execution.workspace = true
 
 [features]
 experimental = []
+slippage-features = ["fynd-core/slippage-features"]
 
 [dev-dependencies]
 rstest.workspace = true
