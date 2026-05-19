@@ -1,0 +1,8 @@
+[package]
+name = "slippage-features"
+version.workspace = true
+edition = "2021"
+description = "Slippage feature collection and assembly tooling"
+license = "MIT"
+
+[dependencies]

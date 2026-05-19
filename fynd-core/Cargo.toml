@@ -6,6 +6,10 @@ description = "Core solving logic for Fynd DEX router"
 license = "MIT"
 readme = "README.md"
 
+[features]
+default = []
+slippage-features = []
+
 [dependencies]
 tycho-simulation.workspace = true
 petgraph.workspace = true
