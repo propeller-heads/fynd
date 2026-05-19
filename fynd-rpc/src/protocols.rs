@@ -3,11 +3,8 @@
 use anyhow::Result;
 use tracing::info;
 use tycho_simulation::{
-    tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, RPCClient},
-    tycho_common::{
-        dto::{PaginationParams, ProtocolSystemsRequestBody},
-        models::Chain,
-    },
+    tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
+    tycho_common::models::Chain,
 };
 
 /// Fetches all available protocol systems from the Tycho RPC, handling pagination.
@@ -23,24 +20,14 @@ pub async fn fetch_protocol_systems(
     let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
     let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
 
-    const PAGE_SIZE: i64 = 100;
-    let mut all_protocols = Vec::new();
-    let mut page = 0;
-    loop {
-        let request = ProtocolSystemsRequestBody {
-            chain: chain.into(),
-            pagination: PaginationParams { page, page_size: PAGE_SIZE },
-        };
-        let response = rpc_client
-            .get_protocol_systems(&request)
-            .await?;
-        let count = response.protocol_systems.len();
-        all_protocols.extend(response.protocol_systems);
-        if (count as i64) < PAGE_SIZE {
-            break;
-        }
-        page += 1;
-    }
-    info!("Fetched {} protocol system(s) from Tycho RPC", all_protocols.len());
-    Ok(all_protocols)
+    let request = ProtocolSystemsParams::new(chain);
+    let response = rpc_client
+        .get_protocol_systems(request)
+        .await?;
+    let protocols = response
+        .data()
+        .protocol_systems()
+        .to_vec();
+    info!("Fetched {} protocol system(s) from Tycho RPC", protocols.len());
+    Ok(protocols)
 }

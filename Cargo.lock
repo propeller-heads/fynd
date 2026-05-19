@@ -7492,8 +7492,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.286.0"
-source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.286.0#fe56a9f686ba5e651acc97b2c4d6bd25d74a05f9"
+version = "0.297.0"
+source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.297.0#8f108cd16f159ff8076b36a30f7287b544e986b6"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7521,8 +7521,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.286.0"
-source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.286.0#fe56a9f686ba5e651acc97b2c4d6bd25d74a05f9"
+version = "0.297.0"
+source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.297.0#8f108cd16f159ff8076b36a30f7287b544e986b6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7547,8 +7547,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.286.0"
-source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.286.0#fe56a9f686ba5e651acc97b2c4d6bd25d74a05f9"
+version = "0.297.0"
+source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.297.0#8f108cd16f159ff8076b36a30f7287b544e986b6"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7568,8 +7568,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.286.0"
-source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.286.0#fe56a9f686ba5e651acc97b2c4d6bd25d74a05f9"
+version = "0.297.0"
+source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.297.0#8f108cd16f159ff8076b36a30f7287b544e986b6"
 dependencies = [
  "alloy",
  "chrono",
@@ -7588,8 +7588,8 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.286.0"
-source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.286.0#fe56a9f686ba5e651acc97b2c4d6bd25d74a05f9"
+version = "0.297.0"
+source = "git+https://github.com/propeller-heads/tycho-indexer?tag=0.297.0#8f108cd16f159ff8076b36a30f7287b544e986b6"
 dependencies = [
  "alloy",
  "alloy-chains",
