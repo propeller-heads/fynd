@@ -6,13 +6,18 @@ description = "Prospective slippage decay data collection for Fynd"
 
 [dependencies]
 fynd-core = { path = "../../fynd-core", features = ["slippage-features"] }
+alloy = { workspace = true }
+anyhow = { workspace = true }
 arrow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
 parquet = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 num-bigint = { workspace = true }
 hex = { workspace = true }
 
@@ -20,3 +25,7 @@ hex = { workspace = true }
 rstest = { workspace = true }
 tempfile = "3"
 tycho-simulation = { workspace = true }
+
+[[bin]]
+name = "node-resim"
+path = "src/bin/node_resim.rs"

@@ -7002,7 +7002,11 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "slippage-features"
 version = "0.57.0"
 dependencies = [
+ "alloy",
+ "anyhow",
  "arrow",
+ "chrono",
+ "clap",
  "fynd-core",
  "hex",
  "num-bigint",
@@ -7014,6 +7018,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
  "tycho-simulation",
 ]
 

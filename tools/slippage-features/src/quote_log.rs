@@ -32,7 +32,10 @@ impl QuoteLogObserver {
     /// Flush any remaining buffered records. Call on shutdown.
     pub fn flush_remaining(&self) {
         let records = {
-            let mut buf = self.buffer.lock().expect("buffer lock poisoned");
+            let mut buf = self
+                .buffer
+                .lock()
+                .expect("buffer lock poisoned");
             buf.drain(..).collect::<Vec<_>>()
         };
         if !records.is_empty() {
@@ -84,7 +87,10 @@ impl SolverObserver for QuoteLogObserver {
         }
 
         let record = QuoteLogRecord::from(&event);
-        let mut buf = self.buffer.lock().expect("buffer lock poisoned");
+        let mut buf = self
+            .buffer
+            .lock()
+            .expect("buffer lock poisoned");
         buf.push(record);
 
         if buf.len() >= self.flush_threshold {
@@ -178,12 +184,13 @@ mod tests {
         let parquet_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "parquet")
+            })
             .collect();
-        assert!(
-            parquet_files.is_empty(),
-            "should not flush before threshold"
-        );
+        assert!(parquet_files.is_empty(), "should not flush before threshold");
 
         // Third event triggers flush.
         observer.on_quote_produced(make_event("q-3"));
@@ -191,7 +198,11 @@ mod tests {
         let parquet_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "parquet")
+            })
             .collect();
         assert_eq!(parquet_files.len(), 1, "should flush exactly once");
     }
@@ -225,7 +236,11 @@ mod tests {
         let parquet_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "parquet")
+            })
             .collect();
         assert_eq!(parquet_files.len(), 1);
     }
@@ -241,7 +256,11 @@ mod tests {
         let parquet_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "parquet")
+            })
             .collect();
         assert!(parquet_files.is_empty());
     }

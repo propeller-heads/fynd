@@ -1,7 +1,9 @@
 use std::{path::Path, sync::Arc};
 
 use arrow::{
-    array::{ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder, UInt64Builder},
+    array::{
+        ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder, UInt64Builder,
+    },
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -169,6 +171,120 @@ pub fn write_hop_decay_parquet(
         Arc::new(concentration_gini.finish()),
         Arc::new(route_total_amount_out.finish()),
         Arc::new(route_decay_bps.finish()),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| ParquetWriteError::BatchConstruction(e.to_string()))?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+
+    let file = std::fs::File::create(path).map_err(|e| ParquetWriteError::Io(e.to_string()))?;
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Route-level decay parquet (node resim output)
+// ---------------------------------------------------------------------------
+
+/// A single row in the route-level decay parquet produced by node resim.
+#[derive(Debug, Clone)]
+pub struct RouteDecayRecord {
+    /// Links to quote log.
+    pub quote_id: String,
+    /// Which solver produced this quote.
+    pub solver_id: String,
+    /// Groups solver responses for the same request.
+    pub request_id: String,
+    /// Block offset k in 1..=MAX_BLOCK_OFFSET.
+    pub block_offset: u32,
+    /// Output amount from eth_call (BigInt string).
+    pub eth_call_amount_out: String,
+    /// Gas consumed by the eth_call.
+    pub eth_call_gas_used: u64,
+    /// Whether the eth_call succeeded (no structural revert).
+    pub eth_call_success: bool,
+    /// Revert reason if the call reverted (nullable).
+    pub eth_call_revert_reason: Option<String>,
+    /// Route decay in basis points.
+    pub eth_call_decay_bps: f64,
+}
+
+/// Returns the Arrow schema for route-level decay records.
+pub fn route_decay_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("quote_id", DataType::Utf8, false),
+        Field::new("solver_id", DataType::Utf8, false),
+        Field::new("request_id", DataType::Utf8, false),
+        Field::new("block_offset", DataType::UInt32, false),
+        Field::new("eth_call_amount_out", DataType::Utf8, false),
+        Field::new("eth_call_gas_used", DataType::UInt64, false),
+        Field::new("eth_call_success", DataType::Boolean, false),
+        Field::new("eth_call_revert_reason", DataType::Utf8, true),
+        Field::new("eth_call_decay_bps", DataType::Float64, false),
+    ])
+}
+
+/// Write route-level decay records to a parquet file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be created, the record batch
+/// construction fails, or writing to the file fails.
+pub fn write_route_decay_parquet(
+    path: &Path,
+    records: &[RouteDecayRecord],
+) -> Result<(), ParquetWriteError> {
+    let schema = Arc::new(route_decay_schema());
+    let n = records.len();
+
+    let mut quote_id = StringBuilder::with_capacity(n, n * 36);
+    let mut solver_id = StringBuilder::with_capacity(n, n * 20);
+    let mut request_id = StringBuilder::with_capacity(n, n * 36);
+    let mut block_offset = UInt32Builder::with_capacity(n);
+    let mut eth_call_amount_out = StringBuilder::with_capacity(n, n * 32);
+    let mut eth_call_gas_used = UInt64Builder::with_capacity(n);
+    let mut eth_call_success = BooleanBuilder::with_capacity(n);
+    let mut eth_call_revert_reason = StringBuilder::with_capacity(n, n * 64);
+    let mut eth_call_decay_bps = Float64Builder::with_capacity(n);
+
+    for r in records {
+        quote_id.append_value(&r.quote_id);
+        solver_id.append_value(&r.solver_id);
+        request_id.append_value(&r.request_id);
+        block_offset.append_value(r.block_offset);
+        eth_call_amount_out.append_value(&r.eth_call_amount_out);
+        eth_call_gas_used.append_value(r.eth_call_gas_used);
+        eth_call_success.append_value(r.eth_call_success);
+
+        match &r.eth_call_revert_reason {
+            Some(v) => eth_call_revert_reason.append_value(v),
+            None => eth_call_revert_reason.append_null(),
+        }
+
+        eth_call_decay_bps.append_value(r.eth_call_decay_bps);
+    }
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(quote_id.finish()),
+        Arc::new(solver_id.finish()),
+        Arc::new(request_id.finish()),
+        Arc::new(block_offset.finish()),
+        Arc::new(eth_call_amount_out.finish()),
+        Arc::new(eth_call_gas_used.finish()),
+        Arc::new(eth_call_success.finish()),
+        Arc::new(eth_call_revert_reason.finish()),
+        Arc::new(eth_call_decay_bps.finish()),
     ];
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -520,16 +636,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("quote_log.parquet");
 
-        let records = vec![
-            sample_quote_log_record("q1"),
-            {
-                let mut r = sample_quote_log_record("q2");
-                r.is_winner = false;
-                r.gap_to_second_best_bps = None;
-                r.slippage_tolerance = Some(0.005);
-                r
-            },
-        ];
+        let records = vec![sample_quote_log_record("q1"), {
+            let mut r = sample_quote_log_record("q2");
+            r.is_winner = false;
+            r.gap_to_second_best_bps = None;
+            r.slippage_tolerance = Some(0.005);
+            r
+        }];
 
         write_quote_log_parquet(&path, &records).unwrap();
 
@@ -595,6 +708,122 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 15);
+
+        let reader = builder.build().unwrap();
+        let total_rows: usize = reader
+            .filter_map(|b| b.ok())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Route decay parquet tests
+    // -----------------------------------------------------------------------
+
+    fn sample_route_decay_record(
+        quote_id: &str,
+        block_offset: u32,
+        success: bool,
+    ) -> RouteDecayRecord {
+        RouteDecayRecord {
+            quote_id: quote_id.to_string(),
+            solver_id: "solver-a".to_string(),
+            request_id: "req-1".to_string(),
+            block_offset,
+            eth_call_amount_out: "990".to_string(),
+            eth_call_gas_used: 150_000,
+            eth_call_success: success,
+            eth_call_revert_reason: if success {
+                None
+            } else {
+                Some("execution reverted".to_string())
+            },
+            eth_call_decay_bps: 10.0,
+        }
+    }
+
+    #[test]
+    fn route_decay_schema_has_expected_field_count() {
+        let schema = route_decay_schema();
+        assert_eq!(schema.fields().len(), 9);
+    }
+
+    #[test]
+    fn route_decay_round_trip() {
+        use arrow::array::{BooleanArray, UInt64Array};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("route_decay.parquet");
+
+        let records = vec![
+            sample_route_decay_record("q1", 1, true),
+            sample_route_decay_record("q1", 2, false),
+            sample_route_decay_record("q2", 1, true),
+        ];
+
+        write_route_decay_parquet(&path, &records).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.num_columns(), 9);
+
+        let quote_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(quote_ids.value(0), "q1");
+        assert_eq!(quote_ids.value(2), "q2");
+
+        let offsets = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(offsets.value(0), 1);
+        assert_eq!(offsets.value(1), 2);
+
+        let success = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(success.value(0));
+        assert!(!success.value(1));
+
+        let revert = batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(revert.is_null(0));
+        assert_eq!(revert.value(1), "execution reverted");
+
+        let gas = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(gas.value(0), 150_000);
+    }
+
+    #[test]
+    fn empty_route_decay_produces_valid_parquet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("empty_route_decay.parquet");
+
+        write_route_decay_parquet(&path, &[]).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        assert_eq!(builder.schema().fields().len(), 9);
 
         let reader = builder.build().unwrap();
         let total_rows: usize = reader
