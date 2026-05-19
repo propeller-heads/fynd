@@ -32,7 +32,7 @@ use tycho_simulation::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
-use crate::{price_guard::config::PriceGuardConfig, AlgorithmError};
+use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
 
 // ============================================================================
 // REQUEST TYPES
@@ -86,6 +86,10 @@ pub struct QuoteOptions {
     /// Options for encoding the solution into an on-chain transaction.
     /// If `None`, the solution is returned without an encoded transaction.
     encoding_options: Option<EncodingOptions>,
+    /// Solve against this named state overlay. `None` solves against the base Tycho state.
+    /// Skipped during JSON serialization — only meaningful when calling Fynd as a Rust library.
+    #[serde(skip)]
+    state_label: Option<StateLabel>,
 }
 
 impl QuoteOptions {
@@ -113,6 +117,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Targets a named state overlay for this request.
+    pub fn with_state_label(mut self, label: StateLabel) -> Self {
+        self.state_label = Some(label);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -131,6 +141,36 @@ impl QuoteOptions {
     /// Returns the encoding options.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// Returns the overlay label, if one was set.
+    pub fn state_label(&self) -> Option<&StateLabel> {
+        self.state_label.as_ref()
+    }
+}
+
+/// Parameters for a single solve operation.
+///
+/// Constructed from [`QuoteOptions`] and passed through the task pipeline down to the worker.
+/// Kept separate from [`QuoteOptions`] so solve-specific parameters can evolve independently
+/// of the HTTP request surface.
+#[must_use]
+#[derive(Debug, Clone, Default)]
+pub struct SolveParams {
+    /// Solve against this labeled state overlay. `None` uses the base Tycho state.
+    state_label: Option<StateLabel>,
+}
+
+impl SolveParams {
+    /// Targets a named state overlay.
+    pub fn with_state_label(mut self, label: StateLabel) -> Self {
+        self.state_label = Some(label);
+        self
+    }
+
+    /// Returns the overlay label, if one was set.
+    pub fn state_label(&self) -> Option<&StateLabel> {
+        self.state_label.as_ref()
     }
 }
 
@@ -696,6 +736,9 @@ pub struct OrderQuote {
     sender: Bytes,
     /// Address of the receiver.
     receiver: Bytes,
+    /// The state overlay this quote was computed against.
+    /// When no overlay was requested this is the block number of the base state at solve time.
+    solved_against: StateLabel,
 }
 
 impl OrderQuote {
@@ -711,6 +754,7 @@ impl OrderQuote {
         algorithm: String,
         sender: Bytes,
         receiver: Bytes,
+        solved_against: StateLabel,
     ) -> Self {
         Self {
             order_id,
@@ -728,6 +772,7 @@ impl OrderQuote {
             fee_breakdown: None,
             sender,
             receiver,
+            solved_against,
         }
     }
 
@@ -843,6 +888,11 @@ impl OrderQuote {
     /// Returns the receiver address.
     pub fn receiver(&self) -> &Bytes {
         &self.receiver
+    }
+
+    /// Returns the state overlay this quote was computed against.
+    pub fn solved_against(&self) -> &StateLabel {
+        &self.solved_against
     }
 }
 

@@ -17,9 +17,11 @@ use crate::{graph::GraphError, types::ComponentId};
 pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {
+        /// Components added in this update, keyed by component ID.
         added_components: HashMap<ComponentId, Vec<Address>>,
+        /// Component IDs that were removed.
         removed_components: Vec<ComponentId>,
-
+        /// Component IDs whose state changed.
         updated_components: Vec<ComponentId>,
     },
 }

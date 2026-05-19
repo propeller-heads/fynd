@@ -331,6 +331,7 @@ mod tests {
             "test".to_string(),
             Bytes::from([0xAA; 20].as_slice()),
             Bytes::from([0xBB; 20].as_slice()),
+            "1".to_string(),
         )
         .with_route(Route::new(vec![weth_usdc_swap()]))
     }

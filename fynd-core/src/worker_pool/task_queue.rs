@@ -7,7 +7,7 @@
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::{types::internal::SolveTask, Order, SingleOrderQuote, SolveError};
+use crate::{types::internal::SolveTask, Order, SingleOrderQuote, SolveError, SolveParams};
 
 /// Configuration for the task queue.
 #[derive(Debug, Clone)]
@@ -34,7 +34,11 @@ impl TaskQueueHandle {
     /// Enqueues a solve request and returns a future that resolves to the result.
     ///
     /// Returns an error if the queue is full.
-    pub async fn enqueue(&self, order: Order) -> Result<SingleOrderQuote, SolveError> {
+    pub async fn enqueue(
+        &self,
+        order: Order,
+        params: SolveParams,
+    ) -> Result<SingleOrderQuote, SolveError> {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -42,7 +46,7 @@ impl TaskQueueHandle {
         let task_id = Uuid::new_v4();
 
         // Create task
-        let task = SolveTask::new(task_id, order, response_tx);
+        let task = SolveTask::new(task_id, order, response_tx).with_params(params);
 
         // Try to send
         self.sender
@@ -122,7 +126,9 @@ mod tests {
     use tycho_simulation::tycho_core::{models::Address, Bytes};
 
     use super::*;
-    use crate::{BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote};
+    use crate::{
+        BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote, SolveParams,
+    };
 
     // -------------------------------------------------------------------------
     // Test Helpers
@@ -156,6 +162,7 @@ mod tests {
                 "test".to_string(),
                 Bytes::from(make_address(0xAA).as_ref()),
                 Bytes::from(make_address(0xAA).as_ref()),
+                "1".to_string(),
             ),
             5,
         )
@@ -246,7 +253,9 @@ mod tests {
         });
 
         // Enqueue an order
-        let result = handle.enqueue(make_order()).await;
+        let result = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
 
         worker
             .await
@@ -269,7 +278,9 @@ mod tests {
             task.respond(Err(SolveError::NoRouteFound { order_id: "test".to_string() }));
         });
 
-        let result = handle.enqueue(make_order()).await;
+        let result = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
 
         worker
             .await
@@ -292,7 +303,9 @@ mod tests {
             drop(task); // Drop without responding
         });
 
-        let result = handle.enqueue(make_order()).await;
+        let result = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
 
         worker
             .await
@@ -309,7 +322,9 @@ mod tests {
         // Drop receiver to close channel
         drop(receiver);
 
-        let result = handle.enqueue(make_order()).await;
+        let result = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
         assert!(matches!(result, Err(SolveError::QueueFull)));
     }
 
@@ -425,8 +440,10 @@ mod tests {
         });
 
         // Enqueue from both handles concurrently
-        let (result1, result2) =
-            tokio::join!(handle1.enqueue(make_order()), handle2.enqueue(make_order()),);
+        let (result1, result2) = tokio::join!(
+            handle1.enqueue(make_order(), SolveParams::default()),
+            handle2.enqueue(make_order(), SolveParams::default()),
+        );
 
         worker
             .await
@@ -456,8 +473,12 @@ mod tests {
         });
 
         // Enqueue two orders
-        let _ = handle.enqueue(make_order()).await;
-        let _ = handle.enqueue(make_order()).await;
+        let _ = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
+        let _ = handle
+            .enqueue(make_order(), SolveParams::default())
+            .await;
 
         let (id1, id2): (Uuid, Uuid) = collector
             .await

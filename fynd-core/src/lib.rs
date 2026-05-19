@@ -49,6 +49,7 @@ pub mod worker_pool_router;
 pub use algorithm::{Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
+pub use feed::{events::MarketEvent, market_data::StateLabel};
 pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
@@ -58,7 +59,7 @@ pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
     QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
-    SolveResult, Swap, TaskId, Transaction, UserTransferType,
+    SolveParams, SolveResult, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

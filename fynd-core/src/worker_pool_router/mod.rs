@@ -33,7 +33,7 @@ use tycho_simulation::tycho_common::Bytes;
 use crate::{
     encoding::encoder::Encoder, price_guard::guard::PriceGuard,
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, SolveError,
+    QuoteRequest, QuoteStatus, SolveError, SolveParams,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -131,11 +131,16 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
+        let params = match request.options().state_label().cloned() {
+            Some(label) => SolveParams::default().with_state_label(label),
+            None => SolveParams::default(),
+        };
+
         // Process each order independently in parallel
         let order_futures: Vec<_> = request
             .orders()
             .iter()
-            .map(|order| self.solve_order(order.clone(), deadline, min_responses))
+            .map(|order| self.solve_order(order.clone(), params.clone(), deadline, min_responses))
             .collect();
 
         let order_responses = futures::future::join_all(order_futures).await;
@@ -195,6 +200,7 @@ impl WorkerPoolRouter {
     async fn solve_order(
         &self,
         order: Order,
+        params: SolveParams,
         deadline: Instant,
         min_responses: usize,
     ) -> OrderResponses {
@@ -211,9 +217,12 @@ impl WorkerPoolRouter {
                 let order_clone = order.clone();
                 let pool_name = pool.name().to_string();
                 let queue = pool.queue().clone();
+                let task_params = params.clone();
 
                 async move {
-                    let result = queue.enqueue(order_clone).await;
+                    let result = queue
+                        .enqueue(order_clone, task_params)
+                        .await;
                     (pool_name, result)
                 }
             })
@@ -379,6 +388,7 @@ impl WorkerPoolRouter {
                 String::new(),
                 any_q.sender().clone(),
                 any_q.receiver().clone(),
+                any_q.solved_against().clone(),
             )
         } else {
             // No responses at all - determine status from failure types
@@ -412,6 +422,12 @@ impl WorkerPoolRouter {
             };
             counter!("worker_router_orders_total", "status" => status_label).increment(1);
 
+            // No worker responded — use the requested label if set, otherwise "0"
+            // (we have no block context here since no worker completed).
+            let label = options
+                .state_label()
+                .cloned()
+                .unwrap_or_else(|| "0".to_string());
             OrderQuote::new(
                 responses.order_id.clone(),
                 status,
@@ -423,6 +439,7 @@ impl WorkerPoolRouter {
                 String::new(),
                 Bytes::default(),
                 Bytes::default(),
+                label,
             )
         };
         vec![fallback]
@@ -515,6 +532,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
         )
         .with_route(Route::new(vec![swap]));
         SingleOrderQuote::new(quote, 5)
@@ -712,6 +730,7 @@ mod tests {
                     "test".to_string(),
                     Bytes::from(make_address(0xAA).as_ref()),
                     Bytes::from(make_address(0xAA).as_ref()),
+                    "1".to_string(),
                 ),
             )],
             failed_solvers: vec![],
@@ -827,6 +846,7 @@ mod tests {
                         "test".to_string(),
                         Bytes::from(make_address(0xAA).as_ref()),
                         Bytes::from(make_address(0xAA).as_ref()),
+                        "1".to_string(),
                     ),
                 ),
                 (
@@ -842,6 +862,7 @@ mod tests {
                         "test".to_string(),
                         Bytes::from(make_address(0xAA).as_ref()),
                         Bytes::from(make_address(0xAA).as_ref()),
+                        "1".to_string(),
                     ),
                 ),
             ],

@@ -442,6 +442,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
         )
     }
 
@@ -503,6 +504,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
         );
 
         let result = Solution::try_from(&quote);
@@ -555,6 +557,7 @@ mod tests {
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
             Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
         );
 
         let encoding_options = EncodingOptions::new(0.01);

@@ -6,7 +6,7 @@ use num_bigint::BigUint;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::{Order, SingleOrderQuote};
+use super::{quote::SolveParams, Order, SingleOrderQuote};
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;
@@ -20,6 +20,8 @@ pub struct SolveTask {
     id: TaskId,
     /// The order request to process.
     order: Order,
+    /// Solve parameters (overlay label, etc.). Defaults to base state.
+    params: SolveParams,
     /// Channel to send the result back.
     response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
@@ -27,9 +29,15 @@ pub struct SolveTask {
 }
 
 impl SolveTask {
-    /// Creates a new solve task.
+    /// Creates a new solve task with default parameters (base Tycho state).
     pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
-        Self { id, order, response_tx, created_at: Instant::now() }
+        Self { id, order, params: SolveParams::default(), response_tx, created_at: Instant::now() }
+    }
+
+    /// Attaches solve parameters to this task.
+    pub fn with_params(mut self, params: SolveParams) -> Self {
+        self.params = params;
+        self
     }
 
     /// Returns the task ID.
@@ -40,6 +48,11 @@ impl SolveTask {
     /// Returns the order to process.
     pub fn order(&self) -> &Order {
         &self.order
+    }
+
+    /// Returns the solve parameters for this task.
+    pub fn params(&self) -> &SolveParams {
+        &self.params
     }
 
     /// Returns how long this task has been waiting.

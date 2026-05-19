@@ -29,7 +29,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
-    BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError,
+    BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -127,8 +127,12 @@ where
         }
     }
 
-    /// Returns a quote for an order.
-    pub async fn quote(&mut self, order: &Order) -> Result<SingleOrderQuote, SolveError> {
+    /// Returns a quote for an order, optionally solved against a named state overlay.
+    pub async fn quote(
+        &mut self,
+        order: &Order,
+        params: SolveParams,
+    ) -> Result<SingleOrderQuote, SolveError> {
         let start_time = Instant::now();
 
         // Log order details once at entry
@@ -161,29 +165,36 @@ where
         // Get the graph from the graph manager
         let graph = self.graph_manager.graph();
 
-        // Get block info
+        // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let block_info = {
+        let (block_info, market_ref, solved_against) = {
             let market = self.market_data.read().await;
             let last_block = market
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
-            BlockInfo::new(
+            let block_info = BlockInfo::new(
                 last_block.number(),
                 last_block.hash().to_string(),
                 last_block.timestamp(),
-            )
+            );
+            // When no label was requested, record the current block number so callers
+            // always know which state the quote was computed against.
+            let label = params
+                .state_label()
+                .cloned()
+                .unwrap_or_else(|| last_block.number().to_string());
+            drop(market);
+            let market_ref = match params.state_label().cloned() {
+                Some(overlay) => self.market_data.with_label(overlay),
+                None => self.market_data.clone(),
+            };
+            (block_info, market_ref, label)
         };
 
         let result = self
             .algorithm
-            .find_best_route(
-                graph,
-                self.market_data.clone(),
-                Some(self.derived_data.clone()),
-                order,
-            )
+            .find_best_route(graph, market_ref, Some(self.derived_data.clone()), order)
             .await;
 
         let order_quote = match result {
@@ -239,6 +250,7 @@ where
                     self.algorithm.name().to_string(),
                     Bytes::from(order.sender().as_ref()),
                     Bytes::from(order.effective_receiver().as_ref()),
+                    solved_against,
                 )
                 .with_route(route)
                 .with_gas_price(gas_price)
@@ -476,8 +488,9 @@ where
 
                             // Process the task
                             let result = {
+                                let params = task.params().clone();
                                 let order = task.order();
-                                self.quote(order).await
+                                self.quote(order, params).await
                             };
 
                             if let Err(ref e) = result {
