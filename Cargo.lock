@@ -7004,6 +7004,7 @@ version = "0.57.0"
 dependencies = [
  "arrow",
  "fynd-core",
+ "hex",
  "num-bigint",
  "parquet",
  "rstest",

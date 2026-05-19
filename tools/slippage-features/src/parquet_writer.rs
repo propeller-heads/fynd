@@ -1,11 +1,14 @@
 use std::{path::Path, sync::Arc};
 
 use arrow::{
-    array::{ArrayRef, Float64Builder, StringBuilder, UInt32Builder},
+    array::{ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder, UInt64Builder},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
+use fynd_core::observer::QuoteProducedEvent;
 use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties};
+
+use crate::quote_log::route_to_json;
 
 /// Per-hop decay record for a single (quote, block_offset, hop) triple.
 #[derive(Debug, Clone)]
@@ -198,6 +201,166 @@ pub enum ParquetWriteError {
     Writer(String),
 }
 
+// ---------------------------------------------------------------------------
+// Quote log parquet
+// ---------------------------------------------------------------------------
+
+/// A single row in the quote log parquet file.
+#[derive(Debug, Clone)]
+pub struct QuoteLogRecord {
+    pub quote_id: String,
+    pub solver_id: String,
+    pub request_id: String,
+    pub is_winner: bool,
+    pub block_number: u64,
+    pub chain_id: u64,
+    pub amount_in: String,
+    pub amount_out: String,
+    pub gas_estimate: u64,
+    pub algorithm_type: String,
+    pub n_alternatives: u32,
+    pub gap_to_second_best_bps: Option<f64>,
+    pub slippage_tolerance: Option<f64>,
+    pub route_json: String,
+    pub calldata_hex: String,
+}
+
+impl From<&QuoteProducedEvent> for QuoteLogRecord {
+    fn from(event: &QuoteProducedEvent) -> Self {
+        Self {
+            quote_id: event.quote_id.clone(),
+            solver_id: event.solver_id.clone(),
+            request_id: event.request_id.clone(),
+            is_winner: event.is_winner,
+            block_number: event.block_number,
+            chain_id: event.chain_id,
+            amount_in: event.amount_in.clone(),
+            amount_out: event.amount_out.clone(),
+            gas_estimate: event.gas_estimate,
+            algorithm_type: event.algorithm_type.clone(),
+            n_alternatives: event.n_alternatives,
+            gap_to_second_best_bps: event.gap_to_second_best_bps,
+            slippage_tolerance: event.slippage_tolerance,
+            route_json: route_to_json(&event.route),
+            calldata_hex: hex::encode(&event.calldata),
+        }
+    }
+}
+
+/// Returns the Arrow schema for quote log records.
+pub fn quote_log_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("quote_id", DataType::Utf8, false),
+        Field::new("solver_id", DataType::Utf8, false),
+        Field::new("request_id", DataType::Utf8, false),
+        Field::new("is_winner", DataType::Boolean, false),
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("chain_id", DataType::UInt64, false),
+        Field::new("amount_in", DataType::Utf8, false),
+        Field::new("amount_out", DataType::Utf8, false),
+        Field::new("gas_estimate", DataType::UInt64, false),
+        Field::new("algorithm_type", DataType::Utf8, false),
+        Field::new("n_alternatives", DataType::UInt32, false),
+        Field::new("gap_to_second_best_bps", DataType::Float64, true),
+        Field::new("slippage_tolerance", DataType::Float64, true),
+        Field::new("route_json", DataType::Utf8, false),
+        Field::new("calldata_hex", DataType::Utf8, false),
+    ])
+}
+
+/// Write quote log records to a parquet file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be created, the record batch
+/// construction fails, or writing to the file fails.
+pub fn write_quote_log_parquet(
+    path: &Path,
+    records: &[QuoteLogRecord],
+) -> Result<(), ParquetWriteError> {
+    let schema = Arc::new(quote_log_schema());
+    let n = records.len();
+
+    let mut quote_id = StringBuilder::with_capacity(n, n * 36);
+    let mut solver_id = StringBuilder::with_capacity(n, n * 20);
+    let mut request_id = StringBuilder::with_capacity(n, n * 36);
+    let mut is_winner = BooleanBuilder::with_capacity(n);
+    let mut block_number = UInt64Builder::with_capacity(n);
+    let mut chain_id = UInt64Builder::with_capacity(n);
+    let mut amount_in = StringBuilder::with_capacity(n, n * 32);
+    let mut amount_out = StringBuilder::with_capacity(n, n * 32);
+    let mut gas_estimate = UInt64Builder::with_capacity(n);
+    let mut algorithm_type = StringBuilder::with_capacity(n, n * 20);
+    let mut n_alternatives = UInt32Builder::with_capacity(n);
+    let mut gap_to_second_best_bps = Float64Builder::with_capacity(n);
+    let mut slippage_tolerance = Float64Builder::with_capacity(n);
+    let mut route_json = StringBuilder::with_capacity(n, n * 256);
+    let mut calldata_hex = StringBuilder::with_capacity(n, n * 128);
+
+    for r in records {
+        quote_id.append_value(&r.quote_id);
+        solver_id.append_value(&r.solver_id);
+        request_id.append_value(&r.request_id);
+        is_winner.append_value(r.is_winner);
+        block_number.append_value(r.block_number);
+        chain_id.append_value(r.chain_id);
+        amount_in.append_value(&r.amount_in);
+        amount_out.append_value(&r.amount_out);
+        gas_estimate.append_value(r.gas_estimate);
+        algorithm_type.append_value(&r.algorithm_type);
+        n_alternatives.append_value(r.n_alternatives);
+
+        match r.gap_to_second_best_bps {
+            Some(v) => gap_to_second_best_bps.append_value(v),
+            None => gap_to_second_best_bps.append_null(),
+        }
+        match r.slippage_tolerance {
+            Some(v) => slippage_tolerance.append_value(v),
+            None => slippage_tolerance.append_null(),
+        }
+
+        route_json.append_value(&r.route_json);
+        calldata_hex.append_value(&r.calldata_hex);
+    }
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(quote_id.finish()),
+        Arc::new(solver_id.finish()),
+        Arc::new(request_id.finish()),
+        Arc::new(is_winner.finish()),
+        Arc::new(block_number.finish()),
+        Arc::new(chain_id.finish()),
+        Arc::new(amount_in.finish()),
+        Arc::new(amount_out.finish()),
+        Arc::new(gas_estimate.finish()),
+        Arc::new(algorithm_type.finish()),
+        Arc::new(n_alternatives.finish()),
+        Arc::new(gap_to_second_best_bps.finish()),
+        Arc::new(slippage_tolerance.finish()),
+        Arc::new(route_json.finish()),
+        Arc::new(calldata_hex.finish()),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| ParquetWriteError::BatchConstruction(e.to_string()))?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+
+    let file = std::fs::File::create(path).map_err(|e| ParquetWriteError::Io(e.to_string()))?;
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| ParquetWriteError::Writer(e.to_string()))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, Float64Array, StringArray, UInt32Array};
@@ -311,6 +474,127 @@ mod tests {
 
         // Schema should have 18 fields.
         assert_eq!(builder.schema().fields().len(), 18);
+
+        let reader = builder.build().unwrap();
+        let total_rows: usize = reader
+            .filter_map(|b| b.ok())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Quote log parquet tests
+    // -----------------------------------------------------------------------
+
+    fn sample_quote_log_record(quote_id: &str) -> QuoteLogRecord {
+        QuoteLogRecord {
+            quote_id: quote_id.to_string(),
+            solver_id: "solver-a".to_string(),
+            request_id: "req-1".to_string(),
+            is_winner: true,
+            block_number: 100,
+            chain_id: 1,
+            amount_in: "1000".to_string(),
+            amount_out: "990".to_string(),
+            gas_estimate: 100_000,
+            algorithm_type: "most_liquid".to_string(),
+            n_alternatives: 3,
+            gap_to_second_best_bps: Some(10.0),
+            slippage_tolerance: None,
+            route_json: r#"{"swaps":[]}"#.to_string(),
+            calldata_hex: "abcd".to_string(),
+        }
+    }
+
+    #[test]
+    fn quote_log_schema_has_expected_field_count() {
+        let schema = quote_log_schema();
+        assert_eq!(schema.fields().len(), 15);
+    }
+
+    #[test]
+    fn quote_log_round_trip() {
+        use arrow::array::{BooleanArray, UInt64Array};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quote_log.parquet");
+
+        let records = vec![
+            sample_quote_log_record("q1"),
+            {
+                let mut r = sample_quote_log_record("q2");
+                r.is_winner = false;
+                r.gap_to_second_best_bps = None;
+                r.slippage_tolerance = Some(0.005);
+                r
+            },
+        ];
+
+        write_quote_log_parquet(&path, &records).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 15);
+
+        let quote_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(quote_ids.value(0), "q1");
+        assert_eq!(quote_ids.value(1), "q2");
+
+        let winners = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(winners.value(0));
+        assert!(!winners.value(1));
+
+        let blocks = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(blocks.value(0), 100);
+
+        // gap_to_second_best_bps: first has value, second is null
+        let gap = batch
+            .column(11)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(!gap.is_null(0));
+        assert!((gap.value(0) - 10.0).abs() < f64::EPSILON);
+        assert!(gap.is_null(1));
+
+        // slippage_tolerance: first is null, second has value
+        let slip = batch
+            .column(12)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(slip.is_null(0));
+        assert!(!slip.is_null(1));
+        assert!((slip.value(1) - 0.005).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn empty_quote_log_produces_valid_parquet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_quote.parquet");
+
+        write_quote_log_parquet(&path, &[]).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        assert_eq!(builder.schema().fields().len(), 15);
 
         let reader = builder.build().unwrap();
         let total_rows: usize = reader
