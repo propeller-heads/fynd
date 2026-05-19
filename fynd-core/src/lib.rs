@@ -32,6 +32,9 @@ pub mod feed;
 /// Graph management for algorithms. Provides [`GraphManager`](graph::GraphManager)
 /// trait and the reusable [`PetgraphStableDiGraphManager`](graph::PetgraphStableDiGraphManager).
 pub mod graph;
+/// Solver observation trait and event types for capturing routing decisions.
+#[cfg(feature = "slippage-features")]
+pub mod observer;
 /// External price validation for quotes.
 pub mod price_guard;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
