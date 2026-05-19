@@ -7,6 +7,8 @@
 //! 4. Ranking by net output (output - gas cost in output token terms)
 //! 5. Returning the best route with stats recorded to the tracing span
 
+#[cfg(feature = "slippage-features")]
+use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
@@ -37,6 +39,8 @@ pub struct MostLiquidAlgorithm {
     timeout: Duration,
     max_routes: Option<usize>,
     connector_tokens: Option<HashSet<Address>>,
+    #[cfg(feature = "slippage-features")]
+    observer: Option<Arc<dyn crate::observer::SolverObserver>>,
 }
 
 /// Algorithm-specific edge data for liquidity-based routing.
@@ -192,6 +196,8 @@ impl MostLiquidAlgorithm {
             timeout: Duration::from_millis(500),
             max_routes: None,
             connector_tokens: None,
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         }
     }
 
@@ -203,7 +209,16 @@ impl MostLiquidAlgorithm {
             timeout: config.timeout(),
             max_routes: config.max_routes(),
             connector_tokens: config.connector_tokens().cloned(),
+            #[cfg(feature = "slippage-features")]
+            observer: None,
         })
+    }
+
+    /// Sets the observer for this algorithm (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    pub fn with_observer(mut self, observer: Arc<dyn crate::observer::SolverObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Finds all paths between two tokens using BFS directly on the graph.
@@ -613,6 +628,16 @@ impl Algorithm for MostLiquidAlgorithm {
                     continue;
                 }
             };
+
+            #[cfg(feature = "slippage-features")]
+            if let Some(ref obs) = self.observer {
+                let observed = crate::observer::ObservedRoute::from(result.route());
+                let score = result
+                    .net_amount_out()
+                    .to_f64()
+                    .unwrap_or(f64::NAN);
+                obs.on_route_scored(&observed, score, paths_simulated);
+            }
 
             // Check if this is the best result so far
             if best

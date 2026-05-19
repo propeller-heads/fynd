@@ -23,6 +23,8 @@
 
 pub mod config;
 
+#[cfg(feature = "slippage-features")]
+use std::sync::Arc;
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
@@ -94,6 +96,10 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
+    #[cfg(feature = "slippage-features")]
+    observer: Option<Arc<dyn crate::observer::SolverObserver>>,
+    #[cfg(feature = "slippage-features")]
+    chain_id: u64,
 }
 
 impl WorkerPoolRouter {
@@ -103,7 +109,16 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None }
+        Self {
+            solver_pools,
+            config,
+            encoder,
+            price_guard: None,
+            #[cfg(feature = "slippage-features")]
+            observer: None,
+            #[cfg(feature = "slippage-features")]
+            chain_id: 0,
+        }
     }
 
     /// Makes price guard validation available for this router.
@@ -112,6 +127,18 @@ impl WorkerPoolRouter {
     /// requests where the client sets `enabled: true` in `PriceGuardConfig`.
     pub fn with_price_guard(mut self, price_guard: PriceGuard) -> Self {
         self.price_guard = Some(price_guard);
+        self
+    }
+
+    /// Sets the observer for this router (slippage-features only).
+    #[cfg(feature = "slippage-features")]
+    pub fn with_observer(
+        mut self,
+        observer: Arc<dyn crate::observer::SolverObserver>,
+        chain_id: u64,
+    ) -> Self {
+        self.observer = Some(observer);
+        self.chain_id = chain_id;
         self
     }
 
@@ -382,6 +409,12 @@ impl WorkerPoolRouter {
                 number_of_candidates = valid_quotes.len(),
                 "ranked quotes"
             );
+
+            #[cfg(feature = "slippage-features")]
+            if let Some(ref obs) = self.observer {
+                self.emit_quote_produced_events(obs.as_ref(), &valid_quotes, options);
+            }
+
             return valid_quotes
                 .into_iter()
                 .map(|(_, q)| q.clone())
@@ -458,6 +491,97 @@ impl WorkerPoolRouter {
             )
         };
         vec![fallback]
+    }
+
+    /// Emits `QuoteProducedEvent` for every ranked candidate.
+    #[cfg(feature = "slippage-features")]
+    fn emit_quote_produced_events(
+        &self,
+        obs: &dyn crate::observer::SolverObserver,
+        ranked: &[&(String, OrderQuote)],
+        options: &QuoteOptions,
+    ) {
+        use num_traits::ToPrimitive;
+        use uuid::Uuid;
+
+        use crate::observer::{CandidateSummary, ObservedRoute, QuoteProducedEvent};
+
+        let n_alternatives = ranked.len() as u32;
+        let request_id = ranked
+            .first()
+            .map(|entry| entry.1.order_id().to_string())
+            .unwrap_or_default();
+
+        let gap_to_second_best_bps = if ranked.len() >= 2 {
+            let best_out = ranked[0]
+                .1
+                .amount_out_net_gas()
+                .to_f64();
+            let second_out = ranked[1]
+                .1
+                .amount_out_net_gas()
+                .to_f64();
+            match (best_out, second_out) {
+                (Some(b), Some(s)) if b > 0.0 => Some((b - s) / b * 10_000.0),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let slippage_tolerance = options
+            .encoding_options()
+            .map(|e| e.slippage());
+
+        let all_candidates: Vec<CandidateSummary> = ranked
+            .iter()
+            .map(|entry| {
+                let q = &entry.1;
+                let route = q
+                    .route()
+                    .map(ObservedRoute::from)
+                    .unwrap_or(ObservedRoute { swaps: vec![] });
+                CandidateSummary {
+                    route,
+                    score: q
+                        .amount_out_net_gas()
+                        .to_f64()
+                        .unwrap_or(0.0),
+                    amount_out: q.amount_out().to_string(),
+                }
+            })
+            .collect();
+
+        for (rank, entry) in ranked.iter().enumerate() {
+            let pool_name = &entry.0;
+            let q = &entry.1;
+            let route = q
+                .route()
+                .map(ObservedRoute::from)
+                .unwrap_or(ObservedRoute { swaps: vec![] });
+
+            let event = QuoteProducedEvent {
+                request_id: request_id.clone(),
+                quote_id: Uuid::new_v4().to_string(),
+                solver_id: pool_name.clone(),
+                is_winner: rank == 0,
+                block_number: q.block().number(),
+                chain_id: self.chain_id,
+                route,
+                amount_in: q.amount_in().to_string(),
+                amount_out: q.amount_out().to_string(),
+                gas_estimate: q.gas_estimate().to_u64().unwrap_or(0),
+                calldata: Vec::new(),
+                algorithm_type: q.algorithm().to_string(),
+                algorithm_settings: std::collections::HashMap::new(),
+                n_alternatives,
+                gap_to_second_best_bps,
+                score_dispersion: None,
+                slippage_tolerance,
+                all_candidates: all_candidates.clone(),
+            };
+            obs.on_quote_produced(event);
+        }
     }
 
     /// Returns the effective timeout for a request.
