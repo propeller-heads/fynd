@@ -762,6 +762,10 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
+        self.amount_out_net_gas = value;
+    }
+
     /// Returns the order ID.
     pub fn order_id(&self) -> &str {
         &self.order_id

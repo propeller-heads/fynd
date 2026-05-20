@@ -11,8 +11,13 @@
 //!    customized, but initially it's set to relay to all solvers.
 //! 2. **Timeout**: Cancel if solver response takes too long
 //! 3. **Collection**: Wait for N responses OR timeout per order
-//! 4. **Selection**: Choose best quote (max `amount_out_net_gas`)
-//! 5. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
+//! 4. **Gas refinement**: Before cross-pool ranking, replace each candidate's naive
+//!    `route.total_gas()` estimate (used internally by algorithms for intra-pool ranking) with the
+//!    more accurate `estimate_gas_usage` from tycho-execution, which accounts for token transfer
+//!    costs and router overhead. The `amount_out_net_gas` values are rescaled proportionally so the
+//!    final ranking reflects realistic execution cost.
+//! 5. **Selection**: Choose best quote (max refined `amount_out_net_gas`)
+//! 6. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
 //!    encode winning solutions into executable on-chain transactions via the
 //!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
@@ -28,12 +33,16 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
+use tycho_execution::encoding::{
+    evm::gas_estimator::estimate_gas_usage,
+    models::{Solution, Strategy},
+};
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     encoding::encoder::Encoder, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, Order, OrderQuote, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, SolveError,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
+    QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
 };
 
 /// Handle to a solver pool for dispatching orders.
@@ -138,9 +147,15 @@ impl WorkerPoolRouter {
             .map(|order| self.solve_order(order.clone(), deadline, min_responses))
             .collect();
 
-        let order_responses = futures::future::join_all(order_futures).await;
+        let mut order_responses = futures::future::join_all(order_futures).await;
 
-        // Rank quotes for each order (sorted by amount_out_net_gas descending)
+        // Refine gas estimates for all candidates using estimate_gas_usage before ranking,
+        // so ranking uses accurate gas costs rather than naive route.total_gas().
+        if let Some(encoding_options) = request.options().encoding_options() {
+            refine_gas_estimates(&mut order_responses, encoding_options)?;
+        }
+
+        // Rank quotes for each order (sorted by refined amount_out_net_gas descending)
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| self.rank_quotes(&responses, request.options()))
@@ -437,6 +452,49 @@ impl WorkerPoolRouter {
     }
 }
 
+fn refine_gas_estimates(
+    order_responses: &mut Vec<OrderResponses>,
+    encoding_options: &EncodingOptions,
+) -> Result<(), SolveError> {
+    for responses in order_responses {
+        for (_, quote) in &mut responses.quotes {
+            if quote.status() != QuoteStatus::Success {
+                continue;
+            }
+            let solution = Solution::try_from(&*quote)?
+                .with_user_transfer_type(encoding_options.transfer_type().clone());
+            let refined_gas = estimate_gas_usage(&solution, derive_strategy(quote));
+            let naive_gas = quote.gas_estimate().clone();
+            if naive_gas > BigUint::ZERO {
+                let gas_cost_in_token_out = quote.amount_out() - quote.amount_out_net_gas();
+                let new_gas_cost = &gas_cost_in_token_out * &refined_gas / &naive_gas;
+                let new_net = if new_gas_cost <= *quote.amount_out() {
+                    quote.amount_out() - &new_gas_cost
+                } else {
+                    BigUint::ZERO
+                };
+                quote.set_amount_out_net_gas(new_net);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn derive_strategy(quote: &OrderQuote) -> Strategy {
+    let Some(route) = quote.route() else { return Strategy::Single };
+    match route.swaps().len() {
+        1 => Strategy::Single,
+        _ if route
+            .swaps()
+            .iter()
+            .any(|s| *s.split() > 0.0) =>
+        {
+            Strategy::Split
+        }
+        _ => Strategy::Sequential,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -589,7 +647,8 @@ mod tests {
         let quote = result.unwrap();
         assert_eq!(quote.orders().len(), 1);
         assert_eq!(quote.orders()[0].status(), QuoteStatus::Success);
-        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(900u64));
+        // amount_out_net_gas is refined using estimate_gas_usage before ranking
+        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(837u64));
         assert!(!quote.orders()[0]
             .transaction()
             .unwrap()
@@ -618,8 +677,8 @@ mod tests {
 
         let quote = result.unwrap();
         assert_eq!(quote.orders().len(), 1);
-        // Should select pool_b's quote (higher amount_out_net_gas)
-        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(950u64));
+        // Pool B wins (higher refined amount_out_net_gas after estimate_gas_usage)
+        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(922u64));
         assert!(!quote.orders()[0]
             .transaction()
             .unwrap()

@@ -200,9 +200,11 @@ Run the reconstructed path forward, calling `get_amount_out()` at each hop with 
 
 ### Step 8: Gas adjustment
 
-Compute the total gas cost of the route (sum of each swap's gas estimate), multiply by the current gas price, convert to the output token using price ratios, and subtract from the gross output. The result is `net_amount_out`: the output after accounting for execution cost.
+Compute the total gas cost of the route (sum of each swap's gas estimate `route.total_gas()`), multiply by the current gas price, convert to the output token using price ratios, and subtract from the gross output. The result is `net_amount_out`: the output after accounting for execution cost.
 
 Return the route and net amount.
+
+> **Note:** `route.total_gas()` is a fast, approximate estimate used for ranking paths *within* this algorithm. When multiple worker pools compete, the `WorkerPoolRouter` applies a more accurate gas estimate (`estimate_gas_usage` from tycho-execution, which accounts for token transfers and router overhead) before the final cross-pool ranking.
 
 ***
 

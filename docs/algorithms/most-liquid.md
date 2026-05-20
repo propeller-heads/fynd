@@ -65,6 +65,8 @@ Where `total_gas` is the sum of gas estimates for each swap in the route, `gas_p
 
 The path with the highest `net_output` wins.
 
+> **Note:** `route.total_gas()` is a fast, approximate estimate used for ranking paths *within* this algorithm. When multiple worker pools compete, the `WorkerPoolRouter` applies a more accurate gas estimate (`estimate_gas_usage` from tycho-execution, which accounts for token transfers and router overhead) before the final cross-pool ranking.
+
 ## When it works well
 
 * **Common pairs** (WETH/USDC, WETH/WBTC): a few high-liquidity pools dominate, and the heuristic reliably ranks them correctly.

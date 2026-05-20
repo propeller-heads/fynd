@@ -155,9 +155,10 @@ Orchestrates quote requests across multiple worker pools:
 
 1. Fans out each order to all pools in parallel
 2. Manages per-request timeouts with optional early return
-3. Selects the best solution by `amount_out_net_gas`
-4. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
-5. Reports failures with error types and metrics
+3. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
+4. Selects the best solution by refined `amount_out_net_gas`
+5. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
+6. Reports failures with error types and metrics
 
 ***
 
@@ -200,8 +201,8 @@ Pluggable interface for route-finding algorithms:
 
 **Built-in algorithms:**
 
-* `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
-* `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
+* `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking (naive `route.total_gas()` within the algorithm; more accurate estimate applied by the router before cross-pool ranking).
+* `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware` (same two-phase gas estimation as above).
 
 ***
 
