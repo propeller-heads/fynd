@@ -222,7 +222,8 @@ Graph management infrastructure:
 * `GraphManager` trait: initialize + incremental updates from events
 * `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
 * `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (pool depths)
-* `Path` type: Sequence of edges for route representation
+* `Path` type: Sequence of edges for route representation. `Path::len()` returns real (non-bridge) hops only.
+* **ETH↔WETH bridge**: When both native ETH (`0x0000`) and WETH exist as graph nodes, zero-cost bridge edges are auto-injected. Bridge edges are invisible to the hop budget (don't count toward `min_hops`/`max_hops`), bypass `connector_tokens`, and pass amounts 1:1 during simulation (with ~25k gas for the wrap/unwrap). Bridge swaps are stripped from the final route — `tycho-execution` auto-inserts the actual wrap/unwrap via `add_weth_swaps()`.
 
 ***
 

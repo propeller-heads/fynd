@@ -201,8 +201,8 @@ impl Encoder {
             encoding_options.slippage(),
         );
         let min_amount_out = biguint_to_u256(fee_breakdown.min_amount_received());
-        let token_in = bytes_to_address(solution.token_in())?;
-        let token_out = bytes_to_address(solution.token_out())?;
+        let token_in = Self::native_to_router_address(bytes_to_address(solution.token_in())?);
+        let token_out = Self::native_to_router_address(bytes_to_address(solution.token_out())?);
         let receiver = bytes_to_address(solution.receiver())?;
 
         let (permit, permit2_sig) = if let Some(p) = encoding_options.permit() {
@@ -334,6 +334,16 @@ impl Encoder {
         }
         call_data.extend(encoded_args);
         call_data
+    }
+
+    /// Converts the Tycho native ETH sentinel (address(0)) to the TychoRouter sentinel
+    /// (0xEEEE...EEEE) for outer function call arguments.
+    fn native_to_router_address(addr: Address) -> Address {
+        if addr == Address::ZERO {
+            Address::from([0xEEu8; 20])
+        } else {
+            addr
+        }
     }
 
     /// Mirrors the on-chain `FeeCalculator.calculateFee` using identical integer arithmetic.

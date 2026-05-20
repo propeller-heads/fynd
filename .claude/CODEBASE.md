@@ -59,7 +59,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → SharedMarketData → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
-9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
+9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation. Automatically injects zero-cost ETH↔WETH bridge edges when both native ETH (`0x0000`) and WETH exist as nodes.
 
 ### Data Flow
 

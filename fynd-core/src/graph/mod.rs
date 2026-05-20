@@ -27,12 +27,14 @@ pub struct Path<'a, D> {
     pub tokens: Vec<&'a Address>,
     /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
     pub edge_data: Vec<&'a EdgeData<D>>,
+    /// Number of real (non-bridge) hops. Bridge edges don't count.
+    real_hops: usize,
 }
 
 impl<'a, D> Path<'a, D> {
     /// Creates a new empty Path.
     pub fn new() -> Self {
-        Self { tokens: Vec::new(), edge_data: Vec::new() }
+        Self { tokens: Vec::new(), edge_data: Vec::new(), real_hops: 0 }
     }
 
     /// Adds a hop to the path.
@@ -46,17 +48,21 @@ impl<'a, D> Path<'a, D> {
             self.tokens.push(from);
         }
         self.tokens.push(to);
+        if !edge_data.is_bridge {
+            self.real_hops += 1;
+        }
         self.edge_data.push(edge_data);
     }
 
-    /// Returns the number of hops in the path.
+    /// Returns the number of real (non-bridge) hops in the path.
+    /// Bridge edges are invisible to the hop budget.
     pub fn len(&self) -> usize {
-        self.edge_data.len()
+        self.real_hops
     }
 
-    /// Returns true if the path has no hops.
+    /// Returns true if the path has no real hops.
     pub fn is_empty(&self) -> bool {
-        self.edge_data.is_empty()
+        self.real_hops == 0
     }
 
     /// Returns an iterator over the edges in the path.
@@ -74,13 +80,14 @@ impl<'a, D> Path<'a, D> {
 
     /// Creates a new reversed Path from the current one.
     pub fn reversed(self) -> Self {
+        let real_hops = self.real_hops;
         let reversed_tokens = self.tokens.into_iter().rev().collect();
         let reversed_edge_data = self
             .edge_data
             .into_iter()
             .rev()
             .collect();
-        Self { tokens: reversed_tokens, edge_data: reversed_edge_data }
+        Self { tokens: reversed_tokens, edge_data: reversed_edge_data, real_hops }
     }
 }
 

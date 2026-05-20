@@ -133,7 +133,9 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 By default Fynd routes through any token reachable in the pool graph. On live markets this can expose routes to illiquid or long-tail intermediates, which increases reversion risk: price impact at the intermediate hop can push slippage over the tolerance threshold, causing the transaction to revert.
 
-`connector_tokens` restricts intermediate hops to a trusted set. It is most useful for deployments that are particularly sensitive to reverts:
+`connector_tokens` restricts intermediate hops to a trusted set. It is most useful for deployments that are particularly sensitive to reverts.
+
+> **Note:** ETH↔WETH bridge edges always bypass the connector token allowlist. Routes can cross between native ETH pools and WETH pools regardless of this setting.
 
 ```toml
 [pools.bellman_ford_safe]

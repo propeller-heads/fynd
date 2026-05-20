@@ -71,7 +71,7 @@ object:
 | Field   | Type     | Description                                                                                                                                 |
 |---------|----------|---------------------------------------------------------------------------------------------------------------------------------------------|
 | `to`    | `string` | The TychoRouter contract address. See [contract addresses](https://docs.propellerheads.xyz/tycho/for-solvers/execution/contract-addresses). |
-| `value` | `string` | Native token value (wei). Non-zero only when the input token is the native token.                                                           |
+| `value` | `string` | Native token value (wei). Non-zero only when the input token is native ETH (`0x0000`). The encoder converts `0x0000` to `0xEEEE` (the TychoRouter's native ETH sentinel) in the outer call args. |
 | `data`  | `string` | Hex-encoded calldata. Submit this as the `data` field of your Ethereum transaction.                                                         |
 
 Use `to`, `value`, and `data` directly in your transaction. Set `from` to the sender address from

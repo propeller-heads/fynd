@@ -23,6 +23,8 @@ Starting from the source token, BFS explores all outgoing edges up to `max_hops`
 
 The result is a list of all simple paths (no repeated tokens) from source to destination within the hop limit.
 
+ETH↔WETH bridge edges are traversed like any other edge but don't consume a hop. A route like `USDC → [UniV2] → ETH → [bridge] → WETH → [Curve] → USDT` uses 2 hops (UniV2 + Curve), not 3. Bridge edges also bypass the `connector_tokens` allowlist.
+
 ## Phase 2: Heuristic scoring
 
 Each path is scored without simulation using two derived data values per edge:

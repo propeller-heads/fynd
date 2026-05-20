@@ -275,9 +275,12 @@ impl MostLiquidAlgorithm {
                     continue;
                 }
 
+                // Bridge edges bypass the connector token filter.
+                let is_bridge = edge.weight().is_bridge;
+
                 // Skip disallowed connector tokens. Endpoints (from / to) are always permitted.
                 let is_destination = next_node == to_idx;
-                if !is_destination {
+                if !is_bridge && !is_destination {
                     if let Some(tokens) = connector_tokens {
                         if !tokens.contains(next_addr) {
                             continue;
@@ -322,6 +325,11 @@ impl MostLiquidAlgorithm {
         let mut min_depth = f64::MAX;
 
         for edge in path.edge_iter() {
+            // Bridge edges are 1:1 with no price impact — skip them.
+            if edge.is_bridge {
+                continue;
+            }
+
             let Some(data) = edge.data.as_ref() else {
                 debug!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
                 return None;
@@ -355,11 +363,18 @@ impl MostLiquidAlgorithm {
     ) -> Result<RouteResult, AlgorithmError> {
         let mut current_amount = amount_in.clone();
         let mut swaps = Vec::with_capacity(path.len());
+        let mut bridge_gas = BigUint::ZERO;
 
         // Track state overrides for pools we've already swapped through.
         let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
 
         for (address_in, edge_data, address_out) in path.iter() {
+            // Bridge edges: 1:1 passthrough, no simulation needed.
+            if edge_data.is_bridge {
+                bridge_gas += crate::types::wrap_gas();
+                continue;
+            }
+
             // Get token and component data for the simulation call
             let token_in = market
                 .get_token(address_in)
@@ -430,7 +445,7 @@ impl MostLiquidAlgorithm {
             .clone();
 
         let net_amount_out = if let Some(last_swap) = route.swaps().last() {
-            let total_gas = route.total_gas();
+            let total_gas = route.total_gas() + bridge_gas;
             let gas_cost_wei = &total_gas * &gas_price;
 
             // Convert gas cost to output token terms using token prices

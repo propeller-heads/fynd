@@ -155,7 +155,6 @@ where
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
         let factory = factory.clone();
-
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
             .spawn(move || {

@@ -49,9 +49,15 @@ use crate::{
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
 
+/// A single edge in the subgraph adjacency list.
+struct SubgraphEdge {
+    target: NodeIndex,
+    component_id: ComponentId,
+    is_bridge: bool,
+}
+
 /// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph =
-    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
+type Subgraph = (HashMap<NodeIndex, Vec<SubgraphEdge>>, HashSet<NodeIndex>, HashSet<ComponentId>);
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
 ///
@@ -229,7 +235,7 @@ impl BellmanFordAlgorithm {
         max_hops: usize,
         order: &Order,
     ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
+        let mut adj: HashMap<NodeIndex, Vec<SubgraphEdge>> = HashMap::new();
         let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut component_ids: HashSet<ComponentId> = HashSet::new();
         let mut visited = HashSet::new();
@@ -245,16 +251,23 @@ impl BellmanFordAlgorithm {
             }
             for edge in graph.edges(node) {
                 let target = edge.target();
-                let cid = edge.weight().component_id.clone();
+                let weight = edge.weight();
+                let cid = weight.component_id.clone();
 
                 adj.entry(node)
                     .or_default()
-                    .push((target, cid.clone()));
+                    .push(SubgraphEdge {
+                        target,
+                        component_id: cid.clone(),
+                        is_bridge: weight.is_bridge,
+                    });
                 component_ids.insert(cid);
                 token_nodes.insert(target);
 
                 if visited.insert(target) {
-                    queue.push_back((target, depth + 1));
+                    // Bridge edges don't consume depth.
+                    let next_depth = if weight.is_bridge { depth } else { depth + 1 };
+                    queue.push_back((target, next_depth));
                 }
             }
         }
@@ -284,12 +297,13 @@ impl BellmanFordAlgorithm {
         spot_product: &[f64],
         node_address: &HashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
+        extra_gas: &BigUint,
     ) -> BigInt {
         let Some(last_swap) = route.swaps().last() else {
             return BigInt::from(amount_out.clone());
         };
 
-        let total_gas = route.total_gas();
+        let total_gas = route.total_gas() + extra_gas;
 
         if gas_price.is_zero() {
             warn!("missing gas price, returning gross amount_out");
@@ -458,8 +472,10 @@ impl Algorithm for BellmanFordAlgorithm {
             }
 
             let mut next_active: HashSet<NodeIndex> = HashSet::new();
+            // Bridge edges propagate within the same round (intra-round queue).
+            let mut intra_round: VecDeque<NodeIndex> = active_nodes.iter().copied().collect();
 
-            for &u in &active_nodes {
+            while let Some(u) = intra_round.pop_front() {
                 let u_idx = u.index();
                 if amount[u_idx].is_zero() {
                     continue;
@@ -468,55 +484,66 @@ impl Algorithm for BellmanFordAlgorithm {
                 let Some(token_u) = token_map.get(&u) else { continue };
                 let Some(edges) = adj.get(&u) else { continue };
 
-                for (v, component_id) in edges {
+                for edge in edges {
+                    let v = &edge.target;
                     let v_idx = v.index();
+                    let component_id = &edge.component_id;
 
                     // Single predecessor walk: skip if target token or pool already in path
                     if Self::path_has_conflict(u, *v, component_id, &predecessor) {
                         continue;
                     }
 
-                    // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
-                    // always permitted regardless of the allowlist.
-                    if let (Some(tokens), Some(v_addr)) =
-                        (&self.connector_tokens, node_address.get(v))
-                    {
-                        if v_addr != order.token_in() &&
-                            v_addr != order.token_out() &&
-                            !tokens.contains(v_addr)
+                    // Bridge edges bypass connector token restrictions.
+                    if !edge.is_bridge {
+                        if let (Some(tokens), Some(v_addr)) =
+                            (&self.connector_tokens, node_address.get(v))
                         {
-                            continue;
+                            if v_addr != order.token_in() &&
+                                v_addr != order.token_out() &&
+                                !tokens.contains(v_addr)
+                            {
+                                continue;
+                            }
                         }
                     }
 
-                    let Some(token_v) = token_map.get(v) else { continue };
-                    let Some(sim) = market_subset.get_simulation_state(component_id) else {
-                        continue;
-                    };
+                    // Bridge edges: 1:1 passthrough with wrap gas.
+                    let (candidate_amount, candidate_edge_gas, candidate_cumul_gas, candidate_spot) =
+                        if edge.is_bridge {
+                            let wrap_gas = crate::types::wrap_gas();
+                            let cumul = &cumul_gas[u_idx] + &wrap_gas;
+                            // Spot price is 1:1 through the bridge.
+                            (amount[u_idx].clone(), wrap_gas, cumul, spot_product[u_idx])
+                        } else {
+                            let Some(token_v) = token_map.get(v) else { continue };
+                            let Some(sim) = market_subset.get_simulation_state(component_id) else {
+                                continue;
+                            };
 
-                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            trace!(
+                            let result =
+                                match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        trace!(
+                                            component_id,
+                                            error = %e,
+                                            "simulation failed, skipping edge"
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                            let cumul = &cumul_gas[u_idx] + &result.gas;
+                            let spot = Self::compute_edge_spot_product(
+                                spot_product[u_idx],
                                 component_id,
-                                error = %e,
-                                "simulation failed, skipping edge"
+                                node_address.get(&u),
+                                node_address.get(v),
+                                spot_prices.as_ref(),
                             );
-                            continue;
-                        }
-                    };
-
-                    let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
-
-                    // Compute spot price product for the candidate path (used for
-                    // gas-aware comparison and for final net amount calculation).
-                    let candidate_spot = Self::compute_edge_spot_product(
-                        spot_product[u_idx],
-                        component_id,
-                        node_address.get(&u),
-                        node_address.get(v),
-                        spot_prices.as_ref(),
-                    );
+                            (result.amount, result.gas, cumul, spot)
+                        };
 
                     // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
                     let is_better = if gas_aware {
@@ -528,7 +555,7 @@ impl Algorithm for BellmanFordAlgorithm {
                         );
 
                         let net_candidate = Self::gas_adjusted_amount(
-                            &result.amount,
+                            &candidate_amount,
                             &candidate_cumul_gas,
                             gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
@@ -541,16 +568,22 @@ impl Algorithm for BellmanFordAlgorithm {
                         );
                         net_candidate > net_existing
                     } else {
-                        result.amount > amount[v_idx]
+                        candidate_amount > amount[v_idx]
                     };
 
                     if is_better {
                         spot_product[v_idx] = candidate_spot;
-                        amount[v_idx] = result.amount;
+                        amount[v_idx] = candidate_amount;
                         predecessor[v_idx] = Some((u, component_id.clone()));
-                        edge_gas[v_idx] = result.gas;
+                        edge_gas[v_idx] = candidate_edge_gas;
                         cumul_gas[v_idx] = candidate_cumul_gas;
-                        next_active.insert(*v);
+
+                        if edge.is_bridge {
+                            // Propagate bridge improvements within the same round.
+                            intra_round.push_back(*v);
+                        } else {
+                            next_active.insert(*v);
+                        }
                     }
                 }
             }
@@ -579,7 +612,14 @@ impl Algorithm for BellmanFordAlgorithm {
         let path_edges = Self::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
 
         let mut swaps = Vec::with_capacity(path_edges.len());
+        let mut bridge_gas = BigUint::ZERO;
         for (from_node, to_node, component_id) in &path_edges {
+            // Bridge edges don't produce swaps — tycho-execution handles wraps.
+            if crate::types::is_bridge_component(component_id) {
+                bridge_gas += crate::types::wrap_gas();
+                continue;
+            }
+
             let token_in = token_map
                 .get(from_node)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
@@ -631,6 +671,7 @@ impl Algorithm for BellmanFordAlgorithm {
             &spot_product,
             &node_address,
             token_in_node,
+            &bridge_gas,
         );
 
         let result = RouteResult::new(route, net_amount_out, gas_price);

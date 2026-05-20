@@ -86,6 +86,10 @@ If a token's amount didn't improve, its outgoing edges can't produce new results
 
 The full graph might have 2,400 tokens. At round 2, perhaps 50 are active. The algorithm processes 50 nodes' outgoing edges instead of 2,400. With 5 rounds, the savings compound: thousands of simulation calls are avoided.
 
+### ETH↔WETH bridge edges
+
+Bridge edges (connecting native ETH `0x0000` to WETH) don't consume a relaxation round. When a bridge edge improves a node, that node is added to an intra-round queue and processed within the same round. Bridge edges also don't count toward the subgraph BFS depth limit and bypass `connector_tokens`. The wrap/unwrap is simulated as 1:1 with ~25k gas. Bridge swaps are excluded from the final route — `tycho-execution` re-inserts them automatically.
+
 ### Gas-aware relaxation
 
 The basic relaxation above compares gross output amounts. But a 5-hop route with slightly more gross output can lose to a 3-hop route after gas costs. To handle this, relaxation optionally compares **net** amounts: gross output minus cumulative gas cost, converted to the output token.

@@ -50,17 +50,24 @@ pub struct EdgeData<D = ()> {
     pub component_id: ComponentId,
     /// Algorithm-specific data. None if not yet computed.
     pub data: Option<D>,
+    /// True for virtual ETH↔WETH bridge edges that don't consume a hop.
+    pub is_bridge: bool,
 }
 
 impl<M> EdgeData<M> {
     /// Creates a new EdgeData with the given component ID and no data set.
     pub fn new(component_id: ComponentId) -> Self {
-        Self { component_id, data: None }
+        Self { component_id, data: None, is_bridge: false }
     }
 
     /// Creates a new EdgeData with the given component ID and data.
     pub fn with_data(component_id: ComponentId, data: M) -> Self {
-        Self { component_id, data: Some(data) }
+        Self { component_id, data: Some(data), is_bridge: false }
+    }
+
+    /// Creates a new bridge EdgeData (free hop, no algorithm data).
+    pub fn bridge(component_id: ComponentId) -> Self {
+        Self { component_id, data: None, is_bridge: true }
     }
 }
 
@@ -88,6 +95,41 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// Creates a new empty graph manager.
     pub fn new() -> Self {
         Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
+    }
+
+    /// Injects a zero-cost bridge between native ETH (0x0000) and WETH when both
+    /// exist as nodes in the graph. Uses the hardcoded addresses from constants.
+    fn inject_bridge_edges(&mut self) {
+        let bridge_id = crate::types::BRIDGE_COMPONENT_ID.to_string();
+        if self.edge_map.contains_key(&bridge_id) {
+            return;
+        }
+
+        let eth = &*crate::types::constants::NATIVE_ETH_ADDRESS;
+        let Some(&eth_idx) = self.node_map.get(eth) else {
+            return;
+        };
+
+        // Try all known WETH addresses — only the one present in this graph will match.
+        for weth in crate::types::constants::NATIVE_TOKEN.values() {
+            let Some(&weth_idx) = self.node_map.get(weth) else {
+                continue;
+            };
+
+            let fwd = self
+                .graph
+                .add_edge(eth_idx, weth_idx, EdgeData::bridge(bridge_id.clone()));
+            let rev = self
+                .graph
+                .add_edge(weth_idx, eth_idx, EdgeData::bridge(bridge_id.clone()));
+            self.edge_map
+                .entry(bridge_id)
+                .or_default()
+                .extend([fwd, rev]);
+
+            debug!("injected ETH↔WETH bridge edges");
+            return;
+        }
     }
 
     /// Helper function to find a node index by address
@@ -423,6 +465,8 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
                 .collect();
             self.add_component_edges(comp_id, &node_indices);
         }
+
+        self.inject_bridge_edges();
     }
 
     fn graph(&self) -> &StableDiGraph<D> {
@@ -447,6 +491,9 @@ impl<D: Clone + Send> MarketEventHandler for PetgraphStableDiGraphManager<D> {
                 if let Err(e) = self.remove_components(removed_components) {
                     errors.push(e);
                 }
+
+                // New components may have introduced ETH or WETH nodes.
+                self.inject_bridge_edges();
 
                 // Return errors if any occurred
                 match errors.len() {
