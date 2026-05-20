@@ -111,8 +111,18 @@ processes all solver events independently — each gets its own decay curve.
 
 1. `MostLiquidAlgorithm::simulate_path` — call `observer.on_route_scored()` for each
    candidate after scoring
-2. Quote selection path — call `observer.on_quote_produced()` for **each solver's
-   response**, not just the winner. The winner gets `is_winner: true`.
+2. **After encoding** (~line 208 in `worker_pool_router/mod.rs`) — call
+   `observer.on_quote_produced()` for **each solver's response**, not just the winner.
+   The winner gets `is_winner: true`.
+
+**Encoding policy**: when `slippage-features` is enabled, **always encode all
+solutions** with `EncodingOptions::new(1.0)` (100% slippage) and a pre-configured
+sender address. This ensures:
+- `calldata` is always populated in `QuoteProducedEvent` (no empty calldata gap)
+- `min_amount_out = 0` is baked into the calldata (the node resim binary can
+  replay calldata as-is with no ABI modification needed)
+- All quotes come from a seed file, so the performance cost of always-encoding
+  is acceptable
 
 **Diff estimate**: ~50-100 lines added to fynd-core. No existing signatures change.
 
@@ -195,14 +205,13 @@ Runs as a separate binary, decoupled from Fynd's hot path.
 **Flow**:
 
 1. Reads the quote log parquet (written by the observer flush)
-2. For each quote, extracts the calldata
-3. **Sets slippage tolerance to 100%** so the tx never reverts due to slippage.
-   This ensures we always get the actual output amount and can compute the true
-   decay. Reverts then only capture structural failures (pool drained, token
-   issues), not slippage-induced ones.
-4. For blocks X+1..X+`MAX_BLOCK_OFFSET`, calls `eth_call` with storage overrides
-   (balance/approval injection, already implemented in fynd-swap-cli's dry-run
-   path) against an archive-capable RPC
+2. For each quote, extracts the calldata (already encoded with 100% slippage /
+   `min_amount_out = 0` — no ABI modification needed)
+3. For blocks X+1..X+`MAX_BLOCK_OFFSET`, calls `eth_call` with storage overrides
+   (balance/approval injection, reusing helpers from `fynd-swap-cli/src/erc20.rs`)
+   against an archive-capable RPC at `BlockId::number(X+k)`
+4. Decodes `amount_out` from first 32 bytes of return data (same as
+   `dry_run_execute` in `clients/rust/src/client.rs:1175`)
 5. Records route-level output amount and gas used
 6. Writes to route-level decay parquet
 
@@ -289,8 +298,9 @@ Cross-validation between the two reveals Tycho simulation accuracy.
   for amounts. Derived ratios (decay bps, feature scores) are `f64`.
 - **Multi-solver**: each solver emits independently. Events share `request_id`
   for cross-solver joins.
-- **100% slippage on eth_call**: node resim uses max slippage so reverts only
-  capture structural failures, giving us true decay values.
+- **100% slippage at encoding time**: all solutions encoded with `slippage = 1.0`,
+  so `min_amount_out = 0` is baked into calldata. Node resim replays as-is —
+  reverts only capture structural failures, giving us true decay values.
 
 ## What the existing scaffold gets wrong
 
