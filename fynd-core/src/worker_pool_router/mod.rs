@@ -227,6 +227,22 @@ impl WorkerPoolRouter {
                 .await?;
         }
 
+        // When observing, force-encode with 100% slippage so calldata is always
+        // available even when the client did not request encoding.
+        #[cfg(feature = "slippage-features")]
+        if self.observer.is_some() && request.options().encoding_options().is_none() {
+            let force_options = crate::EncodingOptions::new(1.0);
+            order_quotes = self
+                .encoder
+                .encode(order_quotes, force_options)
+                .await?;
+        }
+
+        #[cfg(feature = "slippage-features")]
+        if let Some(ref obs) = self.observer {
+            self.emit_quote_produced_events(obs.as_ref(), &order_quotes, request.options());
+        }
+
         // Calculate totals
         let total_gas_estimate = order_quotes
             .iter()
@@ -410,11 +426,6 @@ impl WorkerPoolRouter {
                 "ranked quotes"
             );
 
-            #[cfg(feature = "slippage-features")]
-            if let Some(ref obs) = self.observer {
-                self.emit_quote_produced_events(obs.as_ref(), &valid_quotes, options);
-            }
-
             return valid_quotes
                 .into_iter()
                 .map(|(_, q)| q.clone())
@@ -493,12 +504,15 @@ impl WorkerPoolRouter {
         vec![fallback]
     }
 
-    /// Emits `QuoteProducedEvent` for every ranked candidate.
+    /// Emits `QuoteProducedEvent` for every encoded order quote.
+    ///
+    /// Called after encoding so that `calldata` is populated from the
+    /// transaction data on each `OrderQuote`.
     #[cfg(feature = "slippage-features")]
     fn emit_quote_produced_events(
         &self,
         obs: &dyn crate::observer::SolverObserver,
-        ranked: &[&(String, OrderQuote)],
+        quotes: &[OrderQuote],
         options: &QuoteOptions,
     ) {
         use num_traits::ToPrimitive;
@@ -506,19 +520,17 @@ impl WorkerPoolRouter {
 
         use crate::observer::{CandidateSummary, ObservedRoute, QuoteProducedEvent};
 
-        let n_alternatives = ranked.len() as u32;
-        let request_id = ranked
+        let n_alternatives = quotes.len() as u32;
+        let request_id = quotes
             .first()
-            .map(|entry| entry.1.order_id().to_string())
+            .map(|q| q.order_id().to_string())
             .unwrap_or_default();
 
-        let gap_to_second_best_bps = if ranked.len() >= 2 {
-            let best_out = ranked[0]
-                .1
+        let gap_to_second_best_bps = if quotes.len() >= 2 {
+            let best_out = quotes[0]
                 .amount_out_net_gas()
                 .to_f64();
-            let second_out = ranked[1]
-                .1
+            let second_out = quotes[1]
                 .amount_out_net_gas()
                 .to_f64();
             match (best_out, second_out) {
@@ -533,10 +545,9 @@ impl WorkerPoolRouter {
             .encoding_options()
             .map(|e| e.slippage());
 
-        let all_candidates: Vec<CandidateSummary> = ranked
+        let all_candidates: Vec<CandidateSummary> = quotes
             .iter()
-            .map(|entry| {
-                let q = &entry.1;
+            .map(|q| {
                 let route = q
                     .route()
                     .map(ObservedRoute::from)
@@ -552,9 +563,7 @@ impl WorkerPoolRouter {
             })
             .collect();
 
-        for (rank, entry) in ranked.iter().enumerate() {
-            let pool_name = &entry.0;
-            let q = &entry.1;
+        for (rank, q) in quotes.iter().enumerate() {
             let route = q
                 .route()
                 .map(ObservedRoute::from)
@@ -563,7 +572,7 @@ impl WorkerPoolRouter {
             let event = QuoteProducedEvent {
                 request_id: request_id.clone(),
                 quote_id: Uuid::new_v4().to_string(),
-                solver_id: pool_name.clone(),
+                solver_id: q.algorithm().to_string(),
                 is_winner: rank == 0,
                 block_number: q.block().number(),
                 chain_id: self.chain_id,
@@ -571,7 +580,10 @@ impl WorkerPoolRouter {
                 amount_in: q.amount_in().to_string(),
                 amount_out: q.amount_out().to_string(),
                 gas_estimate: q.gas_estimate().to_u64().unwrap_or(0),
-                calldata: Vec::new(),
+                calldata: q
+                    .transaction()
+                    .map(|tx| tx.data().to_vec())
+                    .unwrap_or_default(),
                 algorithm_type: q.algorithm().to_string(),
                 algorithm_settings: std::collections::HashMap::new(),
                 n_alternatives,
