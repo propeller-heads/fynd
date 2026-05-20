@@ -220,7 +220,11 @@ async fn resim_at_block(
                 let price = prices.get(&swap.token_in)?;
                 let n = price.numerator.to_f64()?;
                 let d = price.denominator.to_f64()?;
-                if d == 0.0 { None } else { Some(n / d) }
+                if d == 0.0 {
+                    None
+                } else {
+                    Some(n / d)
+                }
             });
 
             pq.records.push(HopDecayRecord {

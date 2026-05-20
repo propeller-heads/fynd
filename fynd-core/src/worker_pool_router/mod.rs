@@ -230,7 +230,12 @@ impl WorkerPoolRouter {
         // When observing, force-encode with 100% slippage so calldata is always
         // available even when the client did not request encoding.
         #[cfg(feature = "slippage-features")]
-        if self.observer.is_some() && request.options().encoding_options().is_none() {
+        if self.observer.is_some() &&
+            request
+                .options()
+                .encoding_options()
+                .is_none()
+        {
             let force_options = crate::EncodingOptions::new(1.0);
             order_quotes = self
                 .encoder
@@ -527,12 +532,8 @@ impl WorkerPoolRouter {
             .unwrap_or_default();
 
         let gap_to_second_best_bps = if quotes.len() >= 2 {
-            let best_out = quotes[0]
-                .amount_out_net_gas()
-                .to_f64();
-            let second_out = quotes[1]
-                .amount_out_net_gas()
-                .to_f64();
+            let best_out = quotes[0].amount_out_net_gas().to_f64();
+            let second_out = quotes[1].amount_out_net_gas().to_f64();
             match (best_out, second_out) {
                 (Some(b), Some(s)) if b > 0.0 => Some((b - s) / b * 10_000.0),
                 _ => None,
