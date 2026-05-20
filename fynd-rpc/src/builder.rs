@@ -286,6 +286,7 @@ impl FyndRPCBuilder {
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
             market_data: _market_data,
+            derived_data: _derived_data,
         })
     }
 }
@@ -301,6 +302,7 @@ pub struct FyndRPC {
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
     market_data: fynd_core::feed::market_data::SharedMarketDataRef,
+    derived_data: fynd_core::derived::SharedDerivedDataRef,
 }
 
 impl FyndRPC {
@@ -314,6 +316,11 @@ impl FyndRPC {
         Arc::clone(&self.market_data)
     }
 
+    /// Returns a clone of the shared derived data reference.
+    pub fn derived_data(&self) -> fynd_core::derived::SharedDerivedDataRef {
+        Arc::clone(&self.derived_data)
+    }
+
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
         let FyndRPC {
@@ -325,6 +332,7 @@ impl FyndRPC {
             mut computation_manager_handle,
             computation_shutdown_tx,
             market_data: _,
+            derived_data: _,
         } = self;
 
         info!("HTTP server started");

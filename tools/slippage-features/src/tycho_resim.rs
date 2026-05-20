@@ -4,10 +4,12 @@ use std::{
 };
 
 use fynd_core::{
+    derived::SharedDerivedDataRef,
     feed::market_data::SharedMarketDataRef,
     observer::{QuoteProducedEvent, MAX_BLOCK_OFFSET},
 };
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -32,6 +34,7 @@ struct PendingQuote {
 pub async fn run_tycho_resim(
     mut rx: tokio::sync::mpsc::Receiver<QuoteProducedEvent>,
     market_data: SharedMarketDataRef,
+    derived_data: SharedDerivedDataRef,
     output_dir: PathBuf,
 ) {
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
@@ -82,7 +85,7 @@ pub async fn run_tycho_resim(
         }
         last_seen_block = current_block;
 
-        resim_at_block(&mut pending, &market_data, current_block).await;
+        resim_at_block(&mut pending, &market_data, &derived_data, current_block).await;
         flush_expired(&mut pending, current_block, &output_dir);
     }
 }
@@ -91,9 +94,11 @@ pub async fn run_tycho_resim(
 async fn resim_at_block(
     pending: &mut VecDeque<PendingQuote>,
     market_data: &SharedMarketDataRef,
+    derived_data: &SharedDerivedDataRef,
     current_block: u64,
 ) {
     let md = market_data.read().await;
+    let dd = derived_data.read().await;
 
     for pq in pending.iter_mut() {
         let quote_block = pq.event.block_number;
@@ -107,7 +112,8 @@ async fn resim_at_block(
         let block_offset = offset as u32;
 
         let mut route_amount = None;
-        let mut hop_results: Vec<(u32, String, String, String, BigUint)> = Vec::new();
+        // Stores (hop_index, replay_amount_out) for each successfully simulated hop.
+        let mut replay_amounts: Vec<(u32, BigUint)> = Vec::new();
 
         // Walk each hop, chaining the output of each hop as input to the next.
         let mut current_amount: Option<BigUint> = None;
@@ -157,13 +163,7 @@ async fn resim_at_block(
             match state.get_amount_out(amount_in, token_in, token_out) {
                 Ok(result) => {
                     current_amount = Some(result.amount.clone());
-                    hop_results.push((
-                        hop_idx as u32,
-                        swap.component_id.clone(),
-                        swap.protocol.clone(),
-                        swap.amount_out.clone(),
-                        result.amount,
-                    ));
+                    replay_amounts.push((hop_idx as u32, result.amount));
                 }
                 Err(e) => {
                     debug!(
@@ -179,12 +179,12 @@ async fn resim_at_block(
         }
 
         // Only record if we successfully simulated all hops.
-        if hop_results.len() != pq.event.route.swaps.len() {
+        if replay_amounts.len() != pq.event.route.swaps.len() {
             continue;
         }
 
-        if let Some(last) = hop_results.last() {
-            route_amount = Some(last.4.clone());
+        if let Some(last) = replay_amounts.last() {
+            route_amount = Some(last.1.clone());
         }
         let route_out_str = route_amount
             .as_ref()
@@ -193,9 +193,35 @@ async fn resim_at_block(
         let route_decay =
             compute_decay_bps(&pq.event.amount_out, &route_out_str).unwrap_or(f64::NAN);
 
-        for (hop_idx, component_id, protocol, original_hop_out, replay_hop_out) in &hop_results {
-            let hop_decay = compute_decay_bps(original_hop_out, &replay_hop_out.to_string())
+        for (hop_idx, replay_hop_out) in &replay_amounts {
+            let swap = &pq.event.route.swaps[*hop_idx as usize];
+
+            let hop_decay = compute_decay_bps(&swap.amount_out, &replay_hop_out.to_string())
                 .unwrap_or(f64::NAN);
+
+            let depth_key =
+                (swap.component_id.clone(), swap.token_in.clone(), swap.token_out.clone());
+
+            let depth_at_1pct = dd
+                .pool_depths()
+                .and_then(|depths| depths.get(&depth_key))
+                .map(|d| d.to_string());
+
+            let depth_at_5pct = dd
+                .pool_depths_5pct()
+                .and_then(|depths| depths.get(&depth_key))
+                .map(|d| d.to_string());
+
+            let spot_price = dd
+                .spot_prices()
+                .and_then(|prices| prices.get(&depth_key).copied());
+
+            let token_price_in_native = dd.token_prices().and_then(|prices| {
+                let price = prices.get(&swap.token_in)?;
+                let n = price.numerator.to_f64()?;
+                let d = price.denominator.to_f64()?;
+                if d == 0.0 { None } else { Some(n / d) }
+            });
 
             pq.records.push(HopDecayRecord {
                 quote_id: pq.event.quote_id.clone(),
@@ -203,14 +229,14 @@ async fn resim_at_block(
                 request_id: pq.event.request_id.clone(),
                 block_offset,
                 hop_index: *hop_idx,
-                component_id: component_id.clone(),
-                protocol: protocol.clone(),
+                component_id: swap.component_id.clone(),
+                protocol: swap.protocol.clone(),
                 hop_amount_out: replay_hop_out.to_string(),
                 hop_decay_bps: hop_decay,
-                depth_at_1pct: None,
-                depth_at_5pct: None,
-                spot_price: None,
-                token_price_in_native: None,
+                depth_at_1pct,
+                depth_at_5pct,
+                spot_price,
+                token_price_in_native,
                 fee_tier: None,
                 marginal_liquidity: None,
                 concentration_gini: None,
@@ -277,6 +303,7 @@ mod tests {
     use std::collections::HashMap;
 
     use fynd_core::{
+        derived::DerivedData,
         feed::market_data::SharedMarketData,
         observer::{ObservedRoute, ObservedSwap, QuoteProducedEvent},
         types::BlockInfo,
@@ -337,9 +364,10 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::channel::<QuoteProducedEvent>(16);
 
         let market = SharedMarketData::new_shared();
+        let derived = DerivedData::new_shared();
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market, out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market, derived, out));
 
         // Close the channel immediately.
         drop(_tx);
@@ -353,6 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let market = SharedMarketData::new_shared();
+        let derived = DerivedData::new_shared();
 
         // Market has a block but NO simulation states or tokens.
         {
@@ -361,7 +390,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out));
 
         // Send a quote referencing a non-existent pool.
         let swap = single_hop_swap();
@@ -402,6 +431,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let market = SharedMarketData::new_shared();
+        let derived = DerivedData::new_shared();
 
         // Block stays at 100.
         {
@@ -410,7 +440,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out));
 
         let swap = single_hop_swap();
         let event = make_event("q-queue", 100, vec![swap], "1000", "2000");

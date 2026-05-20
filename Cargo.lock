@@ -7011,6 +7011,7 @@ dependencies = [
  "fynd-core",
  "hex",
  "num-bigint",
+ "num-traits",
  "parquet",
  "rstest",
  "serde",

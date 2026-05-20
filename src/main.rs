@@ -392,10 +392,12 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     let _resim_handle = {
         if let Some(rx) = setup.resim_rx {
             let market_data = solver.market_data();
+            let derived_data = solver.derived_data();
             let output_dir = std::path::PathBuf::from("./slippage-data/hop_decay");
             Some(tokio::spawn(slippage_features::tycho_resim::run_tycho_resim(
                 rx,
                 market_data,
+                derived_data,
                 output_dir,
             )))
         } else {
