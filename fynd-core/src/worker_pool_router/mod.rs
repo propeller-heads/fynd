@@ -474,6 +474,7 @@ fn refine_gas_estimates(
                     BigUint::ZERO
                 };
                 quote.set_amount_out_net_gas(new_net);
+                quote.set_gas_estimate(refined_gas);
             }
         }
     }
@@ -482,16 +483,13 @@ fn refine_gas_estimates(
 
 fn derive_strategy(quote: &OrderQuote) -> Strategy {
     let Some(route) = quote.route() else { return Strategy::Single };
-    match route.swaps().len() {
-        1 => Strategy::Single,
-        _ if route
-            .swaps()
-            .iter()
-            .any(|s| *s.split() > 0.0) =>
-        {
-            Strategy::Split
-        }
-        _ => Strategy::Sequential,
+    let swaps = route.swaps();
+    if swaps.len() == 1 {
+        Strategy::Single
+    } else if swaps.iter().any(|s| *s.split() > 0.0) {
+        Strategy::Split
+    } else {
+        Strategy::Sequential
     }
 }
 

@@ -201,8 +201,8 @@ Pluggable interface for route-finding algorithms:
 
 **Built-in algorithms:**
 
-* `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking (naive `route.total_gas()` within the algorithm; more accurate estimate applied by the router before cross-pool ranking).
-* `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware` (same two-phase gas estimation as above).
+* `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
+* `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
 
 ***
 
