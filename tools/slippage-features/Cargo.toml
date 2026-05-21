@@ -35,3 +35,7 @@ path = "src/bin/node_resim.rs"
 [[bin]]
 name = "assemble"
 path = "src/bin/assemble.rs"
+
+[[bin]]
+name = "quote-driver"
+path = "src/bin/quote_driver.rs"
