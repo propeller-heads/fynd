@@ -42,7 +42,7 @@ struct Args {
     max_block_offset: u32,
 
     /// Router contract address
-    #[arg(long, default_value = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")]
+    #[arg(long, default_value = "0x1f8db310f32d48b6180ff902ec60c586128cef47")]
     router_address: String,
 
     /// Sender address for eth_call
@@ -365,7 +365,6 @@ async fn resim_quote_at_offset(
         from: Some(sender),
         to: Some(alloy::primitives::TxKind::Call(router)),
         input: Bytes::from(calldata_bytes).into(),
-        gas_price: Some(0),
         ..Default::default()
     };
 
@@ -579,7 +578,7 @@ mod tests {
         assert_eq!(args.output_dir, PathBuf::from("/tmp/out"));
         assert_eq!(args.rpc_url, "http://localhost:8545");
         assert_eq!(args.max_block_offset, 10);
-        assert_eq!(args.router_address, "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35");
+        assert_eq!(args.router_address, "0x1f8db310f32d48b6180ff902ec60c586128cef47");
         assert_eq!(args.sender, "0x0000000000000000000000000000000000000001");
     }
 
@@ -733,7 +732,7 @@ mod tests {
         let owner: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
             .parse()
             .unwrap();
-        let spender: Address = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+        let spender: Address = "0x1f8db310f32d48b6180ff902ec60c586128cef47"
             .parse()
             .unwrap();
         let slot = allowance_slot_at(owner, spender, 1);
@@ -755,7 +754,7 @@ mod tests {
         let owner: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
             .parse()
             .unwrap();
-        let spender: Address = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+        let spender: Address = "0x1f8db310f32d48b6180ff902ec60c586128cef47"
             .parse()
             .unwrap();
         let encoded = encode_allowance(owner, spender);
@@ -771,7 +770,7 @@ mod tests {
         let sender: Address = "0x0000000000000000000000000000000000000001"
             .parse()
             .unwrap();
-        let router: Address = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+        let router: Address = "0x1f8db310f32d48b6180ff902ec60c586128cef47"
             .parse()
             .unwrap();
 
