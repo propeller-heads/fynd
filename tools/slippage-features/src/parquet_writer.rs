@@ -337,12 +337,29 @@ pub struct QuoteLogRecord {
     pub n_alternatives: u32,
     pub gap_to_second_best_bps: Option<f64>,
     pub slippage_tolerance: Option<f64>,
+    /// First hop token_in address (0x-prefixed hex).
+    pub token_in: String,
+    /// Last hop token_out address (0x-prefixed hex).
+    pub token_out: String,
     pub route_json: String,
     pub calldata_hex: String,
 }
 
 impl From<&QuoteProducedEvent> for QuoteLogRecord {
     fn from(event: &QuoteProducedEvent) -> Self {
+        let token_in = event
+            .route
+            .swaps
+            .first()
+            .map(|s| format!("0x{}", hex::encode(&s.token_in)))
+            .unwrap_or_default();
+        let token_out = event
+            .route
+            .swaps
+            .last()
+            .map(|s| format!("0x{}", hex::encode(&s.token_out)))
+            .unwrap_or_default();
+
         Self {
             quote_id: event.quote_id.clone(),
             solver_id: event.solver_id.clone(),
@@ -357,6 +374,8 @@ impl From<&QuoteProducedEvent> for QuoteLogRecord {
             n_alternatives: event.n_alternatives,
             gap_to_second_best_bps: event.gap_to_second_best_bps,
             slippage_tolerance: event.slippage_tolerance,
+            token_in,
+            token_out,
             route_json: route_to_json(&event.route),
             calldata_hex: hex::encode(&event.calldata),
         }
@@ -379,6 +398,8 @@ pub fn quote_log_schema() -> Schema {
         Field::new("n_alternatives", DataType::UInt32, false),
         Field::new("gap_to_second_best_bps", DataType::Float64, true),
         Field::new("slippage_tolerance", DataType::Float64, true),
+        Field::new("token_in", DataType::Utf8, false),
+        Field::new("token_out", DataType::Utf8, false),
         Field::new("route_json", DataType::Utf8, false),
         Field::new("calldata_hex", DataType::Utf8, false),
     ])
@@ -410,6 +431,8 @@ pub fn write_quote_log_parquet(
     let mut n_alternatives = UInt32Builder::with_capacity(n);
     let mut gap_to_second_best_bps = Float64Builder::with_capacity(n);
     let mut slippage_tolerance = Float64Builder::with_capacity(n);
+    let mut token_in = StringBuilder::with_capacity(n, n * 42);
+    let mut token_out = StringBuilder::with_capacity(n, n * 42);
     let mut route_json = StringBuilder::with_capacity(n, n * 256);
     let mut calldata_hex = StringBuilder::with_capacity(n, n * 128);
 
@@ -435,6 +458,8 @@ pub fn write_quote_log_parquet(
             None => slippage_tolerance.append_null(),
         }
 
+        token_in.append_value(&r.token_in);
+        token_out.append_value(&r.token_out);
         route_json.append_value(&r.route_json);
         calldata_hex.append_value(&r.calldata_hex);
     }
@@ -453,6 +478,8 @@ pub fn write_quote_log_parquet(
         Arc::new(n_alternatives.finish()),
         Arc::new(gap_to_second_best_bps.finish()),
         Arc::new(slippage_tolerance.finish()),
+        Arc::new(token_in.finish()),
+        Arc::new(token_out.finish()),
         Arc::new(route_json.finish()),
         Arc::new(calldata_hex.finish()),
     ];
@@ -618,6 +645,8 @@ mod tests {
             n_alternatives: 3,
             gap_to_second_best_bps: Some(10.0),
             slippage_tolerance: None,
+            token_in: "0x0101010101010101010101010101010101010101".to_string(),
+            token_out: "0x0202020202020202020202020202020202020202".to_string(),
             route_json: r#"{"swaps":[]}"#.to_string(),
             calldata_hex: "abcd".to_string(),
         }
@@ -626,7 +655,7 @@ mod tests {
     #[test]
     fn quote_log_schema_has_expected_field_count() {
         let schema = quote_log_schema();
-        assert_eq!(schema.fields().len(), 15);
+        assert_eq!(schema.fields().len(), 17);
     }
 
     #[test]
@@ -652,7 +681,7 @@ mod tests {
 
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 15);
+        assert_eq!(batch.num_columns(), 17);
 
         let quote_ids = batch
             .column(0)
@@ -696,6 +725,18 @@ mod tests {
         assert!(slip.is_null(0));
         assert!(!slip.is_null(1));
         assert!((slip.value(1) - 0.005).abs() < f64::EPSILON);
+
+        // token_in / token_out columns
+        let token_in_col = batch
+            .column_by_name("token_in")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .unwrap();
+        assert_eq!(token_in_col.value(0), "0x0101010101010101010101010101010101010101");
+        let token_out_col = batch
+            .column_by_name("token_out")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .unwrap();
+        assert_eq!(token_out_col.value(0), "0x0202020202020202020202020202020202020202");
     }
 
     #[test]
@@ -707,7 +748,7 @@ mod tests {
 
         let file = std::fs::File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        assert_eq!(builder.schema().fields().len(), 15);
+        assert_eq!(builder.schema().fields().len(), 17);
 
         let reader = builder.build().unwrap();
         let total_rows: usize = reader

@@ -227,6 +227,10 @@ async fn resim_at_block(
                 }
             });
 
+            let fee_tier = md
+                .get_simulation_state(&swap.component_id)
+                .map(|sim| sim.fee());
+
             pq.records.push(HopDecayRecord {
                 quote_id: pq.event.quote_id.clone(),
                 solver_id: pq.event.solver_id.clone(),
@@ -241,7 +245,7 @@ async fn resim_at_block(
                 depth_at_5pct,
                 spot_price,
                 token_price_in_native,
-                fee_tier: None,
+                fee_tier,
                 marginal_liquidity: None,
                 concentration_gini: None,
                 route_total_amount_out: route_out_str.clone(),

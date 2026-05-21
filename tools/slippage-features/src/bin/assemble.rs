@@ -16,6 +16,7 @@ use parquet::{
     basic::Compression,
     file::properties::WriterProperties,
 };
+use slippage_features::coingecko::{CoinGeckoClient, PairClassification};
 use tracing::{info, warn};
 
 #[derive(Parser)]
@@ -36,6 +37,10 @@ struct Args {
     /// Output directory for unified dataset
     #[arg(long)]
     output_dir: PathBuf,
+
+    /// CoinGecko API key for token classification
+    #[arg(long, env = "COINGECKO_API_KEY", default_value = "")]
+    coingecko_api_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +57,8 @@ struct QuoteLogRow {
     amount_out: String,
     gas_estimate: u64,
     algorithm_type: String,
+    token_in: String,
+    token_out: String,
     route_json: String,
 }
 
@@ -97,6 +104,18 @@ struct UnifiedRecord {
     amount_out: String,
     gas_estimate: u64,
     algorithm_type: String,
+
+    // Token addresses
+    token_in: String,
+    token_out: String,
+
+    // Token/pair classification (from CoinGecko)
+    token_in_category: String,
+    token_out_category: String,
+    pair_bucket: String,
+    log_mcap_ratio: Option<f64>,
+    min_mcap: Option<f64>,
+    max_mcap: Option<f64>,
 
     // Hop decay (aggregated per block_offset)
     block_offset: u32,
@@ -191,6 +210,12 @@ fn parse_quote_log_rows(batches: &[RecordBatch]) -> Vec<QuoteLogRow> {
         let algorithm_types = batch
             .column_by_name("algorithm_type")
             .and_then(|c| c.as_string_opt::<i32>());
+        let token_ins = batch
+            .column_by_name("token_in")
+            .and_then(|c| c.as_string_opt::<i32>());
+        let token_outs = batch
+            .column_by_name("token_out")
+            .and_then(|c| c.as_string_opt::<i32>());
         let route_jsons = batch
             .column_by_name("route_json")
             .and_then(|c| c.as_string_opt::<i32>());
@@ -224,6 +249,15 @@ fn parse_quote_log_rows(batches: &[RecordBatch]) -> Vec<QuoteLogRow> {
         };
 
         for row in 0..batch.num_rows() {
+            // token_in/token_out may be absent in older parquets;
+            // fall back to extracting from the route JSON.
+            let token_in = token_ins
+                .map(|t| t.value(row).to_string())
+                .unwrap_or_else(|| extract_token_from_route(route_jsons.value(row), true));
+            let token_out = token_outs
+                .map(|t| t.value(row).to_string())
+                .unwrap_or_else(|| extract_token_from_route(route_jsons.value(row), false));
+
             rows.push(QuoteLogRow {
                 quote_id: quote_ids.value(row).to_string(),
                 solver_id: solver_ids.value(row).to_string(),
@@ -234,6 +268,8 @@ fn parse_quote_log_rows(batches: &[RecordBatch]) -> Vec<QuoteLogRow> {
                 amount_out: amounts_out.value(row).to_string(),
                 gas_estimate: gas_estimates.value(row),
                 algorithm_type: algorithm_types.value(row).to_string(),
+                token_in,
+                token_out,
                 route_json: route_jsons.value(row).to_string(),
             });
         }
@@ -400,6 +436,30 @@ fn parse_route_decay_rows(batches: &[RecordBatch]) -> Vec<RouteDecayRow> {
 // Feature computation
 // ---------------------------------------------------------------------------
 
+/// Extract token_in (first swap) or token_out (last swap) from route JSON.
+fn extract_token_from_route(route_json: &str, is_input: bool) -> String {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(route_json);
+    let Ok(value) = parsed else {
+        return String::new();
+    };
+
+    let Some(swaps) = value
+        .get("swaps")
+        .and_then(|s| s.as_array())
+    else {
+        return String::new();
+    };
+
+    let swap = if is_input { swaps.first() } else { swaps.last() };
+
+    let field = if is_input { "token_in" } else { "token_out" };
+
+    swap.and_then(|s| s.get(field))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Extract hop_count and split_count from route JSON.
 ///
 /// hop_count = number of swaps in the route.
@@ -476,10 +536,14 @@ fn estimate_temporal_features(block_number: u64, chain_id: u64) -> (Option<u32>,
 
 /// Join the three data sources by (quote_id, solver_id) and produce unified
 /// records with computed features.
+///
+/// `pair_classifications` maps `(token_in, token_out)` to CoinGecko pair data.
 fn join_datasets(
     quote_logs: &[QuoteLogRow],
     hop_decays: &[HopDecayRow],
     route_decays: &[RouteDecayRow],
+    pair_classifications: &HashMap<(String, String), PairClassification>,
+    token_categories: &HashMap<String, String>,
 ) -> Vec<UnifiedRecord> {
     // Index quote logs by (quote_id, solver_id)
     let mut quote_map: HashMap<(String, String), &QuoteLogRow> = HashMap::new();
@@ -546,8 +610,16 @@ fn join_datasets(
         let is_l2 = ql.chain_id == BASE_CHAIN_ID;
         let (hour_of_day, day_of_week) = estimate_temporal_features(ql.block_number, ql.chain_id);
 
-        // Token/pair features deferred to CoinGecko integration
-        // TODO: add token_category, pair_volatility_24h, token_market_cap
+        let pair_key = (ql.token_in.clone(), ql.token_out.clone());
+        let pair = pair_classifications.get(&pair_key);
+        let token_in_category = token_categories
+            .get(&ql.token_in)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let token_out_category = token_categories
+            .get(&ql.token_out)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
 
         records.push(UnifiedRecord {
             quote_id: quote_id.clone(),
@@ -559,6 +631,14 @@ fn join_datasets(
             amount_out: ql.amount_out.clone(),
             gas_estimate: ql.gas_estimate,
             algorithm_type: ql.algorithm_type.clone(),
+            token_in: ql.token_in.clone(),
+            token_out: ql.token_out.clone(),
+            token_in_category,
+            token_out_category,
+            pair_bucket: pair.map_or_else(|| "unknown".to_string(), |p| p.bucket.clone()),
+            log_mcap_ratio: pair.and_then(|p| p.log_mcap_ratio),
+            min_mcap: pair.and_then(|p| p.min_mcap),
+            max_mcap: pair.and_then(|p| p.max_mcap),
             block_offset: *block_offset,
             max_hop_decay_bps: hop_agg.map_or(0.0, |h| h.max_hop_decay_bps),
             route_decay_bps: hop_agg.map_or(0.0, |h| h.route_decay_bps),
@@ -594,6 +674,16 @@ fn unified_schema() -> Schema {
         Field::new("amount_out", DataType::Utf8, false),
         Field::new("gas_estimate", DataType::UInt64, false),
         Field::new("algorithm_type", DataType::Utf8, false),
+        // Token addresses
+        Field::new("token_in", DataType::Utf8, false),
+        Field::new("token_out", DataType::Utf8, false),
+        // Token/pair classification (CoinGecko)
+        Field::new("token_in_category", DataType::Utf8, false),
+        Field::new("token_out_category", DataType::Utf8, false),
+        Field::new("pair_bucket", DataType::Utf8, false),
+        Field::new("log_mcap_ratio", DataType::Float64, true),
+        Field::new("min_mcap", DataType::Float64, true),
+        Field::new("max_mcap", DataType::Float64, true),
         // Hop decay (aggregated)
         Field::new("block_offset", DataType::UInt32, false),
         Field::new("max_hop_decay_bps", DataType::Float64, false),
@@ -661,6 +751,14 @@ fn write_unified_parquet_file(
     let mut amount_out = StringBuilder::with_capacity(n, n * 32);
     let mut gas_estimate = UInt64Builder::with_capacity(n);
     let mut algorithm_type = StringBuilder::with_capacity(n, n * 20);
+    let mut token_in = StringBuilder::with_capacity(n, n * 42);
+    let mut token_out = StringBuilder::with_capacity(n, n * 42);
+    let mut token_in_category = StringBuilder::with_capacity(n, n * 12);
+    let mut token_out_category = StringBuilder::with_capacity(n, n * 12);
+    let mut pair_bucket = StringBuilder::with_capacity(n, n * 20);
+    let mut log_mcap_ratio = Float64Builder::with_capacity(n);
+    let mut min_mcap = Float64Builder::with_capacity(n);
+    let mut max_mcap = Float64Builder::with_capacity(n);
     let mut block_offset = UInt32Builder::with_capacity(n);
     let mut max_hop_decay_bps = Float64Builder::with_capacity(n);
     let mut route_decay_bps = Float64Builder::with_capacity(n);
@@ -684,6 +782,25 @@ fn write_unified_parquet_file(
         amount_out.append_value(&r.amount_out);
         gas_estimate.append_value(r.gas_estimate);
         algorithm_type.append_value(&r.algorithm_type);
+        token_in.append_value(&r.token_in);
+        token_out.append_value(&r.token_out);
+        token_in_category.append_value(&r.token_in_category);
+        token_out_category.append_value(&r.token_out_category);
+        pair_bucket.append_value(&r.pair_bucket);
+
+        match r.log_mcap_ratio {
+            Some(v) => log_mcap_ratio.append_value(v),
+            None => log_mcap_ratio.append_null(),
+        }
+        match r.min_mcap {
+            Some(v) => min_mcap.append_value(v),
+            None => min_mcap.append_null(),
+        }
+        match r.max_mcap {
+            Some(v) => max_mcap.append_value(v),
+            None => max_mcap.append_null(),
+        }
+
         block_offset.append_value(r.block_offset);
         max_hop_decay_bps.append_value(r.max_hop_decay_bps);
         route_decay_bps.append_value(r.route_decay_bps);
@@ -729,6 +846,14 @@ fn write_unified_parquet_file(
         Arc::new(amount_out.finish()),
         Arc::new(gas_estimate.finish()),
         Arc::new(algorithm_type.finish()),
+        Arc::new(token_in.finish()),
+        Arc::new(token_out.finish()),
+        Arc::new(token_in_category.finish()),
+        Arc::new(token_out_category.finish()),
+        Arc::new(pair_bucket.finish()),
+        Arc::new(log_mcap_ratio.finish()),
+        Arc::new(min_mcap.finish()),
+        Arc::new(max_mcap.finish()),
         Arc::new(block_offset.finish()),
         Arc::new(max_hop_decay_bps.finish()),
         Arc::new(route_decay_bps.finish()),
@@ -761,7 +886,8 @@ fn write_unified_parquet_file(
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -800,8 +926,89 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Collect unique token addresses for CoinGecko lookup
+    let mut unique_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ql in &quote_logs {
+        if !ql.token_in.is_empty() {
+            unique_tokens.insert(ql.token_in.clone());
+        }
+        if !ql.token_out.is_empty() {
+            unique_tokens.insert(ql.token_out.clone());
+        }
+    }
+
+    // Fetch CoinGecko metadata for all unique tokens
+    let mut token_categories: HashMap<String, String> = HashMap::new();
+    let mut pair_classifications: HashMap<(String, String), PairClassification> = HashMap::new();
+
+    if !args.coingecko_api_key.is_empty() {
+        let mut cg_client = CoinGeckoClient::new(args.coingecko_api_key.clone());
+
+        info!(tokens = unique_tokens.len(), "fetching CoinGecko metadata for unique tokens");
+
+        for address in &unique_tokens {
+            match cg_client
+                .get_token_metadata(address)
+                .await
+            {
+                Ok(meta) => {
+                    token_categories.insert(address.clone(), meta.category.as_str().to_string());
+                }
+                Err(e) => {
+                    warn!(
+                        address = %address,
+                        error = %e,
+                        "failed to fetch CoinGecko metadata, using unknown"
+                    );
+                    token_categories.insert(address.clone(), "unknown".to_string());
+                }
+            }
+        }
+
+        // Classify all unique (token_in, token_out) pairs
+        let mut unique_pairs: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for ql in &quote_logs {
+            if !ql.token_in.is_empty() && !ql.token_out.is_empty() {
+                unique_pairs.insert((ql.token_in.clone(), ql.token_out.clone()));
+            }
+        }
+
+        for (tin, tout) in &unique_pairs {
+            // Clone metadata to avoid holding borrows across calls.
+            let meta_in = cg_client
+                .get_token_metadata(tin)
+                .await
+                .ok()
+                .cloned();
+            let meta_out = cg_client
+                .get_token_metadata(tout)
+                .await
+                .ok()
+                .cloned();
+            if let (Some(a), Some(b)) = (meta_in, meta_out) {
+                let classification = cg_client.classify_pair(&a, &b);
+                pair_classifications.insert((tin.clone(), tout.clone()), classification);
+            }
+        }
+
+        info!(
+            tokens = token_categories.len(),
+            pairs = pair_classifications.len(),
+            "CoinGecko classification complete"
+        );
+    } else {
+        info!("no CoinGecko API key, skipping token classification");
+    }
+
     // Join and compute features
-    let unified = join_datasets(&quote_logs, &hop_decays, &route_decays);
+    let unified = join_datasets(
+        &quote_logs,
+        &hop_decays,
+        &route_decays,
+        &pair_classifications,
+        &token_categories,
+    );
 
     info!(records = unified.len(), "assembled unified dataset");
 
@@ -840,6 +1047,7 @@ mod tests {
         assert_eq!(args.hop_decay_dir, PathBuf::from("/tmp/hops"));
         assert_eq!(args.route_decay_dir, PathBuf::from("/tmp/routes"));
         assert_eq!(args.output_dir, PathBuf::from("/tmp/out"));
+        assert_eq!(args.coingecko_api_key, "");
     }
 
     #[test]
@@ -922,6 +1130,8 @@ mod tests {
             n_alternatives: 2,
             gap_to_second_best_bps: None,
             slippage_tolerance: None,
+            token_in: "0x0101010101010101010101010101010101010101".to_string(),
+            token_out: "0x0202020202020202020202020202020202020202".to_string(),
             route_json: r#"{"swaps":[{"component_id":"p1","protocol":"uniswap_v2","split":0.0},{"component_id":"p2","protocol":"curve","split":0.0}]}"#.to_string(),
             calldata_hex: "abcd".to_string(),
         }];
@@ -1002,7 +1212,9 @@ mod tests {
         let hops = parse_hop_decay_rows(&hop_batches);
         let routes = parse_route_decay_rows(&route_batches);
 
-        let unified = join_datasets(&quotes, &hops, &routes);
+        let empty_pairs = HashMap::new();
+        let empty_cats = HashMap::new();
+        let unified = join_datasets(&quotes, &hops, &routes, &empty_pairs, &empty_cats);
 
         assert_eq!(unified.len(), 1);
 
@@ -1032,6 +1244,11 @@ mod tests {
         // Temporal features should be present for mainnet block 17.5M
         assert!(r.hour_of_day.is_some());
         assert!(r.day_of_week.is_some());
+
+        // Without CoinGecko data, categories default to "unknown"
+        assert_eq!(r.token_in_category, "unknown");
+        assert_eq!(r.token_out_category, "unknown");
+        assert_eq!(r.pair_bucket, "unknown");
     }
 
     #[test]
@@ -1049,7 +1266,9 @@ mod tests {
         let hops = parse_hop_decay_rows(&hop_batches);
         let routes = parse_route_decay_rows(&route_batches);
 
-        let unified = join_datasets(&quotes, &hops, &routes);
+        let empty_pairs = HashMap::new();
+        let empty_cats = HashMap::new();
+        let unified = join_datasets(&quotes, &hops, &routes, &empty_pairs, &empty_cats);
         assert_eq!(unified.len(), 1);
 
         let r = &unified[0];
@@ -1074,7 +1293,9 @@ mod tests {
         let hops = parse_hop_decay_rows(&hop_batches);
         let routes = parse_route_decay_rows(&route_batches);
 
-        let unified = join_datasets(&quotes, &hops, &routes);
+        let empty_pairs = HashMap::new();
+        let empty_cats = HashMap::new();
+        let unified = join_datasets(&quotes, &hops, &routes, &empty_pairs, &empty_cats);
         write_unified_parquet(output_dir.path(), &unified).expect("write unified parquet");
 
         // Verify partition directory exists
@@ -1091,7 +1312,7 @@ mod tests {
             .expect("has batch")
             .expect("batch ok");
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 21);
+        assert_eq!(batch.num_columns(), 29);
 
         let quote_ids = batch
             .column_by_name("quote_id")
@@ -1104,6 +1325,12 @@ mod tests {
             .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt32Type>())
             .expect("hop_count column");
         assert_eq!(hop_counts.value(0), 2);
+
+        let pair_buckets = batch
+            .column_by_name("pair_bucket")
+            .and_then(|c| c.as_string_opt::<i32>())
+            .expect("pair_bucket column");
+        assert_eq!(pair_buckets.value(0), "unknown");
     }
 
     #[test]
@@ -1120,13 +1347,15 @@ mod tests {
         let hops = parse_hop_decay_rows(&h);
         let routes = parse_route_decay_rows(&r);
 
-        let unified = join_datasets(&quotes, &hops, &routes);
+        let empty_pairs = HashMap::new();
+        let empty_cats = HashMap::new();
+        let unified = join_datasets(&quotes, &hops, &routes, &empty_pairs, &empty_cats);
         assert!(unified.is_empty());
     }
 
     #[test]
     fn unified_schema_has_expected_field_count() {
         let schema = unified_schema();
-        assert_eq!(schema.fields().len(), 21);
+        assert_eq!(schema.fields().len(), 29);
     }
 }
