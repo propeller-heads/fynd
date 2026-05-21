@@ -290,7 +290,7 @@ pub struct MarketState {
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ProtocolComponent>,
     /// All states indexed by their component ID.
-    pub(crate) simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
     /// Current gas price. None if not fetched yet.
