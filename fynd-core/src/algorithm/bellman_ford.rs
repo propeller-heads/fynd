@@ -379,7 +379,10 @@ impl Algorithm for BellmanFordAlgorithm {
 
         // Acquire read lock only for market data extraction, then release.
         let (token_map, market_subset) = {
-            let market = market.read(label.as_ref()).await;
+            let market = market
+                .read_opt(label.as_ref())
+                .await
+                .map_err(|e| AlgorithmError::Other(e.to_string()))?;
 
             let token_map: HashMap<NodeIndex, Token> = token_nodes
                 .iter()

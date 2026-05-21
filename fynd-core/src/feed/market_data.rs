@@ -52,6 +52,12 @@ pub struct OverlayEntry {
 /// The shared overlay registry: maps each label to its snapshot.
 type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
 
+/// Error returned by [`MarketData::read_labeled`] when the requested label is not registered as
+/// an overlay and does not match the current base-state label.
+#[derive(Debug, thiserror::Error)]
+#[error("label not found: {0}")]
+pub struct LabelNotFound(pub StateLabel);
+
 /// The main entry point for accessing market data.
 ///
 /// Cloning is cheap — all clones share the same underlying data and overlay registry.
@@ -75,24 +81,44 @@ impl MarketData {
         Self::new(Arc::new(RwLock::new(MarketState::new())))
     }
 
-    /// Acquires an overlay-aware view of the market data.
+    /// Acquires a base view of the market data with no overlay applied.
+    pub async fn read(&self) -> MarketDataView<'_> {
+        MarketDataView { guard: self.data.read().await, overlay: None }
+    }
+
+    /// Acquires an overlay-aware view scoped to `label`.
     ///
-    /// If `label` is `Some`, the view will expose overlay states registered under that label,
-    /// falling back to base state for pools not present in the overlay.
+    /// Succeeds when `label` is registered as an overlay **or** matches the current base-state
+    /// label (the block-number string set by `apply_block_update`). Returns
+    /// [`LabelNotFound`] otherwise so callers cannot silently fall back to stale data.
+    ///
     /// The overlay lock is held only briefly to clone the snapshot pointer; it is released
     /// before the view is returned, so solving never holds two locks simultaneously.
-    pub async fn read(&self, label: Option<&StateLabel>) -> MarketDataView<'_> {
+    pub async fn read_labeled(
+        &self,
+        label: &StateLabel,
+    ) -> Result<MarketDataView<'_>, LabelNotFound> {
         let guard = self.data.read().await;
-        let overlay = if let Some(label) = label {
-            self.overlays
-                .read()
-                .await
-                .get(label)
-                .map(|e| (label.clone(), Arc::clone(&e.states)))
-        } else {
-            None
-        };
-        MarketDataView { guard, overlay }
+        if let Some(e) = self.overlays.read().await.get(label) {
+            let states = Arc::clone(&e.states);
+            return Ok(MarketDataView { guard, overlay: Some((label.clone(), states)) });
+        }
+        if &guard.label == label {
+            return Ok(MarketDataView { guard, overlay: None });
+        }
+        Err(LabelNotFound(label.clone()))
+    }
+
+    /// Convenience wrapper: calls [`read_labeled`](Self::read_labeled) when `label` is `Some`,
+    /// otherwise delegates to the infallible [`read`](Self::read).
+    pub async fn read_opt(
+        &self,
+        label: Option<&StateLabel>,
+    ) -> Result<MarketDataView<'_>, LabelNotFound> {
+        match label {
+            Some(l) => self.read_labeled(l).await,
+            None => Ok(self.read().await),
+        }
     }
 
     /// Acquires an exclusive write guard on the base data store.
@@ -569,7 +595,10 @@ mod tests {
             .register_labeled_state(label.clone(), states, u64::MAX)
             .await;
 
-        let guard = market_ref.read(Some(&label)).await;
+        let guard = market_ref
+            .read_labeled(&label)
+            .await
+            .expect("label was just registered");
         // Base data is empty — overlay provides the state
         let sim = guard.get_simulation_state("pool_ab");
         assert!(sim.is_some());
@@ -591,7 +620,7 @@ mod tests {
             .await;
 
         // A handle with no label must not see the overlay
-        let guard = market_ref.read(None).await;
+        let guard = market_ref.read().await;
         assert!(guard
             .get_simulation_state("pool1")
             .is_none());
@@ -664,13 +693,19 @@ mod tests {
         .await;
 
         let label = "shared".to_string();
-        let guard_a = clone_a.read(Some(&label)).await;
+        let guard_a = clone_a
+            .read_labeled(&label)
+            .await
+            .expect("label was just registered");
         assert!(guard_a
             .get_simulation_state("pool_x")
             .is_some());
         drop(guard_a);
 
-        let guard_b = clone_b.read(Some(&label)).await;
+        let guard_b = clone_b
+            .read_labeled(&label)
+            .await
+            .expect("label was just registered");
         assert!(guard_b
             .get_simulation_state("pool_x")
             .is_some());
@@ -707,7 +742,10 @@ mod tests {
             )
             .await;
 
-        let guard = market_ref.read(Some(&label)).await;
+        let guard = market_ref
+            .read_labeled(&label)
+            .await
+            .expect("label was just registered");
         let ids: HashSet<ComponentId> = ["pool_ab".to_string()]
             .into_iter()
             .collect();
@@ -769,7 +807,7 @@ mod tests {
             })
             .await;
 
-        let guard = market_ref.read(None).await;
+        let guard = market_ref.read().await;
         assert_eq!(
             guard
                 .last_updated()

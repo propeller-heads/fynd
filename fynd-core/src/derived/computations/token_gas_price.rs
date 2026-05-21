@@ -330,7 +330,7 @@ impl TokenGasPriceComputation {
     > {
         // Brief lock 1: topology + gas_price + block (all cheap clones)
         let (topology, gas_price, block) = {
-            let guard = market.read(None).await;
+            let guard = market.read().await;
             let topology = guard.component_topology();
             let block = guard
                 .last_updated()
@@ -366,7 +366,7 @@ impl TokenGasPriceComputation {
         // Brief lock 2: extract only the simulation states we need
         let subset = {
             market
-                .read(None)
+                .read()
                 .await
                 .extract_subset(&needed_component_ids)
         };

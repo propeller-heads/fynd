@@ -564,7 +564,10 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 4: Brief lock — check gas price + extract market subset for simulation
         let market = {
-            let market = market.read(label.as_ref()).await;
+            let market = market
+                .read_opt(label.as_ref())
+                .await
+                .map_err(|e| AlgorithmError::Other(e.to_string()))?;
             if market.gas_price().is_none() {
                 return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
             }

@@ -794,7 +794,7 @@ impl Solver {
         loop {
             let market_ready = self
                 .market_data
-                .read(None)
+                .read()
                 .await
                 .last_updated()
                 .is_some();

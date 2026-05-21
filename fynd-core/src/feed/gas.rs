@@ -145,7 +145,7 @@ mod tests {
         // Gas price should still be None (error path skips update)
         assert!(
             market_data
-                .read(None)
+                .read()
                 .await
                 .gas_price()
                 .is_none(),
@@ -159,7 +159,7 @@ mod tests {
 
         assert!(
             market_data
-                .read(None)
+                .read()
                 .await
                 .gas_price()
                 .is_some(),
@@ -191,7 +191,7 @@ mod tests {
 
             assert!(
                 market_data
-                    .read(None)
+                    .read()
                     .await
                     .gas_price()
                     .is_none(),
@@ -205,7 +205,7 @@ mod tests {
             .expect("ack should succeed after recovery");
 
         let gas = market_data
-            .read(None)
+            .read()
             .await
             .gas_price()
             .cloned();

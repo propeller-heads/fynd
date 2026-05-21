@@ -99,7 +99,7 @@ impl HealthTracker {
 
     /// Returns milliseconds since the last market data update.
     pub(crate) async fn age_ms(&self) -> u64 {
-        let data = self.market_data.read(None).await;
+        let data = self.market_data.read().await;
         match data.last_updated() {
             Some(block_info) => {
                 let now = SystemTime::now()
@@ -116,7 +116,7 @@ impl HealthTracker {
 
     /// Returns milliseconds since the last gas price update, if available.
     pub(crate) async fn gas_price_age_ms(&self) -> Option<u64> {
-        let data = self.market_data.read(None).await;
+        let data = self.market_data.read().await;
         let gas_price = data.gas_price()?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

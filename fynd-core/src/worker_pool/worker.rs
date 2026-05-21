@@ -101,7 +101,7 @@ where
     pub async fn initialize_graph(&mut self) {
         let topology = {
             // read lock on market data
-            let market = self.market_data.read(None).await;
+            let market = self.market_data.read().await;
             market.component_topology().clone() // clone to avoid holding the lock
         };
 
@@ -173,8 +173,9 @@ where
             // across the algorithm's own read call.
             let view = self
                 .market_data
-                .read(params.state_label())
-                .await;
+                .read_opt(params.state_label())
+                .await
+                .map_err(|e| SolveError::NotReady(e.to_string()))?;
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
@@ -435,7 +436,7 @@ where
                             // Update edge weights when a relevant computation completes.
                             if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
                                 if self.requirements.is_required(computation_id) {
-                                    let market = self.market_data.read(None).await;
+                                    let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
                                     let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
                                     debug!(
@@ -460,7 +461,7 @@ where
                                 skipped
                             );
                             // Recover by updating with whatever derived data is available.
-                            let market = self.market_data.read(None).await;
+                            let market = self.market_data.read().await;
                             let derived = self.derived_data.read().await;
                             let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
                             debug!(

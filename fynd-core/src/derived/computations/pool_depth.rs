@@ -112,7 +112,7 @@ impl DerivedComputation for PoolDepthComputation {
 
         // Snapshot market data under brief lock.
         let (snapshot, components_to_compute) = {
-            let market_guard = market.read(None).await;
+            let market_guard = market.read().await;
             let topology = market_guard.component_topology();
 
             // Determine which components need (re)computation.
