@@ -51,11 +51,12 @@ impl Algorithm for DirectPoolAlgorithm {
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: SharedMarketDataRef,
+        market: MarketData,
+        label: Option<StateLabel>,
         _derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
-        let market = market.read().await;
+        let market = market.read(label.as_ref()).await;
 
         let gas_price = market
             .gas_price()
