@@ -253,13 +253,13 @@ async fn resim_at_block(
                 let sender = "0x0000000000000000000000000000000000000001";
                 match requote(client, url, &token_in, &token_out, &pq.event.amount_in, sender).await
                 {
-                    Some(fresh_out) => {
+                    Some(fresh_out) if !fresh_out.is_empty() && fresh_out != "0" => {
                         let mm =
                             compute_decay_bps(&pq.event.amount_out, &fresh_out).unwrap_or(f64::NAN);
                         let es = route_decay - mm;
                         (Some(fresh_out), mm, es)
                     }
-                    None => (None, f64::NAN, f64::NAN),
+                    _ => (None, f64::NAN, f64::NAN),
                 }
             } else {
                 (None, f64::NAN, f64::NAN)
