@@ -168,7 +168,9 @@ impl MarketData {
             .write()
             .await
             .retain(|_, entry| entry.valid_until >= new_block_number);
-        update(&mut *self.data.write().await);
+        let mut data = self.data.write().await;
+        data.label = new_block_number.to_string();
+        update(&mut data);
     }
 
     /// Returns the labels of all registered overlays.
@@ -216,7 +218,7 @@ impl<'a> MarketDataView<'a> {
     /// If no overlay is active, this is equivalent to `self.extract_subset(component_ids)`.
     pub fn extract_subset_with_overlay(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
         let mut subset = self.guard.extract_subset(component_ids);
-        if let Some((_, ref states)) = self.overlay {
+        if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
                 if subset
                     .simulation_states
@@ -227,6 +229,7 @@ impl<'a> MarketDataView<'a> {
                         .insert(id.clone(), state.clone_box());
                 }
             }
+            subset.label = label.clone();
         }
         subset
     }
@@ -278,6 +281,12 @@ impl<'a> MarketDataView<'a> {
 /// The indexer updates it, and solvers read from it.
 #[derive(Debug, Default)]
 pub struct MarketState {
+    /// Identifies the block or overlay this state was produced from.
+    ///
+    /// Set to the block number string by `apply_block_update`; copied from the overlay label by
+    /// `extract_subset_with_overlay` when an overlay is active. Empty string until the first block
+    /// is applied.
+    label: StateLabel,
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ProtocolComponent>,
     /// All states indexed by their component ID.
@@ -297,6 +306,7 @@ impl MarketState {
     /// Creates a new empty MarketState.
     pub fn new() -> Self {
         Self {
+            label: String::new(),
             components: HashMap::new(),
             simulation_states: HashMap::new(),
             tokens: HashMap::new(),
@@ -304,6 +314,11 @@ impl MarketState {
             protocol_sync_status: HashMap::new(),
             last_updated: None,
         }
+    }
+
+    /// Returns the label identifying the block or overlay this state was produced from.
+    pub fn label(&self) -> &StateLabel {
+        &self.label
     }
 
     /// Returns the block info for the last update.
@@ -449,6 +464,7 @@ impl MarketState {
             .collect();
 
         MarketState {
+            label: self.label.clone(),
             components,
             simulation_states,
             tokens,
