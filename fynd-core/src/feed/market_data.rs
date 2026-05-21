@@ -52,11 +52,13 @@ pub struct OverlayEntry {
 /// The shared overlay registry: maps each label to its snapshot.
 type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
 
-/// Error returned by [`MarketData::read_labeled`] when the requested label is not registered as
-/// an overlay and does not match the current base-state label.
+/// Error returned by [`MarketData::read_labeled`] when the requested label cannot be resolved.
 #[derive(Debug, thiserror::Error)]
-#[error("label not found: {0}")]
-pub struct LabelNotFound(pub StateLabel);
+pub enum ReadLabeledError {
+    /// The label is not registered as an overlay and does not match the current base-state label.
+    #[error("label not found: {0}")]
+    NotFound(StateLabel),
+}
 
 /// The main entry point for accessing market data.
 ///
@@ -90,14 +92,14 @@ impl MarketData {
     ///
     /// Succeeds when `label` is registered as an overlay **or** matches the current base-state
     /// label (the block-number string set by `apply_block_update`). Returns
-    /// [`LabelNotFound`] otherwise so callers cannot silently fall back to stale data.
+    /// [`ReadLabeledError::NotFound`] otherwise so callers cannot silently fall back to stale data.
     ///
     /// The overlay lock is held only briefly to clone the snapshot pointer; it is released
     /// before the view is returned, so solving never holds two locks simultaneously.
     pub async fn read_labeled(
         &self,
         label: &StateLabel,
-    ) -> Result<MarketDataView<'_>, LabelNotFound> {
+    ) -> Result<MarketDataView<'_>, ReadLabeledError> {
         let guard = self.data.read().await;
         if let Some(e) = self.overlays.read().await.get(label) {
             let states = Arc::clone(&e.states);
@@ -106,19 +108,7 @@ impl MarketData {
         if &guard.label == label {
             return Ok(MarketDataView { guard, overlay: None });
         }
-        Err(LabelNotFound(label.clone()))
-    }
-
-    /// Convenience wrapper: calls [`read_labeled`](Self::read_labeled) when `label` is `Some`,
-    /// otherwise delegates to the infallible [`read`](Self::read).
-    pub async fn read_opt(
-        &self,
-        label: Option<&StateLabel>,
-    ) -> Result<MarketDataView<'_>, LabelNotFound> {
-        match label {
-            Some(l) => self.read_labeled(l).await,
-            None => Ok(self.read().await),
-        }
+        Err(ReadLabeledError::NotFound(label.clone()))
     }
 
     /// Acquires an exclusive write guard on the base data store.

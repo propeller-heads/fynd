@@ -70,10 +70,13 @@ impl Algorithm for DirectPoolAlgorithm {
         _derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
-        let market = market
-            .read_opt(label.as_ref())
-            .await
-            .map_err(|e| AlgorithmError::Other(e.to_string()))?;
+        let market = match label.as_ref() {
+            Some(l) => market
+                .read_labeled(l)
+                .await
+                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
+            None => market.read().await,
+        };
 
         let gas_price = market
             .gas_price()

@@ -171,11 +171,14 @@ where
         let (block_info, solved_against) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
-            let view = self
-                .market_data
-                .read_opt(params.state_label())
-                .await
-                .map_err(|e| SolveError::NotReady(e.to_string()))?;
+            let view = match params.state_label() {
+                Some(l) => self
+                    .market_data
+                    .read_labeled(l)
+                    .await
+                    .map_err(|e| SolveError::NotReady(e.to_string()))?,
+                None => self.market_data.read().await,
+            };
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
