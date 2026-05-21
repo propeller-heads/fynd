@@ -45,7 +45,7 @@ Fynd puts you in control:
 
 ### Key Design Principles
 
-* **Single source of truth**: All market data lives in one `SharedMarketData` structure. A single feed writes to it; all workers read from it. No duplication.
+* **Single source of truth**: All market data lives in one `MarketState` structure. A single feed writes to it; all workers read from it. No duplication.
 * **Algorithm-agnostic**: Built around a pluggable `Algorithm` trait. Different algorithms use different graph representations and strategies. Multiple algorithms compete in parallel; the best result wins.
 * **Performance-first**: CPU-bound route finding runs on dedicated OS threads (not the async runtime). Each worker pool has its own task queue for independent backpressure and scaling.
 * **Observability built-in**: Prometheus metrics, structured logging via `tracing`, and health endpoints are first-class citizens.
@@ -79,7 +79,7 @@ Fynd works with any protocol Tycho supports. See the [list of supported protocol
 <figure><picture><source srcset=".gitbook/assets/how-it-works-darkmode.png" media="(prefers-color-scheme: dark)"><img src=".gitbook/assets/how-it-works-lightmode.png" alt="How It Works"></picture><figcaption></figcaption></figure>
 
 1. **TychoFeed** connects to **Tycho Streams** ([on-chain protocols](https://docs.propellerheads.xyz/tycho/for-solvers/simulation#streaming-protocol-states) and [RFQs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols#stream-real-time-price-updates)) and processes market updates (added/removed components and state changes) every block.
-2. **SharedMarketData** stores all component states, tokens, and gas prices in a single shared structure.
+2. **MarketState** stores all component states, tokens, and gas prices in a single shared structure.
 3. When a **quote request** arrives via HTTP, the **WorkerPoolRouter** fans it out to all worker pools in parallel.
 4. Each **Worker Pool** runs a specific algorithm. Workers compete to pick up the task, find routes through their local graph, simulate swaps against shared market state, and return ranked results.
 5. The **WorkerPoolRouter** collects results from all pools, picks the best solution by `amount_out_net_gas`, optionally encodes it for execution against the `TychoRouter`, and returns it.

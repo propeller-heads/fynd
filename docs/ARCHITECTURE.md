@@ -21,7 +21,7 @@ This modular architecture allows users to:
 ## Design Decisions
 
 * **Concurrency Model**: Hybrid async/threaded -- I/O on tokio, route finding on dedicated OS threads
-* **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for SharedMarketData (single writer, many readers)
+* **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for MarketState (single writer, many readers)
 * **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its preferred graph representation
 * **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
 * **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; WorkerPoolRouter selects the best result
@@ -77,7 +77,7 @@ This modular architecture allows users to:
                                    │ Reads shared data
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────────────────┐
-│                         SharedMarketData (Arc<RwLock<>>)                           │
+│                         MarketState (Arc<RwLock<>>, via MarketData handle)          │
 │  ┌────────────────────────────────────────────────────────────────────────────┐    │
 │  │  components: HashMap<ComponentId, ProtocolComponent>                       │    │
 │  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>             │    │
@@ -93,7 +93,7 @@ This modular architecture allows users to:
 │                              TychoFeed                                      │
 │                     Background task (single instance)                       │
 │  ┌────────────────────────────────────────────────────────────────────┐     │
-│  │  Tycho Stream ──► Update SharedMarketData ──► Broadcast Event      │     │
+│  │  Tycho Stream ──► Update MarketState ──► Broadcast Event            │     │
 │  └────────────────────────────────────────────────────────────────────┘     │
 │                                   │                                         │
 │                                   ▼ broadcast::Sender<MarketEvent>          │
@@ -226,13 +226,13 @@ Graph management infrastructure:
 
 ***
 
-### 8. SharedMarketData
+### 8. MarketState / MarketData
 
 **Crate:** `fynd-core` **Location:** `fynd-core/src/feed/market_data.rs`
 
-Single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring).
+`MarketState` is the single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring). `MarketData` is the cheap-to-clone shared handle used to access it — call `read()` for a base view or `read_labeled(label)` for an overlay-aware view.
 
-Provides `extract_subset()` for creating filtered snapshots that algorithms can use without holding the main lock.
+Provides `extract_subset_with_overlay()` for creating filtered snapshots that algorithms can use without holding the main lock.
 
 ***
 
@@ -240,7 +240,7 @@ Provides `extract_subset()` for creating filtered snapshots that algorithms can 
 
 **Crate:** `fynd-core` **Location:** `fynd-core/src/feed/tycho_feed.rs`
 
-Background task that connects to Tycho's WebSocket API, processes component/state updates, updates SharedMarketData, and broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis (components are added at `min_tvl` and removed at `min_tvl / tvl_buffer_ratio`), token recency filtering (`traded_n_days_ago`), blocklisting, and token quality filtering.
+Background task that connects to Tycho's WebSocket API, processes component/state updates, updates `MarketState` (via `MarketData`), and broadcasts `MarketEvent`s. Applies TVL filtering with hysteresis (components are added at `min_tvl` and removed at `min_tvl / tvl_buffer_ratio`), token recency filtering (`traded_n_days_ago`), blocklisting, and token quality filtering.
 
 ***
 
@@ -316,7 +316,7 @@ Tycho WebSocket Stream
     │
     ▼
 TychoFeed
-    ├──► Write SharedMarketData (RwLock write)
+    ├──► Write MarketState (RwLock write)
     ├──► Broadcast MarketEvent
     │       ├──► Worker 1 GraphManager (update graph)
     │       ├──► Worker 2 GraphManager (update graph)
@@ -359,4 +359,4 @@ Worker Pool B (dedicated OS threads)
 * Workers -> WorkerPoolRouter: `oneshot` channel (single response)
 * TychoFeed -> Workers: `broadcast` channel (MarketEvent)
 * ComputationManager -> Workers: `broadcast` channel (DerivedDataEvent)
-* All -> SharedMarketData: `Arc<RwLock<>>` (read-heavy)
+* All -> MarketState (via MarketData): `Arc<RwLock<>>` (read-heavy)

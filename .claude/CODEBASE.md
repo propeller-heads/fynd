@@ -55,8 +55,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in: `MostLiquidAlgorithm`, `BellmanFordAlgorithm`
-5. **SharedMarketData** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state
-6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → SharedMarketData → broadcast events
+5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state; accessed via `MarketData` handle
+6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
 9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
@@ -65,9 +65,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 **Market update path** (continuous, every block):
 1. `TychoFeed` receives state updates from Tycho WebSocket
-2. Writes new component/token/state data into `SharedMarketData` (write lock)
+2. Writes new component/token/state data into `MarketState` (write lock)
 3. Broadcasts `MarketEvent` → each `SolverWorker` updates its local graph via `GraphManager`
-4. Signals `GasPriceFetcher` → fetches gas price from RPC node → writes to `SharedMarketData`
+4. Signals `GasPriceFetcher` → fetches gas price from RPC node → writes to `MarketState`
 5. Triggers `ComputationManager` → runs spot prices → pool depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
 
 **Quote request path** (`POST /v1/quote`):
