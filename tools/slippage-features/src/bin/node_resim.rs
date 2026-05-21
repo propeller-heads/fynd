@@ -2,7 +2,7 @@
 //! resimulates routes via `eth_call` with storage overrides against an
 //! archive node.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use alloy::{
     eips::BlockId,
@@ -48,14 +48,6 @@ struct Args {
     /// Sender address for eth_call
     #[arg(long, default_value = "0x0000000000000000000000000000000000000001")]
     sender: String,
-
-    /// Balance storage slot position (default: 0, common for most ERC-20s)
-    #[arg(long, default_value_t = 0)]
-    balance_slot_position: u64,
-
-    /// Allowance storage slot position (default: 1, common for most ERC-20s)
-    #[arg(long, default_value_t = 1)]
-    allowance_slot_position: u64,
 }
 
 /// A parsed quote log row with the fields needed for resimulation.
@@ -88,6 +80,129 @@ fn allowance_slot_at(owner: Address, spender: Address, position: u64) -> B256 {
     buf[12..32].copy_from_slice(spender.as_slice());
     buf[32..64].copy_from_slice(inner.as_slice());
     keccak256(buf)
+}
+
+const MAX_PROBE_SLOT: u64 = 20;
+
+/// Sentinel written to a candidate storage slot during balance/allowance probing.
+///
+/// Deliberately avoids high bits so tokens that mask upper bits (e.g. USDC packs a
+/// blacklist flag in bit 255 of its balance slot) still return this value exactly from
+/// `balanceOf`/`allowance`, allowing an exact-match check.
+const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef, 0, 0, 0]);
+
+/// Build a single-slot state override for probing.
+fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOverride {
+    let mut state_diff = B256HashMap::default();
+    state_diff.insert(slot, value);
+    let mut overrides = StateOverride::default();
+    overrides
+        .insert(contract, AccountOverride { state_diff: Some(state_diff), ..Default::default() });
+    overrides
+}
+
+/// ABI-encode `balanceOf(address)`: selector 0x70a08231 + left-padded address.
+fn encode_balance_of(account: Address) -> Vec<u8> {
+    let mut data = vec![0x70, 0xa0, 0x82, 0x31]; // balanceOf selector
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(account.as_slice());
+    data
+}
+
+/// ABI-encode `allowance(address,address)`: selector 0xdd62ed3e + two left-padded addresses.
+fn encode_allowance(owner: Address, spender: Address) -> Vec<u8> {
+    let mut data = vec![0xdd, 0x62, 0xed, 0x3e]; // allowance selector
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(owner.as_slice());
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(spender.as_slice());
+    data
+}
+
+/// Brute-force probe positions 0..=20 to find the balance storage slot.
+async fn find_balance_slot(
+    provider: &impl Provider,
+    token: Address,
+    holder: Address,
+) -> anyhow::Result<u64> {
+    let calldata = encode_balance_of(holder);
+    let sentinel = B256::from(PROBE_SENTINEL);
+    for position in 0..=MAX_PROBE_SLOT {
+        let slot = balance_slot_at(holder, position);
+        let result = provider
+            .call(TransactionRequest {
+                to: Some(alloy::primitives::TxKind::Call(token)),
+                input: Bytes::from(calldata.clone()).into(),
+                ..Default::default()
+            })
+            .overrides(state_override_single(token, slot, sentinel))
+            .await?;
+        if result.len() >= 32 && result[..32] == *sentinel.as_slice() {
+            return Ok(position);
+        }
+    }
+    anyhow::bail!(
+        "could not detect balance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
+         the token may use a non-standard storage layout"
+    )
+}
+
+/// Brute-force probe positions 0..=20 to find the allowance storage slot.
+async fn find_allowance_slot(
+    provider: &impl Provider,
+    token: Address,
+    owner: Address,
+    spender: Address,
+) -> anyhow::Result<u64> {
+    let calldata = encode_allowance(owner, spender);
+    let sentinel = B256::from(PROBE_SENTINEL);
+    for position in 0..=MAX_PROBE_SLOT {
+        let slot = allowance_slot_at(owner, spender, position);
+        let result = provider
+            .call(TransactionRequest {
+                to: Some(alloy::primitives::TxKind::Call(token)),
+                input: Bytes::from(calldata.clone()).into(),
+                ..Default::default()
+            })
+            .overrides(state_override_single(token, slot, sentinel))
+            .await?;
+        if result.len() >= 32 && result[..32] == *sentinel.as_slice() {
+            return Ok(position);
+        }
+    }
+    anyhow::bail!(
+        "could not detect allowance slot for {token:#x} (tried 0..={MAX_PROBE_SLOT}); \
+         the token may use a non-standard storage layout"
+    )
+}
+
+/// Cached balance and allowance slot positions for a token.
+struct SlotPositions {
+    balance: u64,
+    allowance: u64,
+}
+
+/// Detect (or look up cached) balance and allowance slot positions for a token.
+async fn detect_slots(
+    provider: &impl Provider,
+    cache: &mut HashMap<Address, SlotPositions>,
+    token: Address,
+    sender: Address,
+    router: Address,
+) -> anyhow::Result<(u64, u64)> {
+    if let Some(cached) = cache.get(&token) {
+        return Ok((cached.balance, cached.allowance));
+    }
+    let balance_pos = find_balance_slot(provider, token, sender).await?;
+    let allowance_pos = find_allowance_slot(provider, token, sender, router).await?;
+    debug!(
+        token = %token,
+        balance_slot = balance_pos,
+        allowance_slot = allowance_pos,
+        "detected storage slots"
+    );
+    cache.insert(token, SlotPositions { balance: balance_pos, allowance: allowance_pos });
+    Ok((balance_pos, allowance_pos))
 }
 
 /// Extract the first hop's `token_in` address from the route JSON.
@@ -363,8 +478,6 @@ async fn main() -> anyhow::Result<()> {
         max_block_offset = args.max_block_offset,
         sender = %sender,
         router = %router,
-        balance_slot_position = args.balance_slot_position,
-        allowance_slot_position = args.allowance_slot_position,
         "starting node resim"
     );
 
@@ -380,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut all_records: Vec<RouteDecayRecord> = Vec::new();
     let mut skipped = 0u64;
+    let mut slot_cache: HashMap<Address, SlotPositions> = HashMap::new();
 
     for (idx, quote) in quotes.iter().enumerate() {
         if quote.calldata_hex.is_empty() {
@@ -401,13 +515,23 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let overrides = build_token_overrides(
-            token_in,
-            sender,
-            router,
-            args.balance_slot_position,
-            args.allowance_slot_position,
-        );
+        let (balance_pos, allowance_pos) =
+            match detect_slots(&provider, &mut slot_cache, token_in, sender, router).await {
+                Ok(positions) => positions,
+                Err(e) => {
+                    warn!(
+                        quote_id = %quote.quote_id,
+                        token = %token_in,
+                        error = %e,
+                        "cannot detect storage slots, skipping"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+        let overrides =
+            build_token_overrides(token_in, sender, router, balance_pos, allowance_pos);
 
         for offset in 1..=args.max_block_offset {
             let record =
@@ -457,8 +581,6 @@ mod tests {
         assert_eq!(args.max_block_offset, 10);
         assert_eq!(args.router_address, "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35");
         assert_eq!(args.sender, "0x0000000000000000000000000000000000000001");
-        assert_eq!(args.balance_slot_position, 0);
-        assert_eq!(args.allowance_slot_position, 1);
     }
 
     #[test]
@@ -491,15 +613,9 @@ mod tests {
             "0xDEAD000000000000000000000000000000000000",
             "--sender",
             "0xBEEF000000000000000000000000000000000000",
-            "--balance-slot-position",
-            "3",
-            "--allowance-slot-position",
-            "4",
         ]);
         assert_eq!(args.router_address, "0xDEAD000000000000000000000000000000000000");
         assert_eq!(args.sender, "0xBEEF000000000000000000000000000000000000");
-        assert_eq!(args.balance_slot_position, 3);
-        assert_eq!(args.allowance_slot_position, 4);
     }
 
     #[test]
@@ -622,6 +738,29 @@ mod tests {
             .unwrap();
         let slot = allowance_slot_at(owner, spender, 1);
         assert_ne!(slot, B256::ZERO);
+    }
+
+    #[test]
+    fn encode_balance_of_has_correct_selector() {
+        let addr: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap();
+        let encoded = encode_balance_of(addr);
+        assert_eq!(encoded.len(), 36);
+        assert_eq!(&encoded[..4], &[0x70, 0xa0, 0x82, 0x31]);
+    }
+
+    #[test]
+    fn encode_allowance_has_correct_selector() {
+        let owner: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap();
+        let spender: Address = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+            .parse()
+            .unwrap();
+        let encoded = encode_allowance(owner, spender);
+        assert_eq!(encoded.len(), 68);
+        assert_eq!(&encoded[..4], &[0xdd, 0x62, 0xed, 0x3e]);
     }
 
     #[test]
