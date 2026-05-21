@@ -236,7 +236,7 @@ impl WorkerPoolRouter {
                 .encoding_options()
                 .is_none()
         {
-            let force_options = crate::EncodingOptions::new(1.0);
+            let force_options = crate::EncodingOptions::new(0.9999);
             order_quotes = self
                 .encoder
                 .encode(order_quotes, force_options)
