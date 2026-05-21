@@ -565,10 +565,15 @@ impl WorkerPoolRouter {
             .collect();
 
         for (rank, q) in quotes.iter().enumerate() {
-            let route = q
-                .route()
-                .map(ObservedRoute::from)
-                .unwrap_or(ObservedRoute { swaps: vec![] });
+            // Skip quotes with no route (solver found nothing).
+            let Some(route_ref) = q.route() else {
+                continue;
+            };
+            if route_ref.swaps().is_empty() {
+                continue;
+            }
+
+            let route = ObservedRoute::from(route_ref);
 
             let event = QuoteProducedEvent {
                 request_id: request_id.clone(),
