@@ -41,6 +41,10 @@ struct Args {
     /// CoinGecko API key for token classification
     #[arg(long, env = "COINGECKO_API_KEY", default_value = "")]
     coingecko_api_key: String,
+
+    /// Block gap threshold for temporal gap detection (default 100)
+    #[arg(long, default_value_t = 100)]
+    gap_threshold: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -883,6 +887,60 @@ fn write_unified_parquet_file(
 }
 
 // ---------------------------------------------------------------------------
+// Temporal gap detection
+// ---------------------------------------------------------------------------
+
+/// Detect temporal gaps in block coverage from quote log data.
+///
+/// Sorts all observed block numbers and reports consecutive gaps larger than
+/// `threshold`. This helps identify collection outages.
+fn detect_block_gaps(quote_logs: &[QuoteLogRow], threshold: u64) {
+    if quote_logs.is_empty() {
+        return;
+    }
+
+    let mut blocks: Vec<u64> = quote_logs
+        .iter()
+        .map(|q| q.block_number)
+        .collect();
+    blocks.sort_unstable();
+    blocks.dedup();
+
+    if blocks.len() < 2 {
+        info!(blocks = blocks.len(), "only one unique block observed, no gap detection possible");
+        return;
+    }
+
+    let first = blocks[0];
+    let last = blocks[blocks.len() - 1];
+    info!(
+        first_block = first,
+        last_block = last,
+        unique_blocks = blocks.len(),
+        "scanning for temporal gaps (threshold = {threshold} blocks)"
+    );
+
+    let mut gap_count = 0_u32;
+    for pair in blocks.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > threshold {
+            let approx_minutes = gap * 12 / 60;
+            info!(
+                "Gap detected: blocks {} to {} ({} blocks, ~{} minutes)",
+                pair[0], pair[1], gap, approx_minutes
+            );
+            gap_count += 1;
+        }
+    }
+
+    if gap_count == 0 {
+        info!("no temporal gaps detected above threshold of {threshold} blocks");
+    } else {
+        info!("{gap_count} temporal gap(s) detected");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -925,6 +983,8 @@ async fn main() -> anyhow::Result<()> {
         info!("no quote logs found, nothing to assemble");
         return Ok(());
     }
+
+    detect_block_gaps(&quote_logs, args.gap_threshold);
 
     // Collect unique token addresses for CoinGecko lookup
     let mut unique_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1048,6 +1108,7 @@ mod tests {
         assert_eq!(args.route_decay_dir, PathBuf::from("/tmp/routes"));
         assert_eq!(args.output_dir, PathBuf::from("/tmp/out"));
         assert_eq!(args.coingecko_api_key, "");
+        assert_eq!(args.gap_threshold, 100);
     }
 
     #[test]
@@ -1158,6 +1219,9 @@ mod tests {
                 concentration_gini: None,
                 route_total_amount_out: "985".to_string(),
                 route_decay_bps: 15.0,
+                requote_amount_out: None,
+                market_movement_bps: f64::NAN,
+                execution_slippage_bps: f64::NAN,
             },
             HopDecayRecord {
                 quote_id: "q-1".to_string(),
@@ -1178,6 +1242,9 @@ mod tests {
                 concentration_gini: None,
                 route_total_amount_out: "985".to_string(),
                 route_decay_bps: 15.0,
+                requote_amount_out: None,
+                market_movement_bps: f64::NAN,
+                execution_slippage_bps: f64::NAN,
             },
         ];
         write_hop_decay_parquet(&hop_dir.path().join("hops.parquet"), &hop_records)
@@ -1357,5 +1424,105 @@ mod tests {
     fn unified_schema_has_expected_field_count() {
         let schema = unified_schema();
         assert_eq!(schema.fields().len(), 29);
+    }
+
+    #[test]
+    fn gap_detection_no_gaps() {
+        let rows: Vec<QuoteLogRow> = (0..5)
+            .map(|i| QuoteLogRow {
+                quote_id: format!("q-{i}"),
+                solver_id: "solver-a".to_string(),
+                request_id: "req-1".to_string(),
+                block_number: 17_500_000 + i * 10,
+                chain_id: 1,
+                amount_in: "1000".to_string(),
+                amount_out: "990".to_string(),
+                gas_estimate: 100_000,
+                algorithm_type: "most_liquid".to_string(),
+                token_in: "0x01".to_string(),
+                token_out: "0x02".to_string(),
+                route_json: "{}".to_string(),
+            })
+            .collect();
+        // Should not panic; gaps below threshold of 100.
+        detect_block_gaps(&rows, 100);
+    }
+
+    #[test]
+    fn gap_detection_with_gap() {
+        let rows = vec![
+            QuoteLogRow {
+                quote_id: "q-0".to_string(),
+                solver_id: "solver-a".to_string(),
+                request_id: "req-1".to_string(),
+                block_number: 17_500_000,
+                chain_id: 1,
+                amount_in: "1000".to_string(),
+                amount_out: "990".to_string(),
+                gas_estimate: 100_000,
+                algorithm_type: "most_liquid".to_string(),
+                token_in: "0x01".to_string(),
+                token_out: "0x02".to_string(),
+                route_json: "{}".to_string(),
+            },
+            QuoteLogRow {
+                quote_id: "q-1".to_string(),
+                solver_id: "solver-a".to_string(),
+                request_id: "req-1".to_string(),
+                block_number: 17_500_500,
+                chain_id: 1,
+                amount_in: "1000".to_string(),
+                amount_out: "990".to_string(),
+                gas_estimate: 100_000,
+                algorithm_type: "most_liquid".to_string(),
+                token_in: "0x01".to_string(),
+                token_out: "0x02".to_string(),
+                route_json: "{}".to_string(),
+            },
+        ];
+        // Gap of 500 blocks > threshold of 100: should detect it.
+        detect_block_gaps(&rows, 100);
+    }
+
+    #[test]
+    fn gap_detection_empty_input() {
+        detect_block_gaps(&[], 100);
+    }
+
+    #[test]
+    fn gap_detection_single_block() {
+        let rows = vec![QuoteLogRow {
+            quote_id: "q-0".to_string(),
+            solver_id: "solver-a".to_string(),
+            request_id: "req-1".to_string(),
+            block_number: 17_500_000,
+            chain_id: 1,
+            amount_in: "1000".to_string(),
+            amount_out: "990".to_string(),
+            gas_estimate: 100_000,
+            algorithm_type: "most_liquid".to_string(),
+            token_in: "0x01".to_string(),
+            token_out: "0x02".to_string(),
+            route_json: "{}".to_string(),
+        }];
+        detect_block_gaps(&rows, 100);
+    }
+
+    #[test]
+    fn cli_gap_threshold_custom() {
+        let args = Args::parse_from([
+            "assemble",
+            "--quote-log-dir",
+            "/tmp/quotes",
+            "--hop-decay-dir",
+            "/tmp/hops",
+            "--route-decay-dir",
+            "/tmp/routes",
+            "--output-dir",
+            "/tmp/out",
+            "--gap-threshold",
+            "50",
+        ]);
+        assert_eq!(args.gap_threshold, 50);
     }
 }
