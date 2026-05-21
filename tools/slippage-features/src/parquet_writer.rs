@@ -51,6 +51,12 @@ pub struct HopDecayRecord {
     pub route_total_amount_out: String,
     /// Full route decay in basis points.
     pub route_decay_bps: f64,
+    /// Fresh solver re-quote amount_out at block X+k (BigInt string, nullable).
+    pub requote_amount_out: Option<String>,
+    /// Market movement in bps: (original_quote - fresh_quote) / original_quote * 10_000.
+    pub market_movement_bps: f64,
+    /// Execution slippage in bps: route_decay_bps - market_movement_bps.
+    pub execution_slippage_bps: f64,
 }
 
 /// Returns the Arrow schema for hop decay records.
@@ -74,6 +80,9 @@ pub fn hop_decay_schema() -> Schema {
         Field::new("concentration_gini", DataType::Float64, true),
         Field::new("route_total_amount_out", DataType::Utf8, false),
         Field::new("route_decay_bps", DataType::Float64, false),
+        Field::new("requote_amount_out", DataType::Utf8, true),
+        Field::new("market_movement_bps", DataType::Float64, false),
+        Field::new("execution_slippage_bps", DataType::Float64, false),
     ])
 }
 
@@ -108,6 +117,9 @@ pub fn write_hop_decay_parquet(
     let mut concentration_gini = Float64Builder::with_capacity(n);
     let mut route_total_amount_out = StringBuilder::with_capacity(n, n * 32);
     let mut route_decay_bps = Float64Builder::with_capacity(n);
+    let mut requote_amount_out = StringBuilder::with_capacity(n, n * 32);
+    let mut market_movement_bps = Float64Builder::with_capacity(n);
+    let mut execution_slippage_bps = Float64Builder::with_capacity(n);
 
     for r in records {
         quote_id.append_value(&r.quote_id);
@@ -150,6 +162,13 @@ pub fn write_hop_decay_parquet(
         }
         route_total_amount_out.append_value(&r.route_total_amount_out);
         route_decay_bps.append_value(r.route_decay_bps);
+
+        match &r.requote_amount_out {
+            Some(v) => requote_amount_out.append_value(v),
+            None => requote_amount_out.append_null(),
+        }
+        market_movement_bps.append_value(r.market_movement_bps);
+        execution_slippage_bps.append_value(r.execution_slippage_bps);
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -171,6 +190,9 @@ pub fn write_hop_decay_parquet(
         Arc::new(concentration_gini.finish()),
         Arc::new(route_total_amount_out.finish()),
         Arc::new(route_decay_bps.finish()),
+        Arc::new(requote_amount_out.finish()),
+        Arc::new(market_movement_bps.finish()),
+        Arc::new(execution_slippage_bps.finish()),
     ];
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -531,13 +553,16 @@ mod tests {
             concentration_gini: None,
             route_total_amount_out: "980".to_string(),
             route_decay_bps: 20.0,
+            requote_amount_out: None,
+            market_movement_bps: f64::NAN,
+            execution_slippage_bps: f64::NAN,
         }
     }
 
     #[test]
     fn schema_has_expected_field_count() {
         let schema = hop_decay_schema();
-        assert_eq!(schema.fields().len(), 18);
+        assert_eq!(schema.fields().len(), 21);
     }
 
     #[test]
@@ -556,7 +581,7 @@ mod tests {
 
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 18);
+        assert_eq!(batch.num_columns(), 21);
 
         let quote_ids = batch
             .column(0)
@@ -615,8 +640,8 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
 
-        // Schema should have 18 fields.
-        assert_eq!(builder.schema().fields().len(), 18);
+        // Schema should have 21 fields.
+        assert_eq!(builder.schema().fields().len(), 21);
 
         let reader = builder.build().unwrap();
         let total_rows: usize = reader

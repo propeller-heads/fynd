@@ -17,6 +17,36 @@ use crate::{
     parquet_writer::{write_hop_decay_parquet, HopDecayRecord},
 };
 
+/// Fetch a fresh quote from the solver via HTTP.
+async fn requote(
+    http_client: &reqwest::Client,
+    fynd_url: &str,
+    token_in: &str,
+    token_out: &str,
+    amount_in: &str,
+    sender: &str,
+) -> Option<String> {
+    let body = serde_json::json!({
+        "orders": [{
+            "token_in": token_in,
+            "token_out": token_out,
+            "amount": amount_in,
+            "side": "sell",
+            "sender": sender,
+        }]
+    });
+    let resp = http_client
+        .post(format!("{fynd_url}/v1/quote"))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    let data: serde_json::Value = resp.json().await.ok()?;
+    data["orders"][0]["amount_out"]
+        .as_str()
+        .map(String::from)
+}
+
 /// Pending quote waiting for resimulation at future blocks.
 struct PendingQuote {
     event: QuoteProducedEvent,
@@ -36,11 +66,19 @@ pub async fn run_tycho_resim(
     market_data: SharedMarketDataRef,
     derived_data: SharedDerivedDataRef,
     output_dir: PathBuf,
+    requote_url: Option<String>,
 ) {
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
         error!(path = %output_dir.display(), error = %e, "cannot create output directory");
         return;
     }
+
+    let http_client = requote_url.as_ref().map(|_| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build HTTP client for requote")
+    });
 
     let mut pending: VecDeque<PendingQuote> = VecDeque::new();
     let mut last_seen_block: u64 = 0;
@@ -85,7 +123,15 @@ pub async fn run_tycho_resim(
         }
         last_seen_block = current_block;
 
-        resim_at_block(&mut pending, &market_data, &derived_data, current_block).await;
+        resim_at_block(
+            &mut pending,
+            &market_data,
+            &derived_data,
+            current_block,
+            http_client.as_ref(),
+            requote_url.as_deref(),
+        )
+        .await;
         flush_expired(&mut pending, current_block, &output_dir);
     }
 }
@@ -96,6 +142,8 @@ async fn resim_at_block(
     market_data: &SharedMarketDataRef,
     derived_data: &SharedDerivedDataRef,
     current_block: u64,
+    http_client: Option<&reqwest::Client>,
+    requote_url: Option<&str>,
 ) {
     let md = market_data.read().await;
     let dd = derived_data.read().await;
@@ -193,6 +241,33 @@ async fn resim_at_block(
         let route_decay =
             compute_decay_bps(&pq.event.amount_out, &route_out_str).unwrap_or(f64::NAN);
 
+        // Fetch a fresh re-quote if configured.
+        let (requote_out, market_mvmt, exec_slip) = if let (Some(client), Some(url)) =
+            (http_client, requote_url)
+        {
+            let first_swap = pq.event.route.swaps.first();
+            let last_swap = pq.event.route.swaps.last();
+            if let (Some(first), Some(last)) = (first_swap, last_swap) {
+                let token_in = format!("0x{}", hex::encode(&first.token_in));
+                let token_out = format!("0x{}", hex::encode(&last.token_out));
+                let sender = "0x0000000000000000000000000000000000000001";
+                match requote(client, url, &token_in, &token_out, &pq.event.amount_in, sender).await
+                {
+                    Some(fresh_out) => {
+                        let mm =
+                            compute_decay_bps(&pq.event.amount_out, &fresh_out).unwrap_or(f64::NAN);
+                        let es = route_decay - mm;
+                        (Some(fresh_out), mm, es)
+                    }
+                    None => (None, f64::NAN, f64::NAN),
+                }
+            } else {
+                (None, f64::NAN, f64::NAN)
+            }
+        } else {
+            (None, f64::NAN, f64::NAN)
+        };
+
         for (hop_idx, replay_hop_out) in &replay_amounts {
             let swap = &pq.event.route.swaps[*hop_idx as usize];
 
@@ -250,6 +325,9 @@ async fn resim_at_block(
                 concentration_gini: None,
                 route_total_amount_out: route_out_str.clone(),
                 route_decay_bps: route_decay,
+                requote_amount_out: requote_out.clone(),
+                market_movement_bps: market_mvmt,
+                execution_slippage_bps: exec_slip,
             });
         }
     }
@@ -375,7 +453,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market, derived, out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market, derived, out, None));
 
         // Close the channel immediately.
         drop(_tx);
@@ -398,7 +476,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None));
 
         // Send a quote referencing a non-existent pool.
         let swap = single_hop_swap();
@@ -448,7 +526,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None));
 
         let swap = single_hop_swap();
         let event = make_event("q-queue", 100, vec![swap], "1000", "2000");
