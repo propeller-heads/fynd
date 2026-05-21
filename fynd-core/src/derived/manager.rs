@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
 
-use crate::{feed::market_data::MarketState, types::ComponentId};
+use crate::types::ComponentId;
 
 /// Information about which components changed in a market update.
 ///
@@ -39,7 +39,7 @@ impl ChangedComponents {
     /// Creates a marker for full recompute where all components are considered changed.
     ///
     /// Used for startup and lag recovery scenarios.
-    pub fn all(market: &MarketState) -> Self {
+    pub fn all(market: MarketDataView) -> Self {
         Self {
             added: market.component_topology().clone(),
             removed: vec![],
@@ -72,7 +72,7 @@ use super::{
 };
 use crate::feed::{
     events::{EventError, MarketEvent, MarketEventHandler},
-    market_data::MarketData,
+    market_data::{MarketData, MarketDataView},
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -230,8 +230,7 @@ impl ComputationManager {
                                 skipped
                             );
                             let market = self.market_data.read(None).await;
-                            let changed = ChangedComponents::all(market.base_market_state());
-                            drop(market);
+                            let changed = ChangedComponents::all(market);
                             self.compute_all(&changed).await;
                         }
                     }
