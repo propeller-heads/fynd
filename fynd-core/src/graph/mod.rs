@@ -120,7 +120,7 @@ where
     fn graph(&self) -> &G;
 }
 
-use crate::{derived::DerivedData, feed::market_data::MarketState};
+use crate::{derived::DerivedData, feed::market_data::MarketDataView};
 
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///
@@ -169,7 +169,7 @@ pub trait EdgeWeightUpdaterWithDerived {
     /// Returns the number of edges successfully updated.
     fn update_edge_weights_with_derived(
         &mut self,
-        market: &MarketState,
+        market: MarketDataView<'_>,
         derived: &DerivedData,
     ) -> usize;
 }

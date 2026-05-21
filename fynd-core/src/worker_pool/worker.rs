@@ -437,7 +437,7 @@ where
                                 if self.requirements.is_required(computation_id) {
                                     let market = self.market_data.read(None).await;
                                     let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
+                                    let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
                                     debug!(
                                         self.worker_id,
                                         computation_id,
@@ -462,7 +462,7 @@ where
                             // Recover by updating with whatever derived data is available.
                             let market = self.market_data.read(None).await;
                             let derived = self.derived_data.read().await;
-                            let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
+                            let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
                             debug!(
                                 self.worker_id,
                                 updated,

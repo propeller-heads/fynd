@@ -20,7 +20,7 @@ use super::GraphManager;
 use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
-        market_data::MarketState,
+        market_data::MarketDataView,
     },
     graph::GraphError,
     types::ComponentId,
@@ -327,7 +327,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
     /// The number of edges successfully updated.
     pub fn update_edge_weights_with_derived(
         &mut self,
-        market: &MarketState,
+        market: MarketDataView<'_>,
         derived: &crate::derived::DerivedData,
     ) -> usize {
         let tokens = market.token_registry_ref();
@@ -372,7 +372,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWith
 {
     fn update_edge_weights_with_derived(
         &mut self,
-        market: &MarketState,
+        market: MarketDataView<'_>,
         derived: &crate::derived::DerivedData,
     ) -> usize {
         self.update_edge_weights_with_derived(market, derived)
