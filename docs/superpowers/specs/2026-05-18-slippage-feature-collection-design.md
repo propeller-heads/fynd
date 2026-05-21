@@ -261,6 +261,72 @@ as long as the archive node has the state.
 - v2 nullable columns present (cex_dynamics, onchain_flow, priors)
 - Cross-chain coverage report (Ethereum + Base)
 
+### Component 4: Quote Driver (trade replay)
+
+**Location**: `tools/slippage-features/src/bin/quote_driver.rs`
+
+**Purpose**: Systematically replay trades from the 10k benchmark dataset through
+Fynd at regular intervals, ensuring the same pairs/amounts are quoted across
+different market conditions.
+
+**Flow**:
+
+1. Load the 10k benchmark trade dataset (`fynd-benchmark download-trades`)
+2. On a configurable schedule (e.g., every block, every 5 blocks, or every N seconds):
+   - For each trade in the dataset (or a configurable subset):
+     - Send a quote request to Fynd's HTTP API (`POST /v1/quote`)
+     - The SolverObserver captures the event internally
+3. Run continuously for the data collection period (>= 1 week)
+
+**CLI**:
+
+```
+quote-driver --fynd-url http://localhost:3000 \
+             --trades-file ./trades.json \
+             --interval-blocks 1 \
+             --sender 0x0000000000000000000000000000000000000001 \
+             --batch-size 100
+```
+
+**Resilience**: The driver is stateless. If it crashes, restart it — it just
+keeps sending the same trades. All state is in the parquet files on disk.
+
+### Component 5: Re-quote decomposition (market movement vs route staleness)
+
+**Location**: integrated into `tools/slippage-features/src/tycho_resim.rs`
+
+**Purpose**: At each block X+k, run a fresh solver quote for the same
+(token_in, token_out, amount_in) to determine what Fynd would return if
+quoting fresh. This decomposes total decay into:
+
+- `market_movement_bps` = (original_quote - fresh_quote) / original_quote * 10_000
+  → how much did the market as a whole move?
+- `execution_slippage_bps` = route_decay_bps - market_movement_bps
+  → how much decay is route-specific (MEV, liquidity withdrawal, staleness)?
+
+**New columns in hop decay parquet**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| requote_amount_out | string | What Fynd would quote fresh at block X+k (BigInt) |
+| market_movement_bps | f64 | Decay due to market-wide price movement |
+| execution_slippage_bps | f64 | Decay specific to the original route (staleness, MEV, etc.) |
+
+**Implementation**: The resim task already has access to the full solver (via
+`SharedMarketData`). At each block X+k, for each pending quote:
+1. Call the solver's quote method with the same (token_in, token_out, amount_in)
+2. Record the best route's amount_out as `requote_amount_out`
+3. Compute `market_movement_bps` and `execution_slippage_bps`
+
+This is heavier (runs the full solver per block per quote) but since trade
+volume is controlled by the quote driver and there's no latency budget, it's
+acceptable for offline research.
+
+**Interpretation**:
+- `execution_slippage ≈ 0`: decay is just market movement — route is fine
+- `execution_slippage >> 0`: route went stale — revert risk
+- `execution_slippage < 0`: original route improved relative to market (rare)
+
 ## Feature Taxonomy (7 v1 families)
 
 | # | Family | Source | Capture point |
@@ -273,14 +339,18 @@ as long as the archive node has the state.
 | 6 | Chain/env | RPC at capture time | In-process or offline |
 | 7 | Temporal | Block timestamp | Offline assembly |
 
-## Labels (dual)
+## Labels (triple decomposition)
 
 | Label | Source | Granularity |
 |-------|--------|-------------|
-| Tycho sim decay | Component 2a | Per-hop + per-route, bps |
-| Node eth_call decay | Component 2b | Per-route only, bps + gas + revert flag |
+| Tycho sim decay (`route_decay_bps`) | Component 2a | Per-hop + per-route, bps |
+| Node eth_call decay (`eth_call_decay_bps`) | Component 2b | Per-route only, bps + gas + revert flag |
+| Market movement (`market_movement_bps`) | Component 5 | Per-route, bps (fresh re-quote) |
+| Execution slippage (`execution_slippage_bps`) | Derived | `route_decay - market_movement` |
 
-Cross-validation between the two reveals Tycho simulation accuracy.
+Cross-validation between Tycho sim and node eth_call reveals simulation accuracy.
+The market movement / execution slippage decomposition reveals whether decay is
+actionable (route-specific) or unavoidable (market-wide).
 
 ## Constraints
 
@@ -289,6 +359,11 @@ Cross-validation between the two reveals Tycho simulation accuracy.
   serve as reference for the full implementation.
 - **Chains v1**: Ethereum mainnet + Base. Arbitrum/Optimism deferred to v2.
 - **Prospective only**: no historical replay. Data accumulates over time from live Fynd.
+- **Trade source**: 10k benchmark dataset (from `fynd-benchmark download-trades`),
+  replayed on a schedule by the quote driver.
+- **Resilience**: parquet-per-quote design means data on disk is safe across crashes.
+  In-flight quotes in the sliding window (~2 min) may be lost on restart.
+  Assembly step should detect and report temporal gaps.
 - **Feature-gated**: `slippage-features` Cargo feature. Zero overhead when off.
 - **Minimal fynd-core diff**: ~50-100 lines (trait + call sites). No existing
   signatures or behavior change.
@@ -336,8 +411,12 @@ logic that can be re-incorporated into the new design.
 ## Exit criteria
 
 - Dataset covers >= 1 week of live Fynd quotes on Ethereum and Base
+- Trade source: 10k benchmark dataset replayed across multiple market conditions
 - Both decay labels populated (Tycho per-hop + node route-level)
+- Re-quote decomposition populated (market_movement_bps, execution_slippage_bps)
 - All 7 v1 feature families present with explicit null handling
 - Point-in-time integrity validated
+- Temporal gap report generated (any collection outages documented)
 - Exploratory notebook produces decay-vs-feature correlation report
+- Market movement vs execution slippage breakdown analyzed
 - Cross-validation between Tycho sim and node eth_call documented
