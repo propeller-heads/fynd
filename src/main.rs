@@ -261,6 +261,8 @@ struct SetupResult {
     solver: fynd_rpc::builder::FyndRPC,
     #[cfg(feature = "slippage-features")]
     resim_rx: Option<tokio::sync::mpsc::Receiver<fynd_core::observer::QuoteProducedEvent>>,
+    #[cfg(feature = "slippage-features")]
+    slippage_observer: Option<std::sync::Arc<slippage_features::quote_log::QuoteLogObserver>>,
 }
 
 /// Sets up the solver (loads config, parses chain, builds solver).
@@ -339,22 +341,28 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<SetupResult, SolverError>
 
     // Wire slippage-features observer if enabled.
     #[cfg(feature = "slippage-features")]
-    let resim_rx =
-        {
-            let output_dir = std::path::PathBuf::from("./slippage-data");
-            std::fs::create_dir_all(&output_dir).map_err(|e| {
-                SolverError::SetupError(format!("failed to create slippage data dir: {e}"))
-            })?;
+    let (resim_rx, slippage_observer) = {
+        let output_dir = std::path::PathBuf::from("./slippage-data");
+        std::fs::create_dir_all(&output_dir).map_err(|e| {
+            SolverError::SetupError(format!("failed to create slippage data dir: {e}"))
+        })?;
 
-            let (tx, rx) = tokio::sync::mpsc::channel(1000);
-            let observer = std::sync::Arc::new(
-                slippage_features::quote_log::QuoteLogObserver::new(output_dir.clone(), tx, 100),
-            );
+        let flush_threshold: usize = std::env::var("SLIPPAGE_FLUSH_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
 
-            builder = builder.with_observer(observer);
-            info!("slippage feature collection enabled");
-            Some(rx)
-        };
+        let (tx, rx) = tokio::sync::mpsc::channel(1000);
+        let observer = std::sync::Arc::new(slippage_features::quote_log::QuoteLogObserver::new(
+            output_dir.clone(),
+            tx,
+            flush_threshold,
+        ));
+
+        builder = builder.with_observer(observer.clone());
+        info!(flush_threshold, "slippage feature collection enabled");
+        (Some(rx), Some(observer))
+    };
 
     // Build and start solver
     let solver = builder
@@ -365,6 +373,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<SetupResult, SolverError>
         solver,
         #[cfg(feature = "slippage-features")]
         resim_rx,
+        #[cfg(feature = "slippage-features")]
+        slippage_observer,
     })
 }
 
@@ -400,6 +410,27 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
                 derived_data,
                 output_dir,
             )))
+        } else {
+            None
+        }
+    };
+
+    // Spawn periodic flush timer for quote log when slippage-features is enabled.
+    #[cfg(feature = "slippage-features")]
+    let _flush_handle = {
+        if let Some(obs) = setup.slippage_observer {
+            let flush_interval_secs: u64 = std::env::var("SLIPPAGE_FLUSH_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60);
+            Some(tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
+                loop {
+                    interval.tick().await;
+                    obs.flush_if_stale(std::time::Duration::from_secs(flush_interval_secs));
+                }
+            }))
         } else {
             None
         }

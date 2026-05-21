@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use fynd_core::observer::{ObservedRoute, QuoteProducedEvent, SolverObserver};
 use tokio::sync::mpsc;
@@ -13,6 +17,7 @@ pub struct QuoteLogObserver {
     output_dir: PathBuf,
     tx: mpsc::Sender<QuoteProducedEvent>,
     flush_threshold: usize,
+    last_write: Mutex<Instant>,
 }
 
 impl QuoteLogObserver {
@@ -26,7 +31,35 @@ impl QuoteLogObserver {
             output_dir,
             tx,
             flush_threshold,
+            last_write: Mutex::new(Instant::now()),
         }
+    }
+
+    /// Flush buffered records if the buffer is non-empty and `max_age` has
+    /// elapsed since the last write. Returns `true` if a flush occurred.
+    pub fn flush_if_stale(&self, max_age: Duration) -> bool {
+        let stale = {
+            let last = self
+                .last_write
+                .lock()
+                .expect("last_write lock poisoned");
+            last.elapsed() >= max_age
+        };
+        if !stale {
+            return false;
+        }
+        let records = {
+            let mut buf = self
+                .buffer
+                .lock()
+                .expect("buffer lock poisoned");
+            buf.drain(..).collect::<Vec<_>>()
+        };
+        if records.is_empty() {
+            return false;
+        }
+        self.flush_records(records);
+        true
     }
 
     /// Flush any remaining buffered records. Call on shutdown.
@@ -62,6 +95,11 @@ impl QuoteLogObserver {
 
         match write_quote_log_parquet(&path, &records) {
             Ok(()) => {
+                let mut last = self
+                    .last_write
+                    .lock()
+                    .expect("last_write lock poisoned");
+                *last = Instant::now();
                 info!(
                     records = records.len(),
                     path = %path.display(),
@@ -263,6 +301,45 @@ mod tests {
             })
             .collect();
         assert!(parquet_files.is_empty());
+    }
+
+    #[test]
+    fn flush_if_stale_flushes_when_past_max_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let observer = QuoteLogObserver::new(dir.path().to_path_buf(), tx, 100);
+        observer.on_quote_produced(make_event("q-stale-1"));
+        let flushed = observer.flush_if_stale(Duration::ZERO);
+        assert!(flushed, "should flush when max_age is zero");
+        let parquet_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "parquet")
+            })
+            .collect();
+        assert_eq!(parquet_files.len(), 1);
+    }
+
+    #[test]
+    fn flush_if_stale_noop_when_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let observer = QuoteLogObserver::new(dir.path().to_path_buf(), tx, 100);
+        observer.on_quote_produced(make_event("q-fresh-1"));
+        let flushed = observer.flush_if_stale(Duration::from_secs(3600));
+        assert!(!flushed, "should not flush when below max_age");
+    }
+
+    #[test]
+    fn flush_if_stale_noop_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let observer = QuoteLogObserver::new(dir.path().to_path_buf(), tx, 100);
+        let flushed = observer.flush_if_stale(Duration::ZERO);
+        assert!(!flushed, "should not flush when buffer is empty");
     }
 
     #[test]
