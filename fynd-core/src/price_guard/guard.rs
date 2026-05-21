@@ -223,7 +223,7 @@ mod tests {
     use super::{PriceGuard, PriceGuardError};
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
-        feed::market_data::SharedMarketDataRef,
+        feed::market_data::MarketData,
         price_guard::{
             config::PriceGuardConfig,
             provider::{ExternalPrice, PriceProvider, PriceProviderError},
@@ -238,7 +238,7 @@ mod tests {
     }
 
     impl PriceProvider for MockProvider {
-        fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: MarketData) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
@@ -255,7 +255,7 @@ mod tests {
     struct FailingProvider;
 
     impl PriceProvider for FailingProvider {
-        fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: MarketData) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
@@ -272,7 +272,7 @@ mod tests {
     struct PriceNotFoundProvider;
 
     impl PriceProvider for PriceNotFoundProvider {
-        fn start(&mut self, _market_data: SharedMarketDataRef) -> JoinHandle<()> {
+        fn start(&mut self, _market_data: MarketData) -> JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 

@@ -21,7 +21,7 @@ use crate::{
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::SpotPrices,
     },
-    feed::market_data::SharedMarketDataRef,
+    feed::market_data::MarketData,
 };
 
 /// Computes spot prices for all pools.
@@ -49,7 +49,7 @@ impl DerivedComputation for SpotPriceComputation {
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_spot_prices))]
     async fn compute(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
@@ -192,7 +192,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, setup_market, token, MockProtocolSim},
         derived::store::DerivedData,
-        feed::market_data::SharedMarketDataRef,
+        feed::market_data::MarketData,
     };
 
     #[test]
@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn handles_empty_market() {
-        let market_ref = SharedMarketDataRef::new_shared();
+        let market_ref = MarketData::new_shared();
         let derived_ref = DerivedData::new_shared();
         let changed = ChangedComponents::default();
 

@@ -22,7 +22,7 @@ use tycho_simulation::{
 
 use crate::{
     algorithm::most_liquid::DepthAndPrice,
-    feed::market_data::{SharedMarketData, SharedMarketDataRef},
+    feed::market_data::{MarketData, MarketState},
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
     types::{quote::OrderSide, BlockInfo, Order},
 };
@@ -312,11 +312,11 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 
 /// Sets up market with components and a graph. Returns (market_ref, graph_manager).
 ///
-/// Use `market_read(&market_ref)` to get a `SharedMarketData` reference for other tests.
+/// Use `market_read(&market_ref)` to get a `MarketState` reference for other tests.
 pub fn setup_market(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-) -> (SharedMarketDataRef, PetgraphStableDiGraphManager<DepthAndPrice>) {
-    let mut market = SharedMarketData::new();
+) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+    let mut market = MarketState::new();
     let mut component_weights = HashMap::new();
 
     // Set gas_price = 1 wei/gas for simple calculations
@@ -366,14 +366,11 @@ pub fn setup_market(
             .unwrap();
     }
 
-    (SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
+    (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
 }
 
-/// Helper to get a read guard for `simulate_path` tests that need `&SharedMarketData`.
-/// Returns the guard which derefs to `&SharedMarketData` via `Deref`.
-pub fn market_read(
-    market: &SharedMarketDataRef,
-) -> crate::feed::market_data::MarketDataReadGuard<'_> {
+/// Returns a `MarketDataView` for tests that need to access market data synchronously.
+pub fn market_read(market: &MarketData) -> crate::feed::market_data::MarketDataView<'_> {
     market
         .try_read_blocking()
         .expect("lock should not be contested in test")

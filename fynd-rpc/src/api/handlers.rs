@@ -305,7 +305,7 @@ mod tests {
     use fynd_core::{
         derived::SharedDerivedDataRef,
         encoding::encoder::Encoder,
-        feed::market_data::SharedMarketDataRef,
+        feed::market_data::MarketData,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
     use serde_json::Value;
@@ -341,7 +341,7 @@ mod tests {
     }
 
     fn make_test_state() -> AppState {
-        let market_data: SharedMarketDataRef = SharedMarketDataRef::new_shared();
+        let market_data: MarketData = MarketData::new_shared();
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
 

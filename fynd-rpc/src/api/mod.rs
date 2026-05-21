@@ -19,7 +19,7 @@ use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
-    derived::SharedDerivedDataRef, feed::market_data::SharedMarketDataRef,
+    derived::SharedDerivedDataRef, feed::market_data::MarketData,
     worker_pool_router::WorkerPoolRouter,
 };
 use handlers::configure_routes;
@@ -70,11 +70,11 @@ pub struct ExperimentalApiDoc;
 
 /// Simple tracker for service health metrics.
 ///
-/// Reads the last update timestamp from SharedMarketData to determine how fresh the market data is,
+/// Reads the last update timestamp from MarketState to determine how fresh the market data is,
 /// and checks derived data overall readiness.
 #[derive(Clone)]
 pub(crate) struct HealthTracker {
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     derived_data: SharedDerivedDataRef,
     gas_price_stale_threshold: Option<Duration>,
     created_at: Instant,
@@ -82,10 +82,7 @@ pub(crate) struct HealthTracker {
 
 impl HealthTracker {
     /// Creates a new health tracker.
-    pub(crate) fn new(
-        market_data: SharedMarketDataRef,
-        derived_data: SharedDerivedDataRef,
-    ) -> Self {
+    pub(crate) fn new(market_data: MarketData, derived_data: SharedDerivedDataRef) -> Self {
         Self {
             market_data,
             derived_data,

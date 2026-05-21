@@ -18,7 +18,7 @@ use crate::{
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        market_data::SharedMarketDataRef,
+        market_data::MarketData,
     },
     graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
@@ -99,7 +99,7 @@ impl WorkerPool {
     pub fn spawn(
         config: WorkerPoolConfig,
         task_rx: async_channel::Receiver<SolveTask>,
-        market_data: SharedMarketDataRef,
+        market_data: MarketData,
         derived_data: SharedDerivedDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
         derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
@@ -262,7 +262,7 @@ impl WorkerPoolBuilder {
     /// Returns an error if the algorithm name is not registered.
     pub fn build(
         self,
-        market_data: SharedMarketDataRef,
+        market_data: MarketData,
         derived_data: SharedDerivedDataRef,
         event_rx: broadcast::Receiver<MarketEvent>,
         derived_event_rx: broadcast::Receiver<DerivedDataEvent>,

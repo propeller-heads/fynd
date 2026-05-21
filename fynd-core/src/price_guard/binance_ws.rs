@@ -1,7 +1,7 @@
 //! Binance WebSocket price provider.
 //!
 //! Connects to the Binance `bookTicker` WebSocket stream, dynamically discovers trading pairs
-//! from [`SharedMarketData`](crate::feed::market_data::SharedMarketData)(crate::feed::market_data::SharedMarketData), and caches real-time
+//! from [`MarketState`](crate::feed::market_data::MarketState)(crate::feed::market_data::MarketState), and caches real-time
 //! bid/ask prices. Price resolution supports direct pairs, reverse pairs, and intermediate
 //! routing through common quote assets (USDT, USDC, ETH, BTC).
 
@@ -23,7 +23,7 @@ use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
     utils::{check_staleness, expected_out_from_price},
 };
-use crate::feed::market_data::SharedMarketDataRef;
+use crate::feed::market_data::MarketData;
 
 const DEFAULT_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const DEFAULT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
@@ -96,7 +96,7 @@ type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 ///
 /// Subscribes to `bookTicker` streams for pairs discovered by cross-referencing
 /// Binance exchange info with tokens in
-/// [`SharedMarketData`](crate::feed::market_data::SharedMarketData). Prices are resolved via direct
+/// [`MarketState`](crate::feed::market_data::MarketState). Prices are resolved via direct
 /// pair (bid), reverse pair (1/ask), or intermediate routing through USDT/USDC/ETH/BTC.
 pub struct BinanceWsProvider {
     price_cache: PriceCache,
@@ -239,7 +239,7 @@ impl Default for BinanceWsProvider {
 }
 
 impl PriceProvider for BinanceWsProvider {
-    fn start(&mut self, market_data: SharedMarketDataRef) -> JoinHandle<()> {
+    fn start(&mut self, market_data: MarketData) -> JoinHandle<()> {
         let worker = BinanceWsWorker {
             price_cache: Arc::clone(&self.price_cache),
             token_cache: Arc::clone(&self.token_cache),
@@ -283,7 +283,7 @@ impl PriceProvider for BinanceWsProvider {
 struct BinanceWsWorker {
     price_cache: PriceCache,
     token_cache: TokenCache,
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     client: Client,
     ws_url: String,
     exchange_info_url: String,
@@ -444,7 +444,7 @@ impl BinanceWsWorker {
             .collect()
     }
 
-    /// Snapshots the token registry from SharedMarketData into the local token cache.
+    /// Snapshots the token registry from MarketState into the local token cache.
     /// Skips the clone when the registry size hasn't changed, since tokens are only
     /// ever added — never removed or replaced.
     async fn refresh_token_cache(&self) {
@@ -477,7 +477,7 @@ impl BinanceWsWorker {
         *cache = new_cache;
     }
 
-    /// Re-reads tokens from SharedMarketData and subscribes to any new Binance
+    /// Re-reads tokens from MarketState and subscribes to any new Binance
     /// pairs that appeared since the last sync.
     async fn discover_new_pairs<S>(&mut self, write: &mut S)
     where
@@ -656,7 +656,7 @@ mod tests {
     use tycho_simulation::evm::tycho_models::Chain;
 
     use super::*;
-    use crate::feed::market_data::SharedMarketData;
+    use crate::feed::market_data::MarketState;
 
     fn make_token(address: Address, symbol: &str, decimals: u32) -> Token {
         Token {
@@ -757,7 +757,7 @@ mod tests {
 
     /// Creates a `BinanceWsWorker` that writes to the given ticker cache.
     fn make_worker(price_cache: &PriceCache) -> BinanceWsWorker {
-        let market_data = crate::feed::market_data::SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         BinanceWsWorker {
             price_cache: Arc::clone(price_cache),
             token_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1207,9 +1207,9 @@ mod tests {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market_inner = SharedMarketData::new();
+        let mut market_inner = MarketState::new();
         market_inner.upsert_tokens([weth, usdc]);
-        let market_data = crate::feed::market_data::SharedMarketDataRef::new(std::sync::Arc::new(
+        let market_data = crate::feed::market_data::MarketData::new(std::sync::Arc::new(
             tokio::sync::RwLock::new(market_inner),
         ));
 

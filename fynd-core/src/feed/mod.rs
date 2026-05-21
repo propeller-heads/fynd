@@ -4,11 +4,11 @@ use tycho_simulation::tycho_common::models::Chain;
 
 pub(crate) mod events;
 pub(crate) mod gas;
-/// Shared market data store (`SharedMarketData`, `SharedMarketDataRef`).
+/// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
-/// Tycho WebSocket feed: connects to the Tycho data stream and populates `SharedMarketData`.
+/// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.
 pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.

@@ -22,7 +22,7 @@ use tracing::info;
 use crate::{
     algorithm::{AlgorithmConfig, BellmanFordAlgorithm, MostLiquidAlgorithm},
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::SharedMarketDataRef},
+    feed::{events::MarketEvent, market_data::MarketData},
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
 };
@@ -44,7 +44,7 @@ pub(crate) struct SpawnWorkersParams {
     /// Receiver for solve tasks.
     pub task_rx: async_channel::Receiver<SolveTask>,
     /// Shared market data reference.
-    pub market_data: SharedMarketDataRef,
+    pub market_data: MarketData,
     /// Shared derived data reference (pool depths, token prices).
     pub derived_data: SharedDerivedDataRef,
     /// Broadcast receiver for market events.
@@ -213,11 +213,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{derived::DerivedData, feed::market_data::SharedMarketDataRef};
+    use crate::{derived::DerivedData, feed::market_data::MarketData};
 
     fn make_params(algorithm: &str, num_workers: usize) -> SpawnWorkersParams {
         let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
         let (_event_tx, event_rx) = broadcast::channel(10);
         let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
@@ -254,7 +254,7 @@ mod tests {
     fn test_registry_spawns_correct_number_of_workers() {
         let (shutdown_tx, _) = broadcast::channel(1);
         let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
         let (event_tx, event_rx) = broadcast::channel(10);
         let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
@@ -293,7 +293,7 @@ mod tests {
         // The Custom spawner bypasses the registry and uses the factory directly.
         let (shutdown_tx, _) = broadcast::channel(1);
         let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
         let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
         let (derived_event_tx, _) = broadcast::channel(10);

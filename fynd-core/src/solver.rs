@@ -27,7 +27,7 @@ use crate::{
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     encoding::encoder::Encoder,
     feed::{
-        events::MarketEventHandler, gas::GasPriceFetcher, market_data::SharedMarketDataRef,
+        events::MarketEventHandler, gas::GasPriceFetcher, market_data::MarketData,
         tycho_feed::TychoFeed, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
@@ -562,7 +562,7 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
 
         let tycho_feed_config = TychoFeedConfig::new(
             self.tycho_url,
@@ -741,7 +741,7 @@ impl FyndBuilder {
 pub struct Solver {
     router: WorkerPoolRouter,
     worker_pools: Vec<WorkerPool>,
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     derived_data: SharedDerivedDataRef,
     feed_handle: JoinHandle<()>,
     gas_price_handle: JoinHandle<()>,
@@ -753,7 +753,7 @@ pub struct Solver {
 
 impl Solver {
     /// Returns a clone of the shared market data reference.
-    pub fn market_data(&self) -> SharedMarketDataRef {
+    pub fn market_data(&self) -> MarketData {
         self.market_data.clone()
     }
 
@@ -852,7 +852,7 @@ pub struct SolverParts {
     /// One [`WorkerPool`] per configured algorithm pool.
     worker_pools: Vec<WorkerPool>,
     /// Live market snapshot shared across all components.
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     /// Derived on-chain data (spot prices, depths, gas costs) shared across all components.
     derived_data: SharedDerivedDataRef,
     /// Background task running the Tycho market-data feed.
@@ -886,7 +886,7 @@ impl SolverParts {
     }
 
     /// Returns a reference to the shared market data.
-    pub fn market_data(&self) -> &SharedMarketDataRef {
+    pub fn market_data(&self) -> &MarketData {
         &self.market_data
     }
 
@@ -907,7 +907,7 @@ impl SolverParts {
     ) -> (
         WorkerPoolRouter,
         Vec<WorkerPool>,
-        SharedMarketDataRef,
+        MarketData,
         SharedDerivedDataRef,
         JoinHandle<()>,
         JoinHandle<()>,

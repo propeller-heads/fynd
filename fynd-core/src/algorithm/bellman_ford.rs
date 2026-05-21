@@ -44,7 +44,7 @@ use crate::{
         types::{SpotPrices, TokenGasPrices},
         SharedDerivedDataRef,
     },
-    feed::market_data::SharedMarketDataRef,
+    feed::market_data::MarketData,
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
@@ -338,7 +338,7 @@ impl Algorithm for BellmanFordAlgorithm {
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: SharedMarketDataRef,
+        market: MarketData,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
@@ -666,7 +666,10 @@ impl Algorithm for BellmanFordAlgorithm {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use num_bigint::BigInt;
+    use tokio::sync::RwLock;
     use tycho_simulation::{
         tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
         tycho_ethereum::gas::{BlockGasPrice, GasPrice},
@@ -676,7 +679,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, order, token, MockProtocolSim},
         derived::{types::TokenGasPrices, DerivedData},
-        feed::market_data::{SharedMarketData, SharedMarketDataRef},
+        feed::market_data::{MarketData, MarketState},
         graph::GraphManager,
         types::quote::OrderSide,
     };
@@ -686,8 +689,8 @@ mod tests {
     /// Sets up market and graph with `()` edge weights for BellmanFord tests.
     fn setup_market_bf(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-    ) -> (SharedMarketDataRef, PetgraphStableDiGraphManager<()>) {
-        let mut market = SharedMarketData::new();
+    ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
+        let mut market = MarketState::new();
 
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -708,10 +711,7 @@ mod tests {
         let mut graph_manager = PetgraphStableDiGraphManager::default();
         graph_manager.initialize_graph(&market.component_topology());
 
-        (
-            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))),
-            graph_manager,
-        )
+        (MarketData::new(Arc::new(RwLock::new(market))), graph_manager)
     }
 
     fn setup_derived_with_token_prices(
@@ -729,7 +729,7 @@ mod tests {
 
         let mut derived_data = DerivedData::new();
         derived_data.set_token_prices(token_prices, vec![], 1, true);
-        std::sync::Arc::new(tokio::sync::RwLock::new(derived_data))
+        Arc::new(RwLock::new(derived_data))
     }
 
     fn bf_algorithm(max_hops: usize, timeout_ms: u64) -> BellmanFordAlgorithm {

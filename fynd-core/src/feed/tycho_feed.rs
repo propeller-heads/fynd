@@ -2,7 +2,7 @@
 //!
 //! The TychoFeed connects to Tycho's WebSocket API and:
 //! - Receives component/state updates
-//! - Updates SharedMarketData (exclusive write access)
+//! - Updates MarketState (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ use tycho_simulation::{
 use crate::{
     feed::{
         events::MarketEvent,
-        market_data::SharedMarketDataRef,
+        market_data::MarketData,
         protocol_registry::{register_exchanges, register_rfq},
         DataFeedError, TychoFeedConfig,
     },
@@ -38,14 +38,14 @@ use crate::{
 ///
 /// - Connect to Tycho WebSocket and maintain connection
 /// - Process incoming component/state updates
-/// - Update SharedMarketData (holds exclusive write access)
+/// - Update MarketState (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
 pub(crate) struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     /// Event broadcaster.
     event_tx: broadcast::Sender<MarketEvent>,
     /// Signal channel to notify the gas price worker to refresh gas price.
@@ -59,7 +59,7 @@ impl TychoFeed {
     ///
     /// * `config` - Indexer configuration
     /// * `market_data` - Shared market data reference
-    pub(crate) fn new(config: TychoFeedConfig, market_data: SharedMarketDataRef) -> Self {
+    pub(crate) fn new(config: TychoFeedConfig, market_data: MarketData) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
 
         Self { config, market_data, event_tx, gas_price_worker_signal_tx: None }
@@ -417,11 +417,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::feed::{market_data::SharedMarketDataRef, TychoFeedConfig};
+    use crate::feed::{market_data::MarketData, TychoFeedConfig};
 
     /// Creates a new shared market data instance.
-    fn new_shared_market_data() -> SharedMarketDataRef {
-        SharedMarketDataRef::new_shared()
+    fn new_shared_market_data() -> MarketData {
+        MarketData::new_shared()
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

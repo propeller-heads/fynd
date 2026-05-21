@@ -21,7 +21,7 @@ use super::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
     utils::{check_staleness, expected_out_from_price},
 };
-use crate::feed::market_data::SharedMarketDataRef;
+use crate::feed::market_data::MarketData;
 
 const API_URL: &str = "https://api.hyperliquid.xyz/info";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -79,7 +79,7 @@ type TokenCache = Arc<RwLock<HashMap<Address, Token>>>;
 ///
 /// All oracle prices are in USD, so pricing any Fynd pair is `oracle_price_in / oracle_price_out`.
 /// The background worker populates both the price cache (from the API) and a token
-/// cache (snapshotted from `SharedMarketData`) so that `get_expected_out` never
+/// cache (snapshotted from `MarketState`) so that `get_expected_out` never
 /// touches the tokio `RwLock`.
 pub struct HyperliquidProvider {
     price_cache: PriceCache,
@@ -122,7 +122,7 @@ impl Default for HyperliquidProvider {
 }
 
 impl PriceProvider for HyperliquidProvider {
-    fn start(&mut self, market_data: SharedMarketDataRef) -> JoinHandle<()> {
+    fn start(&mut self, market_data: MarketData) -> JoinHandle<()> {
         let worker = HyperliquidWorker {
             price_cache: Arc::clone(&self.price_cache),
             token_cache: Arc::clone(&self.token_cache),
@@ -180,7 +180,7 @@ impl PriceProvider for HyperliquidProvider {
 struct HyperliquidWorker {
     price_cache: PriceCache,
     token_cache: TokenCache,
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     client: Client,
     poll_interval: Duration,
     api_url: String,
@@ -200,7 +200,7 @@ impl HyperliquidWorker {
         }
     }
 
-    /// Snapshots the token registry from SharedMarketData into the local token cache.
+    /// Snapshots the token registry from MarketState into the local token cache.
     /// Skips the clone when the registry size hasn't changed, since tokens are only
     /// ever added — never removed or replaced.
     async fn refresh_token_cache(&self) {
@@ -313,7 +313,7 @@ mod tests {
     use tycho_simulation::{evm::tycho_models::Chain, tycho_common::models::token::Token};
 
     use super::*;
-    use crate::feed::market_data::{SharedMarketData, SharedMarketDataRef};
+    use crate::feed::market_data::{MarketData, MarketState};
 
     fn make_token(address: Address, symbol: &str, decimals: u32) -> Token {
         Token {
@@ -499,10 +499,9 @@ mod tests {
         let pepe = make_token(pepe_addr.clone(), "PEPE", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market = SharedMarketData::new();
+        let mut market = MarketState::new();
         market.upsert_tokens([pepe, usdc]);
-        let market_data =
-            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
+        let market_data = MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
 
         let mut provider = HyperliquidProvider::default();
         let _handle = provider.start(market_data);
@@ -531,10 +530,9 @@ mod tests {
         let weth = make_token(weth_address(), "WETH", 18);
         let usdc = make_token(usdc_address(), "USDC", 6);
 
-        let mut market = SharedMarketData::new();
+        let mut market = MarketState::new();
         market.upsert_tokens([weth, usdc]);
-        let market_data =
-            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
+        let market_data = MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)));
 
         let mut provider = HyperliquidProvider::default();
         let _handle = provider.start(market_data);

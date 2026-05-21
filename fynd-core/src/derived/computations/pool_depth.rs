@@ -34,7 +34,7 @@ use crate::{
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::PoolDepths,
     },
-    feed::market_data::{SharedMarketData, SharedMarketDataRef},
+    feed::market_data::{MarketData, MarketState},
     types::ComponentId,
 };
 
@@ -81,7 +81,7 @@ impl DerivedComputation for PoolDepthComputation {
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_pool_depths))]
     async fn compute(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
@@ -131,7 +131,7 @@ impl DerivedComputation for PoolDepthComputation {
                 .iter()
                 .cloned()
                 .collect();
-            let snapshot: SharedMarketData = market_guard.extract_subset(&component_ids);
+            let snapshot: MarketState = market_guard.extract_subset(&component_ids);
 
             (snapshot, components_to_compute)
         };
@@ -352,7 +352,7 @@ mod tests {
             store::DerivedData,
             types::{PoolDepthKey, SpotPrices},
         },
-        feed::market_data::SharedMarketDataRef,
+        feed::market_data::MarketData,
     };
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_handles_empty_market() {
-        let market = SharedMarketDataRef::new_shared();
+        let market = MarketData::new_shared();
         let derived = DerivedData::new_shared();
         derived
             .try_write()
@@ -790,7 +790,7 @@ mod tests {
         let usdc = token(0x02, "USDC");
 
         // Empty market — no simulation state
-        let market = SharedMarketDataRef::new_shared();
+        let market = MarketData::new_shared();
         let derived = DerivedData::new_shared();
         derived
             .try_write()

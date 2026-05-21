@@ -4,19 +4,19 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::BlockGasPrice};
 
-use crate::feed::{market_data::SharedMarketDataRef, DataFeedError};
+use crate::feed::{market_data::MarketData, DataFeedError};
 
 // TODO: Refactor gas price fetching into a `DerivedComputation`.
 pub(crate) struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     signal_rx: mpsc::Receiver<oneshot::Sender<()>>,
-    shared_market_data: SharedMarketDataRef,
+    shared_market_data: MarketData,
 }
 
 impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
     pub(crate) fn new(
         client: C,
-        shared_market_data: SharedMarketDataRef,
+        shared_market_data: MarketData,
     ) -> (Self, mpsc::Sender<oneshot::Sender<()>>) {
         let (signal_tx, signal_rx) = mpsc::channel(5);
         (Self { client, signal_rx, shared_market_data }, signal_tx)
@@ -131,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_error_does_not_crash_and_acks_oneshot() {
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         let (mut fetcher, signal_tx) =
             GasPriceFetcher::new(MockFeePriceGetter::new(1), market_data.clone());
 
@@ -176,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_failure_keeps_loop_alive() {
-        let market_data = SharedMarketDataRef::new_shared();
+        let market_data = MarketData::new_shared();
         // Fail 3 times, then succeed
         let (mut fetcher, signal_tx) =
             GasPriceFetcher::new(MockFeePriceGetter::new(3), market_data.clone());

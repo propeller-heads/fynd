@@ -25,7 +25,7 @@ use tycho_simulation::{
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
-    feed::market_data::{SharedMarketData, SharedMarketDataRef},
+    feed::market_data::{MarketData, MarketState},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
     AlgorithmError,
@@ -349,7 +349,7 @@ impl MostLiquidAlgorithm {
     #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
     pub(crate) fn simulate_path<D>(
         path: &Path<D>,
-        market: &SharedMarketData,
+        market: &MarketState,
         token_prices: Option<&TokenGasPrices>,
         amount_in: BigUint,
     ) -> Result<RouteResult, AlgorithmError> {
@@ -477,7 +477,7 @@ impl Algorithm for MostLiquidAlgorithm {
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: SharedMarketDataRef,
+        market: MarketData,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
@@ -739,8 +739,8 @@ mod tests {
         types::OrderSide,
     };
 
-    fn wrap_market(market: SharedMarketData) -> SharedMarketDataRef {
-        SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
+    fn wrap_market(market: MarketState) -> MarketData {
+        MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
     /// Creates a SharedDerivedDataRef with token prices set for testing.
@@ -1302,7 +1302,7 @@ mod tests {
 
         let result = MostLiquidAlgorithm::simulate_path(
             &path,
-            &market_read(&market),
+            market_read(&market).base_market_state(),
             None,
             BigUint::from(100u64),
         )
@@ -1338,7 +1338,7 @@ mod tests {
 
         let result = MostLiquidAlgorithm::simulate_path(
             &path,
-            &market_read(&market),
+            market_read(&market).base_market_state(),
             None,
             BigUint::from(10u64),
         )
@@ -1380,7 +1380,7 @@ mod tests {
 
         let result = MostLiquidAlgorithm::simulate_path(
             &path,
-            &market_read(&market),
+            market_read(&market).base_market_state(),
             None,
             BigUint::from(10u64),
         )
@@ -1416,8 +1416,12 @@ mod tests {
                 .unwrap();
         let path = paths.into_iter().next().unwrap();
 
-        let result =
-            MostLiquidAlgorithm::simulate_path(&path, &market, None, BigUint::from(100u64));
+        let result = MostLiquidAlgorithm::simulate_path(
+            &path,
+            market.base_market_state(),
+            None,
+            BigUint::from(100u64),
+        );
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
     }
 
@@ -1441,7 +1445,7 @@ mod tests {
 
         let result = MostLiquidAlgorithm::simulate_path(
             &path,
-            &market_read(&market),
+            market_read(&market).base_market_state(),
             None,
             BigUint::from(100u64),
         );
@@ -1618,7 +1622,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         // Set up market with both pools using new API
-        let mut market = SharedMarketData::new();
+        let mut market = MarketState::new();
         let pool1_state = MockProtocolSim::new(2.0);
         let pool2_state = MockProtocolSim::new(3.0); // Higher multiplier but no edge weight
 
@@ -1685,7 +1689,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let mut market = SharedMarketData::new();
+        let mut market = MarketState::new();
         let pool_state = MockProtocolSim::new(2.0);
         let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
 
@@ -1795,7 +1799,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let mut market = SharedMarketData::new();
+        let mut market = MarketState::new();
         let pool_state = MockProtocolSim::new(2.0);
         let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
 

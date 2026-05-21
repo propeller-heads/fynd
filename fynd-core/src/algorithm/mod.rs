@@ -32,7 +32,7 @@ use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
-    feed::market_data::SharedMarketDataRef,
+    feed::market_data::MarketData,
     graph::GraphManager,
     types::{quote::Order, RouteResult},
 };
@@ -193,7 +193,7 @@ pub trait Algorithm: Send + Sync {
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
-        market: SharedMarketDataRef,
+        market: MarketData,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError>;
@@ -201,7 +201,7 @@ pub trait Algorithm: Send + Sync {
     /// Returns the derived data computation requirements for this algorithm.
     ///
     /// Algorithms declare freshness requirements for derived data:
-    /// - `require_fresh`: Data must be from the current block (same as SharedMarketData)
+    /// - `require_fresh`: Data must be from the current block (same as MarketState)
     /// - `allow_stale`: Data can be from any past block, as long as it exists
     ///
     /// Workers use this to determine when they can safely solve.

@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tycho_simulation::tycho_common::models::Address;
 
-use crate::feed::market_data::SharedMarketDataRef;
+use crate::feed::market_data::MarketData;
 
 /// Errors that can occur when fetching external prices.
 #[non_exhaustive]
@@ -87,7 +87,7 @@ impl ExternalPrice {
 pub trait PriceProvider: Send + Sync + 'static {
     /// Called once at startup. Spawns a background worker that populates an internal cache and
     /// returns its task handle.
-    fn start(&mut self, market_data: SharedMarketDataRef) -> JoinHandle<()>;
+    fn start(&mut self, market_data: MarketData) -> JoinHandle<()>;
 
     /// Returns the expected output amount for a given input by reading from the internal cache.
     /// Must not block or make network calls.

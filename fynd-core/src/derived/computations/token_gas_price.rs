@@ -50,7 +50,7 @@ use crate::{
         manager::{ChangedComponents, SharedDerivedDataRef},
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
-    feed::market_data::{SharedMarketData, SharedMarketDataRef},
+    feed::market_data::{MarketData, MarketState},
     graph::{GraphManager, Path, PetgraphStableDiGraphManager},
     types::ComponentId,
     MostLiquidAlgorithm,
@@ -205,7 +205,7 @@ impl TokenGasPriceComputation {
     fn compute_spread_and_mid_price(
         &self,
         path: Path<()>,
-        market: &SharedMarketData,
+        market: &MarketState,
         gas_price: &BigUint,
     ) -> Result<(f64, Price, HashSet<ComponentId>), ComputationError> {
         // Extract component IDs from path edges for dependency tracking
@@ -321,7 +321,7 @@ impl TokenGasPriceComputation {
     #[allow(clippy::type_complexity)]
     async fn simulate_token_prices(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         spot_prices: &SpotPrices,
         filter_tokens: Option<&HashSet<Address>>,
     ) -> Result<
@@ -467,7 +467,7 @@ impl TokenGasPriceComputation {
     /// or `Err` if computation failed.
     async fn try_incremental_compute(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
@@ -558,7 +558,7 @@ impl DerivedComputation for TokenGasPriceComputation {
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
     async fn compute(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
@@ -644,7 +644,7 @@ mod tests {
     /// Returns (market_guard, store) ready for computation.
     async fn setup_test_env(
         pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-    ) -> (SharedMarketDataRef, SharedDerivedDataRef) {
+    ) -> (MarketData, SharedDerivedDataRef) {
         let (wrapped_market, _) = setup_market(pools.clone());
 
         let wrapped_store = DerivedData::new_shared();
@@ -890,7 +890,7 @@ mod tests {
         let gas_price = BigUint::from(GAS_PRICE);
         let computation = computation_for(&eth.address);
         let (spread, mid_price, _path_components) = computation
-            .compute_spread_and_mid_price(path, &market, &gas_price)
+            .compute_spread_and_mid_price(path, market.base_market_state(), &gas_price)
             .unwrap();
 
         // Expected values from exact fractions
@@ -1258,14 +1258,13 @@ mod tests {
         let usdc = token(1, "USDC");
 
         // Create market without gas price set
-        let mut market_inner = SharedMarketData::new();
+        let mut market_inner = MarketState::new();
         let comp = component("pool", &[eth.clone(), usdc.clone()]);
         market_inner.upsert_components(std::iter::once(comp));
         market_inner
             .update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market_inner.upsert_tokens([eth.clone(), usdc.clone()]);
-        let market =
-            SharedMarketDataRef::new(std::sync::Arc::new(tokio::sync::RwLock::new(market_inner)));
+        let market = MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market_inner)));
 
         // Compute spot prices
         let derived = DerivedData::new_shared();

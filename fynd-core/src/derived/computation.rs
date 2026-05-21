@@ -8,7 +8,7 @@ use super::{
     error::ComputationError,
     manager::{ChangedComponents, SharedDerivedDataRef},
 };
-use crate::feed::market_data::SharedMarketDataRef;
+use crate::feed::market_data::MarketData;
 
 /// Unique identifier for a computation type.
 ///
@@ -34,8 +34,8 @@ impl RequirementConflict {
 ///
 /// Each algorithm declares which computations it needs and their freshness requirements:
 ///
-/// - `require_fresh`: Data must be from the current block (same block as SharedMarketData). Workers
-///   wait for these computations to complete for the current block before solving.
+/// - `require_fresh`: Data must be from the current block (same block as MarketState). Workers wait
+///   for these computations to complete for the current block before solving.
 ///
 /// - `allow_stale`: Data can be from any past block, as long as it has been computed at least once.
 ///   Workers only check that the data exists, not that it's from the current block.
@@ -215,7 +215,7 @@ impl<T> ComputationOutput<T> {
 ///
 ///     async fn compute(
 ///         &self,
-///         market: &SharedMarketDataRef,
+///         market: &MarketData,
 ///         store: &SharedDerivedDataRef,
 ///         changed: &ChangedComponents,
 ///     ) -> Result<Self::Output, ComputationError> {
@@ -265,7 +265,7 @@ pub trait DerivedComputation: Send + Sync + 'static {
     /// as possible to minimize contention. Use `.read().await` for async lock acquisition.
     async fn compute(
         &self,
-        market: &SharedMarketDataRef,
+        market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError>;

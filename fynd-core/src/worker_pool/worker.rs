@@ -25,7 +25,7 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        market_data::SharedMarketDataRef,
+        market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
@@ -43,7 +43,7 @@ where
     /// Graph manager that maintains the graph.
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     /// Reference to shared derived data (pool depths, token prices).
     derived_data: SharedDerivedDataRef,
     /// Algorithm's computation requirements (which derived data to react to).
@@ -75,7 +75,7 @@ where
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
     pub fn new(
-        market_data: SharedMarketDataRef,
+        market_data: MarketData,
         derived_data: SharedDerivedDataRef,
         algorithm: A,
         worker_id: usize,
@@ -94,10 +94,10 @@ where
         }
     }
 
-    /// Initializes the graph from SharedMarketData.
+    /// Initializes the graph from MarketState.
     ///
     /// Call this on startup or to recreate the graph from the latest market topology.
-    /// Gets the market topology from SharedMarketData and uses it to build the graph.
+    /// Gets the market topology from MarketState and uses it to build the graph.
     pub async fn initialize_graph(&mut self) {
         let topology = {
             // read lock on market data
@@ -431,7 +431,7 @@ where
                                 if self.requirements.is_required(computation_id) {
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                                    let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
                                     debug!(
                                         self.worker_id,
                                         computation_id,
@@ -456,7 +456,7 @@ where
                             // Recover by updating with whatever derived data is available.
                             let market = self.market_data.read().await;
                             let derived = self.derived_data.read().await;
-                            let updated = self.graph_manager.update_edge_weights_with_derived(&market, &derived);
+                            let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
                             debug!(
                                 self.worker_id,
                                 updated,
@@ -561,7 +561,7 @@ mod tests {
         async fn find_best_route(
             &self,
             _graph: &Self::GraphType,
-            _market: SharedMarketDataRef,
+            _market: MarketData,
             _derived: Option<SharedDerivedDataRef>,
             _order: &Order,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {

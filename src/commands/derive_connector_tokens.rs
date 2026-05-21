@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Context, Result};
 use clap::Args;
 use fynd_core::{
-    feed::market_data::SharedMarketDataRef,
+    feed::market_data::MarketData,
     solver::{FyndBuilder, SolverBuildError},
 };
 use fynd_rpc::builder::parse_chain;
@@ -145,7 +145,7 @@ struct TokenScore {
     pool_count: usize,
 }
 
-async fn score_tokens(market_data: &SharedMarketDataRef) -> HashMap<Address, TokenScore> {
+async fn score_tokens(market_data: &MarketData) -> HashMap<Address, TokenScore> {
     let guard = market_data.read().await;
     let topology = guard.component_topology();
 
