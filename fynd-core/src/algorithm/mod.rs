@@ -32,7 +32,7 @@ use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
-    feed::market_data::MarketData,
+    feed::market_data::{MarketData, StateLabel},
     graph::GraphManager,
     types::{quote::Order, RouteResult},
 };
@@ -183,6 +183,8 @@ pub trait Algorithm: Send + Sync {
     /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
     /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
     ///   locks)
+    /// * `label` - Optional overlay label; when `Some`, the algorithm reads market state through
+    ///   the named overlay so per-request pool overrides are applied during solving
     /// * `derived` - Optional shared reference to derived data (token prices, etc.)
     /// * `order` - The order to solve
     ///
@@ -194,6 +196,7 @@ pub trait Algorithm: Send + Sync {
         &self,
         graph: &Self::GraphType,
         market: MarketData,
+        label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError>;

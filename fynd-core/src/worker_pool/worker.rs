@@ -101,7 +101,7 @@ where
     pub async fn initialize_graph(&mut self) {
         let topology = {
             // read lock on market data
-            let market = self.market_data.read().await;
+            let market = self.market_data.read(None).await;
             market.component_topology().clone() // clone to avoid holding the lock
         };
 
@@ -168,9 +168,14 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, market_ref, solved_against) = {
-            let market = self.market_data.read().await;
-            let last_block = market
+        let (block_info, solved_against) = {
+            // Read briefly to capture block info; drop the lock before solving so it is not held
+            // across the algorithm's own read call.
+            let view = self
+                .market_data
+                .read(params.state_label())
+                .await;
+            let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
             let block_info = BlockInfo::new(
@@ -178,23 +183,24 @@ where
                 last_block.hash().to_string(),
                 last_block.timestamp(),
             );
-            // When no label was requested, record the current block number so callers
-            // always know which state the quote was computed against.
-            let label = params
+            // When no overlay was requested, record the block number so callers always know which
+            // state the quote was computed against.
+            let solved_against = view
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            drop(market);
-            let market_ref = match params.state_label().cloned() {
-                Some(overlay) => self.market_data.with_label(overlay),
-                None => self.market_data.clone(),
-            };
-            (block_info, market_ref, label)
+            (block_info, solved_against)
         };
 
         let result = self
             .algorithm
-            .find_best_route(graph, market_ref, Some(self.derived_data.clone()), order)
+            .find_best_route(
+                graph,
+                self.market_data.clone(),
+                params.state_label().cloned(),
+                Some(self.derived_data.clone()),
+                order,
+            )
             .await;
 
         let order_quote = match result {
@@ -429,7 +435,7 @@ where
                             // Update edge weights when a relevant computation completes.
                             if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
                                 if self.requirements.is_required(computation_id) {
-                                    let market = self.market_data.read().await;
+                                    let market = self.market_data.read(None).await;
                                     let derived = self.derived_data.read().await;
                                     let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
                                     debug!(
@@ -454,7 +460,7 @@ where
                                 skipped
                             );
                             // Recover by updating with whatever derived data is available.
-                            let market = self.market_data.read().await;
+                            let market = self.market_data.read(None).await;
                             let derived = self.derived_data.read().await;
                             let updated = self.graph_manager.update_edge_weights_with_derived(market.base_market_state(), &derived);
                             debug!(
@@ -562,6 +568,7 @@ mod tests {
             &self,
             _graph: &Self::GraphType,
             _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
             _derived: Option<SharedDerivedDataRef>,
             _order: &Order,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {

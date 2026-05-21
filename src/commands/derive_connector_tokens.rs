@@ -103,7 +103,7 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(args.wait_secs);
     loop {
         if market_data
-            .read()
+            .read(None)
             .await
             .last_updated()
             .is_some()
@@ -146,7 +146,7 @@ struct TokenScore {
 }
 
 async fn score_tokens(market_data: &MarketData) -> HashMap<Address, TokenScore> {
-    let guard = market_data.read().await;
+    let guard = market_data.read(None).await;
     let topology = guard.component_topology();
 
     // Count pool appearances per token.

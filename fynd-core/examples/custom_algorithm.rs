@@ -21,7 +21,7 @@ use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
     derived::SharedDerivedDataRef,
-    feed::market_data::MarketData,
+    feed::market_data::{MarketData, StateLabel},
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
     Algorithm, AlgorithmError, ComputationRequirements, EncodingOptions, FyndBuilder, Order,
@@ -66,10 +66,11 @@ impl Algorithm for DirectPoolAlgorithm {
         &self,
         graph: &Self::GraphType,
         market: MarketData,
+        label: Option<StateLabel>,
         _derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
-        let market = market.read().await;
+        let market = market.read(label.as_ref()).await;
 
         let gas_price = market
             .gas_price()

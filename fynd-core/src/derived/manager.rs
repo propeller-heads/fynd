@@ -229,7 +229,7 @@ impl ComputationManager {
                                 "computation manager lagged, skipped {} events. Recomputing from current state.",
                                 skipped
                             );
-                            let market = self.market_data.read().await;
+                            let market = self.market_data.read(None).await;
                             let changed = ChangedComponents::all(market.base_market_state());
                             drop(market);
                             self.compute_all(&changed).await;
@@ -255,7 +255,7 @@ impl ComputationManager {
         // Get block info for tracking
         let Some(block) = self
             .market_data
-            .read()
+            .read(None)
             .await
             .last_updated()
             .map(|b| b.number())

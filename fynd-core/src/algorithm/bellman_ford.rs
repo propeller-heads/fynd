@@ -44,7 +44,7 @@ use crate::{
         types::{SpotPrices, TokenGasPrices},
         SharedDerivedDataRef,
     },
-    feed::market_data::MarketData,
+    feed::market_data::{MarketData, StateLabel},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
@@ -339,6 +339,7 @@ impl Algorithm for BellmanFordAlgorithm {
         &self,
         graph: &Self::GraphType,
         market: MarketData,
+        label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
@@ -378,7 +379,7 @@ impl Algorithm for BellmanFordAlgorithm {
 
         // Acquire read lock only for market data extraction, then release.
         let (token_map, market_subset) = {
-            let market = market.read().await;
+            let market = market.read(label.as_ref()).await;
 
             let token_map: HashMap<NodeIndex, Token> = token_nodes
                 .iter()
@@ -758,7 +759,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -788,7 +789,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -814,7 +815,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -843,7 +844,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -861,7 +862,7 @@ mod tests {
         let ord = order(&token_x, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(matches!(
             result,
@@ -882,7 +883,7 @@ mod tests {
         let ord = order(&token_a, &token_x, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(matches!(
             result,
@@ -908,7 +909,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -933,7 +934,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -964,7 +965,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -992,7 +993,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1019,7 +1020,7 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algo
-            .find_best_route(manager.graph(), market, Some(derived), &ord)
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
             .await
             .unwrap();
 
@@ -1046,7 +1047,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
 
         // With 0ms timeout, we expect either:
@@ -1083,7 +1084,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1109,7 +1110,7 @@ mod tests {
 
         // Should fail due to insufficient liquidity
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1134,7 +1135,7 @@ mod tests {
         let ord = order(&token_a, &token_e, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1161,7 +1162,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await;
 
         // Should find A->C->B despite A->B failing
@@ -1196,7 +1197,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1267,7 +1268,7 @@ mod tests {
         ]);
 
         let result = algo
-            .find_best_route(manager.graph(), market, Some(derived), &ord)
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
             .await
             .unwrap();
 
@@ -1301,7 +1302,7 @@ mod tests {
 
         // No derived data: should fall back to gross comparison
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1352,7 +1353,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1376,7 +1377,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 
@@ -1403,7 +1404,7 @@ mod tests {
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, &ord)
+            .find_best_route(manager.graph(), market, None, None, &ord)
             .await
             .unwrap();
 

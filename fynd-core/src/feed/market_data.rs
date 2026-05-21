@@ -52,23 +52,22 @@ pub struct OverlayEntry {
 /// The shared overlay registry: maps each label to its snapshot.
 type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
 
-/// Thread-safe handle to shared market data with optional overlay support.
+/// The main entry point for accessing market data.
 ///
-/// Cloning this handle is cheap: all clones share the same underlying data and overlays.
-/// Use `with_label` to obtain a handle scoped to a specific overlay layer.
+/// Cloning is cheap — all clones share the same underlying data and overlay registry.
+/// Pass an optional label to `read` to scope the view to a specific overlay.
 #[derive(Clone)]
 pub struct MarketData {
     data: Arc<RwLock<MarketState>>,
     /// Per-label overlay states. Stored separately from the base data lock so that
     /// overlay writes do not block base-state reads.
     overlays: OverlayRegistry,
-    label: Option<StateLabel>,
 }
 
 impl MarketData {
-    /// Creates a new handle wrapping the given data store with no active overlay label.
+    /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(HashMap::new())), label: None }
+        Self { data, overlays: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -76,30 +75,20 @@ impl MarketData {
         Self::new(Arc::new(RwLock::new(MarketState::new())))
     }
 
-    /// Returns a clone of this handle scoped to the given overlay label.
+    /// Acquires an overlay-aware view of the market data.
     ///
-    /// All clones share the same overlay registry, so a state registered via any handle
-    /// is visible to all handles with the same label.
-    pub fn with_label(&self, label: StateLabel) -> Self {
-        Self {
-            data: Arc::clone(&self.data),
-            overlays: Arc::clone(&self.overlays),
-            label: Some(label),
-        }
-    }
-
-    /// Acquires a view that exposes both the base data and the active overlay (if any).
-    ///
-    /// The overlay lock is held only briefly to clone the overlay `Arc` pointer; it is released
+    /// If `label` is `Some`, the view will expose overlay states registered under that label,
+    /// falling back to base state for pools not present in the overlay.
+    /// The overlay lock is held only briefly to clone the snapshot pointer; it is released
     /// before the view is returned, so solving never holds two locks simultaneously.
-    pub async fn read(&self) -> MarketDataView<'_> {
+    pub async fn read(&self, label: Option<&StateLabel>) -> MarketDataView<'_> {
         let guard = self.data.read().await;
-        let overlay = if let Some(ref label) = self.label {
+        let overlay = if let Some(label) = label {
             self.overlays
                 .read()
                 .await
                 .get(label)
-                .map(|e| Arc::clone(&e.states))
+                .map(|e| (label.clone(), Arc::clone(&e.states)))
         } else {
             None
         };
@@ -200,14 +189,21 @@ impl MarketData {
 /// delegate to the base data.
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
-    overlay: Option<OverlayStates>,
+    overlay: Option<(StateLabel, OverlayStates)>,
 }
 
 impl<'a> MarketDataView<'a> {
+    /// Returns the label identifying the active overlay, or `None` if no overlay is in effect.
+    pub fn state_label(&self) -> Option<&StateLabel> {
+        self.overlay
+            .as_ref()
+            .map(|(label, _)| label)
+    }
+
     /// Returns the simulation state for the given component, checking the overlay first.
     pub fn get_simulation_state(&self, id: &str) -> Option<&dyn ProtocolSim> {
-        if let Some(ref ov) = self.overlay {
-            if let Some(s) = ov.get(id) {
+        if let Some((_, ref states)) = self.overlay {
+            if let Some(s) = states.get(id) {
                 return Some(s.as_ref());
             }
         }
@@ -220,8 +216,8 @@ impl<'a> MarketDataView<'a> {
     /// If no overlay is active, this is equivalent to `self.extract_subset(component_ids)`.
     pub fn extract_subset_with_overlay(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
         let mut subset = self.guard.extract_subset(component_ids);
-        if let Some(ref ov) = self.overlay {
-            for (id, state) in ov.iter() {
+        if let Some((_, ref states)) = self.overlay {
+            for (id, state) in states.iter() {
                 if subset
                     .simulation_states
                     .contains_key(id)
@@ -557,8 +553,7 @@ mod tests {
             .register_labeled_state(label.clone(), states, u64::MAX)
             .await;
 
-        let labeled_ref = market_ref.with_label(label);
-        let guard = labeled_ref.read().await;
+        let guard = market_ref.read(Some(&label)).await;
         // Base data is empty — overlay provides the state
         let sim = guard.get_simulation_state("pool_ab");
         assert!(sim.is_some());
@@ -580,7 +575,7 @@ mod tests {
             .await;
 
         // A handle with no label must not see the overlay
-        let guard = market_ref.read().await;
+        let guard = market_ref.read(None).await;
         assert!(guard
             .get_simulation_state("pool1")
             .is_none());
@@ -635,12 +630,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_label_shares_overlay_registry() {
-        // Registering via one handle must be visible to another handle pointing at the same
-        // overlay registry.
+    async fn clone_shares_overlay_registry() {
+        // Registering via one clone must be visible when reading via any other clone pointing at
+        // the same overlay registry.
         let base = MarketData::new_shared();
-        let handle_a = base.with_label("shared".to_string());
-        let handle_b = base.with_label("shared".to_string());
+        let clone_a = base.clone();
+        let clone_b = base.clone();
 
         base.register_labeled_state(
             "shared".to_string(),
@@ -652,11 +647,14 @@ mod tests {
         )
         .await;
 
-        let guard_a = handle_a.read().await;
-        let guard_b = handle_b.read().await;
+        let label = "shared".to_string();
+        let guard_a = clone_a.read(Some(&label)).await;
         assert!(guard_a
             .get_simulation_state("pool_x")
             .is_some());
+        drop(guard_a);
+
+        let guard_b = clone_b.read(Some(&label)).await;
         assert!(guard_b
             .get_simulation_state("pool_x")
             .is_some());
@@ -693,8 +691,7 @@ mod tests {
             )
             .await;
 
-        let labeled = market_ref.with_label(label);
-        let guard = labeled.read().await;
+        let guard = market_ref.read(Some(&label)).await;
         let ids: HashSet<ComponentId> = ["pool_ab".to_string()]
             .into_iter()
             .collect();
@@ -756,7 +753,7 @@ mod tests {
             })
             .await;
 
-        let guard = market_ref.read().await;
+        let guard = market_ref.read(None).await;
         assert_eq!(
             guard
                 .last_updated()

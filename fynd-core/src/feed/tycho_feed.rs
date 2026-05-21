@@ -597,7 +597,7 @@ mod tests {
             .expect("Failed to handle message");
 
         // Verify component was added to market data
-        let data = market_data.read().await;
+        let data = market_data.read(None).await;
 
         let component = data
             .get_component(component_id)
@@ -663,7 +663,7 @@ mod tests {
 
         // Verify it was added
         {
-            let data = market_data.read().await;
+            let data = market_data.read(None).await;
             assert!(
                 data.get_component(component_id)
                     .is_some(),
@@ -685,7 +685,7 @@ mod tests {
             .expect("Failed to handle removal");
 
         // Verify component was removed
-        let data = market_data.read().await;
+        let data = market_data.read(None).await;
         assert!(
             data.get_component(component_id)
                 .is_none(),
@@ -752,7 +752,7 @@ mod tests {
 
         // Verify state was updated
         {
-            let data = market_data.read().await;
+            let data = market_data.read(None).await;
             assert_eq!(
                 data.get_component(component_id)
                     .expect("Component should be in market data")
@@ -797,7 +797,7 @@ mod tests {
 
         // Verify state was updated
         {
-            let data = market_data.read().await;
+            let data = market_data.read(None).await;
             assert_eq!(
                 data.get_simulation_state(component_id)
                     .expect("Component should be in market data")
@@ -863,7 +863,7 @@ mod tests {
 
         // Verify the old component was added
         {
-            let data = market_data.read().await;
+            let data = market_data.read(None).await;
             assert!(
                 data.get_component(old_component_id)
                     .is_some(),
@@ -892,7 +892,7 @@ mod tests {
 
         // Verify both operations succeeded
         {
-            let data = market_data.read().await;
+            let data = market_data.read(None).await;
             assert!(
                 data.get_component(new_component_id)
                     .is_some(),

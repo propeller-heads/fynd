@@ -455,7 +455,7 @@ impl BinanceWsWorker {
             .unwrap_or(0);
 
         let new_cache: HashMap<Address, Token> = {
-            let data = self.market_data.read().await;
+            let data = self.market_data.read(None).await;
             let registry = data.token_registry_ref();
             if registry.len() == current_len {
                 return;

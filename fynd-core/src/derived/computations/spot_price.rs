@@ -70,7 +70,7 @@ impl DerivedComputation for SpotPriceComputation {
             existing_prices
         };
 
-        let market_guard = market.read().await;
+        let market_guard = market.read(None).await;
         let topology = market_guard.component_topology();
         let tokens = market_guard.token_registry_ref();
 
