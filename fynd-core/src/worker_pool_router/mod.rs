@@ -200,6 +200,27 @@ impl WorkerPoolRouter {
             .map(|e| e.price_guard())
             .filter(|c| c.enabled());
 
+        // Capture candidate info before ranked_quotes is consumed.
+        #[cfg(feature = "slippage-features")]
+        let candidate_info: Vec<_> = ranked_quotes
+            .iter()
+            .map(|candidates| {
+                use num_traits::ToPrimitive;
+                let n = candidates.len() as u32;
+                let gap = if candidates.len() >= 2 {
+                    let b = candidates[0].amount_out_net_gas().to_f64();
+                    let s = candidates[1].amount_out_net_gas().to_f64();
+                    match (b, s) {
+                        (Some(b), Some(s)) if b > 0.0 => Some((b - s) / b * 10_000.0),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                (n, gap)
+            })
+            .collect();
+
         let mut order_quotes: Vec<OrderQuote> = match (&self.price_guard, price_guard_config) {
             (Some(guard), Some(config)) => guard
                 .validate(ranked_quotes, config)
@@ -245,7 +266,7 @@ impl WorkerPoolRouter {
 
         #[cfg(feature = "slippage-features")]
         if let Some(ref obs) = self.observer {
-            self.emit_quote_produced_events(obs.as_ref(), &order_quotes, request.options());
+            self.emit_quote_produced_events(obs.as_ref(), &order_quotes, &candidate_info, request.options());
         }
 
         // Calculate totals
@@ -511,61 +532,27 @@ impl WorkerPoolRouter {
 
     /// Emits `QuoteProducedEvent` for every encoded order quote.
     ///
-    /// Called after encoding so that `calldata` is populated from the
-    /// transaction data on each `OrderQuote`.
+    /// `candidate_info` provides (n_alternatives, gap_to_second_best_bps) per
+    /// order from the full ranked candidate list (before filtering to the
+    /// winner). Each entry corresponds to one order in `quotes`.
     #[cfg(feature = "slippage-features")]
     fn emit_quote_produced_events(
         &self,
         obs: &dyn crate::observer::SolverObserver,
         quotes: &[OrderQuote],
+        candidate_info: &[(u32, Option<f64>)],
         options: &QuoteOptions,
     ) {
         use num_traits::ToPrimitive;
         use uuid::Uuid;
 
-        use crate::observer::{CandidateSummary, ObservedRoute, QuoteProducedEvent};
-
-        let n_alternatives = quotes.len() as u32;
-        let request_id = quotes
-            .first()
-            .map(|q| q.order_id().to_string())
-            .unwrap_or_default();
-
-        let gap_to_second_best_bps = if quotes.len() >= 2 {
-            let best_out = quotes[0].amount_out_net_gas().to_f64();
-            let second_out = quotes[1].amount_out_net_gas().to_f64();
-            match (best_out, second_out) {
-                (Some(b), Some(s)) if b > 0.0 => Some((b - s) / b * 10_000.0),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        use crate::observer::{ObservedRoute, QuoteProducedEvent};
 
         let slippage_tolerance = options
             .encoding_options()
             .map(|e| e.slippage());
 
-        let all_candidates: Vec<CandidateSummary> = quotes
-            .iter()
-            .map(|q| {
-                let route = q
-                    .route()
-                    .map(ObservedRoute::from)
-                    .unwrap_or(ObservedRoute { swaps: vec![] });
-                CandidateSummary {
-                    route,
-                    score: q
-                        .amount_out_net_gas()
-                        .to_f64()
-                        .unwrap_or(0.0),
-                    amount_out: q.amount_out().to_string(),
-                }
-            })
-            .collect();
-
-        for (rank, q) in quotes.iter().enumerate() {
-            // Skip quotes with no route (solver found nothing).
+        for (idx, q) in quotes.iter().enumerate() {
             let Some(route_ref) = q.route() else {
                 continue;
             };
@@ -573,13 +560,18 @@ impl WorkerPoolRouter {
                 continue;
             }
 
+            let (n_alternatives, gap_to_second_best_bps) = candidate_info
+                .get(idx)
+                .copied()
+                .unwrap_or((1, None));
+
             let route = ObservedRoute::from(route_ref);
 
             let event = QuoteProducedEvent {
-                request_id: request_id.clone(),
+                request_id: q.order_id().to_string(),
                 quote_id: Uuid::new_v4().to_string(),
                 solver_id: q.algorithm().to_string(),
-                is_winner: rank == 0,
+                is_winner: true,
                 block_number: q.block().number(),
                 chain_id: self.chain_id,
                 route,
@@ -596,7 +588,7 @@ impl WorkerPoolRouter {
                 gap_to_second_best_bps,
                 score_dispersion: None,
                 slippage_tolerance,
-                all_candidates: all_candidates.clone(),
+                all_candidates: vec![],
             };
             obs.on_quote_produced(event);
         }
