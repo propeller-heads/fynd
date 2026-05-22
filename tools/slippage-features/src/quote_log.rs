@@ -114,9 +114,7 @@ impl QuoteLogObserver {
 }
 
 impl SolverObserver for QuoteLogObserver {
-    fn on_route_scored(&self, _route: &ObservedRoute, _score: f64, _rank: usize) {
-        // Only on_quote_produced matters for the quote log.
-    }
+    fn on_route_scored(&self, _route: &ObservedRoute, _score: f64, _rank: usize) {}
 
     fn on_quote_produced(&self, event: QuoteProducedEvent) {
         // Forward to resim channel (non-blocking to avoid stalling the solver).

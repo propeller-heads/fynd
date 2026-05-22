@@ -200,27 +200,6 @@ impl WorkerPoolRouter {
             .map(|e| e.price_guard())
             .filter(|c| c.enabled());
 
-        // Capture candidate info before ranked_quotes is consumed.
-        #[cfg(feature = "slippage-features")]
-        let candidate_info: Vec<_> = ranked_quotes
-            .iter()
-            .map(|candidates| {
-                use num_traits::ToPrimitive;
-                let n = candidates.len() as u32;
-                let gap = if candidates.len() >= 2 {
-                    let b = candidates[0].amount_out_net_gas().to_f64();
-                    let s = candidates[1].amount_out_net_gas().to_f64();
-                    match (b, s) {
-                        (Some(b), Some(s)) if b > 0.0 => Some((b - s) / b * 10_000.0),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                (n, gap)
-            })
-            .collect();
-
         let mut order_quotes: Vec<OrderQuote> = match (&self.price_guard, price_guard_config) {
             (Some(guard), Some(config)) => guard
                 .validate(ranked_quotes, config)
@@ -266,7 +245,7 @@ impl WorkerPoolRouter {
 
         #[cfg(feature = "slippage-features")]
         if let Some(ref obs) = self.observer {
-            self.emit_quote_produced_events(obs.as_ref(), &order_quotes, &candidate_info, request.options());
+            self.emit_quote_produced_events(obs.as_ref(), &order_quotes, request.options());
         }
 
         // Calculate totals
@@ -532,15 +511,14 @@ impl WorkerPoolRouter {
 
     /// Emits `QuoteProducedEvent` for every encoded order quote.
     ///
-    /// `candidate_info` provides (n_alternatives, gap_to_second_best_bps) per
-    /// order from the full ranked candidate list (before filtering to the
-    /// winner). Each entry corresponds to one order in `quotes`.
+    /// The observer's `on_route_scored` accumulates candidate scores during
+    /// solving, so `n_alternatives` and `gap_to_second_best_bps` are enriched
+    /// by the observer in `on_quote_produced`.
     #[cfg(feature = "slippage-features")]
     fn emit_quote_produced_events(
         &self,
         obs: &dyn crate::observer::SolverObserver,
         quotes: &[OrderQuote],
-        candidate_info: &[(u32, Option<f64>)],
         options: &QuoteOptions,
     ) {
         use num_traits::ToPrimitive;
@@ -552,18 +530,13 @@ impl WorkerPoolRouter {
             .encoding_options()
             .map(|e| e.slippage());
 
-        for (idx, q) in quotes.iter().enumerate() {
+        for q in quotes {
             let Some(route_ref) = q.route() else {
                 continue;
             };
             if route_ref.swaps().is_empty() {
                 continue;
             }
-
-            let (n_alternatives, gap_to_second_best_bps) = candidate_info
-                .get(idx)
-                .copied()
-                .unwrap_or((1, None));
 
             let route = ObservedRoute::from(route_ref);
 
@@ -584,8 +557,8 @@ impl WorkerPoolRouter {
                     .unwrap_or_default(),
                 algorithm_type: q.algorithm().to_string(),
                 algorithm_settings: std::collections::HashMap::new(),
-                n_alternatives,
-                gap_to_second_best_bps,
+                n_alternatives: 1,
+                gap_to_second_best_bps: None,
                 score_dispersion: None,
                 slippage_tolerance,
                 all_candidates: vec![],
