@@ -403,7 +403,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
         if let Some(rx) = setup.resim_rx {
             let market_data = solver.market_data();
             let derived_data = solver.derived_data();
-            let output_dir = std::path::PathBuf::from("./slippage-data/hop_decay");
+            let output_dir = std::path::PathBuf::from("./slippage-data");
             let requote_url = std::env::var("SLIPPAGE_REQUOTE_URL")
                 .ok()
                 .or_else(|| Some("http://localhost:3000".to_string()));

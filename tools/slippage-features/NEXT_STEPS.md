@@ -26,6 +26,7 @@
 COINGECKO_API_KEY="..." cargo run -p slippage-features --release --bin assemble -- \
   --quote-log-dir ./slippage-data \
   --hop-decay-dir ./slippage-data/hop_decay \
+  --tycho-route-decay-dir ./slippage-data/tycho_route_decay \
   --route-decay-dir ./slippage-data/route_decay \
   --output-dir ./slippage-data/unified
 ```

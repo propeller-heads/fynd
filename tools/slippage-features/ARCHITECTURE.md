@@ -113,6 +113,14 @@ Offline join of three parquet sources into a unified dataset:
 
 ## Parquet Schemas
 
+The Tycho resim produces three normalized outputs under `./slippage-data/`:
+- **Hop Static**: once per hop per quote (pool identity + fee)
+- **Hop Decay**: per hop per block offset (volatile pool state + decay)
+- **Tycho Route Decay**: per block offset (route-level aggregates + decomposition)
+
+The node resim produces a fourth output:
+- **Route Decay**: per block offset (eth_call ground truth)
+
 ### Quote Log (`./slippage-data/quote_log_*.parquet`)
 
 17 columns:
@@ -137,28 +145,45 @@ Offline join of three parquet sources into a unified dataset:
 | route_json | string | JSON-serialized route with all hops |
 | calldata_hex | string | Hex-encoded transaction calldata |
 
-### Hop Decay (`./slippage-data/hop_decay/hop_decay_*.parquet`)
+### Hop Static (`./slippage-data/hop_static/hop_static_*.parquet`)
 
-21 columns:
+6 columns — one row per hop per quote (not repeated across block offsets):
 
 | Column | Type | Description |
 |--------|------|-------------|
 | quote_id | string | Links to quote log |
 | solver_id | string | Which solver |
-| request_id | string | Groups responses |
-| block_offset | u32 | k in 1..10 |
 | hop_index | u32 | 0-based hop in route |
 | component_id | string | Pool address |
 | protocol | string | Pool type (uniswap_v3, etc.) |
+| fee_tier | f64 | Pool fee (e.g., 0.0005, nullable) |
+
+### Hop Decay (`./slippage-data/hop_decay/hop_decay_*.parquet`)
+
+10 columns — volatile per-hop data re-read at each block X+k:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| quote_id | string | Links to quote log |
+| solver_id | string | Which solver |
+| block_offset | u32 | k in 1..10 |
+| hop_index | u32 | 0-based hop in route |
 | hop_amount_out | string | Simulated output at X+k (BigInt) |
 | hop_decay_bps | f64 | Per-hop decay |
-| depth_at_1pct | string | Pool depth at 1% impact (BigInt) |
-| depth_at_5pct | string | Pool depth at 5% impact (BigInt) |
-| spot_price | f64 | Pool spot price |
-| token_price_in_native | f64 | Token price in gas token |
-| fee_tier | f64 | Pool fee (e.g., 0.0005) |
-| marginal_liquidity | string | v3/v4: liquidity at tick (BigInt, currently NaN) |
-| concentration_gini | f64 | v3/v4: liquidity distribution (currently NaN) |
+| depth_at_1pct | string | Pool depth at 1% impact at X+k (BigInt) |
+| depth_at_5pct | string | Pool depth at 5% impact at X+k (BigInt) |
+| spot_price | f64 | Pool spot price at X+k |
+| token_price_in_native | f64 | Token price in gas token at X+k |
+
+### Tycho Route Decay (`./slippage-data/tycho_route_decay/tycho_route_decay_*.parquet`)
+
+8 columns — route-level Tycho resim data (one row per block offset, not per hop):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| quote_id | string | Links to quote log |
+| solver_id | string | Which solver |
+| block_offset | u32 | k in 1..10 |
 | route_total_amount_out | string | Full route output at X+k (BigInt) |
 | route_decay_bps | f64 | Full route decay (Tycho sim) |
 | requote_amount_out | string | Fresh solver quote at X+k (BigInt, nullable) |
@@ -174,7 +199,7 @@ total_decay (route_decay_bps) = market_movement_bps + execution_slippage_bps
 
 ### Route Decay (`./slippage-data/route_decay/route_decay.parquet`)
 
-9 columns:
+9 columns — ground-truth eth_call data from node resim:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -190,8 +215,19 @@ total_decay (route_decay_bps) = market_movement_bps + execution_slippage_bps
 
 ### Unified Dataset (`./slippage-data/unified/`)
 
-29 columns — join of all three sources plus computed features (token classification,
-route topology, chain/env, temporal). Partitioned by chain_id.
+31 columns — join of hop decay, Tycho route decay, and node route decay
+plus computed features (token classification, route topology, chain/env,
+temporal). Partitioned by chain_id.
+
+### Join pattern for analysis
+
+```
+hop_decay
+  JOIN hop_static USING (quote_id, solver_id, hop_index)
+  JOIN tycho_route_decay USING (quote_id, solver_id, block_offset)
+  JOIN route_decay USING (quote_id, solver_id, block_offset)
+  JOIN quote_log USING (quote_id, solver_id)
+```
 
 ## How to Run
 
@@ -268,6 +304,7 @@ ground-truth eth_call decay for each quote.
 COINGECKO_API_KEY="your-key" cargo run -p slippage-features --release --bin assemble -- \
   --quote-log-dir ./slippage-data \
   --hop-decay-dir ./slippage-data/hop_decay \
+  --tycho-route-decay-dir ./slippage-data/tycho_route_decay \
   --route-decay-dir ./slippage-data/route_decay \
   --output-dir ./slippage-data/unified
 ```

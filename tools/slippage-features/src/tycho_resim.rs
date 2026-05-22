@@ -14,7 +14,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     decay::compute_decay_bps,
-    parquet_writer::{write_hop_decay_parquet, HopDecayRecord},
+    parquet_writer::{
+        write_hop_decay_parquet, write_hop_static_parquet, write_tycho_route_decay_parquet,
+        HopDecayRecord, HopStaticRecord, TychoRouteDecayRecord,
+    },
 };
 
 /// Fetch a fresh quote from the solver via HTTP.
@@ -50,8 +53,10 @@ async fn requote(
 /// Pending quote waiting for resimulation at future blocks.
 struct PendingQuote {
     event: QuoteProducedEvent,
-    /// Accumulated hop decay records across all block offsets.
-    records: Vec<HopDecayRecord>,
+    hop_statics: Vec<HopStaticRecord>,
+    hop_decays: Vec<HopDecayRecord>,
+    route_decays: Vec<TychoRouteDecayRecord>,
+    statics_collected: bool,
 }
 
 /// Background task that resimulates quotes at each new block for up to
@@ -95,7 +100,13 @@ pub async fn run_tycho_resim(
                     hops = evt.route.swaps.len(),
                     "received quote for resim"
                 );
-                pending.push_back(PendingQuote { event: evt, records: Vec::new() });
+                pending.push_back(PendingQuote {
+                    event: evt,
+                    hop_statics: Vec::new(),
+                    hop_decays: Vec::new(),
+                    route_decays: Vec::new(),
+                    statics_collected: false,
+                });
             }
             Ok(None) => {
                 info!("resim channel closed, flushing remaining quotes");
@@ -254,22 +265,49 @@ async fn resim_at_block(
                 match requote(client, url, &token_in, &token_out, &pq.event.amount_in, sender).await
                 {
                     Some(fresh_out) if !fresh_out.is_empty() && fresh_out != "0" => {
-                        let mm =
-                            compute_decay_bps(&pq.event.amount_out, &fresh_out).unwrap_or(f64::NAN);
-                        let es = route_decay - mm;
+                        let mm = compute_decay_bps(&pq.event.amount_out, &fresh_out).ok();
+                        let es = mm.map(|m| route_decay - m);
                         (Some(fresh_out), mm, es)
                     }
-                    _ => (None, f64::NAN, f64::NAN),
+                    _ => (None, None, None),
                 }
             } else {
-                (None, f64::NAN, f64::NAN)
+                (None, None, None)
             }
         } else {
-            (None, f64::NAN, f64::NAN)
+            (None, None, None)
         };
+
+        // Route-level record (one per block_offset, not per hop).
+        pq.route_decays.push(TychoRouteDecayRecord {
+            quote_id: pq.event.quote_id.clone(),
+            solver_id: pq.event.solver_id.clone(),
+            block_offset,
+            route_total_amount_out: route_out_str,
+            route_decay_bps: route_decay,
+            requote_amount_out: requote_out,
+            market_movement_bps: market_mvmt,
+            execution_slippage_bps: exec_slip,
+        });
 
         for (hop_idx, replay_hop_out) in &replay_amounts {
             let swap = &pq.event.route.swaps[*hop_idx as usize];
+
+            // Collect static hop metadata once (first block_offset).
+            if !pq.statics_collected {
+                let fee_tier = md
+                    .get_simulation_state(&swap.component_id)
+                    .map(|sim| sim.fee());
+
+                pq.hop_statics.push(HopStaticRecord {
+                    quote_id: pq.event.quote_id.clone(),
+                    solver_id: pq.event.solver_id.clone(),
+                    hop_index: *hop_idx,
+                    component_id: swap.component_id.clone(),
+                    protocol: swap.protocol.clone(),
+                    fee_tier,
+                });
+            }
 
             let hop_decay = compute_decay_bps(&swap.amount_out, &replay_hop_out.to_string())
                 .unwrap_or(f64::NAN);
@@ -302,49 +340,38 @@ async fn resim_at_block(
                 }
             });
 
-            let fee_tier = md
-                .get_simulation_state(&swap.component_id)
-                .map(|sim| sim.fee());
-
-            pq.records.push(HopDecayRecord {
+            pq.hop_decays.push(HopDecayRecord {
                 quote_id: pq.event.quote_id.clone(),
                 solver_id: pq.event.solver_id.clone(),
-                request_id: pq.event.request_id.clone(),
                 block_offset,
                 hop_index: *hop_idx,
-                component_id: swap.component_id.clone(),
-                protocol: swap.protocol.clone(),
                 hop_amount_out: replay_hop_out.to_string(),
                 hop_decay_bps: hop_decay,
                 depth_at_1pct,
                 depth_at_5pct,
                 spot_price,
                 token_price_in_native,
-                fee_tier,
-                marginal_liquidity: None,
-                concentration_gini: None,
-                route_total_amount_out: route_out_str.clone(),
-                route_decay_bps: route_decay,
-                requote_amount_out: requote_out.clone(),
-                market_movement_bps: market_mvmt,
-                execution_slippage_bps: exec_slip,
             });
         }
+        pq.statics_collected = true;
     }
 }
 
 /// Flush quotes whose observation window has closed.
+///
+/// Scans the entire deque rather than stopping at the first non-expired
+/// entry, so out-of-order quotes (earlier blocks arriving after later
+/// blocks) are flushed correctly.
 fn flush_expired(pending: &mut VecDeque<PendingQuote>, current_block: u64, output_dir: &Path) {
-    while let Some(front) = pending.front() {
-        let max_block = front.event.block_number + u64::from(MAX_BLOCK_OFFSET);
-        if current_block <= max_block {
-            break;
+    let mut i = 0;
+    while i < pending.len() {
+        let max_block = pending[i].event.block_number + u64::from(MAX_BLOCK_OFFSET);
+        if current_block > max_block {
+            let pq = pending.remove(i).expect("index valid");
+            flush_one(pq, output_dir);
+        } else {
+            i += 1;
         }
-
-        let Some(pq) = pending.pop_front() else {
-            break;
-        };
-        flush_one(pq, output_dir);
     }
 }
 
@@ -355,33 +382,54 @@ fn flush_all(pending: &mut VecDeque<PendingQuote>, output_dir: &Path) {
     }
 }
 
-/// Write one quote's accumulated records to a parquet file.
+/// Write one quote's accumulated records to parquet files.
 fn flush_one(pq: PendingQuote, output_dir: &Path) {
-    if pq.records.is_empty() {
+    if pq.hop_decays.is_empty() {
         debug!(quote_id = %pq.event.quote_id, "no records to flush");
         return;
     }
 
-    let filename = format!("hop_decay_{}.parquet", pq.event.quote_id);
-    let path = output_dir.join(filename);
+    let qid = &pq.event.quote_id;
 
-    match write_hop_decay_parquet(&path, &pq.records) {
-        Ok(()) => {
-            info!(
-                quote_id = %pq.event.quote_id,
-                records = pq.records.len(),
-                path = %path.display(),
-                "flushed hop decay records"
-            );
-        }
-        Err(e) => {
-            error!(
-                quote_id = %pq.event.quote_id,
-                error = %e,
-                "failed to write hop decay parquet"
-            );
+    let hop_decay_dir = output_dir.join("hop_decay");
+    let hop_static_dir = output_dir.join("hop_static");
+    let tycho_route_dir = output_dir.join("tycho_route_decay");
+
+    for dir in [&hop_decay_dir, &hop_static_dir, &tycho_route_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            error!(path = %dir.display(), error = %e, "cannot create subdirectory");
+            return;
         }
     }
+
+    if let Err(e) = write_hop_decay_parquet(
+        &hop_decay_dir.join(format!("hop_decay_{qid}.parquet")),
+        &pq.hop_decays,
+    ) {
+        error!(quote_id = %qid, error = %e, "failed to write hop decay parquet");
+    }
+
+    if let Err(e) = write_hop_static_parquet(
+        &hop_static_dir.join(format!("hop_static_{qid}.parquet")),
+        &pq.hop_statics,
+    ) {
+        error!(quote_id = %qid, error = %e, "failed to write hop static parquet");
+    }
+
+    if let Err(e) = write_tycho_route_decay_parquet(
+        &tycho_route_dir.join(format!("tycho_route_decay_{qid}.parquet")),
+        &pq.route_decays,
+    ) {
+        error!(quote_id = %qid, error = %e, "failed to write tycho route decay parquet");
+    }
+
+    info!(
+        quote_id = %qid,
+        hop_decays = pq.hop_decays.len(),
+        hop_statics = pq.hop_statics.len(),
+        route_decays = pq.route_decays.len(),
+        "flushed resim records"
+    );
 }
 
 #[cfg(test)]
