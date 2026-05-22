@@ -4,10 +4,6 @@ icon: coins
 
 # Client Fees
 
-{% hint style="danger" %}
-Client fees accumulate in the TychoRouter Vault, which is still undergoing a security audit. Keep balances minimal and withdraw regularly - funds stored here may be lost. Use at your own discretion.&#x20;
-{% endhint %}
-
 Every swap through the TychoRouter incurs two fees, deducted from the swap output:
 
 * **Router fee**: 10 bps (0.1%) on the swap output, always applied.

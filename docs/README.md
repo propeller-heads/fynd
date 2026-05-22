@@ -29,12 +29,6 @@ Fynd gives you quotes in 20ms, supports 1.000 RPS on commodity hardware (see [pe
 
 Fynd builds on [Tycho](https://www.propellerheads.xyz/tycho) the open source DEX indexer (see the [protocols it supports](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols)).
 
-{% hint style="danger" %}
-**Alpha Software — Unaudited Contracts**
-
-Fynd's smart contracts ([TychoRouter V3,](https://docs.propellerheads.xyz/tycho/for-solvers/execution) Vault, Executors) are still undergoing a security audit. Funds stored in the router (including vault deposits) might be lost. Use at your own discretion.
-{% endhint %}
-
 ## Own Your Routing <a href="#own-your-dex-routing" id="own-your-dex-routing"></a>
 
 Route APIs are simple, but the tradeoffs are painful: rate limits, network overhead, no transparency, unreliable uptime, and unexplainable slippage. And you can't fix any of it.
