@@ -14,7 +14,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 use tycho_simulation::{
-    evm::stream::ProtocolStreamBuilder,
+    evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
     protocol::models::Update,
     rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
@@ -248,6 +248,103 @@ impl TychoFeed {
                             return Err(DataFeedError::StreamError(format!("RFQ task panicked: {}", e)));
                         }
                     }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Like [`run`](Self::run) but calls [`ProtocolStreamBuilder::build_with_pending`]
+    /// and delivers the [`PendingBlockProcessor`] via `pending_tx` before entering the
+    /// stream loop.
+    ///
+    /// The oneshot fires after token loading and stream setup, but before the first
+    /// block is processed. If the receiver has already been dropped the processor is
+    /// discarded and the feed continues normally (degraded mode, no pending updates).
+    ///
+    /// RFQ protocols are not supported with this method.
+    pub(crate) async fn run_with_pending(
+        self,
+        pending_tx: oneshot::Sender<PendingBlockProcessor>,
+    ) -> Result<(), DataFeedError> {
+        if self
+            .config
+            .protocols
+            .iter()
+            .any(|p| p.starts_with("rfq:"))
+        {
+            return Err(DataFeedError::Config(
+                "run_with_pending does not support RFQ protocols".to_string(),
+            ));
+        }
+
+        info!(
+            tycho_url = %self.config.tycho_url,
+            protocols = ?self.config.protocols,
+            "Starting Data Feed (with pending)..."
+        );
+
+        let tycho_api_key = self
+            .config
+            .tycho_api_key
+            .clone()
+            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
+
+        let all_tokens = load_all_tokens(
+            self.config.tycho_url.as_str(),
+            !self.config.use_tls,
+            tycho_api_key.as_deref(),
+            true,
+            self.config.chain,
+            Some(self.config.min_token_quality),
+            self.config.traded_n_days_ago,
+        )
+        .await
+        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+
+        debug!("Loaded {} tokens from Tycho", all_tokens.len());
+
+        let (mut protocol_stream, pending) = register_exchanges(
+            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                .skip_state_decode_failures(true),
+            ComponentFilter::with_tvl_range(
+                self.config.min_tvl / self.config.tvl_buffer_ratio,
+                self.config.min_tvl,
+            )
+            .blocklist(
+                self.config
+                    .blocklisted_components
+                    .clone(),
+            ),
+            &self.config.protocols,
+        )?
+        .auth_key(self.config.tycho_api_key.clone())
+        .skip_state_decode_failures(true)
+        .min_token_quality(self.config.min_token_quality as u32)
+        .set_tokens(all_tokens)
+        .await
+        .build_with_pending()
+        .await
+        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+
+        if pending_tx.send(pending).is_err() {
+            tracing::warn!(
+                "PendingBlockProcessor receiver dropped before send; continuing without pending \
+                 updates"
+            );
+        }
+
+        loop {
+            match protocol_stream.next().await {
+                Some(msg) => {
+                    let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                    self.refresh_gas_price().await?;
+                    self.handle_tycho_message(msg).await?;
+                }
+                None => {
+                    info!("Protocol stream ended");
+                    break;
                 }
             }
         }
