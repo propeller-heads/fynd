@@ -13,6 +13,7 @@ use num_traits::ToPrimitive;
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    cex_dynamics::{CexDynamicsHandle, FIFTEEN_MIN_MS, FIVE_MIN_MS},
     decay::compute_decay_bps,
     parquet_writer::{
         write_hop_decay_parquet, write_hop_static_parquet, write_tycho_route_decay_parquet,
@@ -72,6 +73,7 @@ pub async fn run_tycho_resim(
     derived_data: SharedDerivedDataRef,
     output_dir: PathBuf,
     requote_url: Option<String>,
+    cex_handle: Option<CexDynamicsHandle>,
 ) {
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
         error!(path = %output_dir.display(), error = %e, "cannot create output directory");
@@ -141,6 +143,7 @@ pub async fn run_tycho_resim(
             current_block,
             http_client.as_ref(),
             requote_url.as_deref(),
+            cex_handle.as_ref(),
         )
         .await;
         flush_expired(&mut pending, current_block, &output_dir);
@@ -155,6 +158,7 @@ async fn resim_at_block(
     current_block: u64,
     http_client: Option<&reqwest::Client>,
     requote_url: Option<&str>,
+    cex_handle: Option<&CexDynamicsHandle>,
 ) {
     let md = market_data.read().await;
     let dd = derived_data.read().await;
@@ -278,7 +282,33 @@ async fn resim_at_block(
             (None, None, None)
         };
 
-        // Route-level record (one per block_offset, not per hop).
+        // CEX dynamics: resolve token symbols and query Binance data.
+        let (cex_mid, cex_dex_spread, vol_5m, vol_15m) = if let Some(cex) = cex_handle {
+            let first_swap = pq.event.route.swaps.first();
+            let sym_in = first_swap.and_then(|s| {
+                md.get_token(&s.token_in).map(|t| t.symbol.clone())
+            });
+            let pair_symbol = sym_in.as_deref().and_then(|s| cex.resolve_pair_symbol(s, "USDT"));
+
+            if let Some(ref pair) = pair_symbol {
+                let mid = cex.mid_price(pair);
+                let dex_spot = first_swap.and_then(|s| {
+                    let key = (s.component_id.clone(), s.token_in.clone(), s.token_out.clone());
+                    dd.spot_prices().and_then(|p| p.get(&key).copied())
+                });
+                let spread = mid.and_then(|m| {
+                    dex_spot.map(|d| (m - d) / m * 10_000.0)
+                });
+                let v5 = cex.realized_vol_bps(pair, FIVE_MIN_MS);
+                let v15 = cex.realized_vol_bps(pair, FIFTEEN_MIN_MS);
+                (mid, spread, v5, v15)
+            } else {
+                (None, None, None, None)
+            }
+        } else {
+            (None, None, None, None)
+        };
+
         pq.route_decays.push(TychoRouteDecayRecord {
             quote_id: pq.event.quote_id.clone(),
             solver_id: pq.event.solver_id.clone(),
@@ -288,6 +318,10 @@ async fn resim_at_block(
             requote_amount_out: requote_out,
             market_movement_bps: market_mvmt,
             execution_slippage_bps: exec_slip,
+            cex_mid_price: cex_mid,
+            cex_dex_spread_bps: cex_dex_spread,
+            realized_vol_5m_bps: vol_5m,
+            realized_vol_15m_bps: vol_15m,
         });
 
         for (hop_idx, replay_hop_out) in &replay_amounts {
@@ -501,7 +535,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market, derived, out, None));
+        let handle = tokio::spawn(run_tycho_resim(rx, market, derived, out, None, None));
 
         // Close the channel immediately.
         drop(_tx);
@@ -524,7 +558,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None, None));
 
         // Send a quote referencing a non-existent pool.
         let swap = single_hop_swap();
@@ -574,7 +608,7 @@ mod tests {
         }
 
         let out = dir.path().to_path_buf();
-        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None));
+        let handle = tokio::spawn(run_tycho_resim(rx, market.clone(), derived, out, None, None));
 
         let swap = single_hop_swap();
         let event = make_event("q-queue", 100, vec![swap], "1000", "2000");

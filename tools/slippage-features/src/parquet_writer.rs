@@ -57,6 +57,10 @@ pub struct TychoRouteDecayRecord {
     pub requote_amount_out: Option<String>,
     pub market_movement_bps: Option<f64>,
     pub execution_slippage_bps: Option<f64>,
+    pub cex_mid_price: Option<f64>,
+    pub cex_dex_spread_bps: Option<f64>,
+    pub realized_vol_5m_bps: Option<f64>,
+    pub realized_vol_15m_bps: Option<f64>,
 }
 
 pub fn hop_decay_schema() -> Schema {
@@ -95,6 +99,10 @@ pub fn tycho_route_decay_schema() -> Schema {
         Field::new("requote_amount_out", DataType::Utf8, true),
         Field::new("market_movement_bps", DataType::Float64, true),
         Field::new("execution_slippage_bps", DataType::Float64, true),
+        Field::new("cex_mid_price", DataType::Float64, true),
+        Field::new("cex_dex_spread_bps", DataType::Float64, true),
+        Field::new("realized_vol_5m_bps", DataType::Float64, true),
+        Field::new("realized_vol_15m_bps", DataType::Float64, true),
     ])
 }
 
@@ -230,6 +238,10 @@ pub fn write_tycho_route_decay_parquet(
     let mut requote_amount_out = StringBuilder::with_capacity(n, n * 32);
     let mut market_movement_bps = Float64Builder::with_capacity(n);
     let mut execution_slippage_bps = Float64Builder::with_capacity(n);
+    let mut cex_mid_price = Float64Builder::with_capacity(n);
+    let mut cex_dex_spread_bps = Float64Builder::with_capacity(n);
+    let mut realized_vol_5m_bps = Float64Builder::with_capacity(n);
+    let mut realized_vol_15m_bps = Float64Builder::with_capacity(n);
 
     for r in records {
         quote_id.append_value(&r.quote_id);
@@ -250,6 +262,22 @@ pub fn write_tycho_route_decay_parquet(
             Some(v) => execution_slippage_bps.append_value(v),
             None => execution_slippage_bps.append_null(),
         }
+        match r.cex_mid_price {
+            Some(v) => cex_mid_price.append_value(v),
+            None => cex_mid_price.append_null(),
+        }
+        match r.cex_dex_spread_bps {
+            Some(v) => cex_dex_spread_bps.append_value(v),
+            None => cex_dex_spread_bps.append_null(),
+        }
+        match r.realized_vol_5m_bps {
+            Some(v) => realized_vol_5m_bps.append_value(v),
+            None => realized_vol_5m_bps.append_null(),
+        }
+        match r.realized_vol_15m_bps {
+            Some(v) => realized_vol_15m_bps.append_value(v),
+            None => realized_vol_15m_bps.append_null(),
+        }
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -261,6 +289,10 @@ pub fn write_tycho_route_decay_parquet(
         Arc::new(requote_amount_out.finish()),
         Arc::new(market_movement_bps.finish()),
         Arc::new(execution_slippage_bps.finish()),
+        Arc::new(cex_mid_price.finish()),
+        Arc::new(cex_dex_spread_bps.finish()),
+        Arc::new(realized_vol_5m_bps.finish()),
+        Arc::new(realized_vol_15m_bps.finish()),
     ];
 
     write_parquet(path, schema, columns)
@@ -645,6 +677,10 @@ mod tests {
             requote_amount_out: None,
             market_movement_bps: None,
             execution_slippage_bps: None,
+            cex_mid_price: Some(2005.0),
+            cex_dex_spread_bps: Some(25.0),
+            realized_vol_5m_bps: Some(12.5),
+            realized_vol_15m_bps: Some(18.3),
         }
     }
 
@@ -660,7 +696,7 @@ mod tests {
 
     #[test]
     fn tycho_route_decay_schema_has_expected_field_count() {
-        assert_eq!(tycho_route_decay_schema().fields().len(), 8);
+        assert_eq!(tycho_route_decay_schema().fields().len(), 12);
     }
 
     #[test]
@@ -778,7 +814,7 @@ mod tests {
 
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 8);
+        assert_eq!(batch.num_columns(), 12);
 
         let decay = batch
             .column(4)
@@ -799,7 +835,7 @@ mod tests {
         for (name, expected_cols) in [
             ("empty_hop.parquet", 10),
             ("empty_static.parquet", 6),
-            ("empty_tycho.parquet", 8),
+            ("empty_tycho.parquet", 12),
         ] {
             let file = std::fs::File::open(dir.path().join(name)).unwrap();
             let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();

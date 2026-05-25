@@ -1355,6 +1355,10 @@ mod tests {
             requote_amount_out: None,
             market_movement_bps: Some(5.0),
             execution_slippage_bps: Some(10.0),
+            cex_mid_price: Some(2005.0),
+            cex_dex_spread_bps: Some(25.0),
+            realized_vol_5m_bps: Some(12.5),
+            realized_vol_15m_bps: Some(18.3),
         }];
         write_tycho_route_decay_parquet(
             &tycho_route_decay_dir.path().join("tycho.parquet"),

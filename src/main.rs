@@ -399,7 +399,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
 
     // Spawn the resim background task when slippage-features is enabled.
     #[cfg(feature = "slippage-features")]
-    let _resim_handle = {
+    let (_resim_handle, _cex_handle) = {
         if let Some(rx) = setup.resim_rx {
             let market_data = solver.market_data();
             let derived_data = solver.derived_data();
@@ -407,15 +407,27 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
             let requote_url = std::env::var("SLIPPAGE_REQUOTE_URL")
                 .ok()
                 .or_else(|| Some("http://localhost:3000".to_string()));
-            Some(tokio::spawn(slippage_features::tycho_resim::run_tycho_resim(
+
+            let cex_handle = if std::env::var("SLIPPAGE_CEX_DYNAMICS").ok().is_some() {
+                let (handle, join) = slippage_features::cex_dynamics::start_cex_dynamics();
+                info!("CEX dynamics enabled (Binance bookTicker)");
+                let _ = join;
+                Some(handle)
+            } else {
+                None
+            };
+
+            let resim = Some(tokio::spawn(slippage_features::tycho_resim::run_tycho_resim(
                 rx,
                 market_data,
                 derived_data,
                 output_dir,
                 requote_url,
-            )))
+                cex_handle,
+            )));
+            (resim, None::<()>)
         } else {
-            None
+            (None, None)
         }
     };
 

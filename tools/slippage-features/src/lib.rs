@@ -1,3 +1,4 @@
+pub mod cex_dynamics;
 pub mod coingecko;
 pub mod decay;
 pub mod parquet_writer;
