@@ -223,18 +223,31 @@ async fn resim_at_block(
                 break;
             };
 
-            match state.get_amount_out(amount_in, token_in, token_out) {
-                Ok(result) => {
+            let sim_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.get_amount_out(amount_in.clone(), token_in, token_out)
+            }));
+            match sim_result {
+                Ok(Ok(result)) => {
                     current_amount = Some(result.amount.clone());
                     replay_amounts.push((hop_idx as u32, result.amount));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     debug!(
                         quote_id = %pq.event.quote_id,
                         component = %swap.component_id,
                         hop = hop_idx,
                         error = ?e,
                         "simulation failed for hop"
+                    );
+                    break;
+                }
+                Err(_) => {
+                    warn!(
+                        quote_id = %pq.event.quote_id,
+                        component = %swap.component_id,
+                        protocol = %swap.protocol,
+                        hop = hop_idx,
+                        "simulation panicked for hop, skipping"
                     );
                     break;
                 }
