@@ -297,13 +297,12 @@ impl BellmanFordAlgorithm {
         spot_product: &[f64],
         node_address: &HashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
-        extra_gas: &BigUint,
     ) -> BigInt {
         let Some(last_swap) = route.swaps().last() else {
             return BigInt::from(amount_out.clone());
         };
 
-        let total_gas = route.total_gas() + extra_gas;
+        let total_gas = route.total_gas();
 
         if gas_price.is_zero() {
             warn!("missing gas price, returning gross amount_out");
@@ -472,10 +471,8 @@ impl Algorithm for BellmanFordAlgorithm {
             }
 
             let mut next_active: HashSet<NodeIndex> = HashSet::new();
-            // Bridge edges propagate within the same round (intra-round queue).
-            let mut intra_round: VecDeque<NodeIndex> = active_nodes.iter().copied().collect();
 
-            while let Some(u) = intra_round.pop_front() {
+            for &u in &active_nodes {
                 let u_idx = u.index();
                 if amount[u_idx].is_zero() {
                     continue;
@@ -508,42 +505,33 @@ impl Algorithm for BellmanFordAlgorithm {
                         }
                     }
 
-                    // Bridge edges: 1:1 passthrough with wrap gas.
-                    let (candidate_amount, candidate_edge_gas, candidate_cumul_gas, candidate_spot) =
-                        if edge.is_bridge {
-                            let wrap_gas = crate::types::wrap_gas();
-                            let cumul = &cumul_gas[u_idx] + &wrap_gas;
-                            // Spot price is 1:1 through the bridge.
-                            (amount[u_idx].clone(), wrap_gas, cumul, spot_product[u_idx])
-                        } else {
-                            let Some(token_v) = token_map.get(v) else { continue };
-                            let Some(sim) = market_subset.get_simulation_state(component_id) else {
+                    let Some(token_v) = token_map.get(v) else { continue };
+                    let Some(sim) = market_subset.get_simulation_state(component_id) else {
+                        continue;
+                    };
+
+                    let result =
+                        match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                trace!(
+                                    component_id,
+                                    error = %e,
+                                    "simulation failed, skipping edge"
+                                );
                                 continue;
-                            };
-
-                            let result =
-                                match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        trace!(
-                                            component_id,
-                                            error = %e,
-                                            "simulation failed, skipping edge"
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                            let cumul = &cumul_gas[u_idx] + &result.gas;
-                            let spot = Self::compute_edge_spot_product(
-                                spot_product[u_idx],
-                                component_id,
-                                node_address.get(&u),
-                                node_address.get(v),
-                                spot_prices.as_ref(),
-                            );
-                            (result.amount, result.gas, cumul, spot)
+                            }
                         };
+
+                    let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
+
+                    let candidate_spot = Self::compute_edge_spot_product(
+                        spot_product[u_idx],
+                        component_id,
+                        node_address.get(&u),
+                        node_address.get(v),
+                        spot_prices.as_ref(),
+                    );
 
                     // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
                     let is_better = if gas_aware {
@@ -555,7 +543,7 @@ impl Algorithm for BellmanFordAlgorithm {
                         );
 
                         let net_candidate = Self::gas_adjusted_amount(
-                            &candidate_amount,
+                            &result.amount,
                             &candidate_cumul_gas,
                             gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
@@ -568,22 +556,16 @@ impl Algorithm for BellmanFordAlgorithm {
                         );
                         net_candidate > net_existing
                     } else {
-                        candidate_amount > amount[v_idx]
+                        result.amount > amount[v_idx]
                     };
 
                     if is_better {
                         spot_product[v_idx] = candidate_spot;
-                        amount[v_idx] = candidate_amount;
+                        amount[v_idx] = result.amount;
                         predecessor[v_idx] = Some((u, component_id.clone()));
-                        edge_gas[v_idx] = candidate_edge_gas;
+                        edge_gas[v_idx] = result.gas;
                         cumul_gas[v_idx] = candidate_cumul_gas;
-
-                        if edge.is_bridge {
-                            // Propagate bridge improvements within the same round.
-                            intra_round.push_back(*v);
-                        } else {
-                            next_active.insert(*v);
-                        }
+                        next_active.insert(*v);
                     }
                 }
             }
@@ -612,14 +594,7 @@ impl Algorithm for BellmanFordAlgorithm {
         let path_edges = Self::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
 
         let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut bridge_gas = BigUint::ZERO;
         for (from_node, to_node, component_id) in &path_edges {
-            // Bridge edges don't produce swaps — tycho-execution handles wraps.
-            if crate::types::is_bridge_component(component_id) {
-                bridge_gas += crate::types::wrap_gas();
-                continue;
-            }
-
             let token_in = token_map
                 .get(from_node)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
@@ -671,7 +646,6 @@ impl Algorithm for BellmanFordAlgorithm {
             &spot_product,
             &node_address,
             token_in_node,
-            &bridge_gas,
         );
 
         let result = RouteResult::new(route, net_amount_out, gas_price);

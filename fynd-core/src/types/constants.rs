@@ -1,19 +1,12 @@
 use std::collections::HashMap;
 
 use lazy_static::lazy_static;
-use num_bigint::BigUint;
 use tycho_simulation::{tycho_common::models::Chain, tycho_core::models::Address};
 
-use super::ComponentId;
-
-/// Component ID for the virtual ETH↔WETH bridge in the routing graph.
-/// No real pool uses this ID.
-pub const BRIDGE_COMPONENT_ID: &str = "__native_bridge__";
-
-/// Approximate gas cost of a WETH deposit or withdrawal (~25k gas units).
-pub fn wrap_gas() -> BigUint {
-    BigUint::from(25_000u64)
-}
+/// Component ID emitted by tycho-simulation's `NativeWrapperState` for the
+/// ETH↔WETH bridge. Edges with this ID are marked as bridge edges (hop-free,
+/// connector-bypass).
+pub const NATIVE_WRAPPER_COMPONENT_ID: &str = "native_wrapper";
 
 lazy_static! {
     /// Native ETH sentinel address used by Tycho components (address(0)).
@@ -22,11 +15,6 @@ lazy_static! {
     /// The address used by the TychoRouter to represent native ETH in outer call args.
     /// Callers must use this (not address(0)) when ABI-encoding router function calls.
     pub static ref ROUTER_ETH_ADDRESS: Address = Address::from([0xEEu8; 20]);
-}
-
-/// Returns true if the given component ID is the virtual ETH↔WETH bridge.
-pub fn is_bridge_component(id: &ComponentId) -> bool {
-    id == BRIDGE_COMPONENT_ID
 }
 
 lazy_static! {

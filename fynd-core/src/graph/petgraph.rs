@@ -97,41 +97,6 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
     }
 
-    /// Injects a zero-cost bridge between native ETH (0x0000) and WETH when both
-    /// exist as nodes in the graph. Uses the hardcoded addresses from constants.
-    fn inject_bridge_edges(&mut self) {
-        let bridge_id = crate::types::BRIDGE_COMPONENT_ID.to_string();
-        if self.edge_map.contains_key(&bridge_id) {
-            return;
-        }
-
-        let eth = &*crate::types::constants::NATIVE_ETH_ADDRESS;
-        let Some(&eth_idx) = self.node_map.get(eth) else {
-            return;
-        };
-
-        // Try all known WETH addresses — only the one present in this graph will match.
-        for weth in crate::types::constants::NATIVE_TOKEN.values() {
-            let Some(&weth_idx) = self.node_map.get(weth) else {
-                continue;
-            };
-
-            let fwd = self
-                .graph
-                .add_edge(eth_idx, weth_idx, EdgeData::bridge(bridge_id.clone()));
-            let rev = self
-                .graph
-                .add_edge(weth_idx, eth_idx, EdgeData::bridge(bridge_id.clone()));
-            self.edge_map
-                .entry(bridge_id)
-                .or_default()
-                .extend([fwd, rev]);
-
-            debug!("injected ETH↔WETH bridge edges");
-            return;
-        }
-    }
-
     /// Helper function to find a node index by address
     pub(crate) fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
         self.node_map
@@ -163,9 +128,15 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// * `to_idx` - The index of the to node.
     /// * `component_id` - The ID of the component represented by this edge.
     fn add_edge(&mut self, from_idx: NodeIndex, to_idx: NodeIndex, component_id: &ComponentId) {
+        let edge_data =
+            if component_id == crate::types::NATIVE_WRAPPER_COMPONENT_ID {
+                EdgeData::bridge(component_id.clone())
+            } else {
+                EdgeData::new(component_id.clone())
+            };
         let edge_idx = self
             .graph
-            .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
+            .add_edge(from_idx, to_idx, edge_data);
         self.edge_map
             .entry(component_id.clone())
             .or_default()
@@ -466,7 +437,6 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
             self.add_component_edges(comp_id, &node_indices);
         }
 
-        self.inject_bridge_edges();
     }
 
     fn graph(&self) -> &StableDiGraph<D> {
@@ -491,9 +461,6 @@ impl<D: Clone + Send> MarketEventHandler for PetgraphStableDiGraphManager<D> {
                 if let Err(e) = self.remove_components(removed_components) {
                     errors.push(e);
                 }
-
-                // New components may have introduced ETH or WETH nodes.
-                self.inject_bridge_edges();
 
                 // Return errors if any occurred
                 match errors.len() {

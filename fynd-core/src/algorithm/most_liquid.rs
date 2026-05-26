@@ -363,18 +363,11 @@ impl MostLiquidAlgorithm {
     ) -> Result<RouteResult, AlgorithmError> {
         let mut current_amount = amount_in.clone();
         let mut swaps = Vec::with_capacity(path.len());
-        let mut bridge_gas = BigUint::ZERO;
 
         // Track state overrides for pools we've already swapped through.
         let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
 
         for (address_in, edge_data, address_out) in path.iter() {
-            // Bridge edges: 1:1 passthrough, no simulation needed.
-            if edge_data.is_bridge {
-                bridge_gas += crate::types::wrap_gas();
-                continue;
-            }
-
             // Get token and component data for the simulation call
             let token_in = market
                 .get_token(address_in)
@@ -445,7 +438,7 @@ impl MostLiquidAlgorithm {
             .clone();
 
         let net_amount_out = if let Some(last_swap) = route.swaps().last() {
-            let total_gas = route.total_gas() + bridge_gas;
+            let total_gas = route.total_gas();
             let gas_cost_wei = &total_gas * &gas_price;
 
             // Convert gas cost to output token terms using token prices
