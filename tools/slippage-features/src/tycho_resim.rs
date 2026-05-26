@@ -331,7 +331,10 @@ async fn resim_at_block(
             if !pq.statics_collected {
                 let fee_tier = md
                     .get_simulation_state(&swap.component_id)
-                    .map(|sim| sim.fee());
+                    .and_then(|sim| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.fee()))
+                            .ok()
+                    });
 
                 pq.hop_statics.push(HopStaticRecord {
                     quote_id: pq.event.quote_id.clone(),
