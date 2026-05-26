@@ -178,17 +178,7 @@ async fn resim_at_block(
         // Stores (hop_index, replay_amount_out) for each successfully simulated hop.
         let mut replay_amounts: Vec<(u32, BigUint)> = Vec::new();
 
-        // Skip routes with protocols whose get_amount_out panics.
-        let has_unsafe_protocol = pq.event.route.swaps.iter().any(|s| {
-            matches!(
-                s.protocol.as_str(),
-                "uniswap_v4" | "ekubo_v3" | "ekubo_v2" | "fluid_v1"
-            )
-        });
-        if has_unsafe_protocol {
-            continue;
-        }
-
+        // Walk each hop, chaining the output of each hop as input to the next.
         let mut current_amount: Option<BigUint> = None;
         for (hop_idx, swap) in pq.event.route.swaps.iter().enumerate() {
             let amount_in = match &current_amount {
