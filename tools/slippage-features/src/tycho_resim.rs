@@ -178,7 +178,17 @@ async fn resim_at_block(
         // Stores (hop_index, replay_amount_out) for each successfully simulated hop.
         let mut replay_amounts: Vec<(u32, BigUint)> = Vec::new();
 
-        // Walk each hop, chaining the output of each hop as input to the next.
+        // Skip routes with protocols whose get_amount_out panics.
+        let has_unsafe_protocol = pq.event.route.swaps.iter().any(|s| {
+            matches!(
+                s.protocol.as_str(),
+                "uniswap_v4" | "ekubo_v3" | "ekubo_v2" | "fluid_v1"
+            )
+        });
+        if has_unsafe_protocol {
+            continue;
+        }
+
         let mut current_amount: Option<BigUint> = None;
         for (hop_idx, swap) in pq.event.route.swaps.iter().enumerate() {
             let amount_in = match &current_amount {
@@ -223,31 +233,18 @@ async fn resim_at_block(
                 break;
             };
 
-            let sim_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                state.get_amount_out(amount_in.clone(), token_in, token_out)
-            }));
-            match sim_result {
-                Ok(Ok(result)) => {
+            match state.get_amount_out(amount_in, token_in, token_out) {
+                Ok(result) => {
                     current_amount = Some(result.amount.clone());
                     replay_amounts.push((hop_idx as u32, result.amount));
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     debug!(
                         quote_id = %pq.event.quote_id,
                         component = %swap.component_id,
                         hop = hop_idx,
                         error = ?e,
                         "simulation failed for hop"
-                    );
-                    break;
-                }
-                Err(_) => {
-                    warn!(
-                        quote_id = %pq.event.quote_id,
-                        component = %swap.component_id,
-                        protocol = %swap.protocol,
-                        hop = hop_idx,
-                        "simulation panicked for hop, skipping"
                     );
                     break;
                 }

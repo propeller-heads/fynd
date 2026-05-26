@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # Slippage feature data collection — long-running wrapper with auto-restart.
 #
@@ -70,7 +70,6 @@ start_fynd() {
         --tycho-api-key "$TYCHO_API_KEY" \
         --rpc-url "$RPC_URL" \
         --min-tvl 10 \
-        --protocols uniswap_v2,uniswap_v3 \
         >> "$log_file" 2>&1 &
     FYND_PID=$!
 }
