@@ -5,7 +5,7 @@ use std::{
 
 use fynd_core::{
     derived::SharedDerivedDataRef,
-    feed::market_data::SharedMarketDataRef,
+    feed::market_data::MarketData,
     observer::{QuoteProducedEvent, MAX_BLOCK_OFFSET},
 };
 use num_bigint::BigUint;
@@ -64,12 +64,12 @@ struct PendingQuote {
 /// `MAX_BLOCK_OFFSET` blocks after the quote was produced.
 ///
 /// On each new block it walks every hop in the route, calls
-/// `ProtocolSim::get_amount_out` against the current `SharedMarketData`
+/// `ProtocolSim::get_amount_out` against the current `MarketData`
 /// state, and records per-hop decay. When a quote's observation window
 /// closes, the accumulated records are flushed to a parquet file.
 pub async fn run_tycho_resim(
     mut rx: tokio::sync::mpsc::Receiver<QuoteProducedEvent>,
-    market_data: SharedMarketDataRef,
+    market_data: MarketData,
     derived_data: SharedDerivedDataRef,
     output_dir: PathBuf,
     requote_url: Option<String>,
@@ -153,7 +153,7 @@ pub async fn run_tycho_resim(
 /// Resimulate all pending quotes at `current_block`.
 async fn resim_at_block(
     pending: &mut VecDeque<PendingQuote>,
-    market_data: &SharedMarketDataRef,
+    market_data: &MarketData,
     derived_data: &SharedDerivedDataRef,
     current_block: u64,
     http_client: Option<&reqwest::Client>,
@@ -472,7 +472,7 @@ mod tests {
 
     use fynd_core::{
         derived::DerivedData,
-        feed::market_data::SharedMarketData,
+        feed::market_data::MarketData,
         observer::{ObservedRoute, ObservedSwap, QuoteProducedEvent},
         types::BlockInfo,
     };
@@ -531,7 +531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_tx, rx) = tokio::sync::mpsc::channel::<QuoteProducedEvent>(16);
 
-        let market = SharedMarketData::new_shared();
+        let market = MarketData::new_shared();
         let derived = DerivedData::new_shared();
 
         let out = dir.path().to_path_buf();
@@ -548,7 +548,7 @@ mod tests {
     async fn missing_sim_state_skips_gracefully() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let market = SharedMarketData::new_shared();
+        let market = MarketData::new_shared();
         let derived = DerivedData::new_shared();
 
         // Market has a block but NO simulation states or tokens.
@@ -598,7 +598,7 @@ mod tests {
     async fn events_before_block_advance_are_queued() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let market = SharedMarketData::new_shared();
+        let market = MarketData::new_shared();
         let derived = DerivedData::new_shared();
 
         // Block stays at 100.

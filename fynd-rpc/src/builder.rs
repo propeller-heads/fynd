@@ -301,7 +301,7 @@ pub struct FyndRPC {
     gas_price_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
-    market_data: fynd_core::feed::market_data::SharedMarketDataRef,
+    market_data: fynd_core::feed::market_data::MarketData,
     derived_data: fynd_core::derived::SharedDerivedDataRef,
 }
 
@@ -312,8 +312,8 @@ impl FyndRPC {
     }
 
     /// Returns a clone of the shared market data reference.
-    pub fn market_data(&self) -> fynd_core::feed::market_data::SharedMarketDataRef {
-        Arc::clone(&self.market_data)
+    pub fn market_data(&self) -> fynd_core::feed::market_data::MarketData {
+        self.market_data.clone()
     }
 
     /// Returns a clone of the shared derived data reference.

@@ -7001,13 +7001,14 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slippage-features"
-version = "0.57.0"
+version = "0.60.0"
 dependencies = [
  "alloy",
  "anyhow",
  "arrow",
  "chrono",
  "clap",
+ "futures 0.3.32",
  "fynd-core",
  "hex",
  "num-bigint",
@@ -7020,6 +7021,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber 0.3.23",
  "tycho-simulation",
