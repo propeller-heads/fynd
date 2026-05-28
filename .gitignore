@@ -12,3 +12,7 @@ scale_results*.json
 
 # fynd-gas-audit output artifacts
 tools/fynd-gas-audit/out/
+run_2hop_audit.sh
+audit_results*.json
+audit_*.log
+solver.log

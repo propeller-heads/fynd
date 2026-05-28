@@ -3,10 +3,14 @@
 //! Dispatches to the `load` (latency/throughput) and `compare`
 //! (output-quality diff) subcommands.
 
+mod aggregator;
+mod audit;
 mod benchmark;
 mod compare;
 mod config;
+mod erc20;
 mod exporter;
+mod pair_selector;
 mod requests;
 mod runner;
 mod scale;
@@ -36,6 +40,8 @@ enum Command {
     DownloadTrades(DownloadTradesArgs),
     /// Benchmark throughput scaling across different worker counts
     Scale(scale::Args),
+    /// Compare Fynd quote performance against external DEX aggregators
+    Audit(audit::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -61,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("{e}")),
         Command::Scale(args) => scale::run(args).await,
+        Command::Audit(args) => audit::run(args).await,
     }
 }
 

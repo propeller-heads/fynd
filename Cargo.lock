@@ -3377,9 +3377,11 @@ version = "0.81.1"
 dependencies = [
  "alloy",
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "fastrand",
+ "futures 0.3.32",
  "fynd-client",
  "fynd-rpc",
  "num-bigint",

@@ -3,7 +3,7 @@
 //! Provides a default WETH→USDC swap, random generation from an embedded
 //! token-pair set (`pairs.json`), and loading from user-supplied JSON files.
 
-use std::str::FromStr;
+use std::{str::FromStr, sync::OnceLock};
 
 use alloy::hex;
 use bytes::Bytes;
@@ -40,6 +40,10 @@ impl SwapRequest {
 
     pub fn token_out_addr(&self) -> &str {
         &self.token_out_addr
+    }
+
+    pub fn raw_amount(&self) -> &str {
+        &self.raw_amount
     }
 
     pub fn to_quote_params(&self) -> QuoteParams {
@@ -84,8 +88,12 @@ struct Token {
     address: String,
 }
 
-fn load_pairs_file() -> PairsFile {
-    serde_json::from_str(PAIRS_JSON).unwrap_or_else(|e| panic!("failed to parse pairs.json: {e}"))
+fn load_pairs_file() -> &'static PairsFile {
+    static PAIRS: OnceLock<PairsFile> = OnceLock::new();
+    PAIRS.get_or_init(|| {
+        serde_json::from_str(PAIRS_JSON)
+            .unwrap_or_else(|e| panic!("failed to parse embedded pairs.json: {e}"))
+    })
 }
 
 fn symbol_for_address(addr: &str, tokens: &[Token]) -> String {
@@ -202,6 +210,48 @@ pub fn load_embedded_trades(
         .map(|_| all[fastrand::usize(..all.len())].clone())
         .collect();
     Ok(requests)
+}
+
+/// Return a human-readable token symbol for an address using the embedded `pairs.json`.
+/// Falls back to a truncated address when the token is not in the list.
+pub fn lookup_symbol(addr: &str) -> String {
+    let file = load_pairs_file();
+    symbol_for_address(addr, &file.tokens)
+}
+
+/// Load all templates from a file without random sampling.
+///
+/// Used for pair-distribution analysis where the full dataset is needed.
+pub fn load_all_templates_from_file(
+    path: &str,
+) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
+    load_request_templates(path, 5000)
+}
+
+/// Load all 50 embedded aggregator trades deterministically (no random sampling).
+///
+/// Used for pair-distribution analysis when no external dataset is provided.
+pub fn load_all_embedded_templates() -> Vec<SwapRequest> {
+    let Ok(templates) = serde_json::from_str::<Vec<FileRequest>>(TRADES_SAMPLE_JSON) else {
+        return vec![];
+    };
+    let file = load_pairs_file();
+    templates
+        .iter()
+        .filter_map(|tmpl| {
+            let order = tmpl.orders.first()?;
+            let in_sym = symbol_for_address(&order.token_in, &file.tokens);
+            let out_sym = symbol_for_address(&order.token_out, &file.tokens);
+            Some(SwapRequest {
+                label: format!("{} {in_sym} -> {out_sym}", order.amount),
+                token_in_addr: order.token_in.clone(),
+                token_out_addr: order.token_out.clone(),
+                raw_amount: order.amount.clone(),
+                sender_addr: order.sender.clone(),
+                timeout_ms: 5000,
+            })
+        })
+        .collect()
 }
 
 /// Download the full 10k aggregator trade dataset from GitHub Releases.
