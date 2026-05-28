@@ -6,17 +6,18 @@ use tracing::{debug, warn};
 
 const API_BASE: &str = "https://api.coingecko.com/api/v3";
 
-/// Hardcoded stablecoin addresses (Ethereum mainnet, lowercase).
-const STABLE_ADDRESSES: &[&str] = &[
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
-    "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
-    "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
-    "0x853d955acef822db058eb8505911ed77f175b99e", // FRAX
-    "0x4fabb145d64652a948d72533023f6e7a623c7c53", // BUSD
-    "0x0000000000085d4780b73119b644ae5ecd22b376", // TUSD
-    "0x8e870d67f660d95d5be530380d0ec0bd388289e1", // USDP
-    "0x1a7e4e63778b4f12a199c062f3efdd288afcbce8", // agEUR (euro stable)
-    "0x5f98805a4e8be255a32880fdec7f6728c6568ba0", // LUSD
+/// Hardcoded stablecoin addresses with approximate market caps (USD).
+const STABLECOINS: &[(&str, f64)] = &[
+    ("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 43_000_000_000.0), // USDC
+    ("0xdac17f958d2ee523a2206206994597c13d831ec7", 140_000_000_000.0), // USDT
+    ("0x6b175474e89094c44da98b954eedeac495271d0f", 5_000_000_000.0), // DAI
+    ("0x853d955acef822db058eb8505911ed77f175b99e", 600_000_000.0), // FRAX
+    ("0x4fabb145d64652a948d72533023f6e7a623c7c53", 100_000_000.0), // BUSD
+    ("0x0000000000085d4780b73119b644ae5ecd22b376", 100_000_000.0), // TUSD
+    ("0x8e870d67f660d95d5be530380d0ec0bd388289e1", 800_000_000.0), // USDP
+    ("0x1a7e4e63778b4f12a199c062f3efdd288afcbce8", 100_000_000.0), // agEUR
+    ("0x5f98805a4e8be255a32880fdec7f6728c6568ba0", 300_000_000.0), // LUSD
+    ("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 300_000_000_000.0), // WETH (not stable but always known)
 ];
 
 /// Thresholds for market cap classification (USD).
@@ -119,12 +120,16 @@ impl CoinGeckoClient {
     }
 
     async fn fetch_token_metadata(&self, address: &str) -> anyhow::Result<TokenMetadata> {
-        // Check if this is a known stablecoin first (no API call needed).
-        if STABLE_ADDRESSES.contains(&address) {
+        if let Some((_, mcap)) = STABLECOINS.iter().find(|(addr, _)| *addr == address) {
+            let category = if address == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" {
+                TokenCategory::BlueChip
+            } else {
+                TokenCategory::Stable
+            };
             return Ok(TokenMetadata {
-                market_cap: None,
-                fdv: None,
-                category: TokenCategory::Stable,
+                market_cap: Some(*mcap),
+                fdv: Some(*mcap),
+                category,
             });
         }
 
@@ -261,7 +266,7 @@ mod tests {
     #[test]
     fn classify_stablecoin_by_address() {
         let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
-        assert!(STABLE_ADDRESSES.contains(&usdc));
+        assert!(STABLECOINS.iter().any(|(addr, _)| *addr == usdc));
     }
 
     #[test]
