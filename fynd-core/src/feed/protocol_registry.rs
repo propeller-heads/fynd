@@ -9,7 +9,10 @@ use tycho_simulation::{
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
-            filters::{balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter},
+            filters::{
+                balancer_v2_pool_filter, curve_pool_filter, erc4626_filter,
+                fluid_v1_paused_pools_filter,
+            },
             fluid::FluidV1,
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
@@ -81,7 +84,7 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:curve",
                     tvl_filter.clone(),
-                    None,
+                    Some(curve_pool_filter),
                 );
             }
             "uniswap_v4_hooks" => {
