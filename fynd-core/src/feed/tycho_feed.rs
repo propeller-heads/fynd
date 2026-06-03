@@ -38,7 +38,7 @@ use crate::{
 /// - Update MarketState (holds exclusive write access)
 /// - Broadcast MarketEvents to all subscribed Solvers
 /// - Periodically refresh gas prices from RPC
-pub(crate) struct TychoFeed {
+pub struct TychoFeed {
     /// Configuration.
     config: TychoFeedConfig,
     /// Shared market data (we have write access).
@@ -54,14 +54,14 @@ impl TychoFeed {
     ///
     /// * `config` - Indexer configuration
     /// * `market_data` - Shared market data reference
-    pub(crate) fn new(config: TychoFeedConfig, market_data: MarketData) -> Self {
+    pub fn new(config: TychoFeedConfig, market_data: MarketData) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
 
         Self { config, market_data, event_tx }
     }
 
     /// Returns a new subscriber for market events.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
         self.event_tx.subscribe()
     }
 
@@ -75,7 +75,7 @@ impl TychoFeed {
     ///
     /// This method runs indefinitely, reconnecting on failures.
     /// It is recommended to call this in a dedicated tokio task.
-    pub(crate) async fn run(self) -> Result<(), DataFeedError> {
+    pub async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
             protocols = ?self.config.protocols,

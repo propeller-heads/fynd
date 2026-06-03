@@ -13,7 +13,7 @@ pub mod tycho_feed;
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]
-pub(crate) struct TychoFeedConfig {
+pub struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
     /// Blockchain to connect to.
@@ -50,7 +50,8 @@ pub(crate) struct TychoFeedConfig {
 }
 
 impl TychoFeedConfig {
-    pub(crate) fn new(
+    /// Creates a new config with the given connection parameters and sensible defaults.
+    pub fn new(
         tycho_url: String,
         chain: Chain,
         tycho_api_key: Option<String>,
@@ -74,32 +75,38 @@ impl TychoFeedConfig {
         }
     }
 
-    pub(crate) fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
+    /// Sets the TVL hysteresis buffer ratio (lower bound = `min_tvl / ratio`).
+    pub fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
         self.tvl_buffer_ratio = tvl_buffer_ratio;
         self
     }
 
-    pub(crate) fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
+    /// Sets the delay before reconnecting after a connection failure.
+    pub fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
         self.reconnect_delay = reconnect_delay;
         self
     }
 
-    pub(crate) fn min_token_quality(mut self, min_token_quality: i32) -> Self {
+    /// Sets the minimum token quality filter.
+    pub fn min_token_quality(mut self, min_token_quality: i32) -> Self {
         self.min_token_quality = min_token_quality;
         self
     }
 
-    pub(crate) fn traded_n_days_ago(mut self, days: u64) -> Self {
+    /// Only includes tokens traded within the given number of days.
+    pub fn traded_n_days_ago(mut self, days: u64) -> Self {
         self.traded_n_days_ago = Some(days);
         self
     }
 
-    pub(crate) fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+    /// Sets the component IDs to exclude from the Tycho stream.
+    pub fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
         self.blocklisted_components = components;
         self
     }
 
-    pub(crate) fn partial_blocks(mut self, enabled: bool) -> Self {
+    /// Enables or disables partial block (flashblock) updates from the stream.
+    pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
         self
     }
@@ -107,7 +114,7 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum DataFeedError {
+pub enum DataFeedError {
     /// Configuration error.
     #[error("configuration error: {0}")]
     Config(String),

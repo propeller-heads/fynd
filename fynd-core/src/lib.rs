@@ -67,3 +67,29 @@ pub use worker_pool::{
     TaskQueueHandle,
 };
 pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+
+// Experimental: internal graph, feed, and derived-data types for downstream consumers
+// (e.g. atomic-searcher). Gated behind the `experimental` feature flag — this API is
+// unstable and may change between releases.
+/// Unstable, semver-exempt re-exports of internal graph, feed, and derived-data
+/// types for downstream consumers such as `atomic-searcher`.
+#[cfg(feature = "experimental")]
+pub mod experimental {
+    pub use crate::{
+        derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
+        feed::{
+            events::{EventError, MarketEvent, MarketEventHandler},
+            gas::GasPriceFetcher,
+            // `SharedMarketData`/`SharedMarketDataRef` were renamed to `MarketState`/`MarketData`
+            // on main (commit d89beb5). Re-export under the original names downstream expects.
+            market_data::{MarketData as SharedMarketDataRef, MarketState as SharedMarketData},
+            tycho_feed::TychoFeed,
+            TychoFeedConfig,
+        },
+        graph::{
+            petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+            GraphManager,
+        },
+        types::native_token,
+    };
+}
