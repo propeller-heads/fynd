@@ -55,6 +55,36 @@ pub(crate) struct PathAllocation {
     pub(crate) marginal_price_product: f64,
 }
 
+impl PathAllocation {
+    /// Validates that this path does not revisit any token.
+    ///
+    /// A token appearing more than once means `merge_shared_hops` would
+    /// incorrectly collapse distinct hops into one. The only exception is
+    /// a round-trip where the final output equals the first input.
+    pub(crate) fn validate(&self) -> Result<(), AlgorithmError> {
+        if self.hops.is_empty() {
+            return Ok(());
+        }
+        let first_token = &self.hops[0].token_in.address;
+        let mut seen = HashSet::new();
+        seen.insert(first_token.clone());
+        let last_idx = self.hops.len() - 1;
+        for (i, hop) in self.hops.iter().enumerate() {
+            if !seen.insert(hop.token_out.address.clone()) {
+                let is_valid_round_trip = i == last_idx && &hop.token_out.address == first_token;
+                if !is_valid_round_trip {
+                    return Err(AlgorithmError::Other(format!(
+                        "path revisits token {} at hop {i} \
+                         (would corrupt merge_shared_hops)",
+                        hop.token_out.address,
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Output of simulating one path at a given input amount.
 pub(crate) struct SimResult {
     pub(crate) amount_out: BigUint,
@@ -571,6 +601,9 @@ pub(crate) fn build_split_route(
     market: &MarketState,
     order: &Order,
 ) -> Result<Route, AlgorithmError> {
+    for path in paths {
+        path.validate()?;
+    }
     let mut hops_by_token = merge_shared_hops(paths)?;
 
     let mut pending_tokens = VecDeque::new();
@@ -748,6 +781,104 @@ mod tests {
         let f = |x: f64| -(x - 0.3) * (x - 0.3);
         let result = golden_section_search(f, 0.0, 1.0, 100);
         assert!((result - 0.3).abs() < 1e-4, "expected ~0.3, got {result}");
+    }
+
+    // ==================== PathAllocation::validate Tests ====================
+
+    #[test]
+    fn test_path_allocation_validate_valid_path() {
+        let gas = BigUint::from(50_000u64);
+        let path = PathAllocation {
+            hops: vec![
+                HopDescriptor::new("p1".to_string(), token(0x01, "A"), token(0x02, "B"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p2".to_string(), token(0x02, "B"), token(0x03, "C"))
+                    .with_amounts(BigUint::from(100u64), gas),
+            ],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(100u64),
+            marginal_price_product: 1.0,
+        };
+        assert!(path.validate().is_ok());
+    }
+
+    #[test]
+    fn test_path_allocation_validate_empty_hops() {
+        let path = PathAllocation {
+            hops: vec![],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(100u64),
+            marginal_price_product: 1.0,
+        };
+        assert!(path.validate().is_ok());
+    }
+
+    #[test]
+    fn test_path_allocation_validate_valid_round_trip() {
+        // A → B → A is a valid round-trip (first == last).
+        let gas = BigUint::from(50_000u64);
+        let path = PathAllocation {
+            hops: vec![
+                HopDescriptor::new("p1".to_string(), token(0x01, "A"), token(0x02, "B"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p2".to_string(), token(0x02, "B"), token(0x01, "A"))
+                    .with_amounts(BigUint::from(100u64), gas),
+            ],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(100u64),
+            marginal_price_product: 1.0,
+        };
+        assert!(path.validate().is_ok());
+    }
+
+    #[test]
+    fn test_path_allocation_validate_rejects_mid_path_cycle() {
+        // A → B → C → A → D: token A revisited mid-path (not a round-trip).
+        // merge_shared_hops would incorrectly merge both A→? hops.
+        let gas = BigUint::from(50_000u64);
+        let path = PathAllocation {
+            hops: vec![
+                HopDescriptor::new("p1".to_string(), token(0x01, "A"), token(0x02, "B"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p2".to_string(), token(0x02, "B"), token(0x03, "C"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p3".to_string(), token(0x03, "C"), token(0x01, "A"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p4".to_string(), token(0x01, "A"), token(0x04, "D"))
+                    .with_amounts(BigUint::from(100u64), gas),
+            ],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(100u64),
+            marginal_price_product: 1.0,
+        };
+        assert!(path.validate().is_err());
+    }
+
+    #[test]
+    fn test_path_allocation_validate_rejects_intermediate_revisit() {
+        // A → B → C → B → D: token B revisited.
+        let gas = BigUint::from(50_000u64);
+        let path = PathAllocation {
+            hops: vec![
+                HopDescriptor::new("p1".to_string(), token(0x01, "A"), token(0x02, "B"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p2".to_string(), token(0x02, "B"), token(0x03, "C"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p3".to_string(), token(0x03, "C"), token(0x02, "B"))
+                    .with_amounts(BigUint::from(100u64), gas.clone()),
+                HopDescriptor::new("p4".to_string(), token(0x02, "B"), token(0x04, "D"))
+                    .with_amounts(BigUint::from(100u64), gas),
+            ],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(100u64),
+            amount_out: BigUint::from(100u64),
+            marginal_price_product: 1.0,
+        };
+        assert!(path.validate().is_err());
     }
 
     // ==================== Simulation Utility Tests ====================
