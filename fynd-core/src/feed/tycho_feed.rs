@@ -536,7 +536,7 @@ impl TychoFeed {
         let mut protocol_stream = match stream_builder.build().await {
             Ok(stream) => {
                 let _ = controller_tx.send(Ok(controller));
-                stream
+                Box::pin(stream)
             }
             Err(e) => {
                 let msg = e.to_string();
