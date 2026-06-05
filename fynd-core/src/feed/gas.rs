@@ -9,14 +9,17 @@ use tycho_simulation::{tycho_core::traits::FeePriceGetter, tycho_ethereum::gas::
 use crate::feed::market_data::MarketData;
 
 // TODO: Refactor gas price fetching into a `DerivedComputation`.
-pub(crate) struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
+/// Periodically fetches the latest block gas price from an RPC client and writes it
+/// into the shared market data.
+pub struct GasPriceFetcher<C: FeePriceGetter<FeePrice = BlockGasPrice>> {
     client: C,
     refresh_interval: Duration,
     shared_market_data: MarketData,
 }
 
 impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
-    pub(crate) fn new(
+    /// Creates a new fetcher that refreshes gas prices at the given interval.
+    pub fn new(
         client: C,
         shared_market_data: MarketData,
         refresh_interval: Duration,
@@ -24,7 +27,8 @@ impl<C: FeePriceGetter<FeePrice = BlockGasPrice>> GasPriceFetcher<C> {
         Self { client, refresh_interval, shared_market_data }
     }
 
-    pub(crate) async fn run(&mut self) {
+    /// Runs the refresh loop indefinitely; intended to be spawned in a dedicated task.
+    pub async fn run(&mut self) {
         let mut ticker = interval(self.refresh_interval);
         // Skip missed ticks rather than catching up — fetches are best-effort.
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);

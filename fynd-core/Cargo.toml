@@ -34,6 +34,9 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 alloy = { workspace = true, features = ["sol-types"] }
 
+[features]
+experimental = []
+
 [dev-dependencies]
 rstest.workspace = true
 tracing-subscriber.workspace = true
