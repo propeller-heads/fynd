@@ -23,6 +23,15 @@ num_workers = 3
 task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
+
+# Example: a permissioned-inclusive "surplus" pool (see repo-root worker_pools.toml).
+# Public pools (role omitted; defaults to "public") never see permissioned components.
+# [pools.surplus]
+# algorithm = "bellman_ford"
+# num_workers = 3
+# max_hops = 2
+# timeout_ms = 500
+# role = "surplus"
 "#;
 
 /// Worker pools configuration loaded from TOML file.

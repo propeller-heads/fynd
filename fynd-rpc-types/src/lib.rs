@@ -1700,6 +1700,9 @@ mod conversions {
     }
 
     impl From<fynd_core::OrderQuote> for OrderQuote {
+        // NOTE: `eg_amount` and `committed_amount_out` (permissioned-pool surplus) are
+        // intentionally NOT mapped onto this public response DTO. They are internal values that
+        // reach only the encoder; exposing them would leak Fynd-exclusive surplus to clients.
         fn from(core: fynd_core::OrderQuote) -> Self {
             let order_id = core.order_id().to_string();
             let status = core.status().into();
