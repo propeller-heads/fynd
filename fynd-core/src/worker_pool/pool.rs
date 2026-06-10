@@ -19,7 +19,7 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::MarketData,
-        permission::{ComponentScope, PermissionPolicy},
+        permission::{ComponentScope, PermissionContext, PermissionPolicy},
     },
     graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
@@ -29,7 +29,6 @@ use crate::{
             DEFAULT_ALGORITHM,
         },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
-        worker::PermissionContext,
     },
 };
 

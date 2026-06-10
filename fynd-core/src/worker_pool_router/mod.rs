@@ -109,6 +109,34 @@ pub(crate) struct OrderResponses {
     failed_solvers: Vec<(String, SolveError)>,
 }
 
+impl OrderResponses {
+    /// Returns a copy keeping only candidates from public-role pools.
+    ///
+    /// These form the committed reference and the ranked fallback chain (ranked by `rank_quotes`,
+    /// consumed by the price guard); surplus-pool candidates are overlaid separately by
+    /// `combine_with_surplus`. `failed_solvers` is retained so placeholder construction is
+    /// unchanged.
+    fn public_only(&self, pool_roles: &HashMap<String, PoolRole>) -> OrderResponses {
+        let quotes = self
+            .quotes
+            .iter()
+            .filter(|(pool, _)| {
+                pool_roles
+                    .get(pool)
+                    .copied()
+                    .unwrap_or(PoolRole::Public) ==
+                    PoolRole::Public
+            })
+            .cloned()
+            .collect();
+        OrderResponses {
+            order_id: self.order_id.clone(),
+            quotes,
+            failed_solvers: self.failed_solvers.clone(),
+        }
+    }
+}
+
 /// Orchestrates multiple solver pools to find the best quote.
 pub struct WorkerPoolRouter {
     /// All registered solver pools.
@@ -197,13 +225,16 @@ impl WorkerPoolRouter {
             .any(|r| *r == PoolRole::Surplus);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
-        // When a surplus pool is configured, fold the surplus candidate into the public reference
-        // via `combine_with_surplus`; otherwise keep the plain public-only ranking.
+        // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
+        // fallback chain. When a surplus pool is configured, the surplus winner is overlaid onto
+        // that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are preserved.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
                 if has_surplus_pool {
-                    vec![combine_with_surplus(&responses, &pool_roles, request.options())]
+                    let public_ranked =
+                        self.rank_quotes(&responses.public_only(&pool_roles), request.options());
+                    combine_with_surplus(&responses, &pool_roles, request.options(), public_ranked)
                 } else {
                     self.rank_quotes(&responses, request.options())
                 }
@@ -518,12 +549,14 @@ impl WorkerPoolRouter {
     }
 }
 
-/// Selects the winning quote for an order when a surplus (permissioned-inclusive) pool is present.
+/// Overlays the surplus winner onto the ranked public fallback list for one order.
 ///
-/// Returns either the surplus route — with the user's `amount_out` pinned to the committed public
-/// reference, an order-level `SurplusInfo` attached, and the per-leg `Swap::committed_amount_out`
-/// stamped onto each permissioned leg — or the pure public route as a fallback. The user is never
-/// quoted worse than the public market.
+/// `public_ranked` is the public-only ranking from `rank_quotes` — both the committed reference and
+/// the price-guard fallback chain. If the best surplus candidate beats the committed reference
+/// net-of-gas, the executed surplus quote (user `amount_out` pinned to the committed reference,
+/// order-level `SurplusInfo` attached, per-leg `Swap::committed_amount_out` stamped) is returned at
+/// the *head* of the list, preserving the public candidates as fallbacks. Otherwise `public_ranked`
+/// is returned unchanged. The user is never quoted worse than the public market.
 ///
 /// # Per-leg attribution
 ///
@@ -559,33 +592,35 @@ fn combine_with_surplus(
     responses: &OrderResponses,
     pool_roles: &HashMap<String, PoolRole>,
     options: &QuoteOptions,
-) -> OrderQuote {
-    // TODO: implement surplus-capture selection.
+    public_ranked: Vec<OrderQuote>,
+) -> Vec<OrderQuote> {
+    // The committed reference and fallback chain are already computed (`public_ranked`); this
+    // function only overlays the surplus winner. TODO: implement the overlay:
     //
-    // 1. Split `responses.quotes` into public vs surplus candidates via `pool_roles`.
-    // 2. committed = best PUBLIC candidate by `amount_out_net_gas` (respect `options.max_gas`). If
-    //    there are no public candidates, return the `rank_quotes` placeholder (no surplus).
-    // 3. best_surplus = best SURPLUS candidate by `amount_out_net_gas` whose route contains exactly
-    //    one permissioned leg per path (`is_permissioned(&swap.protocol_component)`), positioned as
-    //    that path's terminal leg. Reject multi-permissioned-per-path routes (out of scope for v1).
-    // 4. Fallback: if best_surplus is absent or does not beat `committed` net-of-gas, return the
-    //    committed public quote unchanged (eg_amount == None).
-    // 5. Otherwise build the executed quote FROM the surplus route and, for each permissioned leg,
+    // 1. best_surplus = best SURPLUS candidate (surplus-role pools per `pool_roles`) by
+    //    `amount_out_net_gas` whose route has exactly one permissioned leg per path
+    //    (`is_permissioned(&swap.protocol_component)`), positioned as that path's terminal leg.
+    //    Reject multi-permissioned-per-path routes (out of scope for v1). Respect
+    //    `options.max_gas`.
+    // 2. committed reference = `public_ranked.first()`. If absent (no public route) there is no
+    //    reference to commit against — return `public_ranked` unchanged.
+    // 3. If best_surplus does not beat the committed reference net-of-gas, return `public_ranked`
+    //    unchanged (eg_amount == None).
+    // 4. Otherwise build the executed quote FROM the surplus route and, for each permissioned leg,
     //    stamp `Swap::with_committed_amount_out(committed_leg)` where (BigUint, integer math):
     //    committed_leg = ceil(leg.amount_out * committed_route_out / realized_route_out) clamped to
     //    [0, leg.amount_out] using `realized_route_out` = the surplus route's gross output and
-    //    `committed_route_out` = committed.amount_out. (Terminal-leg single path: this reduces to
-    //    committed_leg == committed_route_out. Split with one permissioned branch: scale by that
-    //    BRANCH's realized/committed and cap at the branch's leg output; attribute the order
-    //    surplus there.)
-    // 6. Pin the executed quote's user-facing `amount_out` to `committed_route_out` and attach
-    //    `SurplusInfo::new(eg_route, committed_route_out)` via `OrderQuote::with_surplus`, where
-    //    `eg_route = realized_route_out − committed_route_out` (== Σ over legs of `leg.amount_out −
-    //    committed_leg`, normalized to token_out).
-    // 7. debug_assert! the invariant: simulated user output (after per-leg capture) ≥
+    //    `committed_route_out` = the committed reference's amount_out. (Terminal-leg single path:
+    //    reduces to committed_leg == committed_route_out. Split with one permissioned branch: scale
+    //    by that BRANCH's realized/committed and cap at the branch's leg output.)
+    // 5. Pin the executed quote's user-facing `amount_out` to `committed_route_out`, attach
+    //    `SurplusInfo::new(eg_route, committed_route_out)` via `OrderQuote::with_surplus`
+    //    (`eg_route = realized_route_out − committed_route_out`), and PREPEND it to `public_ranked`
+    //    so the price guard keeps the public candidates as fallbacks.
+    // 6. debug_assert! the invariant: simulated user output (after per-leg capture) ≥
     //    committed_route_out.
     let _ = (responses, pool_roles, options);
-    todo!("select surplus-vs-public quote, stamp per-leg committed amounts, attach SurplusInfo")
+    public_ranked
 }
 
 fn refine_gas_estimates(
@@ -1100,26 +1135,37 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: combine_with_surplus is todo!()"]
+    #[ignore = "scaffold: surplus overlay in combine_with_surplus is todo"]
     fn combine_prefers_surplus_when_it_beats_public() {
         let responses = surplus_responses(900, 950);
-        let combined =
-            combine_with_surplus(&responses, &surplus_pool_roles(), &QuoteOptions::default());
+        let public_ranked = vec![make_single_quote(900).order().clone()];
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+        );
 
-        // User is quoted the committed public output, protocol captures the surplus.
-        assert_eq!(*combined.amount_out(), BigUint::from(900u64));
-        assert_eq!(combined.committed_amount_out(), Some(&BigUint::from(900u64)));
-        assert_eq!(combined.eg_amount(), Some(&BigUint::from(50u64)));
+        // The surplus winner is at the head: user is quoted the committed public output, protocol
+        // captures the surplus. The public candidate remains as a fallback.
+        assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
+        assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(900u64)));
+        assert_eq!(combined[0].eg_amount(), Some(&BigUint::from(50u64)));
     }
 
     #[test]
-    #[ignore = "scaffold: combine_with_surplus is todo!()"]
+    #[ignore = "scaffold: surplus overlay in combine_with_surplus is todo"]
     fn combine_falls_back_to_public_when_surplus_does_not_beat_it() {
         let responses = surplus_responses(950, 900);
-        let combined =
-            combine_with_surplus(&responses, &surplus_pool_roles(), &QuoteOptions::default());
+        let public_ranked = vec![make_single_quote(950).order().clone()];
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+        );
 
-        assert_eq!(*combined.amount_out(), BigUint::from(950u64));
-        assert_eq!(combined.eg_amount(), None);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(950u64));
+        assert_eq!(combined[0].eg_amount(), None);
     }
 }

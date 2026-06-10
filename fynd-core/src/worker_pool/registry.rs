@@ -25,9 +25,9 @@ use crate::{
         MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::MarketData},
+    feed::{events::MarketEvent, market_data::MarketData, permission::PermissionContext},
     types::internal::SolveTask,
-    worker_pool::worker::{PermissionContext, SolverWorker},
+    worker_pool::worker::SolverWorker,
 };
 
 /// List of available built-in algorithm names (for registry-based dispatch).
