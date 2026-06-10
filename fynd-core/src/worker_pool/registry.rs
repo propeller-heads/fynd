@@ -27,7 +27,7 @@ use crate::{
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
     types::internal::SolveTask,
-    worker_pool::worker::SolverWorker,
+    worker_pool::worker::{PermissionContext, SolverWorker},
 };
 
 /// List of available built-in algorithm names (for registry-based dispatch).
@@ -59,6 +59,11 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Permission scoping applied to every worker in this pool.
+    ///
+    /// Cloned per worker so each gets its own [`PermissionContext`]. Defaults to "include all"
+    /// (no filtering) for public pools without permission configuration.
+    pub permission: PermissionContext,
 }
 
 /// Error returned when algorithm registration fails.
@@ -164,6 +169,7 @@ where
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
+        let permission = params.permission.clone();
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -182,7 +188,8 @@ where
                         algorithm,
                         worker_id,
                         pool_name,
-                    );
+                    )
+                    .with_permission(permission);
 
                     worker.initialize_graph().await;
                     worker
@@ -261,6 +268,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
+            permission: PermissionContext::include_all(),
         }
     }
 
@@ -299,6 +307,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            permission: PermissionContext::include_all(),
         };
 
         let workers =
@@ -340,6 +349,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                permission: PermissionContext::include_all(),
             });
         assert!(registry_err.is_err());
 
@@ -367,6 +377,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                permission: PermissionContext::include_all(),
             });
 
         assert!(workers.is_ok());

@@ -9,6 +9,8 @@ pub(crate) mod gas;
 pub mod market_data;
 /// Background sampler exporting per-protocol market metrics.
 pub(crate) mod metrics_sampler;
+/// Per-worker permission scoping for permissioned (Fynd-exclusive) pools.
+pub mod permission;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.

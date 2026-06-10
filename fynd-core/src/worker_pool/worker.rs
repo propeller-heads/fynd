@@ -8,6 +8,7 @@
 //! - Coordinates market event and solve task processing
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -26,6 +27,7 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::MarketData,
+        permission::{ComponentScope, PermissionPolicy},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
@@ -68,6 +70,34 @@ where
     worker_id: usize,
     /// Pool name (used as the `pool` metric label).
     pool_name: String,
+    /// Permission scoping for this worker's local graph.
+    ///
+    /// `IncludeAll` with no policy (the default) preserves the original non-filtered behaviour.
+    /// A public worker is configured with `ExcludePermissioned` + a `PermissionPolicy` so
+    /// permissioned components never enter its graph; a surplus worker uses `IncludeAll`.
+    permission: PermissionContext,
+}
+
+/// Per-worker permission scoping: which components the worker may ingest into its local graph.
+#[derive(Clone, Debug)]
+pub(crate) struct PermissionContext {
+    /// Scope governing whether permissioned components are filtered out.
+    scope: ComponentScope,
+    /// Predicate classifying components as permissioned. `None` ⇒ no filtering is ever applied
+    /// (equivalent to `IncludeAll`).
+    policy: Option<PermissionPolicy>,
+}
+
+impl PermissionContext {
+    /// Default context: see every component, apply no permission filtering.
+    pub(crate) fn include_all() -> Self {
+        Self { scope: ComponentScope::IncludeAll, policy: None }
+    }
+
+    /// Context for a public worker that must exclude permissioned components.
+    pub(crate) fn new(scope: ComponentScope, policy: Option<PermissionPolicy>) -> Self {
+        Self { scope, policy }
+    }
 }
 
 impl<A> SolverWorker<A>
@@ -105,7 +135,16 @@ where
             initialized: false,
             worker_id,
             pool_name,
+            permission: PermissionContext::include_all(),
         }
+    }
+
+    /// Configures this worker's permission scoping.
+    ///
+    /// Public workers pass `ExcludePermissioned` + a policy; surplus workers pass `IncludeAll`.
+    pub(crate) fn with_permission(mut self, permission: PermissionContext) -> Self {
+        self.permission = permission;
+        self
     }
 
     /// Initializes the graph from MarketState.
@@ -116,7 +155,21 @@ where
         let topology = {
             // read lock on market data
             let market = self.market_data.read().await;
-            market.component_topology().clone() // clone to avoid holding the lock
+            let topology = market.component_topology().clone(); // clone to avoid holding the lock
+            match (self.permission.scope, &self.permission.policy) {
+                (ComponentScope::ExcludePermissioned, Some(policy)) => {
+                    // TODO: a public worker must drop permissioned components from its initial
+                    // topology so they can never surface in a public quote.
+                    crate::feed::permission::filter_topology(
+                        self.permission.scope,
+                        policy,
+                        market.base_market_state(),
+                        topology,
+                    )
+                }
+                // IncludeAll (surplus worker) or no policy ⇒ original unfiltered behaviour.
+                _ => topology,
+            }
         };
 
         self.graph_manager
@@ -126,6 +179,7 @@ where
 
     /// Processes a single market event.
     pub async fn process_event(&mut self, event: MarketEvent) {
+        let event = self.scope_event(event).await;
         match event {
             MarketEvent::MarketUpdated { .. } => {
                 if let Err(e) = self
@@ -139,6 +193,58 @@ where
                 }
             }
         }
+    }
+
+    /// Restricts an incoming market event to the components this worker is permitted to see.
+    ///
+    /// Surplus workers (or any worker with no policy) see the event unchanged; public workers
+    /// drop permissioned component ids before the event reaches the graph manager.
+    async fn scope_event(&self, event: MarketEvent) -> MarketEvent {
+        let (ComponentScope::ExcludePermissioned, Some(policy)) =
+            (self.permission.scope, &self.permission.policy)
+        else {
+            // IncludeAll (surplus worker) or no policy ⇒ original unfiltered behaviour.
+            return event;
+        };
+
+        let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+            event;
+
+        // TODO: apply policy.is_permissioned (via filter_component_ids) to the added, updated, and
+        // removed id lists so a permissioned component is never ingested mid-stream by a public
+        // worker. `added_components` is keyed by id; filter its keys to the permitted subset.
+        let market = self.market_data.read().await;
+        let market_state = market.base_market_state();
+        let added_ids: Vec<_> = added_components
+            .keys()
+            .cloned()
+            .collect();
+        let permitted_added: HashSet<_> = crate::feed::permission::filter_component_ids(
+            self.permission.scope,
+            policy,
+            market_state,
+            &added_ids,
+        )
+        .into_iter()
+        .collect();
+        let added_components = added_components
+            .into_iter()
+            .filter(|(id, _)| permitted_added.contains(id))
+            .collect();
+        let removed_components = crate::feed::permission::filter_component_ids(
+            self.permission.scope,
+            policy,
+            market_state,
+            &removed_components,
+        );
+        let updated_components = crate::feed::permission::filter_component_ids(
+            self.permission.scope,
+            policy,
+            market_state,
+            &updated_components,
+        );
+
+        MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
     }
 
     /// Returns a quote for an order, optionally solved against a named state overlay.
