@@ -704,9 +704,9 @@ impl SingleOrderQuote {
     }
 }
 
-/// Order-level surplus summary for a quote routed through a permissioned component: `eg_amount` is
-/// the surplus the protocol captures (realized output minus the committed public-market output the
-/// user is quoted), in the order's `token_out`.
+/// Order-level surplus summary for a quote routed through a permissioned component:
+/// `surplus_amount` is what the protocol captures (realized output minus the committed
+/// public-market output the user is quoted), in the order's `token_out`.
 ///
 /// Informational only (observability). The value the encoder acts on is the per-leg
 /// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
@@ -716,7 +716,7 @@ pub struct SurplusInfo {
     /// Surplus captured by the protocol: realized surplus-route output minus the committed
     /// (public-reference) output.
     #[serde_as(as = "DisplayFromStr")]
-    eg_amount: BigUint,
+    surplus_amount: BigUint,
     /// The best public-market output the user is committed to (the quoted `amount_out`).
     #[serde_as(as = "DisplayFromStr")]
     committed_amount_out: BigUint,
@@ -724,13 +724,13 @@ pub struct SurplusInfo {
 
 impl SurplusInfo {
     /// Creates surplus info from the captured surplus and the committed public output.
-    pub fn new(eg_amount: BigUint, committed_amount_out: BigUint) -> Self {
-        Self { eg_amount, committed_amount_out }
+    pub fn new(surplus_amount: BigUint, committed_amount_out: BigUint) -> Self {
+        Self { surplus_amount, committed_amount_out }
     }
 
     /// Returns the surplus amount captured by the protocol.
-    pub fn eg_amount(&self) -> &BigUint {
-        &self.eg_amount
+    pub fn surplus_amount(&self) -> &BigUint {
+        &self.surplus_amount
     }
 
     /// Returns the committed public-market output the user is quoted.
@@ -853,10 +853,10 @@ impl OrderQuote {
     }
 
     /// Returns the captured surplus amount, if this quote routes through a permissioned component.
-    pub fn eg_amount(&self) -> Option<&BigUint> {
+    pub fn surplus_amount(&self) -> Option<&BigUint> {
         self.surplus
             .as_ref()
-            .map(SurplusInfo::eg_amount)
+            .map(SurplusInfo::surplus_amount)
     }
 
     /// Returns the committed public-market output, if this quote routes through a permissioned
@@ -1883,10 +1883,11 @@ mod tests {
     #[ignore = "scaffold: surplus wiring not yet exercised end-to-end"]
     fn surplus_round_trips_through_getters() {
         let committed = BigUint::from(990u64);
-        let eg = BigUint::from(15u64);
-        let quote = make_quote(990).with_surplus(SurplusInfo::new(eg.clone(), committed.clone()));
+        let surplus = BigUint::from(15u64);
+        let quote =
+            make_quote(990).with_surplus(SurplusInfo::new(surplus.clone(), committed.clone()));
 
-        assert_eq!(quote.eg_amount(), Some(&eg));
+        assert_eq!(quote.surplus_amount(), Some(&surplus));
         assert_eq!(quote.committed_amount_out(), Some(&committed));
     }
 
@@ -1894,7 +1895,7 @@ mod tests {
     #[ignore = "scaffold: surplus wiring not yet exercised end-to-end"]
     fn public_quote_has_no_surplus() {
         let quote = make_quote(990);
-        assert_eq!(quote.eg_amount(), None);
+        assert_eq!(quote.surplus_amount(), None);
         assert_eq!(quote.committed_amount_out(), None);
     }
 

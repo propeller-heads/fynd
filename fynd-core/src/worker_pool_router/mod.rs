@@ -1242,7 +1242,7 @@ mod tests {
         // captures the surplus. The public candidate remains as a fallback.
         assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
         assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(900u64)));
-        assert_eq!(combined[0].eg_amount(), Some(&BigUint::from(50u64)));
+        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(50u64)));
     }
 
     #[test]
@@ -1258,6 +1258,6 @@ mod tests {
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(950u64));
-        assert_eq!(combined[0].eg_amount(), None);
+        assert_eq!(combined[0].surplus_amount(), None);
     }
 }
