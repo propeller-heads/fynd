@@ -1700,7 +1700,7 @@ mod conversions {
     }
 
     impl From<fynd_core::OrderQuote> for OrderQuote {
-        // NOTE: `eg_amount` and `committed_amount_out` (permissioned-component surplus) are
+        // NOTE: `surplus_amount` and `committed_amount_out` (permissioned-component surplus) are
         // intentionally NOT mapped onto this public response DTO — they are internal (the per-leg
         // committed amount reaches the encoder; the order-level surplus is for observability).
         // Exposing them would leak the captured surplus to clients.
