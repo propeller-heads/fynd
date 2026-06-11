@@ -13,7 +13,7 @@ max_hops = 2
 timeout_ms = 500
 
 # Example: a permissioned-inclusive "surplus" pool. `role = "surplus"` lets this pool route
-# through permissioned (Fynd-exclusive) pools to capture surplus above the best public rate.
+# through permissioned components to capture surplus above the best public rate.
 # Public pools (role omitted; defaults to "public") never see permissioned components.
 # [pools.surplus]
 # algorithm = "bellman_ford"

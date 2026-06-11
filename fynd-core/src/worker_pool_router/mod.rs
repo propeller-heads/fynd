@@ -45,17 +45,17 @@ use crate::{
     QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
 };
 
-/// The role a solver pool plays in a quote.
+/// The role a solver pool (a group of workers) plays in a quote.
 ///
-/// Public pools route only through public liquidity and provide the committed (quoted) reference
-/// output. The single surplus pool additionally routes through permissioned pools and may beat the
-/// public reference, in which case the protocol captures the surplus (`egAmount`).
+/// A `Public` pool routes only through public liquidity and provides the committed (quoted)
+/// reference output. The single `All` pool also routes through permissioned components and may beat
+/// that reference, in which case the protocol captures the surplus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolRole {
     /// Routes through public liquidity only. Establishes the committed reference output.
     Public,
-    /// Routes through all liquidity including permissioned pools; source of surplus quotes.
-    Surplus,
+    /// Routes through all liquidity, including permissioned components; source of surplus quotes.
+    All,
 }
 
 /// Handle to a solver pool for dispatching orders.
@@ -65,7 +65,7 @@ pub struct SolverPoolHandle {
     name: String,
     /// Queue handle for this pool.
     queue: TaskQueueHandle,
-    /// Whether this pool provides public or surplus candidates.
+    /// Whether this pool routes public-only or all liquidity.
     role: PoolRole,
 }
 
@@ -75,7 +75,7 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, role: PoolRole::Public }
     }
 
-    /// Sets the pool's role (e.g. [`PoolRole::Surplus`] for the permissioned-inclusive pool).
+    /// Sets the pool's role (e.g. [`PoolRole::All`] for the permissioned-inclusive pool).
     pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self
@@ -220,18 +220,19 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| (p.name().to_string(), p.role()))
             .collect();
-        let has_surplus_pool = pool_roles
+        let has_all_pool = pool_roles
             .values()
-            .any(|r| *r == PoolRole::Surplus);
+            .any(|r| *r == PoolRole::All);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When a surplus pool is configured, the surplus winner is overlaid onto
-        // that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are preserved.
+        // fallback chain. When an `All`-role pool is configured, the surplus winner is overlaid
+        // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
+        // preserved.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
-                if has_surplus_pool {
+                if has_all_pool {
                     let public_ranked =
                         self.rank_quotes(&responses.public_only(&pool_roles), request.options());
                     combine_with_surplus(&responses, &pool_roles, request.options(), public_ranked)
@@ -553,41 +554,16 @@ impl WorkerPoolRouter {
 ///
 /// `public_ranked` is the public-only ranking from `rank_quotes` — both the committed reference and
 /// the price-guard fallback chain. If the best surplus candidate beats the committed reference
-/// net-of-gas, the executed surplus quote (user `amount_out` pinned to the committed reference,
-/// order-level `SurplusInfo` attached, per-leg `Swap::committed_amount_out` stamped) is returned at
-/// the *head* of the list, preserving the public candidates as fallbacks. Otherwise `public_ranked`
-/// is returned unchanged. The user is never quoted worse than the public market.
+/// net-of-gas, the executed surplus quote is returned at the head of the list (its `amount_out`
+/// pinned to the committed reference, an order-level `SurplusInfo` attached, and each permissioned
+/// leg's `Swap::committed_amount_out` set), preserving the public candidates as fallbacks.
+/// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
+/// public market.
 ///
-/// # Per-leg attribution
-///
-/// The on-chain hook captures surplus *per pool*, in that pool's `token_out`, from a signed
-/// `maxExchangeRate`. The order-level surplus (`eg_route = realized_route_out −
-/// committed_route_out`, both in the order's `token_out`) must therefore be pushed down to each
-/// permissioned leg. We use a linear (no-inverse-simulation) approximation that is provably
-/// conservative for concave AMMs:
-///
-/// ```text
-/// committed_amount_out_leg = leg.amount_out * committed_route_out / realized_route_out   (ceil)
-/// eg_amount_leg            = leg.amount_out − committed_amount_out_leg                    (floor)
-/// ```
-///
-/// Equivalently, the leg's realized output is scaled down by the same ratio as the whole-route
-/// haircut — i.e. `eg_route` is converted from the order's `token_out` into the leg's `token_out`
-/// by dividing through the realized downstream price `realized_route_out / leg.amount_out`.
-///
-/// ## Why this never shorts the user
-///
-/// Let `f` map the downstream segment's input (the leg's `token_out`) to the order's final
-/// `token_out`. For standard AMMs `f` is concave and increasing, and a composition of such legs
-/// stays concave. Capturing `Δ = eg_route / p_down` (with `p_down = f(x₀)/x₀`) drops the user's
-/// final output by `f(x₀) − f(x₀−Δ)`. Define `h(eg) = eg − [f(x₀) − f(x₀ − eg/p_down)]`. Then
-/// `h(0) = 0`, `h(f(x₀)) = f(0) = 0`, and `h'' = f''/p_down² < 0`, so `h` is concave with both
-/// endpoints zero ⟹ `h ≥ 0` throughout. Hence the true drop never exceeds `eg_route`, so the user
-/// always receives ≥ `committed_route_out`. We capture slightly *less* than the theoretical maximum
-/// (the safe direction). `ceil` on the committed leg and `floor` on `eg_amount_leg` preserve this.
-///
-/// SAFETY: the guarantee assumes downstream legs are concave. If a non-concave downstream protocol
-/// is ever permitted, add a haircut or exclude it.
+/// Each permissioned leg's `committed_amount_out` is its realized output reduced by the same
+/// proportion as the order-level reduction; the protocol captures the difference. The per-leg
+/// attribution formula and the bound that keeps the user at or above the committed reference are
+/// derived in the design plan.
 fn combine_with_surplus(
     responses: &OrderResponses,
     pool_roles: &HashMap<String, PoolRole>,
@@ -595,30 +571,19 @@ fn combine_with_surplus(
     public_ranked: Vec<OrderQuote>,
 ) -> Vec<OrderQuote> {
     // The committed reference and fallback chain are already computed (`public_ranked`); this
-    // function only overlays the surplus winner. TODO: implement the overlay:
+    // function only overlays the surplus winner. TODO: implement the overlay (see the design plan
+    // for the per-leg attribution formula and the user-never-short-changed bound):
     //
-    // 1. best_surplus = best SURPLUS candidate (surplus-role pools per `pool_roles`) by
-    //    `amount_out_net_gas` whose route has exactly one permissioned leg per path
-    //    (`is_permissioned(&swap.protocol_component)`), positioned as that path's terminal leg.
-    //    Reject multi-permissioned-per-path routes (out of scope for v1). Respect
-    //    `options.max_gas`.
-    // 2. committed reference = `public_ranked.first()`. If absent (no public route) there is no
-    //    reference to commit against — return `public_ranked` unchanged.
-    // 3. If best_surplus does not beat the committed reference net-of-gas, return `public_ranked`
-    //    unchanged (eg_amount == None).
-    // 4. Otherwise build the executed quote FROM the surplus route and, for each permissioned leg,
-    //    stamp `Swap::with_committed_amount_out(committed_leg)` where (BigUint, integer math):
-    //    committed_leg = ceil(leg.amount_out * committed_route_out / realized_route_out) clamped to
-    //    [0, leg.amount_out] using `realized_route_out` = the surplus route's gross output and
-    //    `committed_route_out` = the committed reference's amount_out. (Terminal-leg single path:
-    //    reduces to committed_leg == committed_route_out. Split with one permissioned branch: scale
-    //    by that BRANCH's realized/committed and cap at the branch's leg output.)
-    // 5. Pin the executed quote's user-facing `amount_out` to `committed_route_out`, attach
-    //    `SurplusInfo::new(eg_route, committed_route_out)` via `OrderQuote::with_surplus`
-    //    (`eg_route = realized_route_out − committed_route_out`), and PREPEND it to `public_ranked`
-    //    so the price guard keeps the public candidates as fallbacks.
-    // 6. debug_assert! the invariant: simulated user output (after per-leg capture) ≥
-    //    committed_route_out.
+    // 1. best_surplus = best candidate from surplus-role pools (per `pool_roles`) by
+    //    `amount_out_net_gas`, whose route has exactly one permissioned leg per path positioned as
+    //    that path's terminal leg (`is_permissioned(&swap.protocol_component)`); reject
+    //    multi-permissioned-per-path routes (out of scope for v1); respect `options.max_gas`.
+    // 2. committed reference = `public_ranked.first()`. If there is none, or best_surplus does not
+    //    beat it net-of-gas, return `public_ranked` unchanged (no surplus).
+    // 3. Otherwise build the executed quote from the surplus route, set each permissioned leg's
+    //    `Swap::with_committed_amount_out(...)`, pin the user `amount_out` to the committed
+    //    reference, attach `SurplusInfo` via `OrderQuote::with_surplus`, and PREPEND it to
+    //    `public_ranked`. debug_assert! that the user output is ≥ the committed reference.
     let _ = (responses, pool_roles, options);
     public_ranked
 }
@@ -1130,7 +1095,7 @@ mod tests {
     fn surplus_pool_roles() -> HashMap<String, PoolRole> {
         HashMap::from([
             ("public_pool".to_string(), PoolRole::Public),
-            ("surplus_pool".to_string(), PoolRole::Surplus),
+            ("surplus_pool".to_string(), PoolRole::All),
         ])
     }
 

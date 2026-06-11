@@ -7,7 +7,7 @@ pub mod events;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
-/// Per-worker permission scoping for permissioned (Fynd-exclusive) pools.
+/// Per-worker permission scoping for permissioned components.
 pub mod permission;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;

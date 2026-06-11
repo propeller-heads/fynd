@@ -701,18 +701,12 @@ impl SingleOrderQuote {
     }
 }
 
-/// Order-level surplus summary for a quote routed through a permissioned ("fair-flow hook") pool.
+/// Order-level surplus summary for a quote routed through a permissioned component: `eg_amount` is
+/// the surplus the protocol captures (realized output minus the committed public-market output the
+/// user is quoted), in the order's `token_out`.
 ///
-/// The user is quoted and committed to the best *public*-market output
-/// (`committed_amount_out`), while the trade actually executes through a permissioned pool that
-/// yields more. The protocol captures the difference (`eg_amount = realized_surplus_output −
-/// committed_amount_out`, in the order's `token_out`). Present only on quotes selected from the
-/// surplus pool; absent for pure public quotes.
-///
-/// This is the *reporting aggregate* (observability only). The *actionable* per-pool commitment
-/// the encoder signs lives on the permissioned [`Swap::committed_amount_out`] leg, because the
-/// on-chain hook captures surplus per pool (in that pool's `token_out`), which only equals the
-/// order-level `eg_amount` when the permissioned pool is the route's terminal leg.
+/// Informational only (observability). The value the encoder acts on is the per-leg
+/// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurplusInfo {
@@ -839,20 +833,19 @@ impl OrderQuote {
         }
     }
 
-    /// Attaches the order-level surplus summary (committed output + captured `egAmount`).
+    /// Attaches the order-level surplus summary (committed output + captured surplus).
     ///
     /// Set by the router when a surplus route is selected, for observability. The per-leg
     /// [`Swap::committed_amount_out`] (not this) is what the encoder acts on.
-    // Wired into `combine_with_surplus`, whose body is still scaffolded (`todo!()`); the only
-    // current callers are `#[cfg(test)]`, so the prod build sees it as unused.
+    // Called by the surplus overlay in `combine_with_surplus` (still scaffolded); no prod caller
+    // yet.
     #[allow(dead_code)]
     pub(crate) fn with_surplus(mut self, surplus: SurplusInfo) -> Self {
         self.surplus = Some(surplus);
         self
     }
 
-    /// Returns the captured surplus amount (`egAmount`), if this quote routes through a
-    /// permissioned pool.
+    /// Returns the captured surplus amount, if this quote routes through a permissioned component.
     pub fn eg_amount(&self) -> Option<&BigUint> {
         self.surplus
             .as_ref()
@@ -860,7 +853,7 @@ impl OrderQuote {
     }
 
     /// Returns the committed public-market output, if this quote routes through a permissioned
-    /// pool.
+    /// component.
     pub fn committed_amount_out(&self) -> Option<&BigUint> {
         self.surplus
             .as_ref()
@@ -1570,11 +1563,11 @@ pub struct Swap {
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
-    /// Per-leg committed output for a permissioned ("fair-flow hook") swap.
+    /// Per-leg committed output for a permissioned swap.
     ///
     /// Set only on the single permissioned leg of a surplus route. The on-chain hook signs a
     /// `maxExchangeRate` derived from this value (`committed_amount_out * denom / amount_in`); the
-    /// pool then captures `amount_out - committed_amount_out` as `egAmount`, denominated in this
+    /// component then captures `amount_out - committed_amount_out` as surplus, denominated in this
     /// swap's `token_out`. `None` for ordinary public swaps. In-process only — consumed by the
     /// encoder; `#[serde(skip)]` so it never enters the wire format.
     #[serde(skip)]
