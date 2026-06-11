@@ -59,11 +59,11 @@ impl TryFrom<&OrderQuote> for Solution {
             SolveError::FailedEncoding("successful quote must have a route".to_string())
         })?;
 
-        // TODO: when this quote routes through a permissioned pool, read
-        // `quote.committed_amount_out()` and `quote.eg_amount()` here and carry them into the
-        // encoded `Solution` so the on-chain fair-flow hook can be parameterised. The user is
-        // committed to `committed_amount_out` while the executed route yields the surplus. Hook
-        // calldata/signature encoding is a separate later extension and is out of scope here.
+        // TODO: when a swap in this route is permissioned, read its `Swap::committed_amount_out`
+        // and carry it into the encoded `Solution` so the on-chain permissioned hook can be
+        // parameterised — the user is committed to that amount while the executed route yields the
+        // surplus. Hook calldata/signature encoding is a separate later extension, out of scope
+        // here.
 
         let token_in = route
             .input_token()

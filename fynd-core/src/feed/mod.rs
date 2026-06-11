@@ -9,7 +9,7 @@ pub(crate) mod gas;
 pub mod market_data;
 /// Background sampler exporting per-protocol market metrics.
 pub(crate) mod metrics_sampler;
-/// Per-worker permission scoping for permissioned (Fynd-exclusive) pools.
+/// Per-worker permission scoping for permissioned components.
 pub mod permission;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;

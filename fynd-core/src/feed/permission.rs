@@ -1,10 +1,10 @@
-//! Per-worker permission scoping for permissioned ("fair-flow hook") pools.
+//! Per-worker permission scoping for permissioned components.
 //!
-//! Some pools are exclusive to Fynd: they must never appear in a normal public quote, yet a
-//! dedicated "surplus" worker is allowed to route through them to capture the surplus
-//! (`egAmount`) they offer above the best public-market rate. Isolation is achieved by filtering
-//! each worker's local graph topology/events through a `PermissionPolicy` according to its
-//! `ComponentScope` — the shared `MarketState` is never duplicated.
+//! "Permissioned" means accessible only to Fynd: such components must never appear in a normal
+//! public quote, yet a dedicated worker is allowed to route through them to capture the surplus
+//! they offer above the best public-market rate. Isolation is achieved by filtering each worker's
+//! local graph topology/events through a `PermissionPolicy` according to its `ComponentScope` — the
+//! shared `MarketState` is never duplicated.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,7 +18,7 @@ use crate::{
     types::ComponentId,
 };
 
-/// Classifies a [`ProtocolComponent`] as permissioned (Fynd-exclusive) or public.
+/// Classifies a [`ProtocolComponent`] as permissioned or public.
 ///
 /// The predicate is supplied by the caller rather than hard-coded against an id or protocol name,
 /// so the notion of "permissioned" can evolve (e.g. a hook address allowlist) without touching the
@@ -39,7 +39,7 @@ impl PermissionPolicy {
         Self { is_permissioned: Arc::new(predicate) }
     }
 
-    /// Returns `true` if the component is permissioned (Fynd-exclusive).
+    /// Returns `true` if the component is permissioned.
     pub fn is_permissioned(&self, component: &ProtocolComponent) -> bool {
         (self.is_permissioned)(component)
     }
@@ -166,7 +166,7 @@ mod tests {
         feed::{events::MarketEvent, market_data::MarketState},
     };
 
-    /// A predicate that treats the `vm:permissioned` protocol system as Fynd-exclusive.
+    /// A predicate that treats the `vm:permissioned` protocol system as permissioned.
     fn permissioned_protocol_policy() -> PermissionPolicy {
         PermissionPolicy::new(|c: &ProtocolComponent| c.protocol_system == "vm:permissioned")
     }

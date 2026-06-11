@@ -131,18 +131,19 @@ fn parse_connector_tokens(
     Ok(Some(set))
 }
 
-/// Role a configured pool plays in routing: public-only or permissioned-inclusive (surplus).
+/// Role a configured pool plays in routing: public-only or permissioned-inclusive.
 ///
-/// Serialized in lowercase (`"public"` / `"surplus"`) in `worker_pools.toml`. Maps to the
-/// router's `PoolRole` and the worker's `ComponentScope`: public pools exclude permissioned
-/// components, the surplus pool includes everything.
+/// Serialized in lowercase (`"public"` / `"surplus"`) in `worker_pools.toml`. Maps to the router's
+/// `PoolRole` and the worker's `ComponentScope`: a public pool excludes permissioned components; a
+/// surplus pool routes through all liquidity to capture surplus above the public rate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolRoleConfig {
     /// Public pool: routes through public liquidity only (the committed reference). Default.
     #[default]
     Public,
-    /// Surplus pool: routes through permissioned pools to capture surplus above the public rate.
+    /// Surplus pool: routes through all liquidity, including permissioned components, to capture
+    /// surplus above the public rate.
     Surplus,
 }
 
@@ -151,7 +152,7 @@ impl PoolRoleConfig {
     fn pool_role(self) -> PoolRole {
         match self {
             Self::Public => PoolRole::Public,
-            Self::Surplus => PoolRole::Surplus,
+            Self::Surplus => PoolRole::All,
         }
     }
 
@@ -677,7 +678,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the predicate that classifies components as permissioned (Fynd-exclusive).
+    /// Sets the predicate that classifies components as permissioned.
     ///
     /// Public pools exclude matching components from their graphs; the surplus pool includes them.
     /// Without a policy, no pool performs any permission filtering.
