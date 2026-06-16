@@ -7,10 +7,10 @@
 # Worker pools
 [pools.bellman_ford_2_hops]
 algorithm = "bellman_ford"
-num_workers = 3
+num_workers = 6
 task_queue_capacity = 1000
 max_hops = 2
-timeout_ms = 500
+timeout_ms = 1000
 
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).
