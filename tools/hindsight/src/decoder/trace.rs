@@ -191,6 +191,26 @@ mod tests {
     }
 
     #[test]
+    fn relay_attributes_tycho_router() {
+        // Real tx 0x8b461c…: Relay ApprovalProxy -> Relay router -> Tycho router.
+        // The settling venue is Tycho even though it sits two levels deep.
+        let aggregators = known_aggregators();
+        let sender = addr(1);
+        let relay_proxy = address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be");
+        let relay_router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
+        let tycho = address!("0x1f8db310f32d48b6180ff902ec60c586128cef47");
+
+        let mut router_call = frame("CALL", relay_proxy, relay_router, 0);
+        router_call.calls = vec![frame("CALL", relay_router, tycho, 0)];
+        let mut root = frame("CALL", sender, relay_proxy, 0);
+        root.calls = vec![router_call];
+
+        let found = attribute_aggregator(&root, relay_proxy, sender, &aggregators).unwrap();
+        assert_eq!(found, tycho);
+        assert_eq!(label(found, &known_names()), "tycho");
+    }
+
+    #[test]
     fn unknown_aggregator_falls_back_to_largest_external_call() {
         // No known aggregator in the trace: pick the largest external call,
         // skipping the client self-call and the refund back to the sender.

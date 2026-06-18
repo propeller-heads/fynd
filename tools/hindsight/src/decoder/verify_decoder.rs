@@ -1,0 +1,452 @@
+use std::collections::{HashMap, HashSet};
+
+use alloy::{
+    primitives::{Address, Bytes, U256},
+    providers::Provider,
+    rpc::types::{TransactionInput, TransactionRequest},
+};
+use anyhow::Context;
+use tracing::warn;
+
+use crate::decoder::{
+    allium::{AlliumClient, AlliumRow},
+    decode_block, DecodedTrade,
+};
+
+const NATIVE_DECIMALS: u8 = 18;
+/// `keccak256("decimals()")[..4]`.
+const DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
+
+/// Outcome of comparing one transaction's decode against Allium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Match,
+    TokenMismatch,
+    AggregatorMismatch,
+    AmountMismatch,
+    OursOnly,
+    AlliumOnly,
+}
+
+impl Status {
+    fn label(self) -> &'static str {
+        match self {
+            Status::Match => "match",
+            Status::TokenMismatch => "token mismatch",
+            Status::AggregatorMismatch => "aggregator mismatch",
+            Status::AmountMismatch => "amount mismatch",
+            Status::OursOnly => "ours only",
+            Status::AlliumOnly => "allium only (decoder gap)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TxComparison {
+    pub tx_hash: String,
+    pub status: Status,
+    pub detail: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct VerifyReport {
+    pub comparisons: Vec<TxComparison>,
+}
+
+impl VerifyReport {
+    pub fn print(&self) {
+        let count = |status: Status| {
+            self.comparisons
+                .iter()
+                .filter(|c| c.status == status)
+                .count()
+        };
+        println!("\nVerification vs Allium ground truth:");
+        println!("  compared txs:          {}", self.comparisons.len());
+        println!("  matches:               {}", count(Status::Match));
+        println!("  token mismatches:      {}", count(Status::TokenMismatch));
+        println!("  aggregator mismatches: {}", count(Status::AggregatorMismatch));
+        println!("  amount mismatches:     {}", count(Status::AmountMismatch));
+        println!("  ours only:             {}", count(Status::OursOnly));
+        println!("  allium only (gaps):    {}", count(Status::AlliumOnly));
+
+        let problems: Vec<&TxComparison> = self
+            .comparisons
+            .iter()
+            .filter(|c| c.status != Status::Match)
+            .collect();
+        if problems.is_empty() {
+            return;
+        }
+        println!("\n  details:");
+        for comparison in problems {
+            println!("    [{}] {}", comparison.status.label(), comparison.tx_hash);
+            if !comparison.detail.is_empty() {
+                println!("        {}", comparison.detail);
+            }
+        }
+    }
+}
+
+/// Decode each block locally and compare against Allium's `aggregator_trades`.
+pub async fn run<P: Provider>(
+    provider: &P,
+    allium: &AlliumClient,
+    blocks: &[u64],
+    tolerance_bps: f64,
+) -> anyhow::Result<VerifyReport> {
+    let mut comparisons = Vec::new();
+    let mut decimals = HashMap::new();
+    for &block in blocks {
+        let ours = decode_block(provider, block).await?;
+        let theirs = allium
+            .fetch_block(block)
+            .await
+            .with_context(|| format!("failed to fetch Allium trades for block {block}"))?;
+        compare_block(provider, &ours, &theirs, tolerance_bps, &mut decimals, &mut comparisons)
+            .await;
+    }
+    Ok(VerifyReport { comparisons })
+}
+
+async fn compare_block<P: Provider>(
+    provider: &P,
+    ours: &[DecodedTrade],
+    theirs: &[AlliumRow],
+    tolerance_bps: f64,
+    decimals: &mut HashMap<Address, u8>,
+    out: &mut Vec<TxComparison>,
+) {
+    let our_by_tx: HashMap<String, &DecodedTrade> = ours
+        .iter()
+        .map(|t| (t.tx_hash.to_lowercase(), t))
+        .collect();
+    let mut their_by_tx: HashMap<String, Vec<&AlliumRow>> = HashMap::new();
+    for row in theirs {
+        their_by_tx
+            .entry(row.transaction_hash.to_lowercase())
+            .or_default()
+            .push(row);
+    }
+
+    for (tx, trade) in &our_by_tx {
+        match their_by_tx.get(tx) {
+            Some(rows) => {
+                out.push(compare_trade(provider, trade, rows, tolerance_bps, decimals).await);
+            }
+            None => out.push(TxComparison {
+                tx_hash: tx.clone(),
+                status: Status::OursOnly,
+                detail: format!("decoded a {} trade Allium does not list", trade.aggregator),
+            }),
+        }
+    }
+    for (tx, rows) in &their_by_tx {
+        if our_by_tx.contains_key(tx) {
+            continue;
+        }
+        let project = rows
+            .iter()
+            .find_map(|r| r.project.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        out.push(TxComparison {
+            tx_hash: tx.clone(),
+            status: Status::AlliumOnly,
+            detail: format!("Allium has a {project} trade we did not decode"),
+        });
+    }
+}
+
+async fn compare_trade<P: Provider>(
+    provider: &P,
+    ours: &DecodedTrade,
+    rows: &[&AlliumRow],
+    tolerance_bps: f64,
+    decimals: &mut HashMap<Address, u8>,
+) -> TxComparison {
+    let mut detail = Vec::new();
+    let token_ok = tokens_agree(ours, rows, &mut detail);
+    let aggregator_ok = aggregator_agrees(ours, rows, &mut detail);
+    let amount_ok = amounts_agree(provider, ours, rows, tolerance_bps, decimals, &mut detail).await;
+
+    let status = if !token_ok {
+        Status::TokenMismatch
+    } else if !aggregator_ok {
+        Status::AggregatorMismatch
+    } else if !amount_ok {
+        Status::AmountMismatch
+    } else {
+        Status::Match
+    };
+
+    TxComparison { tx_hash: ours.tx_hash.to_lowercase(), status, detail: detail.join("; ") }
+}
+
+/// Allium splits a trade into per-leg rows. Treat the decode as agreeing if
+/// our netted input token appears among the sold tokens and our output token
+/// among the bought tokens.
+fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
+    let sold: HashSet<Address> = rows
+        .iter()
+        .filter_map(|r| parse_addr(&r.token_sold_address))
+        .collect();
+    let bought: HashSet<Address> = rows
+        .iter()
+        .filter_map(|r| parse_addr(&r.token_bought_address))
+        .collect();
+
+    let in_ok = sold.contains(&ours.token_in);
+    let out_ok = bought.contains(&ours.token_out);
+    if !in_ok {
+        detail.push(format!("token_in {} not among Allium sold tokens", ours.token_in));
+    }
+    if !out_ok {
+        detail.push(format!("token_out {} not among Allium bought tokens", ours.token_out));
+    }
+    in_ok && out_ok
+}
+
+fn aggregator_agrees(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
+    let ours_norm = normalize_name(&ours.aggregator);
+    let agrees = rows
+        .iter()
+        .filter_map(|r| r.project.as_deref())
+        .any(|project| names_match(&ours_norm, &normalize_name(project)));
+    if !agrees {
+        let projects: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.project.as_deref())
+            .collect();
+        detail.push(format!("aggregator {} vs Allium {projects:?}", ours.aggregator));
+    }
+    agrees
+}
+
+async fn amounts_agree<P: Provider>(
+    provider: &P,
+    ours: &DecodedTrade,
+    rows: &[&AlliumRow],
+    tolerance_bps: f64,
+    decimals: &mut HashMap<Address, u8>,
+    detail: &mut Vec<String>,
+) -> bool {
+    let [row] = rows else {
+        detail.push(format!("amount not compared ({} Allium legs for this tx)", rows.len()));
+        return true;
+    };
+    let (Some(sold), Some(bought)) = (row.token_sold_amount, row.token_bought_amount) else {
+        detail.push("amount not compared (Allium amount is null)".to_string());
+        return true;
+    };
+
+    let in_leg =
+        AmountLeg { token: ours.token_in, ours: ours.amount_in, theirs: sold, field: "amount_in" };
+    let out_leg = AmountLeg {
+        token: ours.token_out,
+        ours: ours.amount_out,
+        theirs: bought,
+        field: "amount_out",
+    };
+
+    let in_ok = amount_within(provider, &in_leg, tolerance_bps, decimals, detail).await;
+    let out_ok = amount_within(provider, &out_leg, tolerance_bps, decimals, detail).await;
+    in_ok && out_ok
+}
+
+/// One side of a trade to compare: our decoded amount against Allium's.
+struct AmountLeg {
+    token: Address,
+    ours: U256,
+    theirs: f64,
+    field: &'static str,
+}
+
+async fn amount_within<P: Provider>(
+    provider: &P,
+    leg: &AmountLeg,
+    tolerance_bps: f64,
+    cache: &mut HashMap<Address, u8>,
+    detail: &mut Vec<String>,
+) -> bool {
+    let Some(decimals) = token_decimals(provider, leg.token, cache).await else {
+        detail.push(format!("{} not compared (decimals unavailable for {})", leg.field, leg.token));
+        return true;
+    };
+    let normalized = normalize_amount(leg.ours, decimals);
+    let diff = bps_diff(normalized, leg.theirs);
+    if diff > tolerance_bps {
+        detail.push(format!(
+            "{} {normalized:.6} vs Allium {:.6} ({diff:.0} bps)",
+            leg.field, leg.theirs
+        ));
+        return false;
+    }
+    true
+}
+
+async fn token_decimals<P: Provider>(
+    provider: &P,
+    token: Address,
+    cache: &mut HashMap<Address, u8>,
+) -> Option<u8> {
+    if token == Address::ZERO {
+        return Some(NATIVE_DECIMALS);
+    }
+    if let Some(decimals) = cache.get(&token) {
+        return Some(*decimals);
+    }
+    match fetch_decimals(provider, token).await {
+        Ok(decimals) => {
+            cache.insert(token, decimals);
+            Some(decimals)
+        }
+        Err(error) => {
+            warn!(%token, %error, "failed to fetch token decimals");
+            None
+        }
+    }
+}
+
+async fn fetch_decimals<P: Provider>(provider: &P, token: Address) -> anyhow::Result<u8> {
+    let tx = TransactionRequest {
+        to: Some(token.into()),
+        input: TransactionInput::new(Bytes::from_static(&DECIMALS_SELECTOR)),
+        ..Default::default()
+    };
+    let result = provider
+        .call(tx)
+        .await
+        .with_context(|| format!("decimals() call failed for {token}"))?;
+    // decimals() returns uint8 right-aligned in a 32-byte word: the value is
+    // the last byte.
+    result
+        .last()
+        .copied()
+        .with_context(|| format!("empty decimals() return for {token}"))
+}
+
+fn parse_addr(value: &str) -> Option<Address> {
+    value.parse().ok()
+}
+
+fn normalize_amount(amount: U256, decimals: u8) -> f64 {
+    let raw: f64 = amount
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
+    raw / 10f64.powi(i32::from(decimals))
+}
+
+fn bps_diff(ours: f64, theirs: f64) -> f64 {
+    if theirs == 0.0 {
+        return f64::INFINITY;
+    }
+    ((ours - theirs).abs() / theirs) * 10_000.0
+}
+
+/// Lowercase, strip non-alphanumerics, and fold venue aliases so `uniswap_x`
+/// and `uniswap`, `1inch` and `1inch_ar_v6`, or `0x` and `zeroex` compare equal.
+fn normalize_name(name: &str) -> String {
+    let normalized: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect();
+    match normalized.as_str() {
+        "zeroex" => "0x".to_string(),
+        _ => normalized,
+    }
+}
+
+fn names_match(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoder::test_support::addr;
+
+    fn trade(token_in: Address, token_out: Address, aggregator: &str) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: "0xabc".to_string(),
+            block_number: 1,
+            client: "relay".to_string(),
+            aggregator: aggregator.to_string(),
+            sender: addr(1),
+            token_in,
+            token_out,
+            amount_in: U256::from(1000),
+            amount_out: U256::from(2000),
+        }
+    }
+
+    fn row(sold: Address, bought: Address, project: &str) -> AlliumRow {
+        AlliumRow {
+            project: Some(project.to_string()),
+            token_sold_address: sold.to_string(),
+            token_sold_amount: Some(1.0),
+            token_bought_address: bought.to_string(),
+            token_bought_amount: Some(2.0),
+            transaction_hash: "0xabc".to_string(),
+        }
+    }
+
+    #[test]
+    fn tokens_agree_when_present() {
+        let ours = trade(addr(10), addr(11), "1inch");
+        let allium = row(addr(10), addr(11), "1inch");
+        let mut detail = Vec::new();
+        assert!(tokens_agree(&ours, &[&allium], &mut detail));
+        assert!(detail.is_empty());
+    }
+
+    #[test]
+    fn tokens_disagree_flags_detail() {
+        let ours = trade(addr(10), addr(99), "1inch");
+        let allium = row(addr(10), addr(11), "1inch");
+        let mut detail = Vec::new();
+        assert!(!tokens_agree(&ours, &[&allium], &mut detail));
+        assert_eq!(detail.len(), 1);
+    }
+
+    #[test]
+    fn aggregator_matches_on_prefix() {
+        let ours = trade(addr(10), addr(11), "uniswap");
+        let allium = row(addr(10), addr(11), "uniswap_x");
+        let mut detail = Vec::new();
+        assert!(aggregator_agrees(&ours, &[&allium], &mut detail));
+    }
+
+    #[test]
+    fn aggregator_matches_zeroex_alias() {
+        let ours = trade(addr(10), addr(11), "0x");
+        let allium = row(addr(10), addr(11), "zeroex");
+        let mut detail = Vec::new();
+        assert!(aggregator_agrees(&ours, &[&allium], &mut detail));
+    }
+
+    #[test]
+    fn aggregator_disagrees_on_different_venue() {
+        let ours = trade(addr(10), addr(11), "tycho");
+        let allium = row(addr(10), addr(11), "1inch");
+        let mut detail = Vec::new();
+        assert!(!aggregator_agrees(&ours, &[&allium], &mut detail));
+    }
+
+    #[test]
+    fn normalize_amount_applies_decimals() {
+        assert!((normalize_amount(U256::from(1_000_000u64), 6) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bps_diff_zero_for_equal() {
+        assert!(bps_diff(1.0, 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bps_diff_scales() {
+        assert!((bps_diff(1.01, 1.0) - 100.0).abs() < 1e-6);
+    }
+}
