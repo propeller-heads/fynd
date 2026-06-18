@@ -6,8 +6,9 @@ use alloy::primitives::{address, Address};
 /// Start with top aggregators — expand later.
 pub(crate) fn known_aggregators() -> HashMap<Address, &'static str> {
     HashMap::from([
-        // 1inch v6 Aggregation Router
+        // 1inch v6 and v5 Aggregation Routers
         (address!("0x111111125421ca6dc452d289314280a0f8842a65"), "1inch"),
+        (address!("0x1111111254eeb25477b68fb85ed929f73a960582"), "1inch"),
         // 0x Exchange Proxy (legacy) and AllowanceHolder (Settler)
         (address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff"), "0x"),
         (address!("0x0000000000001ff3684f28c67538d4d072c22734"), "0x"),
@@ -17,8 +18,14 @@ pub(crate) fn known_aggregators() -> HashMap<Address, &'static str> {
         (address!("0x6a000f20005980200259b80c5102003040001068"), "paraswap"),
         // Uniswap Universal Router
         (address!("0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad"), "uniswap"),
+        // UniswapX Dutch order reactor (filler-initiated; found via its log)
+        (address!("0x00000011f84b9aa48e5f8aa8b9897600006289be"), "uniswapx"),
         // OKX DEX Router
         (address!("0xf3de3c0d654fda23dad170f0f320a92172509127"), "okx"),
+        // Tycho (PropellerHeads) router — current, v2, and prior deployment
+        (address!("0x1f8db310f32d48b6180ff902ec60c586128cef47"), "tycho"),
+        (address!("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35"), "tycho"),
+        (address!("0xda892c989d07a18b5dd3f392d949f00df15c5736"), "tycho"),
     ])
 }
 
