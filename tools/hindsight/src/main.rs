@@ -1,0 +1,158 @@
+mod decoder;
+
+use std::time::Instant;
+
+use alloy::providers::{Provider, ProviderBuilder};
+use anyhow::Context;
+use clap::Parser;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser)]
+#[command(name = "hindsight", about = "Decode aggregator swaps from on-chain data")]
+struct Cli {
+    /// Ethereum RPC URL
+    #[arg(long, env = "ETH_RPC_URL")]
+    rpc_url: String,
+
+    /// Block number to decode (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to decode (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
+
+    /// Output as JSON instead of human-readable
+    #[arg(long)]
+    json: bool,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_env("RUST_LOG").add_directive("hindsight=info".parse().unwrap()),
+        )
+        .with_target(false)
+        .init();
+
+    let cli = Cli::parse();
+
+    let rpc_url: reqwest::Url = cli
+        .rpc_url
+        .parse()
+        .with_context(|| format!("invalid RPC URL: {}", cli.rpc_url))?;
+    let provider = ProviderBuilder::new().connect_http(rpc_url);
+
+    let blocks: Vec<u64> = if let Some(range) = &cli.range {
+        parse_range(range)?
+    } else if let Some(block) = cli.block {
+        vec![block]
+    } else {
+        let latest = provider
+            .get_block_number()
+            .await
+            .context("failed to fetch latest block number")?;
+        vec![latest]
+    };
+
+    let mut all_trades = Vec::new();
+
+    for block_number in &blocks {
+        info!(block = block_number, "decoding aggregator trades");
+        let start = Instant::now();
+        let trades = decoder::decode_block(&provider, *block_number).await?;
+        let elapsed_ms = start.elapsed().as_millis();
+
+        if trades.is_empty() {
+            info!(block = block_number, elapsed_ms, "no aggregator trades found");
+        } else {
+            info!(block = block_number, count = trades.len(), elapsed_ms, "decoded trades");
+        }
+
+        all_trades.extend(trades);
+    }
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&all_trades)?);
+    } else {
+        print_trades(&all_trades);
+    }
+
+    Ok(())
+}
+
+fn print_trades(trades: &[decoder::DecodedTrade]) {
+    if trades.is_empty() {
+        println!("No aggregator trades found.");
+        return;
+    }
+
+    println!("\n{} aggregator trade(s) found:\n", trades.len());
+    for trade in trades {
+        println!("  tx:         {}", trade.tx_hash);
+        println!("  block:      {}", trade.block_number);
+        println!("  client:     {}", trade.client);
+        println!("  aggregator: {}", trade.aggregator);
+        println!("  sender:     {}", trade.sender);
+        println!("  token_in:   {}", trade.token_in);
+        println!("  amount_in:  {}", trade.amount_in);
+        println!("  token_out:  {}", trade.token_out);
+        println!("  amount_out: {}", trade.amount_out);
+        println!();
+    }
+}
+
+fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
+    let parts: Vec<&str> = range.split('-').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("invalid range format: expected START-END, got '{range}'");
+    }
+    let start: u64 = parts[0]
+        .parse()
+        .with_context(|| format!("invalid start block: {}", parts[0]))?;
+    let end: u64 = parts[1]
+        .parse()
+        .with_context(|| format!("invalid end block: {}", parts[1]))?;
+    if end < start {
+        anyhow::bail!("end block ({end}) must be >= start block ({start})");
+    }
+    if end - start > 1000 {
+        anyhow::bail!("range too large: {} blocks (max 1000)", end - start);
+    }
+    Ok((start..=end).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_valid() {
+        let blocks = parse_range("100-105").unwrap();
+        assert_eq!(blocks, vec![100, 101, 102, 103, 104, 105]);
+    }
+
+    #[test]
+    fn parse_range_single_block() {
+        let blocks = parse_range("100-100").unwrap();
+        assert_eq!(blocks, vec![100]);
+    }
+
+    #[test]
+    fn parse_range_invalid_format() {
+        assert!(parse_range("100").is_err());
+        assert!(parse_range("100-200-300").is_err());
+    }
+
+    #[test]
+    fn parse_range_reversed() {
+        assert!(parse_range("200-100").is_err());
+    }
+
+    #[test]
+    fn parse_range_too_large() {
+        assert!(parse_range("0-1001").is_err());
+    }
+}

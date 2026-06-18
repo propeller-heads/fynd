@@ -84,6 +84,7 @@ members = [
     "tools/erc20-overrides",
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
+    "tools/hindsight",
     "tools/record-market",
     "test-fixtures",
 ]
