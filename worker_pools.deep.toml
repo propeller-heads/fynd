@@ -1,26 +1,35 @@
-# DEEP config (executing). 500ms budget, 10 workers total (2+4+4).
+# DEEP config (executing). 500ms budget, 10 workers total (3+2+2+3).
 #
-# most_liquid stays as a cheap fast-path baseline; bellman_ford handles deeper
-# single-path search and path_frank_wolfe handles input splitting. The search
-# pools get the full 3 hops and 500ms to find the optimal (and splittable) route.
-
-[pools.most_liquid_2_hops_fast]
-algorithm = "most_liquid"
-num_workers = 2
-task_queue_capacity = 1000
-max_hops = 2
-timeout_ms = 500
+# bellman_ford handles deep single-path search at 3, 4 and 5 hops; path_frank_wolfe
+# handles input splitting. Deeper hops (4/5) are pricier and lower yield, so they
+# get fewer workers than the 3-hop search and the splitting pool.
 
 [pools.bellman_ford_3_hops]
 algorithm = "bellman_ford"
-num_workers = 4
+num_workers = 3
 task_queue_capacity = 1000
 max_hops = 3
 timeout_ms = 500
 
+[pools.bellman_ford_4_hops]
+algorithm = "bellman_ford"
+num_workers = 2
+task_queue_capacity = 1000
+min_hops = 4
+max_hops = 4
+timeout_ms = 500
+
+[pools.bellman_ford_5_hops]
+algorithm = "bellman_ford"
+num_workers = 2
+task_queue_capacity = 1000
+min_hops = 5
+max_hops = 5
+timeout_ms = 500
+
 [pools.path_frank_wolfe_3_hops]
 algorithm = "path_frank_wolfe"
-num_workers = 4
+num_workers = 3
 task_queue_capacity = 1000
 max_hops = 3
 timeout_ms = 500
