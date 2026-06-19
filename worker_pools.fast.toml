@@ -1,0 +1,25 @@
+# FAST config (quoting). 200ms budget, 10 workers total (4+3+3).
+#
+# most_liquid provides the cheap single-route baseline, bellman_ford handles
+# deeper single-path search, and path_frank_wolfe handles input splitting.
+
+[pools.most_liquid_2_hops_fast]
+algorithm = "most_liquid"
+num_workers = 4
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 200
+
+[pools.bellman_ford_2_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 200
+
+[pools.path_frank_wolfe_2_hops]
+algorithm = "path_frank_wolfe"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 2
+timeout_ms = 200
