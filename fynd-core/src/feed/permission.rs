@@ -1,10 +1,11 @@
 //! Per-worker permission scoping for permissioned components.
 //!
-//! "Permissioned" means accessible only to Fynd: such components must never appear in a normal
-//! public quote, yet a dedicated worker is allowed to route through them to capture the surplus
-//! they offer above the best public-market rate. Isolation is achieved by filtering each worker's
-//! local graph topology/events through its `PermissionContext` — the shared `MarketState` is
-//! never duplicated.
+//! "Permissioned" means accessible only to Fynd: such components must never enter the route a
+//! public pool returns, yet the surplus pool is allowed to route through them to capture the
+//! surplus they offer above the best public-market rate. Both pool kinds serve the same request;
+//! they differ only in which liquidity their workers may route through. Isolation is achieved by
+//! filtering each worker's local graph topology/events through its `PermissionContext` — the
+//! shared `MarketState` is never duplicated.
 
 use std::{
     collections::{HashMap, HashSet},

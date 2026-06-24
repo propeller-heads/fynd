@@ -48,9 +48,9 @@ use crate::{
 
 /// The role a solver pool (a group of workers) plays in a quote.
 ///
-/// A `Public` pool routes only through public liquidity and provides the committed (quoted)
-/// reference output. The single `All` pool also routes through permissioned components and may beat
-/// that reference, in which case the protocol captures the surplus.
+/// A `Public` worker routes only through public liquidity and provides the committed (quoted)
+/// reference output. An `All` worker also routes through permissioned components and may beat that
+/// reference, in which case the protocol captures the surplus.
 ///
 /// Serialized in lowercase (`"public"` / `"all"`) in `worker_pools.toml` via [`PoolConfig`].
 ///
