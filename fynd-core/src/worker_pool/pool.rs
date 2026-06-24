@@ -19,7 +19,7 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::MarketData,
-        permission::{ComponentScope, PermissionContext, PermissionPolicy},
+        permission::PermissionContext,
     },
     graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
@@ -46,10 +46,8 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// Permission scope for this pool's workers (default: include all, no filtering).
-    component_scope: ComponentScope,
-    /// Permission predicate. `None` ⇒ no filtering regardless of scope.
-    permission_policy: Option<PermissionPolicy>,
+    /// Permission scoping for this pool's workers (default: include all, no filtering).
+    permission: PermissionContext,
 }
 
 impl WorkerPoolConfig {
@@ -67,8 +65,7 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
-            component_scope: ComponentScope::IncludeAll,
-            permission_policy: None,
+            permission: PermissionContext::IncludeAll,
         }
     }
 }
@@ -119,8 +116,7 @@ impl WorkerPool {
             .to_string();
 
         // Spawn workers
-        let permission =
-            PermissionContext::new(config.component_scope, config.permission_policy.clone());
+        let permission = config.permission.clone();
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
             pool_name: name.clone(),
@@ -264,18 +260,12 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the permission scope for this pool's workers.
+    /// Sets the permission scoping for this pool's workers.
     ///
-    /// `ExcludePermissioned` (public pools) drops permissioned components from each worker's graph;
-    /// `IncludeAll` (surplus pools) keeps them. Only has effect when a policy is also set.
-    pub fn component_scope(mut self, scope: ComponentScope) -> Self {
-        self.config.component_scope = scope;
-        self
-    }
-
-    /// Sets the permission policy used to classify components as permissioned.
-    pub fn permission_policy(mut self, policy: PermissionPolicy) -> Self {
-        self.config.permission_policy = Some(policy);
+    /// `ExcludePermissioned(policy)` (public pools) drops permissioned components from each
+    /// worker's graph; `IncludeAll` (surplus pools, the default) keeps every component.
+    pub fn permission(mut self, permission: PermissionContext) -> Self {
+        self.config.permission = permission;
         self
     }
 

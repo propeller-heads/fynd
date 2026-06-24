@@ -31,7 +31,7 @@ timeout_ms = 500
 # num_workers = 3
 # max_hops = 2
 # timeout_ms = 500
-# role = "surplus"
+# role = "all"
 "#;
 
 /// Worker pools configuration loaded from TOML file.
@@ -113,6 +113,8 @@ impl BlocklistConfig {
 
 #[cfg(test)]
 mod tests {
+    use fynd_core::PoolRole;
+
     use super::*;
 
     #[test]
@@ -150,6 +152,7 @@ mod tests {
             max_hops = 4
             timeout_ms = 200
             max_routes = 50
+            role = "all"
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
         let pool = &config.pools()["custom"];
@@ -160,6 +163,7 @@ mod tests {
         assert_eq!(pool.max_hops(), 4);
         assert_eq!(pool.timeout_ms(), 200);
         assert_eq!(pool.max_routes(), Some(50));
+        assert_eq!(pool.role(), PoolRole::All);
     }
 }
 

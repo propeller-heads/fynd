@@ -268,7 +268,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
-            permission: PermissionContext::include_all(),
+            permission: PermissionContext::IncludeAll,
         }
     }
 
@@ -307,7 +307,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            permission: PermissionContext::include_all(),
+            permission: PermissionContext::IncludeAll,
         };
 
         let workers =
@@ -349,7 +349,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                permission: PermissionContext::include_all(),
+                permission: PermissionContext::IncludeAll,
             });
         assert!(registry_err.is_err());
 
@@ -377,7 +377,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                permission: PermissionContext::include_all(),
+                permission: PermissionContext::IncludeAll,
             });
 
         assert!(workers.is_ok());

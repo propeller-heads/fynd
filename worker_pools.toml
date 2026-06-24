@@ -12,7 +12,7 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: a permissioned-inclusive "surplus" pool. `role = "surplus"` lets this pool route
+# Example: a permissioned-inclusive "surplus" pool. `role = "all"` lets this pool route
 # through permissioned components to capture surplus above the best public rate.
 # Public pools (role omitted; defaults to "public") never see permissioned components.
 # [pools.surplus]
@@ -20,7 +20,7 @@ timeout_ms = 500
 # num_workers = 3
 # max_hops = 2
 # timeout_ms = 500
-# role = "surplus"
+# role = "all"
 
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).

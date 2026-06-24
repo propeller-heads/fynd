@@ -36,7 +36,7 @@ use crate::{
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
-        permission::{ComponentScope, PermissionPolicy},
+        permission::{PermissionContext, PermissionPolicy},
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -131,40 +131,6 @@ fn parse_connector_tokens(
     Ok(Some(set))
 }
 
-/// Role a configured pool plays in routing: public-only or permissioned-inclusive.
-///
-/// Serialized in lowercase (`"public"` / `"surplus"`) in `worker_pools.toml`. Maps to the router's
-/// `PoolRole` and the worker's `ComponentScope`: a public pool excludes permissioned components; a
-/// surplus pool routes through all liquidity to capture surplus above the public rate.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PoolRoleConfig {
-    /// Public pool: routes through public liquidity only (the committed reference). Default.
-    #[default]
-    Public,
-    /// Surplus pool: routes through all liquidity, including permissioned components, to capture
-    /// surplus above the public rate.
-    Surplus,
-}
-
-impl PoolRoleConfig {
-    /// The router role this config maps to.
-    fn pool_role(self) -> PoolRole {
-        match self {
-            Self::Public => PoolRole::Public,
-            Self::Surplus => PoolRole::All,
-        }
-    }
-
-    /// The per-worker component scope this config maps to.
-    fn component_scope(self) -> ComponentScope {
-        match self {
-            Self::Public => ComponentScope::ExcludePermissioned,
-            Self::Surplus => ComponentScope::IncludeAll,
-        }
-    }
-}
-
 /// Per-pool configuration for [`FyndBuilder::add_pool`].
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,9 +159,9 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool role: `public` (default) or `surplus` (permissioned-inclusive).
+    /// Pool role: `public` (default) or `all` (permissioned-inclusive).
     #[serde(default)]
-    role: PoolRoleConfig,
+    role: PoolRole,
 }
 
 impl PoolConfig {
@@ -210,7 +176,7 @@ impl PoolConfig {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            role: PoolRoleConfig::Public,
+            role: PoolRole::Public,
         }
     }
 
@@ -220,12 +186,12 @@ impl PoolConfig {
     }
 
     /// Returns the pool role.
-    pub fn role(&self) -> PoolRoleConfig {
+    pub fn role(&self) -> PoolRole {
         self.role
     }
 
-    /// Sets the pool role (public or surplus).
-    pub fn with_role(mut self, role: PoolRoleConfig) -> Self {
+    /// Sets the pool role (public or all).
+    pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self
     }
@@ -377,14 +343,14 @@ enum PoolEntry {
         timeout_ms: u64,
         max_routes: Option<usize>,
         connector_tokens: Option<HashSet<Address>>,
-        role: PoolRoleConfig,
+        role: PoolRole,
     },
     Custom(CustomPoolEntry),
 }
 
 impl PoolEntry {
     /// Returns the configured role for this pool.
-    fn role(&self) -> PoolRoleConfig {
+    fn role(&self) -> PoolRole {
         match self {
             PoolEntry::BuiltIn { role, .. } => *role,
             PoolEntry::Custom(custom) => custom.role,
@@ -401,8 +367,8 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
-    /// Pool role: public (default) or surplus.
-    role: PoolRoleConfig,
+    /// Pool role: public (default) or all.
+    role: PoolRole,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
@@ -595,7 +561,7 @@ impl FyndBuilder {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            role: PoolRoleConfig::Public,
+            role: PoolRole::Public,
         });
         self
     }
@@ -622,7 +588,7 @@ impl FyndBuilder {
                 max_hops: defaults::POOL_MAX_HOPS,
                 timeout_ms: defaults::POOL_TIMEOUT_MS,
                 max_routes: None,
-                role: PoolRoleConfig::Public,
+                role: PoolRole::Public,
                 configure,
             }));
         self
@@ -787,11 +753,13 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            // Derive the per-worker component scope and the router-facing pool role from the
-            // configured role, then thread the shared permission policy through the builder.
-            let role_config = pool_entry.role();
-            let pool_role = role_config.pool_role();
-            let component_scope = role_config.component_scope();
+            // The router-facing role doubles as the per-worker scope: only a public pool with a
+            // policy filters; the surplus pool (and any pool without a policy) includes everything.
+            let pool_role = pool_entry.role();
+            let permission = match (pool_role, permission_policy.clone()) {
+                (PoolRole::Public, Some(policy)) => PermissionContext::ExcludePermissioned(policy),
+                _ => PermissionContext::IncludeAll,
+            };
 
             let (worker_pool, task_handle) = match pool_entry {
                 PoolEntry::BuiltIn {
@@ -815,16 +783,13 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    let mut builder = WorkerPoolBuilder::new()
+                    let builder = WorkerPoolBuilder::new()
                         .name(name)
                         .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .component_scope(component_scope);
-                    if let Some(policy) = permission_policy.clone() {
-                        builder = builder.permission_policy(policy);
-                    }
+                        .permission(permission);
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -839,15 +804,12 @@ impl FyndBuilder {
                         Duration::from_millis(custom.timeout_ms),
                         custom.max_routes,
                     )?;
-                    let mut builder = WorkerPoolBuilder::new()
+                    let builder = WorkerPoolBuilder::new()
                         .name(custom.name)
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .component_scope(component_scope);
-                    if let Some(policy) = permission_policy.clone() {
-                        builder = builder.permission_policy(policy);
-                    }
+                        .permission(permission);
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
