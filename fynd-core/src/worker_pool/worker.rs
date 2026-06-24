@@ -60,9 +60,9 @@ where
     worker_id: usize,
     /// Permission scoping for this worker's local graph.
     ///
-    /// `IncludeAll` with no policy (the default) preserves the original non-filtered behaviour.
-    /// A public worker is configured with `ExcludePermissioned` + a `PermissionPolicy` so
-    /// permissioned components never enter its graph; a surplus worker uses `IncludeAll`.
+    /// `IncludeAll` (the default) preserves the original non-filtered behaviour. A public worker
+    /// is configured with `ExcludePermissioned(policy)` so permissioned components never enter
+    /// its graph; a surplus worker uses `IncludeAll`.
     permission: PermissionContext,
 }
 
@@ -98,13 +98,13 @@ where
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
             worker_id,
-            permission: PermissionContext::include_all(),
+            permission: PermissionContext::IncludeAll,
         }
     }
 
     /// Configures this worker's permission scoping.
     ///
-    /// Public workers pass `ExcludePermissioned` + a policy; surplus workers pass `IncludeAll`.
+    /// Public workers pass `ExcludePermissioned(policy)`; surplus workers pass `IncludeAll`.
     pub(crate) fn with_permission(mut self, permission: PermissionContext) -> Self {
         self.permission = permission;
         self

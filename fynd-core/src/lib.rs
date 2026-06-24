@@ -57,9 +57,7 @@ pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
-pub use solver::{
-    FyndBuilder, PoolConfig, PoolRoleConfig, Solver, SolverBuildError, SolverParts, WaitReadyError,
-};
+pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
 pub use tycho_simulation::evm::pending::PendingBlockProcessor;

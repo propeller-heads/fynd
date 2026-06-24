@@ -3,8 +3,8 @@
 //! "Permissioned" means accessible only to Fynd: such components must never appear in a normal
 //! public quote, yet a dedicated worker is allowed to route through them to capture the surplus
 //! they offer above the best public-market rate. Isolation is achieved by filtering each worker's
-//! local graph topology/events through a `PermissionPolicy` according to its `ComponentScope` — the
-//! shared `MarketState` is never duplicated.
+//! local graph topology/events through its `PermissionContext` — the shared `MarketState` is
+//! never duplicated.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,48 +52,25 @@ impl std::fmt::Debug for PermissionPolicy {
     }
 }
 
-/// The set of components a worker is allowed to see in its local graph.
-///
-/// Determines whether permissioned components are filtered out before the worker builds or updates
-/// its graph. Each worker gets exactly one scope for its lifetime, derived from its pool's role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComponentScope {
-    /// Public workers: permissioned components are dropped so they can never appear in a quote.
-    ExcludePermissioned,
-    /// Surplus workers: every component is visible, including permissioned ones.
-    IncludeAll,
-}
-
 /// Per-worker permission scoping: which components a worker may ingest into its local graph.
 ///
-/// Bundles a [`ComponentScope`] with an optional [`PermissionPolicy`]. All graph filtering for a
-/// worker flows through this type, so the worker never reasons about permissioned-ness itself — it
-/// just hands its topology and incoming events here.
+/// Each worker gets exactly one context for its lifetime, derived from its pool's role. All graph
+/// filtering for a worker flows through this type, so the worker never reasons about
+/// permissioned-ness itself — it just hands its topology and incoming events here.
 #[derive(Clone, Debug)]
-pub(crate) struct PermissionContext {
-    /// Scope governing whether permissioned components are filtered out.
-    scope: ComponentScope,
-    /// Predicate classifying components as permissioned. `None` ⇒ no filtering is ever applied.
-    policy: Option<PermissionPolicy>,
+pub enum PermissionContext {
+    /// See every component — the default. No filtering is applied.
+    IncludeAll,
+    /// Drop components classified as permissioned by this policy, so they never enter the graph.
+    ExcludePermissioned(PermissionPolicy),
 }
 
 impl PermissionContext {
-    /// Default context: see every component, apply no permission filtering.
-    pub(crate) fn include_all() -> Self {
-        Self { scope: ComponentScope::IncludeAll, policy: None }
-    }
-
-    /// Context derived from a pool's role: a scope plus the (optional) classifying policy.
-    pub(crate) fn new(scope: ComponentScope, policy: Option<PermissionPolicy>) -> Self {
-        Self { scope, policy }
-    }
-
-    /// Returns the policy to enforce, or `None` when this worker filters nothing (scope is
-    /// `IncludeAll`, or no policy was configured).
+    /// Returns the policy to enforce, or `None` when this worker filters nothing.
     fn active_policy(&self) -> Option<&PermissionPolicy> {
-        match (self.scope, &self.policy) {
-            (ComponentScope::ExcludePermissioned, Some(policy)) => Some(policy),
-            _ => None,
+        match self {
+            Self::ExcludePermissioned(policy) => Some(policy),
+            Self::IncludeAll => None,
         }
     }
 
@@ -202,13 +179,12 @@ mod tests {
         let market = market_with(vec![public_component("pub-1"), permissioned_component("perm-1")]);
         let topology = market.component_topology();
 
-        let public = PermissionContext::new(ComponentScope::ExcludePermissioned, Some(policy));
+        let public = PermissionContext::ExcludePermissioned(policy);
         let public_view = public.filter_topology(&market, topology.clone());
         assert!(public_view.contains_key("pub-1"));
         assert!(!public_view.contains_key("perm-1"));
 
-        let surplus_view =
-            PermissionContext::include_all().filter_topology(&market, topology.clone());
+        let surplus_view = PermissionContext::IncludeAll.filter_topology(&market, topology.clone());
         assert_eq!(surplus_view.len(), topology.len());
     }
 
@@ -226,7 +202,7 @@ mod tests {
             updated_components: vec!["pub-1".to_string(), "perm-1".to_string()],
         };
 
-        let public = PermissionContext::new(ComponentScope::ExcludePermissioned, Some(policy));
+        let public = PermissionContext::ExcludePermissioned(policy);
         let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
             public.scope_event(&market, event);
         assert!(added_components.contains_key("pub-1"));

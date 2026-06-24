@@ -32,6 +32,7 @@ use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
@@ -50,9 +51,15 @@ use crate::{
 /// A `Public` pool routes only through public liquidity and provides the committed (quoted)
 /// reference output. The single `All` pool also routes through permissioned components and may beat
 /// that reference, in which case the protocol captures the surplus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized in lowercase (`"public"` / `"all"`) in `worker_pools.toml` via [`PoolConfig`].
+///
+/// [`PoolConfig`]: crate::PoolConfig
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PoolRole {
-    /// Routes through public liquidity only. Establishes the committed reference output.
+    /// Routes through public liquidity only. Establishes the committed reference output. Default.
+    #[default]
     Public,
     /// Routes through all liquidity, including permissioned components; source of surplus quotes.
     All,
