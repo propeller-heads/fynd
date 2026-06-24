@@ -128,11 +128,24 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     ranked.sort_by_key(|(_, s)| std::cmp::Reverse(s.pool_count));
     let total = ranked.len();
 
-    let candidates: Vec<&(Address, TokenScore)> = ranked
+    let mut candidates: Vec<&(Address, TokenScore)> = ranked
         .iter()
         .filter(|(_, s)| s.pool_count >= args.min_pool_count)
         .take(args.top_n)
         .collect();
+
+    // Always include the chain's native and wrapped native tokens so that
+    // wrap/unwrap hops are never accidentally blocked by connector_tokens.
+    for addr in [chain.native_token().address, chain.wrapped_native_token().address] {
+        let already_present = candidates
+            .iter()
+            .any(|(a, _)| *a == addr);
+        if !already_present {
+            if let Some(entry) = ranked.iter().find(|(a, _)| *a == addr) {
+                candidates.push(entry);
+            }
+        }
+    }
 
     solver.shutdown();
 
