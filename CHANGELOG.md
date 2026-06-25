@@ -1,3 +1,18 @@
+## [0.82.0](https://github.com/propeller-heads/fynd/compare/0.81.1...0.82.0) (2026-06-25)
+
+
+### Features
+
+* **benchmark:** add audit subcommand for on-chain quote validation ([3aa5f1e](https://github.com/propeller-heads/fynd/commit/3aa5f1e781635fa4822abadeddd7b566e256fbfb))
+* **benchmark:** add scale --min-tvl and native_onchain resolution ([7e10f66](https://github.com/propeller-heads/fynd/commit/7e10f66c696bb1a13f5a96e70c51869d6278a1fd))
+* **benchmark:** capture pool-level route in audit output ([c21bcb9](https://github.com/propeller-heads/fynd/commit/c21bcb9ab8c66e961ccbc2d10fe53fef8cf77def))
+
+
+### Bug Fixes
+
+* **deps:** update quinn-proto to 0.11.15 for RUSTSEC-2026-0185 ([53b7bfc](https://github.com/propeller-heads/fynd/commit/53b7bfc4cbc254830497a019a6414dd2505d0229))
+* include native/wrapped tokens in derive-connector-tokens ([59f7daa](https://github.com/propeller-heads/fynd/commit/59f7daaa6757ff4b4afb04ed6b3e75617b89badc))
+
 ## [0.81.1](https://github.com/propeller-heads/fynd/compare/0.81.0...0.81.1) (2026-06-19)
 
 
