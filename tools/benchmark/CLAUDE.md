@@ -10,11 +10,101 @@ Three subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`compare`** — Compare output quality between two solver instances. Sends identical quote requests to both and reports differences in amount out (bps), net-of-gas output (server-side `amount_out_net_gas`), gas estimates, route selection, and status. Requires two solvers running on different ports (use git worktrees to run different branches simultaneously).
 
-- **`scale`** — Measure how solver throughput scales with worker thread count. Builds and tears down the solver in-process for each iteration; no external solver instance needed.
+- **`scale`** — Measure how solver throughput scales with worker thread count. Builds and tears down the solver in-process for each iteration; no external solver instance needed. `--protocols` accepts the `all_onchain` and `native_onchain` expansion tokens (the latter drops VM-simulated `vm:*` protocols), and `--min-tvl` sets the TVL floor — both resolved via the shared `fynd_rpc::protocols::resolve_protocols`.
 
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases for use with `--requests-file`.
 
+- **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x). Runs over a trade dataset, records per-trade participant results (amount out, gas, protocols, route, eth_call on-chain validation), and writes a JSON report.
+
 Run `--help` on any subcommand for detailed options.
+
+## Running the Audit
+
+### Prerequisites
+
+1. **Build the release binary** (required — debug is too slow for vm:curve EVM simulation):
+   ```bash
+   cargo build -p fynd-benchmark --release
+   ```
+
+2. **Start the solver** with the `.env` vars sourced and RFQ protocols included:
+   ```bash
+   set -a && source .env && set +a
+   RUST_LOG=info ./target/release/fynd serve \
+     -w worker_pools_pfw3.toml \
+     --protocols all_onchain,rfq:bebop,rfq:hashflow \
+     > /tmp/fynd_solver.log 2>&1 &
+   ```
+   Wait until `/v1/health` returns `healthy: true` (~5–10 min for derived data).
+
+3. **Download the full trade dataset** (once):
+   ```bash
+   ./target/release/fynd-benchmark download-trades
+   ```
+
+### Standard full audit
+
+```bash
+TIMESTAMP=$(date +%Y%m%d_%H%M)
+./target/release/fynd-benchmark audit \
+  --fynd-url http://localhost:3000 \
+  --trade-data aggregator_trades_10k.json \
+  --rpc-url "$RPC_URL" \
+  --output "audit_results_${TIMESTAMP}.json" \
+  2>&1 | tee "audit_${TIMESTAMP}.log"
+```
+
+`--rpc-url` enables eth_call on-chain validation of every Fynd quote, populating `eth_call_amount_out`, `eth_call_gas_used`, and `gas_adjusted_diff_bps_onchain` in the output. **Always pass it** — omitting it leaves `gas_adjusted_diff_bps_onchain: null` for all trades.
+
+`$RPC_URL` is set by sourcing `.env` (see above). The `.env` file has the canonical node endpoint.
+
+### Targeted mini-audit (specific pairs)
+
+Create a trade-data file matching the dataset schema:
+```json
+[
+  {
+    "orders": [
+      {
+        "id": "",
+        "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token_out": "<TOKEN_OUT>",
+        "amount": "10000000000",
+        "side": "sell",
+        "sender": "0x0000000000000000000000000000000000000001",
+        "receiver": null
+      }
+    ],
+    "options": { "timeout_ms": 5000, "min_responses": null, "max_gas": null }
+  }
+]
+```
+
+Then run:
+```bash
+./target/release/fynd-benchmark audit \
+  --fynd-url http://localhost:3000 \
+  --trade-data /tmp/my_pairs.json \
+  --rpc-url "$RPC_URL" \
+  --output /tmp/my_audit_out.json
+```
+
+### Reading results
+
+```python
+import json
+data = json.load(open("audit_results_TIMESTAMP.json"))
+for r in data["results"]:
+    for p in r["participants"]:
+        print(p["name"], p["raw_diff_bps"], p["gas_adjusted_diff_bps_onchain"])
+```
+
+Key fields per participant:
+- `protocols` — list of DEX protocols used
+- `route` — `[[protocol, pool_address], ...]` pairs (Fynd only)
+- `raw_diff_bps` — output diff vs Fynd ignoring gas
+- `gas_adjusted_diff_bps_reported` — diff using solver-reported gas estimates
+- `gas_adjusted_diff_bps_onchain` — diff using actual on-chain gas (requires `--rpc-url`)
 
 ## Module Overview
 
@@ -27,7 +117,7 @@ Run `--help` on any subcommand for detailed options.
 | `runner.rs` | Benchmark execution engine. Implements three strategies: sequential (one-at-a-time), fixed concurrency (semaphore-bounded), and rate-based (fire at fixed intervals). Returns timing vectors and order counts. |
 | `exporter.rs` | Statistics calculation (`TimingStats::from_measurements` — min/max/mean/median/p95/p99/stddev), ASCII histogram rendering, and JSON export of `BenchmarkResults`. |
 | `requests.rs` | Request generation and loading. Provides a default WETH→USDC request, loads embedded aggregator trades, downloads the full 10k dataset, and loads custom requests from a JSON file. |
-| `scale.rs` | `scale` subcommand handler. Builds and tears down an in-process Fynd instance for each worker-count iteration, runs load tests via `runner`, and exports scaling results to JSON. |
+| `scale.rs` | `scale` subcommand handler. Resolves protocols once via `resolve_protocols` (`all_onchain`/`native_onchain` expansion), then builds and tears down an in-process Fynd instance for each worker-count iteration (applying `--min-tvl`), runs load tests via `runner`, and exports scaling results to JSON. |
 
 ## Data Files
 

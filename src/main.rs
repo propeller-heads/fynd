@@ -39,7 +39,7 @@ use fynd_rpc::{
     builder::FyndRPCBuilder,
     config::{defaults, BlocklistConfig, WorkerPoolsConfig},
     parse_chain,
-    protocols::fetch_protocol_systems,
+    protocols::resolve_protocols,
 };
 mod cli;
 mod commands;
@@ -56,10 +56,7 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tycho_simulation::{
-    tycho_common::models::{Chain, TvlThresholdTier},
-    utils::default_blocklist,
-};
+use tycho_simulation::{tycho_common::models::TvlThresholdTier, utils::default_blocklist};
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
@@ -220,48 +217,6 @@ fn resolve_rpc_url(chain: &str, override_url: Option<&str>) -> Result<String, So
     }
 }
 
-/// Resolves the protocol list from `--protocols`.
-///
-/// - Empty → fetch all on-chain protocols from Tycho RPC.
-/// - Contains `"all_onchain"` → fetch all on-chain, then append any other explicit entries.
-/// - Otherwise → use as given (no network call).
-///
-/// Returns an error if the resolved list is empty.
-async fn resolve_protocols(
-    tycho_url: &str,
-    api_key: Option<&str>,
-    use_tls: bool,
-    chain: Chain,
-    requested: &[String],
-) -> Result<Vec<String>, SolverError> {
-    let needs_fetch = requested.is_empty() ||
-        requested
-            .iter()
-            .any(|p| p == "all_onchain");
-    let protocols = if needs_fetch {
-        let mut fetched = fetch_protocol_systems(tycho_url, api_key, use_tls, chain)
-            .await
-            .map_err(|e| {
-                SolverError::SetupError(format!("failed to fetch protocol systems: {e}"))
-            })?;
-        for p in requested {
-            if p != "all_onchain" && !fetched.contains(p) {
-                fetched.push(p.clone());
-            }
-        }
-        fetched
-    } else {
-        requested.to_vec()
-    };
-    if protocols.is_empty() {
-        return Err(SolverError::SetupError(
-            "no supported protocols found. Provide --protocols or check Tycho connectivity."
-                .to_string(),
-        ));
-    }
-    Ok(protocols)
-}
-
 /// Sets up the solver (loads config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
 async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
@@ -298,7 +253,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
         chain,
         &args.protocols,
     )
-    .await?;
+    .await
+    .map_err(|e| SolverError::SetupError(format!("failed to resolve protocols: {e}")))?;
 
     info!(?protocols, "starting with {} protocol(s)", protocols.len());
 

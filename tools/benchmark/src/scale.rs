@@ -18,6 +18,7 @@ use fynd_rpc::{
     builder::{FyndRPC, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
     parse_chain,
+    protocols::resolve_protocols,
 };
 use serde::Serialize;
 use tracing::info;
@@ -45,9 +46,15 @@ pub struct Args {
     #[arg(long)]
     pub worker_counts: String,
 
-    /// Comma-separated protocols for the solver
+    /// Comma-separated protocols for the solver. Supports the `all_onchain` and `native_onchain`
+    /// expansion tokens (the latter drops VM-simulated `vm:*` protocols).
     #[arg(long)]
     pub protocols: String,
+
+    /// Minimum TVL threshold in native token (e.g. ETH). Components below this threshold are
+    /// removed from the market data. Defaults to the chain-specific value when unset.
+    #[arg(long)]
+    pub min_tvl: Option<f64>,
 
     /// Tycho WebSocket URL
     #[arg(long, default_value = "localhost:4242")]
@@ -166,14 +173,10 @@ fn build_solver(
     args: &Args,
     pool_name: &str,
     pool_config: &PoolConfig,
+    protocols: &[String],
     workers: usize,
 ) -> Result<FyndRPC> {
     let chain = parse_chain(&args.chain)?;
-    let protocols: Vec<String> = args
-        .protocols
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
     let rpc_url = match args.rpc_url.clone() {
         Some(url) => url,
         None => fynd_rpc::config::defaults::default_rpc_url(&args.chain)
@@ -188,9 +191,12 @@ fn build_solver(
     let pools = HashMap::from([(pool_name.to_string(), pool)]);
 
     let mut builder =
-        FyndRPCBuilder::new(chain, pools, args.tycho_url.clone(), rpc_url, protocols)?
+        FyndRPCBuilder::new(chain, pools, args.tycho_url.clone(), rpc_url, protocols.to_vec())?
             .http_port(args.http_port);
 
+    if let Some(min_tvl) = args.min_tvl {
+        builder = builder.min_tvl(min_tvl);
+    }
     if let Some(ref key) = args.tycho_api_key {
         builder = builder.tycho_api_key(key.clone());
     }
@@ -286,6 +292,25 @@ pub async fn run(args: Args) -> Result<()> {
     info!("Worker counts: {:?}", worker_counts);
     info!("Requests per run: {}", args.num_requests);
 
+    // Resolve protocols once (expands `all_onchain` / `native_onchain` via a Tycho RPC call)
+    // and reuse the concrete list for every worker-count iteration.
+    let chain = parse_chain(&args.chain)?;
+    let requested: Vec<String> = args
+        .protocols
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let protocols = resolve_protocols(
+        &args.tycho_url,
+        args.tycho_api_key.as_deref(),
+        !args.disable_tls,
+        chain,
+        &requested,
+    )
+    .await?;
+    info!("Resolved {} protocol(s)", protocols.len());
+
     let requests = load_requests(args.requests_file.as_deref())?;
     let solver_url = format!("http://127.0.0.1:{}", args.http_port);
 
@@ -294,7 +319,7 @@ pub async fn run(args: Args) -> Result<()> {
     for &workers in &worker_counts {
         println!("\n--- Testing with {} worker(s) ---\n", workers);
 
-        let fynd = build_solver(&args, &pool_name, &pool_config, workers)
+        let fynd = build_solver(&args, &pool_name, &pool_config, &protocols, workers)
             .with_context(|| format!("failed to build solver with {workers} workers"))?;
         let handle = fynd.server_handle();
         let server_task = tokio::spawn(fynd.run());
