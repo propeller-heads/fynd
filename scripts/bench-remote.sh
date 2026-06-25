@@ -21,6 +21,12 @@ POOL_CONFIG="${POOL_CONFIG:-single_pool.toml}"
 REQUESTS_FILE="${REQUESTS_FILE:-tools/benchmark/requests_set.json}"
 OUTPUT_FILE="${OUTPUT_FILE:-scale_results_remote.json}"
 RPC_URL="${RPC_URL:-}"
+MIN_TVL="${MIN_TVL:-}" # forwarded to `scale --min-tvl` when set; chain default otherwise
+# RFQ credentials forwarded to the remote so rfq:* protocols register. Empty when unused.
+BEBOP_USER="${BEBOP_USER:-}"
+BEBOP_KEY="${BEBOP_KEY:-}"
+HASHFLOW_USER="${HASHFLOW_USER:-}"
+HASHFLOW_KEY="${HASHFLOW_KEY:-}"
 VOLUME_SIZE="${VOLUME_SIZE:-60}" # GB, needs space for Rust toolchain + build
 KEY_NAME="bench-remote-$$"
 SG_NAME="bench-remote-sg-$$"
@@ -34,6 +40,10 @@ CLEANUP_ITEMS=()
 cleanup() {
 	echo ""
 	echo "=== Cleanup ==="
+	if [[ ${#CLEANUP_ITEMS[@]} -eq 0 ]]; then
+		echo "Nothing to clean up."
+		return
+	fi
 	for item in "${CLEANUP_ITEMS[@]}"; do
 		case "$item" in
 		instance:*)
@@ -154,7 +164,7 @@ PUBLIC_IP=$(aws ec2 describe-instances \
 	--output text)
 echo "Public IP: ${PUBLIC_IP}"
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=8"
 SSH="ssh ${SSH_OPTS} -i ${KEY_FILE} ec2-user@${PUBLIC_IP}"
 SCP="scp ${SSH_OPTS} -i ${KEY_FILE}"
 
@@ -208,18 +218,29 @@ cargo build -p fynd-benchmark --release 2>&1 | tail -5
 echo "Build complete."
 BUILD_EOF
 
-# ---------- run benchmark ----------
+# ---------- run benchmark (detached + polled) ----------
 echo ""
 echo "=== Running scale benchmark ==="
-$SSH <<BENCH_EOF
+MIN_TVL_ARG=""
+if [[ -n "$MIN_TVL" ]]; then
+	MIN_TVL_ARG="--min-tvl ${MIN_TVL}"
+fi
+
+# Stage the benchmark command in a remote script so it survives SSH disconnects.
+$SSH "cat > ${REMOTE_DIR}/run_bench.sh" <<BENCH_EOF
+#!/usr/bin/env bash
 set -euo pipefail
 source "\$HOME/.cargo/env"
-cd ~/fynd
+cd ${REMOTE_DIR}
 
-RPC_URL="${RPC_URL}" RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
+RPC_URL="${RPC_URL}" \\
+BEBOP_USER="${BEBOP_USER}" BEBOP_KEY="${BEBOP_KEY}" \\
+HASHFLOW_USER="${HASHFLOW_USER}" HASHFLOW_KEY="${HASHFLOW_KEY}" \\
+RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --base-config "${POOL_CONFIG}" \\
     --worker-counts "${WORKER_COUNTS}" \\
     --protocols "${PROTOCOLS}" \\
+    ${MIN_TVL_ARG} \\
     --tycho-url "${TYCHO_URL}" \\
     --tycho-api-key "${TYCHO_API_KEY}" \\
     --http-port ${HTTP_PORT} \\
@@ -228,12 +249,47 @@ RPC_URL="${RPC_URL}" RUST_LOG=info cargo run -p fynd-benchmark --release -- scal
     --requests-file "${REQUESTS_FILE}" \\
     --warmup-secs ${WARMUP_SECS} \\
     --health-timeout-secs ${HEALTH_TIMEOUT} \\
-    --output-file "${OUTPUT_FILE}" 2>&1
+    --output-file "${OUTPUT_FILE}"
 BENCH_EOF
+
+# Launch detached: nohup keeps it alive if the SSH session drops; the exit code is
+# written to bench.done so the poll loop below can detect completion and success.
+$SSH "cd ${REMOTE_DIR} && rm -f bench.done bench.out && nohup bash -c 'bash run_bench.sh > bench.out 2>&1; echo \$? > bench.done' >/dev/null 2>&1 & echo launched"
+
+echo "Benchmark running remotely; polling for completion (reconnect-tolerant)..."
+BENCH_RC=""
+POLL_DEADLINE=$(($(date +%s) + 7200)) # 2h hard cap
+while :; do
+	if [[ $(date +%s) -gt $POLL_DEADLINE ]]; then
+		echo "ERROR: benchmark did not finish within 2h"
+		exit 1
+	fi
+	sleep 30
+	rc="$($SSH "cat ${REMOTE_DIR}/bench.done 2>/dev/null" 2>/dev/null || true)"
+	progress="$($SSH "tail -1 ${REMOTE_DIR}/bench.out 2>/dev/null" 2>/dev/null || true)"
+	if [[ -n "$progress" ]]; then
+		echo "  ... ${progress}"
+	fi
+	if [[ -n "$rc" ]]; then
+		BENCH_RC="$rc"
+		break
+	fi
+done
+
+echo "Remote benchmark exited with code ${BENCH_RC}"
 
 # ---------- fetch results ----------
 echo ""
 echo "=== Fetching results ==="
+# Always fetch the remote run log for diagnostics, even on failure.
+$SCP "ec2-user@${PUBLIC_IP}:${REMOTE_DIR}/bench.out" \
+	"${REPO_ROOT}/${OUTPUT_FILE%.json}.remote.log" 2>/dev/null || true
+
+if [[ "$BENCH_RC" != "0" ]]; then
+	echo "ERROR: remote benchmark failed (rc=${BENCH_RC}); see ${OUTPUT_FILE%.json}.remote.log"
+	exit 1
+fi
+
 $SCP "ec2-user@${PUBLIC_IP}:${REMOTE_DIR}/${OUTPUT_FILE}" \
 	"${REPO_ROOT}/${OUTPUT_FILE}"
 echo "Results saved to: ${REPO_ROOT}/${OUTPUT_FILE}"

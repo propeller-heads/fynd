@@ -1,0 +1,6 @@
+[pools.path_frank_wolfe_3_hops]
+algorithm = "path_frank_wolfe"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 3
+timeout_ms = 1000

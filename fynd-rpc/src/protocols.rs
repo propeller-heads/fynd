@@ -1,11 +1,19 @@
 //! Tycho protocol system discovery.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tracing::info;
 use tycho_simulation::{
     tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     tycho_common::models::Chain,
 };
+
+/// Expansion token: fetch every on-chain protocol system from Tycho.
+const ALL_ONCHAIN: &str = "all_onchain";
+/// Expansion token: like [`ALL_ONCHAIN`] but drop VM-simulated protocols (those prefixed `vm:`),
+/// keeping only native-Rust protocols.
+const NATIVE_ONCHAIN: &str = "native_onchain";
+/// Prefix marking a VM-simulated (EVM) protocol system.
+const VM_PREFIX: &str = "vm:";
 
 /// Fetches all available protocol systems from the Tycho RPC.
 pub async fn fetch_protocol_systems(
@@ -29,5 +37,51 @@ pub async fn fetch_protocol_systems(
         .protocol_systems()
         .to_vec();
     info!("Fetched {} protocol system(s) from Tycho RPC", protocols.len());
+    Ok(protocols)
+}
+
+/// Resolves a requested protocol list into concrete Tycho protocol systems.
+///
+/// Expansion tokens:
+/// - `all_onchain` (or an empty `requested` list) → fetch every on-chain protocol system.
+/// - `native_onchain` → fetch every on-chain protocol system, then drop the VM-simulated ones
+///   (those prefixed `vm:`), keeping only native-Rust protocols.
+///
+/// Explicit entries other than the expansion tokens (e.g. `rfq:bebop`, `uniswap_v3`) are appended
+/// if not already present. When no expansion token is given the list is returned unchanged.
+/// Returns an error if the resolved list is empty.
+pub async fn resolve_protocols(
+    tycho_url: &str,
+    auth_key: Option<&str>,
+    use_tls: bool,
+    chain: Chain,
+    requested: &[String],
+) -> Result<Vec<String>> {
+    let want_native = requested
+        .iter()
+        .any(|p| p == NATIVE_ONCHAIN);
+    let want_all = requested.is_empty() ||
+        requested
+            .iter()
+            .any(|p| p == ALL_ONCHAIN);
+
+    let protocols = if want_all || want_native {
+        let mut fetched = fetch_protocol_systems(tycho_url, auth_key, use_tls, chain).await?;
+        if want_native {
+            fetched.retain(|p| !p.starts_with(VM_PREFIX));
+        }
+        for p in requested {
+            if p != ALL_ONCHAIN && p != NATIVE_ONCHAIN && !fetched.contains(p) {
+                fetched.push(p.clone());
+            }
+        }
+        fetched
+    } else {
+        requested.to_vec()
+    };
+
+    if protocols.is_empty() {
+        bail!("no supported protocols found. Provide --protocols or check Tycho connectivity.");
+    }
     Ok(protocols)
 }
