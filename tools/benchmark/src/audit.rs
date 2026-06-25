@@ -201,6 +201,8 @@ struct ParticipantResult {
     /// Reported gas units (Fynd `gas_estimate` or aggregator self-reported gas).
     gas_units: Option<u64>,
     protocols: Vec<String>,
+    /// Pool-level route: `[protocol, component_id]` pairs for each swap leg (Fynd only).
+    route: Option<Vec<[String; 2]>>,
     /// Parallel sub-routes (aggregators only; `null` for Fynd).
     num_splits: Option<usize>,
     /// Wall-clock time from request dispatch to first byte of response.
@@ -718,6 +720,13 @@ impl AggregatorClient for FyndAggregator {
             })
             .unwrap_or_default();
 
+        let fynd_route = q.route().map(|r| {
+            r.swaps()
+                .iter()
+                .map(|s| [s.protocol().to_string(), s.component_id().to_string()])
+                .collect()
+        });
+
         let calldata = success
             .then(|| q.transaction())
             .flatten()
@@ -752,6 +761,7 @@ impl AggregatorClient for FyndAggregator {
             num_splits: None,
             response_time_ms,
             calldata,
+            route: fynd_route,
         })
     }
 }
@@ -805,7 +815,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Build the FyndClient — used for health-checks and block-waiting only.
     let fynd = Arc::new(
-        FyndClientBuilder::new(&args.fynd_url, "")
+        FyndClientBuilder::new(&args.fynd_url)
             .with_timeout(Duration::from_millis(args.timeout_ms))
             .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
             .build_quote_only()
@@ -1161,6 +1171,7 @@ async fn execute_trade(
                     amount_out_net_gas: q.amount_out_net_gas,
                     gas_units: q.gas_units,
                     protocols: q.protocols,
+                    route: q.route,
                     num_splits: q.num_splits,
                     response_time_ms: Some(q.response_time_ms),
                     eth_call_amount_out: ec_amount,
@@ -1179,6 +1190,7 @@ async fn execute_trade(
                         amount_out_net_gas: None,
                         gas_units: None,
                         protocols: vec![],
+                        route: None,
                         num_splits: None,
                         response_time_ms: None,
                         eth_call_amount_out: None,

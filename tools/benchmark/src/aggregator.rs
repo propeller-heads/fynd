@@ -73,6 +73,8 @@ pub struct AggregatorQuote {
     /// Encoded on-chain transaction. Present only when `fetch_calldata` was `true` and the
     /// aggregator has an encoding endpoint. `None` otherwise.
     pub calldata: Option<AggregatorCalldata>,
+    /// Pool-level route: `[protocol, component_id]` pairs (Fynd only; `None` for aggregators).
+    pub route: Option<Vec<[String; 2]>>,
 }
 
 impl AggregatorQuote {
@@ -151,8 +153,9 @@ struct NordsternTx {
 
 #[derive(Deserialize)]
 struct NordsternSwap {
+    // Nordstern returns fractional gas units (e.g. 162984.6); deserialise as f64, truncate later.
     #[serde(rename = "gasUnits", default)]
-    gas_units: Option<u64>,
+    gas_units: Option<f64>,
     route: Option<Vec<NordsternRouteItem>>,
 }
 
@@ -202,6 +205,7 @@ impl AggregatorClient for NordsternClient {
                 num_splits: None,
                 response_time_ms,
                 calldata: None,
+                route: None,
             });
         }
 
@@ -223,6 +227,7 @@ impl AggregatorClient for NordsternClient {
                     num_splits: None,
                     response_time_ms,
                     calldata: None,
+                    route: None,
                 });
             }
         };
@@ -236,6 +241,7 @@ impl AggregatorClient for NordsternClient {
         let gas_units: u64 = swaps
             .iter()
             .filter_map(|s| s.gas_units)
+            .map(|f| f as u64)
             .sum();
         let gas_units = (gas_units > 0).then_some(gas_units);
 
@@ -285,6 +291,7 @@ impl AggregatorClient for NordsternClient {
             num_splits,
             response_time_ms,
             calldata,
+            route: None,
         })
     }
 }
@@ -396,6 +403,7 @@ impl AggregatorClient for KyberswapClient {
                 num_splits: None,
                 response_time_ms,
                 calldata: None,
+                route: None,
             });
         }
 
@@ -414,6 +422,7 @@ impl AggregatorClient for KyberswapClient {
                 num_splits: None,
                 response_time_ms,
                 calldata: None,
+                route: None,
             });
         };
 
@@ -473,6 +482,7 @@ impl AggregatorClient for KyberswapClient {
             num_splits,
             response_time_ms,
             calldata,
+            route: None,
         })
     }
 }
@@ -648,6 +658,7 @@ impl AggregatorClient for ZeroExClient {
                 num_splits: None,
                 response_time_ms,
                 calldata: None,
+                route: None,
             });
         }
 
@@ -712,6 +723,7 @@ impl AggregatorClient for ZeroExClient {
             num_splits: None, // 0x route.fills is a flat list, not split-aware
             response_time_ms,
             calldata,
+            route: None,
         })
     }
 }
@@ -822,6 +834,7 @@ mod tests {
             num_splits: None,
             response_time_ms: 100,
             calldata: None,
+            route: None,
         };
         assert!(q.is_success());
     }
@@ -837,6 +850,7 @@ mod tests {
             num_splits: None,
             response_time_ms: 100,
             calldata: None,
+            route: None,
         };
         assert!(!q.is_success());
     }
@@ -852,6 +866,7 @@ mod tests {
             num_splits: None,
             response_time_ms: 50,
             calldata: None,
+            route: None,
         };
         assert!(!q.is_success());
     }
