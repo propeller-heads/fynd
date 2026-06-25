@@ -73,10 +73,29 @@ pub struct Args {
     #[arg(long, default_value_t = 1)]
     pub block_stride: usize,
 
-    /// Minimum milliseconds between successive aggregator requests per aggregator.
-    /// Increase (e.g. 500) to stay well under rate limits on long runs.
-    #[arg(long, default_value_t = 0)]
-    pub aggregator_delay_ms: u64,
+    /// Per-aggregator request rate cap (requests/sec). Each aggregator is paced by its own
+    /// token bucket so a slow API (e.g. KyberSwap) doesn't drop samples while fast ones run
+    /// freely. Set to 0 to disable pacing for that aggregator. Fynd is never paced.
+    #[arg(long, default_value_t = 20.0)]
+    pub nordstern_rps: f64,
+
+    /// Per-aggregator request rate cap for KyberSwap (requests/sec). KyberSwap's public API
+    /// rate-limits aggressively; keep this low to avoid 429s. 0 disables pacing.
+    #[arg(long, default_value_t = 3.0)]
+    pub kyberswap_rps: f64,
+
+    /// Per-aggregator request rate cap for 0x (requests/sec). 0 disables pacing.
+    #[arg(long, default_value_t = 5.0)]
+    pub zerox_rps: f64,
+
+    /// Max retries per aggregator request on a rate-limit (429) or 5xx response, with
+    /// exponential backoff. Recovers samples that would otherwise be dropped.
+    #[arg(long, default_value_t = 3)]
+    pub aggregator_max_retries: u32,
+
+    /// Base backoff in milliseconds for aggregator retries (doubled each attempt, plus jitter).
+    #[arg(long, default_value_t = 250)]
+    pub aggregator_retry_base_ms: u64,
 
     /// Path to write the full per-trade JSON results.
     #[arg(long, default_value = "audit_results.json")]

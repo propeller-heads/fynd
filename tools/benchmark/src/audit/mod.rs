@@ -10,7 +10,7 @@ mod execute;
 mod output;
 mod summary;
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use alloy::providers::ProviderBuilder;
 use anyhow::{Context, Result};
@@ -19,13 +19,14 @@ use fynd_client::{FyndClient, FyndClientBuilder, RetryConfig};
 use fynd_tools_common::{
     aggregator::AggregatorClient, fynd::FyndAggregator, swap_simulation::EthCallRunner,
 };
+use governor::DefaultDirectRateLimiter;
 use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::{info, warn};
 
 use crate::{
     aggregator::{KyberswapClient, NordsternClient, ZeroExClient},
     audit::{
-        execute::{execute_trade, QuoteTask, TradeConfig},
+        execute::{execute_trade, make_rate_limiter, QuoteTask, RetryCfg, TradeConfig},
         output::{AuditConfig, AuditOutput, TradeResult},
     },
     pair_selector::{select_top_pairs, PairSpec},
@@ -59,11 +60,30 @@ pub async fn run(args: Args) -> Result<()> {
         chunk_size * (participants.len() - 1),
     );
 
+    // Per-aggregator rate limiters (Fynd is never paced). Keyed by `AggregatorClient::name`.
+    let mut rate_limiters: HashMap<String, Arc<DefaultDirectRateLimiter>> = HashMap::new();
+    for (name, rps) in [
+        ("nordstern", args.nordstern_rps),
+        ("kyberswap", args.kyberswap_rps),
+        ("0x", args.zerox_rps),
+    ] {
+        if let Some(limiter) = make_rate_limiter(rps)? {
+            rate_limiters.insert(name.to_string(), limiter);
+        }
+    }
+    let rate_limiters = Arc::new(rate_limiters);
+    let retry = RetryCfg {
+        max_retries: args.aggregator_max_retries,
+        base_ms: args.aggregator_retry_base_ms,
+    };
+
     let runner = BlockRunner {
         pairs: &pairs,
         participants: &participants,
         fynd: &fynd,
         eth_call_runner: eth_call_runner.as_ref(),
+        rate_limiters: &rate_limiters,
+        retry,
         args: &args,
     };
 
@@ -221,6 +241,8 @@ struct BlockRunner<'a> {
     participants: &'a [Arc<dyn AggregatorClient>],
     fynd: &'a FyndClient,
     eth_call_runner: Option<&'a Arc<EthCallRunner>>,
+    rate_limiters: &'a Arc<HashMap<String, Arc<DefaultDirectRateLimiter>>>,
+    retry: RetryCfg,
     args: &'a Args,
 }
 
@@ -249,23 +271,6 @@ impl BlockRunner<'_> {
 
         info!("  Block ready — firing {} quote pairs…", chunk.len());
 
-        // Guard: warn when cumulative aggregator delay per chunk approaches one block (~12s).
-        let n_aggs = self
-            .participants
-            .len()
-            .saturating_sub(1);
-        let cumulative_delay_ms = self
-            .args
-            .aggregator_delay_ms
-            .saturating_mul(n_aggs as u64);
-        if cumulative_delay_ms >= 12_000 {
-            warn!(
-                "aggregator_delay_ms ({} ms) × {} aggregators = {} ms ≥ 12 s (one Ethereum \
-                 block); quotes in this chunk may not be comparable across participants",
-                self.args.aggregator_delay_ms, n_aggs, cumulative_delay_ms,
-            );
-        }
-
         let sem = Arc::new(Semaphore::new(self.args.concurrency));
         let mut jset: JoinSet<Result<TradeResult>> = JoinSet::new();
 
@@ -275,7 +280,8 @@ impl BlockRunner<'_> {
             let participants = self.participants.to_vec();
             let sem = sem.clone();
             let block_sample = block_idx + 1;
-            let aggregator_delay_ms = self.args.aggregator_delay_ms;
+            let rate_limiters = self.rate_limiters.clone();
+            let retry = self.retry;
             let baseline_fee_bps = self.args.eth_call_baseline_fee_bps;
             let runner = self.eth_call_runner.cloned();
 
@@ -288,7 +294,8 @@ impl BlockRunner<'_> {
                     participants,
                     QuoteTask { block_sample, pair, amount, amount_percentile_idx: amount_idx },
                     TradeConfig {
-                        aggregator_delay_ms,
+                        rate_limiters,
+                        retry,
                         eth_call_runner: runner,
                         quote_block,
                         baseline_fee_bps,
