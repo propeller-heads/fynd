@@ -16,3 +16,7 @@ run_2hop_audit.sh
 audit_results*.json
 audit_*.log
 solver.log
+
+# benchmark suite workflow
+bench_runs/
+.venv-bench/
