@@ -7,6 +7,7 @@ mod benchmark;
 mod compare;
 mod config;
 mod exporter;
+mod quality;
 mod requests;
 mod runner;
 mod scale;
@@ -36,6 +37,8 @@ enum Command {
     DownloadTrades(DownloadTradesArgs),
     /// Benchmark throughput scaling across different worker counts
     Scale(scale::Args),
+    /// Compare routing-algorithm output quality offline on a captured market snapshot
+    Quality(quality::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -61,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("{e}")),
         Command::Scale(args) => scale::run(args).await,
+        Command::Quality(args) => quality::run(args).await,
     }
 }
 

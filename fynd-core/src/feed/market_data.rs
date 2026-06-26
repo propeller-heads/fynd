@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
@@ -489,6 +490,68 @@ impl MarketState {
             last_updated: self.last_updated.clone(),
         }
     }
+
+    /// Builds a serializable snapshot of this market state.
+    ///
+    /// Captures everything an algorithm needs to solve offline: components, tokens, simulation
+    /// states, gas price and block info. `protocol_sync_status` is intentionally dropped because it
+    /// is irrelevant to solving. Simulation states serialize via `ProtocolSim`'s
+    /// `#[typetag::serde]` impl, so only native (non-VM) protocols round-trip; VM-backed states
+    /// will fail to serialize.
+    pub fn to_snapshot(&self) -> MarketSnapshot {
+        MarketSnapshot {
+            label: self.label.clone(),
+            components: self
+                .components
+                .values()
+                .cloned()
+                .collect(),
+            tokens: self.tokens.values().cloned().collect(),
+            states: self
+                .simulation_states
+                .iter()
+                .map(|(id, state)| (id.clone(), state.clone_box()))
+                .collect(),
+            gas_price: self.gas_price.clone(),
+            last_updated: self.last_updated.clone(),
+        }
+    }
+
+    /// Reconstructs a `MarketState` from a snapshot produced by [`MarketState::to_snapshot`].
+    pub fn from_snapshot(snapshot: MarketSnapshot) -> Self {
+        let mut market = MarketState::new();
+        market.label = snapshot.label;
+        market.upsert_components(snapshot.components);
+        market.upsert_tokens(snapshot.tokens);
+        market.update_states(snapshot.states);
+        if let Some(gas_price) = snapshot.gas_price {
+            market.update_gas_price(gas_price);
+        }
+        if let Some(block_info) = snapshot.last_updated {
+            market.update_last_updated(block_info);
+        }
+        market
+    }
+}
+
+/// A serializable, self-contained snapshot of market state for offline replay.
+///
+/// Produced by [`MarketState::to_snapshot`] and consumed by [`MarketState::from_snapshot`].
+/// Uses `Vec` rather than `HashMap` so that non-string map keys never block JSON serialization.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MarketSnapshot {
+    /// Block-number string identifying the captured state.
+    pub label: StateLabel,
+    /// All protocol components (pools).
+    pub components: Vec<ProtocolComponent>,
+    /// All tokens referenced by the components.
+    pub tokens: Vec<Token>,
+    /// Per-component simulation states. Serialized via `ProtocolSim`'s typetag impl.
+    pub states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
+    /// Gas price captured at snapshot time.
+    pub gas_price: Option<BlockGasPrice>,
+    /// Block info captured at snapshot time.
+    pub last_updated: Option<BlockInfo>,
 }
 
 #[cfg(test)]
@@ -566,6 +629,56 @@ mod tests {
         assert!(empty_subset
             .simulation_states
             .is_empty());
+    }
+
+    #[test]
+    fn snapshot_round_trips_real_uniswap_v2_state() {
+        use alloy::primitives::U256;
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+
+        let reserve0 = U256::from(1_000_000_000_000_000_000u128);
+        let reserve1 = U256::from(2_000_000_000_000_000_000u128);
+        let pool = UniswapV2State::new(reserve0, reserve1);
+
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool_ab", &[token_a.clone(), token_b.clone()])]);
+        market.upsert_tokens([token_a.clone(), token_b.clone()]);
+        market.update_states([("pool_ab".to_string(), Box::new(pool) as Box<dyn ProtocolSim>)]);
+        market.update_gas_price(BlockGasPrice {
+            block_number: 42,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(5u64) },
+        });
+        market.update_last_updated(BlockInfo::new(42, "0xfeed".to_string(), 0));
+
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let expected = market
+            .get_simulation_state("pool_ab")
+            .expect("pool present")
+            .get_amount_out(amount_in.clone(), &token_a, &token_b)
+            .expect("swap simulates");
+
+        // Round-trip through JSON via the typetag-backed snapshot.
+        let json = serde_json::to_string(&market.to_snapshot()).expect("snapshot serializes");
+        let snapshot: MarketSnapshot = serde_json::from_str(&json).expect("snapshot deserializes");
+        let restored = MarketState::from_snapshot(snapshot);
+
+        assert_eq!(restored.components.len(), 1);
+        assert_eq!(restored.tokens.len(), 2);
+        assert_eq!(restored.label(), market.label());
+        assert_eq!(restored.gas_price(), market.gas_price());
+
+        let actual = restored
+            .get_simulation_state("pool_ab")
+            .expect("pool present after round-trip")
+            .get_amount_out(amount_in, &token_a, &token_b)
+            .expect("swap simulates after round-trip");
+        assert_eq!(actual.amount, expected.amount, "amount_out must survive round-trip");
+        assert_eq!(actual.gas, expected.gas, "gas must survive round-trip");
     }
 
     // ==================== MarketData overlay tests ====================

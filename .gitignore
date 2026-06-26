@@ -5,6 +5,13 @@ clients/typescript/client/dist/
 clients/typescript/node_modules/
 comparison_results.json
 scale_results*.json
+# routing quality benchmark artifacts (generated locally)
+market_snapshot.json
+aggregator_trades_10k.json
+quality_*.json
+quality_*.log
+baseline_*.json
+baseline_*.log
 .env
 .claude/worktrees/
 .claude/plans/

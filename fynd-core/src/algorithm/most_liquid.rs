@@ -217,7 +217,7 @@ impl MostLiquidAlgorithm {
     /// - Source token is not in the graph
     /// - Destination token is not in the graph
     #[instrument(level = "debug", skip(graph, connector_tokens))]
-    fn find_paths<'a>(
+    pub(crate) fn find_paths<'a>(
         graph: &'a StableDiGraph<DepthAndPrice>,
         from: &Address,
         to: &Address,
@@ -312,7 +312,7 @@ impl MostLiquidAlgorithm {
     /// Paths that return `None` are filtered out of simulation.
     ///
     /// Higher score = better path candidate. Paths through deeper pools rank higher.
-    fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
+    pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
         if path.is_empty() {
             trace!("cannot score empty path");
             return None;

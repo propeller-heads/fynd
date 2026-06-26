@@ -32,6 +32,9 @@ pub mod feed;
 /// Graph management for algorithms. Provides [`GraphManager`](graph::GraphManager)
 /// trait and the reusable [`PetgraphStableDiGraphManager`](graph::PetgraphStableDiGraphManager).
 pub mod graph;
+/// Offline, deterministic benchmarking harness: replays a captured market snapshot in-process so
+/// routing algorithms can be compared on output quality without a live Tycho feed.
+pub mod offline;
 /// External price validation for quotes.
 pub mod price_guard;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
