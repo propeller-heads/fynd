@@ -539,7 +539,7 @@ impl BellmanFordAlgorithm {
                 .or_insert_with(|| token_out.clone());
         }
 
-        Ok(Route::new(swaps, tokens))
+        Ok(Route::new(swaps, tokens)?)
     }
 
     /// Computes gas-adjusted net amount: gross_amount - gas_cost_in_token.

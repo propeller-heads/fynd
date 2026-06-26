@@ -796,7 +796,7 @@ pub(crate) fn build_split_route(
         )));
     }
 
-    Ok(Route::new(swaps, route_tokens))
+    Ok(Route::new(swaps, route_tokens)?)
 }
 
 #[cfg(test)]

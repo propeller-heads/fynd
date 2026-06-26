@@ -546,7 +546,7 @@ mod tests {
                 make_route_swap_addrs(tin.clone(), tout.clone())
             })
             .collect();
-        crate::types::Route::new(swaps, tokens)
+        crate::types::Route::new(swaps, tokens).expect("non-empty route")
     }
 
     fn make_address(byte: u8) -> Address {

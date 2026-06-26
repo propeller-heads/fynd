@@ -1012,8 +1012,18 @@ pub struct Route {
 
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
-    pub fn new(swaps: Vec<Swap>, tokens: HashMap<Bytes, Token>) -> Self {
-        Self { swaps, tokens }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteValidationError::EmptyRoute`] if `swaps` is empty.
+    pub fn new(
+        swaps: Vec<Swap>,
+        tokens: HashMap<Bytes, Token>,
+    ) -> Result<Self, RouteValidationError> {
+        if swaps.is_empty() {
+            return Err(RouteValidationError::EmptyRoute);
+        }
+        Ok(Self { swaps, tokens })
     }
 
     /// Returns the swaps in this route.
@@ -1726,12 +1736,14 @@ mod tests {
     // Route Tests
     // -------------------------------------------------------------------------
 
+    // Constructs a `Route` directly, bypassing `Route::new`'s non-empty check, so
+    // accessor behaviour on empty routes (reachable via deserialization) stays testable.
     fn make_route(swaps: Vec<(u8, u8)>) -> Route {
         let swaps: Vec<Swap> = swaps
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        Route::new(swaps, HashMap::new())
+        Route { swaps, tokens: HashMap::new() }
     }
 
     #[rstest]
@@ -1788,8 +1800,14 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route { swaps, tokens: HashMap::new() };
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
+    }
+
+    #[test]
+    fn test_route_new_rejects_empty() {
+        let result = Route::new(vec![], HashMap::new());
+        assert!(matches!(result, Err(RouteValidationError::EmptyRoute)));
     }
 
     #[rstest]
@@ -1850,7 +1868,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1864,7 +1882,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.3),
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1880,7 +1898,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1896,7 +1914,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),
             make_swap(0x03, 0x04, 490, 480),
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1904,7 +1922,7 @@ mod tests {
     fn test_validate_split_single_swap_nonzero_split() {
         // A ──[50%]── B   ERROR: single swap must have split=0.0
         let swaps = vec![make_split_swap(0x01, 0x02, 0.5)];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1919,7 +1937,7 @@ mod tests {
             make_split_swap(0x01, 0x02, 0.0), // A→B (remainder)
             make_swap(0x03, 0x04, 490, 480),  // C→D (unreachable)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitStart { .. }));
     }
@@ -1935,7 +1953,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D (dead end)
             make_swap(0x03, 0x05, 490, 480),  // C→E (terminal)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitEnd { .. }));
     }
@@ -1952,7 +1970,7 @@ mod tests {
             make_swap(0x03, 0x02, 980, 970),                 // C→B (cycle)
             make_swap(0x04, 0x02, 480, 470),                 // D→B (cycle)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -1969,7 +1987,7 @@ mod tests {
             make_swap(0x03, 0x04, 490, 480),  // C→D
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1985,7 +2003,7 @@ mod tests {
             make_swap(0x03, 0x01, 960, 950),  // C→A (round-trip)
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1998,7 +2016,7 @@ mod tests {
             make_split_swap(0x01, 0x01, 0.5), // A→A
             make_split_swap(0x01, 0x01, 0.0), // A→A (remainder)
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -2232,7 +2250,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D
             make_swap(0x03, 0x04, 490, 480),  // C→D
         ];
-        let route = Route::new(swaps, HashMap::new());
+        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
         assert!(matches!(route.validate(), Err(RouteValidationError::DisconnectedSwaps { .. })));
     }
 
@@ -2254,7 +2272,7 @@ mod tests {
             make_swap(0x02, 0x03, 594, 580).with_split(0.6), // B→C via P2, 60%
             make_swap(0x02, 0x03, 396, 385),                 // B→C via P3, remainder
         ];
-        let route_interior = Route::new(swaps_interior, HashMap::new());
+        let route_interior = Route::new(swaps_interior, HashMap::new()).expect("non-empty route");
         assert!(route_interior.is_split());
 
         //   ┌──[60%]── B ──┐
@@ -2266,7 +2284,7 @@ mod tests {
             make_swap(0x01, 0x04, 400, 390),                 // A→D, remainder
             make_swap(0x04, 0x03, 390, 380),                 // D→C
         ];
-        let route_source = Route::new(swaps_source, HashMap::new());
+        let route_source = Route::new(swaps_source, HashMap::new()).expect("non-empty route");
         assert!(route_source.is_split());
     }
 

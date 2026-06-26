@@ -333,7 +333,7 @@ mod tests {
             Bytes::from([0xBB; 20].as_slice()),
             "1".to_string(),
         )
-        .with_route(Route::new(vec![weth_usdc_swap()], HashMap::new()))
+        .with_route(Route::new(vec![weth_usdc_swap()], HashMap::new()).expect("non-empty route"))
     }
 
     fn price_guard(providers: Vec<Box<dyn PriceProvider>>) -> PriceGuard {
