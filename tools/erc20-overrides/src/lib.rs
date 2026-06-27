@@ -29,7 +29,8 @@ sol! {
     }
 }
 
-const MAX_PROBE_SLOT: u64 = 20;
+/// Highest standard Solidity mapping position probed before falling back to the OZ v5 layout.
+pub const MAX_PROBE_SLOT: u64 = 20;
 
 /// Sentinel written to a candidate storage slot during balance/allowance probing.
 ///
