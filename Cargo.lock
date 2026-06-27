@@ -3384,6 +3384,7 @@ dependencies = [
  "futures 0.3.32",
  "fynd-client",
  "fynd-rpc",
+ "fynd-tools-common",
  "num-bigint",
  "reqwest 0.12.28",
  "serde",
@@ -3552,6 +3553,25 @@ dependencies = [
  "tracing",
  "tycho-simulation",
  "zstd",
+]
+
+[[package]]
+name = "fynd-tools-common"
+version = "0.82.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "erc20-overrides",
+ "fastrand",
+ "fynd-client",
+ "num-bigint",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

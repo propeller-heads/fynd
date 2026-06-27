@@ -1,0 +1,24 @@
+[package]
+name = "fynd-tools-common"
+version.workspace = true
+edition = "2021"
+description = "Shared utilities for Fynd tooling: aggregator quote model, on-chain simulation, BPS math"
+license = "MIT"
+
+[dependencies]
+fynd-client = { workspace = true }
+erc20-overrides = { workspace = true }
+alloy = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+num-bigint = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+fastrand = "2.3"
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
