@@ -5,7 +5,8 @@
 //! The output is deterministic (1 ETH in → 1 WETH out), so the test asserts an exact amount.
 //!
 //! `#[ignore]`d so it never runs in the default `cargo nextest run` (CI has no node). Run with:
-//! `RPC_URL=<https-eth-rpc> cargo test -p fynd-tools-common --test eth_call_integration -- --ignored`.
+//! `RPC_URL=<https-eth-rpc> cargo test -p fynd-tools-common --test eth_call_integration --
+//! --ignored`.
 
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use fynd_tools_common::eth_call::EthCallRunner;
