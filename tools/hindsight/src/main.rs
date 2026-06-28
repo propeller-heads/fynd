@@ -1,4 +1,5 @@
 mod decoder;
+mod resolve;
 
 use std::time::Instant;
 
@@ -21,6 +22,8 @@ enum Command {
     Decode(DecodeArgs),
     /// Decode and compare against Allium's aggregator_trades ground truth.
     Verify(VerifyArgs),
+    /// Decode a block's trades and re-solve each through a running Fynd instance.
+    Resolve(ResolveArgs),
 }
 
 #[derive(Args)]
@@ -83,6 +86,33 @@ struct VerifyArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct ResolveArgs {
+    /// Ethereum RPC URL (used to decode the block's settled trades)
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: String,
+
+    /// Base URL of a running Fynd solver to re-solve trades through
+    #[arg(long, env = "FYND_URL", default_value = "http://localhost:3000")]
+    fynd_url: String,
+
+    /// Block number to re-solve (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to re-solve (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
+
+    /// Per-quote timeout in milliseconds for Fynd
+    #[arg(long, default_value_t = 10_000)]
+    timeout_ms: u64,
+
+    /// Output as JSON instead of human-readable
+    #[arg(long)]
+    json: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -95,6 +125,17 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
+        Command::Resolve(args) => {
+            resolve::run::run(
+                &args.rpc_url,
+                &args.fynd_url,
+                args.block,
+                args.range.as_deref(),
+                args.timeout_ms,
+                args.json,
+            )
+            .await
+        }
     }
 }
 
@@ -150,14 +191,14 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn provider_from(rpc_url: &str) -> anyhow::Result<impl Provider> {
+pub(crate) fn provider_from(rpc_url: &str) -> anyhow::Result<impl Provider> {
     let url: reqwest::Url = rpc_url
         .parse()
         .with_context(|| format!("invalid RPC URL: {rpc_url}"))?;
     Ok(ProviderBuilder::new().connect_http(url))
 }
 
-async fn resolve_blocks<P: Provider>(
+pub(crate) async fn resolve_blocks<P: Provider>(
     provider: &P,
     block: Option<u64>,
     range: Option<&str>,
