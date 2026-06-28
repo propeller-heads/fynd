@@ -3826,6 +3826,7 @@ dependencies = [
  "futures 0.3.32",
  "fynd-client",
  "fynd-core",
+ "fynd-rpc",
  "fynd-tools-common",
  "metrics",
  "metrics-exporter-prometheus",

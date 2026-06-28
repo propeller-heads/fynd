@@ -21,7 +21,7 @@ use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
     decoder::decode_block,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
 };
 
 /// How long to wait for the solver to apply the next block after releasing it.
@@ -132,9 +132,13 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     let chain = parse_chain(cfg.chain)
         .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain))?;
 
-    info!(chain = cfg.chain, "building in-process solver (loading tokens may take minutes)…");
-    let mut builder =
-        FyndBuilder::new(chain, cfg.tycho_url, cfg.rpc_url, cfg.protocols.clone(), cfg.min_tvl);
+    // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
+    let protocols =
+        fynd_rpc::protocols::resolve_protocols(cfg.tycho_url, cfg.tycho_api_key, true, chain, &cfg.protocols)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to resolve protocols: {e}"))?;
+    info!(chain = cfg.chain, protocols = protocols.len(), "building in-process solver (loading tokens may take minutes)…");
+    let mut builder = FyndBuilder::new(chain, cfg.tycho_url, cfg.rpc_url, protocols, cfg.min_tvl);
     if let Some(key) = cfg.tycho_api_key {
         builder = builder.tycho_api_key(key);
     }
@@ -159,6 +163,8 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     establish_baseline(&adapter).await?;
 
     let mut processed = 0u64;
+    let mut total_trades = 0usize;
+    let mut comparable_trades = 0usize;
     loop {
         if controller.peek_next_block().await.is_none() {
             info!("block stream ended");
@@ -187,6 +193,14 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         crate::telemetry::record_block_seconds(elapsed_s);
+
+        total_trades += ranges.len();
+        comparable_trades += ranges
+            .iter()
+            .filter(|r| matches!(r.verdict, Verdict::Win | Verdict::Loss))
+            .count();
+        crate::telemetry::record_coverage(total_trades, comparable_trades);
+
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
         processed += 1;

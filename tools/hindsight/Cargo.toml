@@ -13,6 +13,7 @@ path = "src/main.rs"
 # Fynd integration: re-solve via a running solver (HTTP) or an in-process stepped solver
 fynd-client = { workspace = true }
 fynd-core = { workspace = true }
+fynd-rpc = { workspace = true }
 tycho-simulation = { workspace = true }
 # Shared tooling (BPS comparison math, FyndAggregator wrapper)
 fynd-tools-common = { workspace = true }
