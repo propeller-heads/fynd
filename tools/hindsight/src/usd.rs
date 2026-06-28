@@ -59,7 +59,13 @@ pub(crate) fn savings_usd(
         .parse()
         .ok()
         .filter(|&v: &f64| v > 0.0)?;
-    Some(notional * (fynd - settled) / settled)
+    let savings = notional * (fynd - settled) / settled;
+    // Guard against mis-decoded trades (e.g. a dust-tiny settled output) blowing the implied
+    // price up: a re-solve can't plausibly beat the settled trade by more than ~10x its notional.
+    if !savings.is_finite() || savings.abs() > notional * 10.0 {
+        return None;
+    }
+    Some(savings)
 }
 
 #[cfg(test)]
@@ -117,6 +123,16 @@ mod tests {
         let fynd_weth = one_weth * U256::from(101u64) / U256::from(100u64);
         let s = savings_usd(USDC, U256::from(1_000_000_000u64), WETH, fynd_weth, one_weth).unwrap();
         assert!((s - 10.0).abs() < 1e-3, "expected ~+10, got {s}");
+    }
+
+    #[test]
+    fn savings_usd_input_leg_implausible_ratio_is_none() {
+        // $1000 in, but a dust settled output (1 wei) → astronomically large implied savings → skip.
+        let one_weth = U256::from(10u64).pow(U256::from(18u64));
+        assert_eq!(
+            savings_usd(USDC, U256::from(1_000_000_000u64), WETH, one_weth, U256::from(1u64)),
+            None
+        );
     }
 
     #[test]
