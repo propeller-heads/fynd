@@ -32,8 +32,13 @@ alloy = { workspace = true, features = [
     "rpc-types-trace",
 ] }
 
-# HTTP (for RPC URL parsing)
+# HTTP (for RPC URL parsing) + metrics server
 reqwest = { workspace = true }
+actix-web = { workspace = true }
+
+# Prometheus metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 # Error handling & logging
 anyhow = { workspace = true }

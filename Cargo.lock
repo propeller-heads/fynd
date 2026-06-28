@@ -3818,6 +3818,7 @@ dependencies = [
 name = "hindsight"
 version = "0.82.0"
 dependencies = [
+ "actix-web",
  "alloy",
  "anyhow",
  "async-trait",
@@ -3825,6 +3826,8 @@ dependencies = [
  "futures 0.3.32",
  "fynd-client",
  "fynd-tools-common",
+ "metrics",
+ "metrics-exporter-prometheus",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
