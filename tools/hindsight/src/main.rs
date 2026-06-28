@@ -142,6 +142,10 @@ struct MonitorArgs {
     #[arg(long, env = "TYCHO_API_KEY")]
     tycho_api_key: Option<String>,
 
+    /// Worker-pools TOML config (algorithm/hops/workers); defaults to a single most_liquid pool
+    #[arg(long)]
+    worker_pools_config: Option<String>,
+
     /// Per-quote timeout in milliseconds
     #[arg(long, default_value_t = 10_000)]
     timeout_ms: u64,
@@ -188,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 protocols: args.protocols,
                 min_tvl: args.min_tvl,
                 tycho_api_key: args.tycho_api_key.as_deref(),
+                worker_pools_config: args.worker_pools_config.as_deref(),
                 timeout_ms: args.timeout_ms,
                 metrics_port: args.metrics_port,
                 max_blocks: args.max_blocks,
