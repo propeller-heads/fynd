@@ -3820,8 +3820,11 @@ version = "0.82.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "async-trait",
  "clap",
  "futures 0.3.32",
+ "fynd-client",
+ "fynd-tools-common",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
