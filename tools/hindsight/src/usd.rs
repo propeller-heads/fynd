@@ -27,13 +27,39 @@ pub(crate) fn stable_usd(token: Address, amount: U256) -> Option<f64> {
     Some(amount / 10f64.powi(decimals as i32))
 }
 
-/// Signed USD savings of Fynd's output vs the settled amount, when `token_out` is a stablecoin.
+/// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better), anchored on
+/// whichever leg is a stablecoin.
 ///
-/// Positive = Fynd would have delivered more USD. `None` when `token_out` is not a stablecoin.
-pub(crate) fn savings_usd(token_out: Address, fynd_amount_out: U256, settled_amount_out: U256) -> Option<f64> {
-    let fynd_usd = stable_usd(token_out, fynd_amount_out)?;
-    let settled_usd = stable_usd(token_out, settled_amount_out)?;
-    Some(fynd_usd - settled_usd)
+/// - **Output leg stable:** both outputs are valued at peg and differenced directly.
+/// - **Input leg stable (output not):** the input amount is the trade's USD notional, and the
+///   output delta is valued at the settled trade's implied price
+///   (`notional * (fynd_out - settled_out) / settled_out`).
+///
+/// `None` when neither leg is a known stablecoin (or the settled output is zero).
+pub(crate) fn savings_usd(
+    token_in: Address,
+    amount_in: U256,
+    token_out: Address,
+    fynd_amount_out: U256,
+    settled_amount_out: U256,
+) -> Option<f64> {
+    if let (Some(fynd_usd), Some(settled_usd)) =
+        (stable_usd(token_out, fynd_amount_out), stable_usd(token_out, settled_amount_out))
+    {
+        return Some(fynd_usd - settled_usd);
+    }
+
+    let notional = stable_usd(token_in, amount_in)?;
+    let fynd: f64 = fynd_amount_out
+        .to_string()
+        .parse()
+        .ok()?;
+    let settled: f64 = settled_amount_out
+        .to_string()
+        .parse()
+        .ok()
+        .filter(|&v: &f64| v > 0.0)?;
+    Some(notional * (fynd - settled) / settled)
 }
 
 #[cfg(test)]
@@ -58,20 +84,54 @@ mod tests {
     }
 
     #[test]
-    fn savings_usd_positive_when_fynd_better() {
-        // Fynd 1010 USDC vs settled 1000 USDC → +$10.
-        let s = savings_usd(USDC, U256::from(1_010_000_000u64), U256::from(1_000_000_000u64)).unwrap();
+    fn savings_usd_output_leg_positive_when_fynd_better() {
+        // WETH→USDC: Fynd 1010 USDC vs settled 1000 USDC → +$10 (output leg valued at peg).
+        let s = savings_usd(
+            WETH,
+            U256::from(1u64),
+            USDC,
+            U256::from(1_010_000_000u64),
+            U256::from(1_000_000_000u64),
+        )
+        .unwrap();
         assert!((s - 10.0).abs() < 1e-6, "expected +10, got {s}");
     }
 
     #[test]
-    fn savings_usd_negative_when_fynd_worse() {
-        let s = savings_usd(USDC, U256::from(990_000_000u64), U256::from(1_000_000_000u64)).unwrap();
+    fn savings_usd_output_leg_negative_when_fynd_worse() {
+        let s = savings_usd(
+            WETH,
+            U256::from(1u64),
+            USDC,
+            U256::from(990_000_000u64),
+            U256::from(1_000_000_000u64),
+        )
+        .unwrap();
         assert!((s + 10.0).abs() < 1e-6, "expected -10, got {s}");
     }
 
     #[test]
-    fn savings_usd_non_stable_out_is_none() {
-        assert_eq!(savings_usd(WETH, U256::from(2u64), U256::from(1u64)), None);
+    fn savings_usd_input_leg_uses_notional_and_implied_price() {
+        // USDC→WETH: $1000 in. Fynd 1.01 WETH vs settled 1.00 WETH → +1% of $1000 = +$10.
+        let one_weth = U256::from(10u64).pow(U256::from(18u64));
+        let fynd_weth = one_weth * U256::from(101u64) / U256::from(100u64);
+        let s = savings_usd(USDC, U256::from(1_000_000_000u64), WETH, fynd_weth, one_weth).unwrap();
+        assert!((s - 10.0).abs() < 1e-3, "expected ~+10, got {s}");
+    }
+
+    #[test]
+    fn savings_usd_input_leg_zero_settled_is_none() {
+        assert_eq!(
+            savings_usd(USDC, U256::from(1_000_000_000u64), WETH, U256::from(1u64), U256::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn savings_usd_neither_leg_stable_is_none() {
+        assert_eq!(
+            savings_usd(WETH, U256::from(1u64), WETH, U256::from(2u64), U256::from(1u64)),
+            None
+        );
     }
 }

@@ -86,8 +86,13 @@ pub(crate) fn record(cmp: &Comparison, chain: &str) {
     }
 
     if let Outcome::Solved(solved) = &cmp.outcome {
-        if let Some(usd) = usd::savings_usd(cmp.token_out, solved.amount_out, cmp.settled_amount_out)
-        {
+        if let Some(usd) = usd::savings_usd(
+            cmp.token_in,
+            cmp.amount_in,
+            cmp.token_out,
+            solved.amount_out,
+            cmp.settled_amount_out,
+        ) {
             histogram!(
                 SAVINGS_USD,
                 "client" => cmp.client.clone(),
@@ -122,9 +127,13 @@ pub(crate) fn record_range(range: &RangeComparison, chain: &str) {
     }
 
     if let Outcome::Solved(solved) = &range.top.outcome {
-        if let Some(usd) =
-            usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)
-        {
+        if let Some(usd) = usd::savings_usd(
+            range.token_in,
+            range.amount_in,
+            range.token_out,
+            solved.amount_out,
+            range.settled_amount_out,
+        ) {
             histogram!(
                 SAVINGS_USD,
                 "client" => range.client.clone(),

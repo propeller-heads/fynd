@@ -135,10 +135,11 @@ token in Tycho, insufficient liquidity, timeout).
   via an in-process stepped solver. `monitor`'s end-to-end run is exercised by a gated integration
   test that needs a reachable Tycho endpoint (`TYCHO_URL` + `TYCHO_API_KEY`); the comparison/range
   logic is unit-tested independently.
-- **USD savings only for stablecoin-out trades.** When `token_out` is a known stablecoin, savings
-  are valued in USD at peg (`hindsight_savings_usd`). Fynd exposes no public token→USD conversion,
-  so trades that don't settle into a stablecoin are reported in basis points and token amounts
-  only; general USD valuation needs an external price feed.
+- **USD savings need a stablecoin leg.** Savings are valued in USD (`hindsight_savings_usd`) when
+  either leg is a known stablecoin: the output leg is taken at peg directly, or the input leg
+  provides the trade's USD notional and the output delta is valued at the settled trade's implied
+  price. Fynd exposes no public token→USD conversion, so trades with no stablecoin leg are reported
+  in basis points and token amounts only; valuing those needs an external price feed.
 - **Ethereum only.** The decoder targets Ethereum mainnet. Other chains are a `--chain` label on
   metrics but are not yet decoded.
 - **Known decode gaps.** Log-silent protocols (e.g. ParaSwap Delta's canonical contract emits no
