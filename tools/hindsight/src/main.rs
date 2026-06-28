@@ -26,6 +26,9 @@ enum Command {
     Verify(VerifyArgs),
     /// Decode a block's trades and re-solve each through a running Fynd instance.
     Resolve(ResolveArgs),
+    /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
+    /// trades at top-of-block (N-1) and back-of-block (N).
+    Monitor(MonitorArgs),
 }
 
 #[derive(Args)]
@@ -113,6 +116,45 @@ struct ResolveArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct MonitorArgs {
+    /// Ethereum RPC URL (used to decode each block's settled trades and feed the solver)
+    #[arg(long, env = "ETH_RPC_URL")]
+    rpc_url: String,
+
+    /// Tycho WebSocket URL feeding the in-process solver
+    #[arg(long, env = "TYCHO_URL")]
+    tycho_url: String,
+
+    /// Chain to monitor (the decoder is Ethereum-only for now)
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+
+    /// Protocols to index, comma-separated (e.g. uniswap_v2,uniswap_v3)
+    #[arg(long, value_delimiter = ',', default_value = "uniswap_v2,uniswap_v3")]
+    protocols: Vec<String>,
+
+    /// Minimum pool TVL filter for the solver
+    #[arg(long, default_value_t = 100.0)]
+    min_tvl: f64,
+
+    /// Tycho API key (if the endpoint requires one)
+    #[arg(long, env = "TYCHO_API_KEY")]
+    tycho_api_key: Option<String>,
+
+    /// Per-quote timeout in milliseconds
+    #[arg(long, default_value_t = 10_000)]
+    timeout_ms: u64,
+
+    /// Serve Prometheus metrics on this port
+    #[arg(long)]
+    metrics_port: Option<u16>,
+
+    /// Stop after this many blocks (runs until interrupted if omitted)
+    #[arg(long)]
+    max_blocks: Option<u64>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -135,6 +177,20 @@ async fn main() -> anyhow::Result<()> {
                 timeout_ms: args.timeout_ms,
                 metrics_port: args.metrics_port,
                 json: args.json,
+            })
+            .await
+        }
+        Command::Monitor(args) => {
+            resolve::monitor::run(resolve::monitor::MonitorConfig {
+                rpc_url: &args.rpc_url,
+                tycho_url: &args.tycho_url,
+                chain: &args.chain,
+                protocols: args.protocols,
+                min_tvl: args.min_tvl,
+                tycho_api_key: args.tycho_api_key.as_deref(),
+                timeout_ms: args.timeout_ms,
+                metrics_port: args.metrics_port,
+                max_blocks: args.max_blocks,
             })
             .await
         }

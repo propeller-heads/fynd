@@ -10,7 +10,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing::error;
 
 use crate::{
-    resolve::{Comparison, Outcome, Verdict},
+    resolve::{Comparison, Outcome, RangeComparison, Verdict},
     usd,
 };
 
@@ -92,6 +92,43 @@ pub(crate) fn record(cmp: &Comparison, chain: &str) {
                 SAVINGS_USD,
                 "client" => cmp.client.clone(),
                 "aggregator" => cmp.aggregator.clone(),
+                "chain" => chain.to_string(),
+            )
+            .record(usd);
+        }
+    }
+}
+
+/// Record a two-state range, anchored on the headline (top-of-block) state.
+pub(crate) fn record_range(range: &RangeComparison, chain: &str) {
+    counter!(
+        TRADES_TOTAL,
+        "client" => range.client.clone(),
+        "aggregator" => range.aggregator.clone(),
+        "pair" => pair_label(range.token_in, range.token_out),
+        "chain" => chain.to_string(),
+        "outcome" => outcome_label(range.verdict).to_string(),
+    )
+    .increment(1);
+
+    if let Some(bps) = range.top.deltas.net_bps {
+        histogram!(
+            SAVINGS_BPS,
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
+            "chain" => chain.to_string(),
+        )
+        .record(bps);
+    }
+
+    if let Outcome::Solved(solved) = &range.top.outcome {
+        if let Some(usd) =
+            usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)
+        {
+            histogram!(
+                SAVINGS_USD,
+                "client" => range.client.clone(),
+                "aggregator" => range.aggregator.clone(),
                 "chain" => chain.to_string(),
             )
             .record(usd);
