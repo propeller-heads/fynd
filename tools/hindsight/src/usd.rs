@@ -35,7 +35,20 @@ pub(crate) fn stable_usd(token: Address, amount: U256) -> Option<f64> {
 ///   output delta is valued at the settled trade's implied price
 ///   (`notional * (fynd_out - settled_out) / settled_out`).
 ///
-/// `None` when neither leg is a known stablecoin (or the settled output is zero).
+/// Largest plausible relative output difference between Fynd and the settled trade. Real
+/// aggregator routing differs by basis points to low single-digit percent; anything beyond this
+/// is a mis-decode (e.g. a dust-tiny or wrong-token settled amount), not a genuine saving.
+const MAX_PLAUSIBLE_GAIN: f64 = 1.0; // 100%
+
+/// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better), anchored on
+/// whichever leg is a stablecoin and valued from the relative output gain.
+///
+/// - **Output leg stable:** the gain is applied to the settled output's USD value (≡ valuing both
+///   outputs at peg and differencing).
+/// - **Input leg stable (output not):** the gain is applied to the input amount's USD notional.
+///
+/// Returns `None` when neither leg is a known stablecoin, the settled output is zero, or the
+/// implied gain exceeds [`MAX_PLAUSIBLE_GAIN`] (a mis-decode rather than a real saving).
 pub(crate) fn savings_usd(
     token_in: Address,
     amount_in: U256,
@@ -43,13 +56,6 @@ pub(crate) fn savings_usd(
     fynd_amount_out: U256,
     settled_amount_out: U256,
 ) -> Option<f64> {
-    if let (Some(fynd_usd), Some(settled_usd)) =
-        (stable_usd(token_out, fynd_amount_out), stable_usd(token_out, settled_amount_out))
-    {
-        return Some(fynd_usd - settled_usd);
-    }
-
-    let notional = stable_usd(token_in, amount_in)?;
     let fynd: f64 = fynd_amount_out
         .to_string()
         .parse()
@@ -59,13 +65,18 @@ pub(crate) fn savings_usd(
         .parse()
         .ok()
         .filter(|&v: &f64| v > 0.0)?;
-    let savings = notional * (fynd - settled) / settled;
-    // Guard against mis-decoded trades (e.g. a dust-tiny settled output) blowing the implied
-    // price up: a re-solve can't plausibly beat the settled trade by more than ~10x its notional.
-    if !savings.is_finite() || savings.abs() > notional * 10.0 {
+
+    let gain = (fynd - settled) / settled;
+    if !gain.is_finite() || gain.abs() > MAX_PLAUSIBLE_GAIN {
         return None;
     }
-    Some(savings)
+
+    // Prefer the output leg (value at peg); else use the input leg's USD notional.
+    if let Some(settled_usd) = stable_usd(token_out, settled_amount_out) {
+        return Some(settled_usd * gain);
+    }
+    let notional = stable_usd(token_in, amount_in)?;
+    Some(notional * gain)
 }
 
 #[cfg(test)]
