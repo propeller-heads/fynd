@@ -9,10 +9,14 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing::error;
 
-use crate::resolve::{Comparison, Verdict};
+use crate::{
+    resolve::{Comparison, Outcome, Verdict},
+    usd,
+};
 
 const TRADES_TOTAL: &str = "hindsight_trades_total";
 const SAVINGS_BPS: &str = "hindsight_savings_bps";
+const SAVINGS_USD: &str = "hindsight_savings_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 
@@ -51,6 +55,10 @@ pub(crate) fn describe() {
         Unit::Count,
         "Net-of-gas bps delta of Fynd vs settled (positive = Fynd better)"
     );
+    describe_histogram!(
+        SAVINGS_USD,
+        "Signed USD savings of Fynd vs settled, for stablecoin-out trades (positive = Fynd better)"
+    );
     describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
 }
@@ -75,6 +83,19 @@ pub(crate) fn record(cmp: &Comparison, chain: &str) {
             "chain" => chain.to_string(),
         )
         .record(bps);
+    }
+
+    if let Outcome::Solved(solved) = &cmp.outcome {
+        if let Some(usd) = usd::savings_usd(cmp.token_out, solved.amount_out, cmp.settled_amount_out)
+        {
+            histogram!(
+                SAVINGS_USD,
+                "client" => cmp.client.clone(),
+                "aggregator" => cmp.aggregator.clone(),
+                "chain" => chain.to_string(),
+            )
+            .record(usd);
+        }
     }
 }
 
@@ -132,8 +153,10 @@ mod tests {
     use alloy::primitives::U256;
     use metrics_exporter_prometheus::PrometheusBuilder;
 
+    use alloy::primitives::address;
+
     use super::*;
-    use crate::resolve::{Deltas, Outcome};
+    use crate::resolve::{Deltas, SolvedAmount};
 
     fn comparison(verdict: Verdict, net_bps: Option<f64>) -> Comparison {
         Comparison {
@@ -190,6 +213,25 @@ mod tests {
         assert!(rendered.contains("client=\"relay\""));
         assert!(rendered.contains("hindsight_savings_bps"));
         assert!(rendered.contains("hindsight_coverage_ratio"));
+    }
+
+    #[test]
+    fn record_emits_usd_for_stablecoin_out() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let mut cmp = comparison(Verdict::Win, Some(10.0));
+        cmp.token_out = usdc;
+        cmp.settled_amount_out = U256::from(1_000_000_000u64); // 1000 USDC
+        cmp.outcome = Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(1_010_000_000u64), // 1010 USDC
+            amount_out_net_gas: U256::from(1_005_000_000u64),
+            gas_estimate: U256::from(120_000u64),
+        });
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || record(&cmp, "ethereum"));
+        let rendered = handle.render();
+        assert!(rendered.contains("hindsight_savings_usd"), "rendered: {rendered}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod decoder;
 mod resolve;
 mod telemetry;
+mod usd;
 
 use std::time::Instant;
 

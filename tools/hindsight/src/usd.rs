@@ -1,0 +1,77 @@
+//! Approximate USD valuation, anchored on stablecoin legs.
+//!
+//! Fynd exposes no public token→USD conversion, so Hindsight values a trade in USD only when one
+//! side is a known stablecoin: a stablecoin amount is taken at its peg (1 token ≈ 1 USD), scaled
+//! by its decimals. A large share of aggregator volume settles into a stablecoin, so this covers
+//! the common case without an external price feed. Trades with no stablecoin leg are reported in
+//! basis points and token amounts only.
+
+use alloy::primitives::{address, Address, U256};
+
+/// `(stablecoin address, decimals)` on Ethereum mainnet.
+const STABLECOINS: &[(Address, u32)] = &[
+    (address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 6),  // USDC
+    (address!("0xdac17f958d2ee523a2206206994597c13d831ec7"), 6),  // USDT
+    (address!("0x6b175474e89094c44da98b954eedeac495271d0f"), 18), // DAI
+    (address!("0x4c9edd5852cd905f086c759e8383e09bff1e68b3"), 18), // USDe
+    (address!("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), 18), // USDS
+];
+
+/// USD value of `amount` of `token`, or `None` when `token` is not a known stablecoin.
+pub(crate) fn stable_usd(token: Address, amount: U256) -> Option<f64> {
+    let &(_, decimals) = STABLECOINS.iter().find(|(addr, _)| *addr == token)?;
+    let amount: f64 = amount
+        .to_string()
+        .parse()
+        .ok()?;
+    Some(amount / 10f64.powi(decimals as i32))
+}
+
+/// Signed USD savings of Fynd's output vs the settled amount, when `token_out` is a stablecoin.
+///
+/// Positive = Fynd would have delivered more USD. `None` when `token_out` is not a stablecoin.
+pub(crate) fn savings_usd(token_out: Address, fynd_amount_out: U256, settled_amount_out: U256) -> Option<f64> {
+    let fynd_usd = stable_usd(token_out, fynd_amount_out)?;
+    let settled_usd = stable_usd(token_out, settled_amount_out)?;
+    Some(fynd_usd - settled_usd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const USDC: Address = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+    const DAI: Address = address!("0x6b175474e89094c44da98b954eedeac495271d0f");
+    const WETH: Address = address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+
+    #[test]
+    fn stable_usd_scales_by_decimals() {
+        // 1,000 USDC (6 decimals) = $1000.
+        assert_eq!(stable_usd(USDC, U256::from(1_000_000_000u64)), Some(1_000.0));
+        // 1 DAI (18 decimals) = $1.
+        assert_eq!(stable_usd(DAI, U256::from(10u64).pow(U256::from(18u64))), Some(1.0));
+    }
+
+    #[test]
+    fn stable_usd_unknown_token_is_none() {
+        assert_eq!(stable_usd(WETH, U256::from(1u64)), None);
+    }
+
+    #[test]
+    fn savings_usd_positive_when_fynd_better() {
+        // Fynd 1010 USDC vs settled 1000 USDC → +$10.
+        let s = savings_usd(USDC, U256::from(1_010_000_000u64), U256::from(1_000_000_000u64)).unwrap();
+        assert!((s - 10.0).abs() < 1e-6, "expected +10, got {s}");
+    }
+
+    #[test]
+    fn savings_usd_negative_when_fynd_worse() {
+        let s = savings_usd(USDC, U256::from(990_000_000u64), U256::from(1_000_000_000u64)).unwrap();
+        assert!((s + 10.0).abs() < 1e-6, "expected -10, got {s}");
+    }
+
+    #[test]
+    fn savings_usd_non_stable_out_is_none() {
+        assert_eq!(savings_usd(WETH, U256::from(2u64), U256::from(1u64)), None);
+    }
+}

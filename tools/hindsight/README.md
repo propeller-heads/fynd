@@ -81,6 +81,7 @@ With `--metrics-port`, `resolve` exposes Prometheus metrics at `/metrics`:
 |---|---|---|
 | `hindsight_trades_total` | counter | `client`, `aggregator`, `pair`, `chain`, `outcome` |
 | `hindsight_savings_bps` | histogram | `client`, `aggregator`, `chain` |
+| `hindsight_savings_usd` | histogram | `client`, `aggregator`, `chain` |
 | `hindsight_coverage_ratio` | gauge | — |
 | `hindsight_block_processing_seconds` | histogram | — |
 
@@ -111,8 +112,10 @@ token in Tycho, insufficient liquidity, timeout).
 - **Single block-state (v0).** `resolve` currently compares at the chain's *current* state. The
   intended top-of-block (N-1) / back-of-block (N) range — solving before and after the block's own
   swaps moved the pools — depends on `BlockStepController` stepping being wired into `fynd-core`.
-- **No USD denomination yet.** Savings are reported in basis points and token amounts. USD
-  conversion needs an external price source; Fynd exposes no public token→USD conversion.
+- **USD savings only for stablecoin-out trades.** When `token_out` is a known stablecoin, savings
+  are valued in USD at peg (`hindsight_savings_usd`). Fynd exposes no public token→USD conversion,
+  so trades that don't settle into a stablecoin are reported in basis points and token amounts
+  only; general USD valuation needs an external price feed.
 - **Ethereum only.** The decoder targets Ethereum mainnet. Other chains are a `--chain` label on
   metrics but are not yet decoded.
 - **Known decode gaps.** Log-silent protocols (e.g. ParaSwap Delta's canonical contract emits no
