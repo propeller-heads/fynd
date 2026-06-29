@@ -1735,19 +1735,15 @@ mod tests {
     // -------------------------------------------------------------------------
     // Route Tests
     // -------------------------------------------------------------------------
-
-    // Constructs a `Route` directly, bypassing `Route::new`'s non-empty check, so
-    // accessor behaviour on empty routes (reachable via deserialization) stays testable.
     fn make_route(swaps: Vec<(u8, u8)>) -> Route {
         let swaps: Vec<Swap> = swaps
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        Route { swaps, tokens: HashMap::new() }
+        Route::new(swaps, HashMap::new()).unwrap()
     }
 
     #[rstest]
-    #[case::empty(vec![], 0)]
     #[case::single(vec![(0x01, 0x02)], 1)]
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], 2)]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], 3)]
@@ -1757,7 +1753,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(vec![], None)]
     #[case::single(vec![(0x01, 0x02)], Some(0x01))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x01))]
     fn test_route_input_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
@@ -1766,7 +1761,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(vec![], None)]
     #[case::single(vec![(0x01, 0x02)], Some(0x02))]
     #[case::multi(vec![(0x01, 0x02), (0x02, 0x03)], Some(0x03))]
     fn test_route_output_token(#[case] swaps: Vec<(u8, u8)>, #[case] expected: Option<u8>) {
@@ -1775,7 +1769,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(vec![], vec![])]
     #[case::single(vec![(0x01, 0x02)], vec![])]
     #[case::two_hops(vec![(0x01, 0x02), (0x02, 0x03)], vec![0x02])]
     #[case::three_hops(vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x04)], vec![0x02, 0x03])]
@@ -1792,7 +1785,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(0, 0u64)]
     #[case::single(1, 100_000u64)]
     #[case::two_swaps(2, 200_000u64)]
     #[case::three_swaps(3, 300_000u64)]
@@ -1814,7 +1806,6 @@ mod tests {
     #[case::valid_single(vec![(0x01, 0x02)], true, None)]
     #[case::valid_connected(vec![(0x01, 0x02), (0x02, 0x03)], true, None)]
     #[case::valid_first_last_cycle(vec![(0x01, 0x02), (0x02, 0x01)], true, None)]
-    #[case::empty(vec![], false, Some("EmptyRoute"))]
     #[case::disconnected(vec![(0x01, 0x02), (0x03, 0x04)], false, Some("DisconnectedSwaps"))]
     #[case::unsupported_intermediate_cycle(
         vec![(0x01, 0x02), (0x02, 0x03), (0x03, 0x02)],
@@ -1838,7 +1829,6 @@ mod tests {
         if let Some(err_name) = error_type {
             let err = result.unwrap_err();
             match err_name {
-                "EmptyRoute" => assert!(matches!(err, RouteValidationError::EmptyRoute)),
                 "DisconnectedSwaps" => {
                     assert!(matches!(err, RouteValidationError::DisconnectedSwaps { .. }))
                 }
@@ -2154,7 +2144,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(vec![], vec![], "")]
     #[case::single_hop(vec![(0x01, 0x02)], vec![(0x01, "WETH"), (0x02, "USDC")], "WETH -> USDC")]
     #[case::multi_hop(
         vec![(0x01, 0x02), (0x02, 0x03)],
