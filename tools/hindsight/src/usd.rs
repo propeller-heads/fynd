@@ -35,13 +35,13 @@ pub(crate) fn stable_usd(token: Address, amount: U256) -> Option<f64> {
 ///   output delta is valued at the settled trade's implied price
 ///   (`notional * (fynd_out - settled_out) / settled_out`).
 ///
-/// Largest plausible relative output difference between Fynd and the settled trade. Re-solving the
-/// same inputs at the same block differs by basis points to low single-digit percent in practice,
-/// so anything beyond this band is a degenerate case rather than a genuine saving:
-/// `gain > +MAX` is a mis-decode (dust-tiny / wrong-token settled amount), and `gain ≈ -1` is Fynd
-/// returning ~no output (a coverage failure, not a real loss). Both would otherwise dominate the
-/// USD aggregate, so they are excluded from `savings_usd`.
-const MAX_PLAUSIBLE_GAIN: f64 = 0.5; // 50%
+/// Largest plausible relative output difference between Fynd and the settled trade for a *valid*
+/// comparison. Re-solving the same `(token_in, token_out, amount)` at the same block can only
+/// differ by basis points to low single-digit percent in reality (gas, fees, minor routing). A
+/// larger gap means the decoded amounts don't actually correspond — i.e. the decoder mis-netted
+/// the trade (common for large multi-hop / intent fills) — so the comparison is invalid and is
+/// excluded from `savings_usd` rather than booked as a (spurious) six/seven-figure win or loss.
+const MAX_PLAUSIBLE_GAIN: f64 = 0.1; // 10%
 
 /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better), anchored on
 /// whichever leg is a stablecoin and valued from the relative output gain.
