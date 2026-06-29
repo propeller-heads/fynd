@@ -5,6 +5,9 @@ quality. This document tells you exactly how the benchmark works, how to run it,
 standings are, and where `split` is weak so you can attack it.
 
 The companion doc `docs/routing-quality-bench.md` has the full design rationale and results history.
+For automated fresh-session iteration, use `scripts/routing-quality-evolve.sh`; the runbook is
+`docs/routing-quality-evolution-loop.md`. That loop now splits the trade dataset into an exposed set
+for iteration and a hidden holdout set for final scoring.
 
 ## The challenge
 

@@ -1,6 +1,7 @@
 /target/
 /.idea/
 /.vscode/
+.DS_Store
 clients/typescript/client/dist/
 clients/typescript/node_modules/
 comparison_results.json
@@ -15,6 +16,7 @@ baseline_*.log
 .env
 .claude/worktrees/
 .claude/plans/
+.agents/
 
 # fynd-gas-audit output artifacts
 tools/fynd-gas-audit/out/
