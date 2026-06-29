@@ -291,6 +291,12 @@ pub enum AlgorithmError {
     Other(String),
 }
 
+impl From<crate::types::RouteValidationError> for AlgorithmError {
+    fn from(error: crate::types::RouteValidationError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
 /// Reason why no path was found between tokens.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
