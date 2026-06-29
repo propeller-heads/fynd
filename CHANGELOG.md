@@ -1,3 +1,11 @@
+## [0.82.1](https://github.com/propeller-heads/fynd/compare/0.82.0...0.82.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **Route:** Enforce no empty swaps on Router::new() ([33bf08b](https://github.com/propeller-heads/fynd/commit/33bf08b84511f606112314ca2857350428a53d77))
+* **Route:** Fix test fixture and corresponding usages ([b1a0cf8](https://github.com/propeller-heads/fynd/commit/b1a0cf8f28b09e82ff59249e311e50fd500475e1))
+
 ## [0.82.0](https://github.com/propeller-heads/fynd/compare/0.81.1...0.82.0) (2026-06-25)
 
 
