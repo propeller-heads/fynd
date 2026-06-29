@@ -35,10 +35,13 @@ pub(crate) fn stable_usd(token: Address, amount: U256) -> Option<f64> {
 ///   output delta is valued at the settled trade's implied price
 ///   (`notional * (fynd_out - settled_out) / settled_out`).
 ///
-/// Largest plausible relative output difference between Fynd and the settled trade. Real
-/// aggregator routing differs by basis points to low single-digit percent; anything beyond this
-/// is a mis-decode (e.g. a dust-tiny or wrong-token settled amount), not a genuine saving.
-const MAX_PLAUSIBLE_GAIN: f64 = 1.0; // 100%
+/// Largest plausible relative output difference between Fynd and the settled trade. Re-solving the
+/// same inputs at the same block differs by basis points to low single-digit percent in practice,
+/// so anything beyond this band is a degenerate case rather than a genuine saving:
+/// `gain > +MAX` is a mis-decode (dust-tiny / wrong-token settled amount), and `gain ≈ -1` is Fynd
+/// returning ~no output (a coverage failure, not a real loss). Both would otherwise dominate the
+/// USD aggregate, so they are excluded from `savings_usd`.
+const MAX_PLAUSIBLE_GAIN: f64 = 0.5; // 50%
 
 /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better), anchored on
 /// whichever leg is a stablecoin and valued from the relative output gain.
@@ -144,6 +147,14 @@ mod tests {
             savings_usd(USDC, U256::from(1_000_000_000u64), WETH, one_weth, U256::from(1u64)),
             None
         );
+    }
+
+    #[test]
+    fn savings_usd_rejects_near_total_loss_whale() {
+        // A large stablecoin-out trade where Fynd returns ~0 (gain ≈ -1) is a coverage failure,
+        // not a −$1M "loss" — excluded rather than dominating the USD aggregate.
+        let big = U256::from(1_000_000_000_000u64); // 1,000,000 USDC (6 dp)
+        assert_eq!(savings_usd(WETH, U256::from(1u64), USDC, U256::from(1u64), big), None);
     }
 
     #[test]
