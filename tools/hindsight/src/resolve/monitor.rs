@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use fynd_core::{
     types::{
         parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
-        QuoteStatus,
+        QuoteStatus, Swap, Transaction,
     },
     BlockStepController, FyndBuilder, PoolConfig, Solver,
 };
@@ -25,7 +25,8 @@ use tycho_simulation::tycho_common::models::Address as CoreAddress;
 use crate::{
     decoder::decode_block,
     resolve::{
-        resolve_block_range, Outcome, RangeComparison, SolvedAmount, SteppingSolver, Verdict,
+        resolve_block_range, Outcome, RangeComparison, SolvedAmount, StateResult, SteppingSolver,
+        Verdict,
     },
     usd,
 };
@@ -52,8 +53,9 @@ pub(crate) struct MonitorConfig<'a> {
     pub metrics_port: Option<u16>,
     /// Stop after this many blocks (`None` runs until interrupted).
     pub max_blocks: Option<u64>,
-    /// Append one JSON line per improvement (Fynd beats the settled trade) with the complete
-    /// quote, calldata, block, and settled tx — for later investigation. Disabled when `None`.
+    /// Append one JSON line per improvement (Fynd wins at top- or back-of-block) carrying both
+    /// block states — each with its net bps, USD improvement, and a slim route + calldata — plus
+    /// the block and settled tx, for later investigation. Disabled when `None`.
     pub improvements_jsonl: Option<&'a str>,
 }
 
@@ -139,9 +141,11 @@ fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
     if quote.status() != QuoteStatus::Success {
         return Outcome::Unsolvable(format!("{:?}", quote.status()));
     }
-    // Capture the complete quote (route, per-hop pools/amounts, and the encoded transaction) so
-    // improvements can be dumped for later investigation.
-    let quote_json = serde_json::to_string(quote).ok();
+    // Project the quote to a slim route + calldata, built directly from the quote object. We must
+    // NOT serialize the whole `OrderQuote`: it embeds each hop's `protocol_state`, which both
+    // dominates size and fails to serialize for vm pools (e.g. Curve) — dropping the entire route
+    // for exactly the deep-liquidity stable trades we care about.
+    let quote_json = serde_json::to_string(&slim_quote(quote)).ok();
     Outcome::Solved(SolvedAmount {
         amount_out: biguint_to_u256(quote.amount_out()),
         amount_out_net_gas: biguint_to_u256(quote.amount_out_net_gas()),
@@ -258,15 +262,18 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         };
 
         let start = Instant::now();
-        // Snapshot token prices at top-of-block, matching the headline (top-of-block) outcome used
-        // to value savings in USD.
-        let prices = snapshot_prices(&solver).await;
+        // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
+        // USD valuation.
+        let prices_top = snapshot_prices(&solver).await;
         let ranges = resolve_block_range(&adapter, &trades).await?;
+        // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
+        // back-of-block improvement is valued against the state it was solved at.
+        let prices_back = snapshot_prices(&solver).await;
         for range in &ranges {
-            crate::telemetry::record_range(range, cfg.chain, &prices);
+            crate::telemetry::record_range(range, cfg.chain, &prices_top);
         }
         if let Some(writer) = improvements.as_mut() {
-            write_improvements(writer, &ranges);
+            write_improvements(writer, &ranges, &prices_top, &prices_back);
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         crate::telemetry::record_block_seconds(elapsed_s);
@@ -342,13 +349,21 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
     (bytes.len() == 20).then(|| Address::from_slice(bytes))
 }
 
-/// Append one JSON line per improvement (Fynd beats the settled trade) to `writer`.
-fn write_improvements<W: std::io::Write>(writer: &mut W, ranges: &[RangeComparison]) {
+/// Append one JSON line per improvement to `writer`. A record is written when Fynd wins at either
+/// top-of-block (optimistic) or back-of-block (the more credible, post-block state); each record
+/// carries both states so the back-of-block figure can be used as the headline.
+fn write_improvements<W: std::io::Write>(
+    writer: &mut W,
+    ranges: &[RangeComparison],
+    prices_top: &usd::PriceMap,
+    prices_back: &usd::PriceMap,
+) {
     for range in ranges {
-        if range.verdict != Verdict::Win {
+        if range.top.verdict != Verdict::Win && range.back.verdict != Verdict::Win {
             continue;
         }
-        let Ok(line) = serde_json::to_string(&improvement_record(range)) else {
+        let Ok(line) = serde_json::to_string(&improvement_record(range, prices_top, prices_back))
+        else {
             continue;
         };
         if let Err(e) = writeln!(writer, "{line}") {
@@ -361,16 +376,14 @@ fn write_improvements<W: std::io::Write>(writer: &mut W, ranges: &[RangeComparis
     }
 }
 
-/// Build the JSON record for one improvement: block, settled tx, decoded amounts, and the complete
-/// Fynd quote (route, per-hop pools/amounts, and encoded calldata).
-fn improvement_record(range: &RangeComparison) -> serde_json::Value {
-    let solved = match &range.top.outcome {
-        Outcome::Solved(solved) => Some(solved),
-        Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
-    };
-    let quote = solved
-        .and_then(|solved| solved.quote_json.as_deref())
-        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+/// Build the JSON record for one improvement: block, settled tx, decoded amounts, and a `top` and
+/// `back` state (each with its bps, USD improvement, and slim route + calldata). Top is valued at
+/// N-1 prices, back at N prices, matching the state each was solved against.
+fn improvement_record(
+    range: &RangeComparison,
+    prices_top: &usd::PriceMap,
+    prices_back: &usd::PriceMap,
+) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
         "settled_tx": range.tx_hash,
@@ -380,16 +393,196 @@ fn improvement_record(range: &RangeComparison) -> serde_json::Value {
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
         "settled_amount_out": range.settled_amount_out.to_string(),
+        "top": state_record(&range.top, range.token_out, range.settled_amount_out, prices_top),
+        "back": state_record(&range.back, range.token_out, range.settled_amount_out, prices_back),
+    })
+}
+
+/// JSON for one block-state of an improvement: verdict, bps, Fynd amounts, the USD improvement
+/// (net-of-gas Fynd output minus the settled output, valued at `prices`), and the slim quote.
+fn state_record(
+    state: &StateResult,
+    token_out: Address,
+    settled_amount_out: U256,
+    prices: &usd::PriceMap,
+) -> serde_json::Value {
+    let solved = match &state.outcome {
+        Outcome::Solved(solved) => Some(solved),
+        Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
+    };
+    let improvement_usd = solved.and_then(|s| {
+        usd::savings_usd(token_out, s.amount_out_net_gas, settled_amount_out, prices)
+    });
+    let fynd_value_usd = solved.and_then(|s| usd::value_usd(token_out, s.amount_out, prices));
+    serde_json::json!({
+        "verdict": state.verdict,
+        "net_bps": state.deltas.net_bps,
+        "raw_bps": state.deltas.raw_bps,
         "fynd_amount_out": solved.map(|s| s.amount_out.to_string()),
         "fynd_amount_out_net_gas": solved.map(|s| s.amount_out_net_gas.to_string()),
-        "net_bps": range.top.deltas.net_bps,
-        "quote": quote,
+        "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
+        "improvement_usd": improvement_usd,
+        "fynd_value_usd": fynd_value_usd,
+        "settled_value_usd": usd::value_usd(token_out, settled_amount_out, prices),
+        "quote": solved
+            .and_then(|s| s.quote_json.as_deref())
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
+    })
+}
+
+/// Project an `OrderQuote` down to what an investigation needs: order id, status, the encoded
+/// transaction (calldata), and a per-hop route (protocol, pool, tokens, amounts, gas). Built from
+/// the quote object's accessors so it never touches each hop's `protocol_state` — which is both
+/// the bulk of the size and unserializable for vm pools (Curve etc.).
+fn slim_quote(quote: &OrderQuote) -> serde_json::Value {
+    let route: Vec<serde_json::Value> = quote
+        .route()
+        .map(|route| {
+            route
+                .swaps()
+                .iter()
+                .map(slim_swap)
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "order_id": quote.order_id(),
+        "status": serde_json::to_value(quote.status()).ok(),
+        "transaction": quote.transaction().map(slim_transaction),
+        "route": route,
+    })
+}
+
+/// One route hop: protocol, pool (the component id is the pool address), tokens, amounts, gas.
+fn slim_swap(swap: &Swap) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": swap.protocol(),
+        "pool": swap.component_id(),
+        "token_in": serde_json::to_value(swap.token_in()).ok(),
+        "token_out": serde_json::to_value(swap.token_out()).ok(),
+        "amount_in": swap.amount_in().to_string(),
+        "amount_out": swap.amount_out().to_string(),
+        "gas_estimate": swap.gas_estimate().to_string(),
+        "split": swap.split(),
+    })
+}
+
+/// The encoded on-chain transaction: target, native value, and hex calldata.
+fn slim_transaction(transaction: &Transaction) -> serde_json::Value {
+    serde_json::json!({
+        "to": serde_json::to_value(transaction.to()).ok(),
+        "value": transaction.value().to_string(),
+        "data": format!("0x{}", alloy::hex::encode(transaction.data())),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slim_transaction_emits_hex_calldata_and_address() {
+        use tycho_simulation::tycho_common::Bytes;
+        let tx = Transaction::new(
+            Bytes::from(vec![0x11u8; 20]),
+            BigUint::from(5u8),
+            vec![0xde, 0xad, 0xbe, 0xef],
+        );
+        let slim = slim_transaction(&tx);
+        assert_eq!(slim.get("data").unwrap(), "0xdeadbeef");
+        assert_eq!(slim.get("value").unwrap(), "5");
+        assert!(slim
+            .get("to")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+    }
+
+    #[test]
+    fn improvement_record_carries_top_and_back_with_usd_and_slim_route() {
+        use crate::resolve::build_range;
+
+        let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse()
+            .unwrap();
+        let weth: Address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            .parse()
+            .unwrap();
+        // ETH=$2000: USDC (6dp) = 2e-9 native units/wei, WETH (18dp) = 1.0.
+        let prices = usd::PriceMap::from([(usdc, 2e-9), (weth, 1.0)]);
+
+        let trade = crate::decoder::DecodedTrade {
+            tx_hash: "0xabc".into(),
+            block_number: 25_000_000,
+            client: "relay".into(),
+            aggregator: "1inch".into(),
+            sender: Address::ZERO,
+            token_in: weth,
+            token_out: usdc,
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
+        };
+        // quote_json is already the slim projection (what order_quote_to_outcome stores).
+        let quote = Some(
+            r#"{"order_id":"o","status":"success","transaction":{"to":"0xrouter","value":"0",
+                "data":"0x01"},"route":[{"protocol":"uniswap_v3","pool":"0xpool",
+                "token_in":"0xaaa","token_out":"0xbbb","amount_in":"1","amount_out":"2",
+                "gas_estimate":"0","split":1.0}]}"#
+                .to_string(),
+        );
+        // Top: net 1005 USDC → +$5. Back: net 1001 USDC → +$1. Both win.
+        let top = Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(1_010_000_000u64),
+            amount_out_net_gas: U256::from(1_005_000_000u64),
+            gas_estimate: U256::from(21_000u64),
+            quote_json: quote.clone(),
+        });
+        let back = Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(1_002_000_000u64),
+            amount_out_net_gas: U256::from(1_001_000_000u64),
+            gas_estimate: U256::from(21_000u64),
+            quote_json: quote,
+        });
+        let range = build_range(&trade, top, back);
+
+        let rec = improvement_record(&range, &prices, &prices);
+        let top_usd = rec
+            .pointer("/top/improvement_usd")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        let back_usd = rec
+            .pointer("/back/improvement_usd")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((top_usd - 5.0).abs() < 1e-3, "top_usd={top_usd}");
+        assert!((back_usd - 1.0).abs() < 1e-3, "back_usd={back_usd}");
+        assert!(
+            rec.pointer("/back/net_bps")
+                .unwrap()
+                .as_f64()
+                .unwrap() >
+                0.0
+        );
+        // Both states embed the slim quote: calldata and route/pool are present.
+        assert_eq!(
+            rec.pointer("/top/quote/transaction/data")
+                .unwrap(),
+            "0x01"
+        );
+        assert_eq!(
+            rec.pointer("/top/quote/route/0/pool")
+                .unwrap(),
+            "0xpool"
+        );
+        assert_eq!(
+            rec.pointer("/back/quote/route/0/protocol")
+                .unwrap(),
+            "uniswap_v3"
+        );
+    }
 
     /// End-to-end smoke test of the live two-state monitor against a real solver.
     ///
