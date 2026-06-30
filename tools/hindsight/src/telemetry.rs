@@ -8,10 +8,10 @@ use metrics::{
     counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
-    resolve::{Comparison, Outcome, Verdict},
+    resolve::{Comparison, Outcome, RangeComparison, Verdict},
     usd,
 };
 
@@ -22,6 +22,16 @@ const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
+
+/// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
+/// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
+/// from the ETH-anchored valuation).
+const USD_OUTLIER_THRESHOLD: f64 = 1_000.0;
+
+/// Whether a USD savings value is large enough to log for inspection.
+fn is_usd_outlier(usd: f64) -> bool {
+    usd.abs() >= USD_OUTLIER_THRESHOLD
+}
 
 /// Metric label for a trade's headline verdict.
 pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
@@ -138,6 +148,89 @@ pub(crate) fn record(cmp: &Comparison, chain: &str, prices: &usd::PriceMap) {
     }
 }
 
+/// Record a two-state range, anchored on the headline (top-of-block) state. `prices` is the
+/// solver's token-price snapshot used to value savings in USD; an empty map disables USD recording.
+pub(crate) fn record_range(range: &RangeComparison, chain: &str, prices: &usd::PriceMap) {
+    counter!(
+        TRADES_TOTAL,
+        "client" => range.client.clone(),
+        "aggregator" => range.aggregator.clone(),
+        "chain" => chain.to_string(),
+        "outcome" => outcome_label(range.verdict).to_string(),
+    )
+    .increment(1);
+
+    // Observed volume covers every trade (including unsolvable) so per-client coverage is accurate.
+    if let Some(volume) = usd::value_usd(range.token_out, range.settled_amount_out, prices) {
+        histogram!(
+            VOLUME_USD,
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
+            "chain" => chain.to_string(),
+        )
+        .record(volume);
+    }
+
+    if let Some(bps) = range.top.deltas.net_bps {
+        histogram!(
+            SAVINGS_BPS,
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
+            "chain" => chain.to_string(),
+        )
+        .record(bps);
+    }
+
+    if let Outcome::Solved(solved) = &range.top.outcome {
+        if let Some(usd) =
+            usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)
+        {
+            if is_usd_outlier(usd) {
+                warn!(
+                    tx = %range.tx_hash,
+                    block = range.block_number,
+                    client = %range.client,
+                    aggregator = %range.aggregator,
+                    token_in = %range.token_in,
+                    token_out = %range.token_out,
+                    amount_in = %range.amount_in,
+                    settled_out = %range.settled_amount_out,
+                    fynd_out = %solved.amount_out,
+                    token_out_price = ?prices.get(&range.token_out),
+                    usd,
+                    "USD outlier — inspect for token mispricing vs genuinely large trade"
+                );
+            }
+            histogram!(
+                SAVINGS_USD,
+                "client" => range.client.clone(),
+                "aggregator" => range.aggregator.clone(),
+                "chain" => chain.to_string(),
+            )
+            .record(usd);
+        }
+
+        // Client-benefit uplift: net-of-gas improvement, recorded only when Fynd beats the settled
+        // trade. A client routes elsewhere when Fynd is worse, so losses contribute nothing.
+        if let Some(uplift) = usd::savings_usd(
+            range.token_out,
+            solved.amount_out_net_gas,
+            range.settled_amount_out,
+            prices,
+        ) {
+            if uplift > 0.0 {
+                histogram!(
+                    IMPROVEMENT_USD,
+                    "client" => range.client.clone(),
+                    "aggregator" => range.aggregator.clone(),
+                    "chain" => chain.to_string(),
+                )
+                .record(uplift);
+            }
+        }
+    }
+}
+
 pub(crate) fn record_coverage(total: usize, comparable: usize) {
     gauge!(COVERAGE_RATIO).set(coverage_ratio(total, comparable));
 }
@@ -220,6 +313,15 @@ mod tests {
     }
 
     #[test]
+    fn usd_outlier_threshold() {
+        assert!(!is_usd_outlier(0.0));
+        assert!(!is_usd_outlier(USD_OUTLIER_THRESHOLD - 1.0));
+        assert!(!is_usd_outlier(-(USD_OUTLIER_THRESHOLD - 1.0)));
+        assert!(is_usd_outlier(USD_OUTLIER_THRESHOLD));
+        assert!(is_usd_outlier(-(USD_OUTLIER_THRESHOLD * 100.0)));
+    }
+
+    #[test]
     fn coverage_ratio_math() {
         assert_eq!(coverage_ratio(0, 0), 0.0);
         assert_eq!(coverage_ratio(10, 4), 0.4);
@@ -254,6 +356,7 @@ mod tests {
             amount_out: U256::from(1_010_000_000u64), // 1010 USDC
             amount_out_net_gas: U256::from(1_005_000_000u64),
             gas_estimate: U256::from(120_000u64),
+            quote_json: None,
         });
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let prices = usd::PriceMap::from([(usdc, 2e-9)]);
@@ -279,6 +382,7 @@ mod tests {
             amount_out: U256::from(995_000_000u64),
             amount_out_net_gas: U256::from(990_000_000u64), // worse than settled
             gas_estimate: U256::from(120_000u64),
+            quote_json: None,
         });
         let prices = usd::PriceMap::from([(usdc, 2e-9)]);
 

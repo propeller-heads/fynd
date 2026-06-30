@@ -82,7 +82,7 @@ fn quote_to_outcome(quote: AggregatorQuote) -> Outcome {
         .gas_units
         .map(U256::from)
         .unwrap_or(U256::ZERO);
-    Outcome::Solved(SolvedAmount { amount_out, amount_out_net_gas, gas_estimate })
+    Outcome::Solved(SolvedAmount { amount_out, amount_out_net_gas, gas_estimate, quote_json: None })
 }
 
 fn parse_u256(s: &str) -> Option<U256> {
