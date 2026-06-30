@@ -19,6 +19,7 @@ use crate::{
         },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
+        store::DerivedData,
         types::SpotPrices,
     },
     feed::market_data::MarketData,
@@ -45,6 +46,15 @@ impl DerivedComputation for SpotPriceComputation {
     type Output = SpotPrices;
 
     const ID: ComputationId = "spot_prices";
+
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        store.set_spot_prices(output.data, output.failed_items, block, is_full_recompute);
+    }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_spot_prices))]
     async fn compute(

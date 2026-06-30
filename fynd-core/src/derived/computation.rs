@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::{
     error::ComputationError,
     manager::{ChangedComponents, SharedDerivedDataRef},
+    store::DerivedData,
 };
 use crate::feed::market_data::MarketData;
 
@@ -45,12 +46,10 @@ impl RequirementConflict {
 ///
 /// ```ignore
 /// // Token prices don't change much block-to-block, stale is fine
-/// ComputationRequirements::none()
-///     .expect_stale("token_prices")?
+/// ComputationRequirements::stale(["token_prices"])
 ///
 /// // Spot prices must be fresh for accurate routing
-/// ComputationRequirements::none()
-///     .expect_fresh("spot_prices")?
+/// ComputationRequirements::fresh(["spot_prices"])
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
@@ -77,6 +76,16 @@ impl ComputationRequirements {
     /// Creates empty requirements (no derived data needed).
     pub fn none() -> Self {
         Self::default()
+    }
+
+    /// Creates requirements that need the given computations from the current block.
+    pub fn fresh<I: IntoIterator<Item = ComputationId>>(ids: I) -> Self {
+        Self { require_fresh: ids.into_iter().collect(), allow_stale: HashSet::new() }
+    }
+
+    /// Creates requirements that accept the given computations from any past block.
+    pub fn stale<I: IntoIterator<Item = ComputationId>>(ids: I) -> Self {
+        Self { require_fresh: HashSet::new(), allow_stale: ids.into_iter().collect() }
     }
 
     /// Builder method to add a computation that requires fresh data (current block).
@@ -195,9 +204,10 @@ impl<T> ComputationOutput<T> {
 ///
 /// # Design
 ///
-/// - No `dependencies()` method - execution order is hardcoded in `ComputationManager`
-/// - Typed `DerivedDataStore` - access previous results via `store.token_prices()` etc.
-/// - Each computation is explicitly added to `ComputationManager`
+/// - `requirements()` declares upstream computations so `ComputationManager` can order computations
+///   into dependency stages
+/// - Access previous results via the store getters (`store.token_prices()` etc.)
+/// - Each computation is registered with `ComputationManager`
 /// - Computations receive `Arc<RwLock<>>` references and acquire locks as needed, allowing early
 ///   release and granular locking strategies
 ///
@@ -238,6 +248,30 @@ pub trait DerivedComputation: Send + Sync + 'static {
     ///
     /// Used for event discrimination, storage keys, and readiness tracking.
     const ID: ComputationId;
+
+    /// Upstream computations this one reads from the store, by freshness.
+    ///
+    /// The manager uses this to order computations and to fail dependents when a
+    /// dependency fails. Defaults to none (a source computation with no upstream).
+    fn requirements(&self) -> ComputationRequirements {
+        ComputationRequirements::none()
+    }
+
+    /// Persists this computation's output into the store under [`Self::ID`].
+    ///
+    /// The default writes the output value into the store's generic slot and ignores
+    /// partial failures, so a computation needs no change to `DerivedData` to be
+    /// stored. Computations that keep a typed failure map (or other bespoke storage)
+    /// override this. The manager calls it after [`Self::compute`].
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        let _ = is_full_recompute;
+        store.set_output(Self::ID, output.data, block);
+    }
 
     /// Computes the derived data from market state.
     ///

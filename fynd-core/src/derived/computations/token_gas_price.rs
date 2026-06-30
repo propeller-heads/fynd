@@ -44,10 +44,13 @@ use tycho_simulation::{
 use crate::{
     derived::{
         computation::{
-            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+            ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
+            FailedItem, FailedItemError,
         },
+        computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
+        store::DerivedData,
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::{MarketData, MarketState},
@@ -554,6 +557,19 @@ impl DerivedComputation for TokenGasPriceComputation {
     type Output = TokenGasPrices;
 
     const ID: ComputationId = "token_prices";
+
+    fn requirements(&self) -> ComputationRequirements {
+        ComputationRequirements::fresh([SpotPriceComputation::ID])
+    }
+
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
     async fn compute(
