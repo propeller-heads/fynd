@@ -4,7 +4,10 @@
 //! This compares at the chain's current state. Re-solving at top-of-block (N-1) and back-of-block
 //! (N) as a range is a follow-up gated on `BlockStepController` support in `fynd-core`.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use alloy::primitives::{Address, U256};
 use async_trait::async_trait;
@@ -142,48 +145,76 @@ fn print_summary(summary: &Summary) {
     println!("{}", "=".repeat(60));
 }
 
-/// Decode `blocks`, re-solve every trade through the Fynd instance at `fynd_url`, and report.
-pub(crate) async fn run(
-    rpc_url: &str,
-    fynd_url: &str,
-    block: Option<u64>,
-    range: Option<&str>,
-    timeout_ms: u64,
-    json: bool,
-) -> anyhow::Result<()> {
-    let provider = crate::provider_from(rpc_url)?;
-    let blocks = crate::resolve_blocks(&provider, block, range).await?;
+/// Inputs for the `resolve` driver.
+pub(crate) struct ResolveConfig<'a> {
+    pub rpc_url: &'a str,
+    pub fynd_url: &'a str,
+    /// Chain label applied to metrics (the decoder is Ethereum-only for now).
+    pub chain: &'a str,
+    pub block: Option<u64>,
+    pub range: Option<&'a str>,
+    pub timeout_ms: u64,
+    /// When set, install the Prometheus exporter on this port and keep serving after the run.
+    pub metrics_port: Option<u16>,
+    pub json: bool,
+}
 
-    let client = FyndClientBuilder::new(fynd_url)
-        .with_timeout(Duration::from_millis(timeout_ms))
+/// Decode the requested blocks, re-solve every trade through the Fynd instance, record metrics,
+/// and report.
+pub(crate) async fn run(cfg: ResolveConfig<'_>) -> anyhow::Result<()> {
+    let provider = crate::provider_from(cfg.rpc_url)?;
+    let blocks = crate::resolve_blocks(&provider, cfg.block, cfg.range).await?;
+
+    if let Some(port) = cfg.metrics_port {
+        crate::telemetry::install_exporter(port)?;
+        info!(port, "serving Prometheus metrics at /metrics");
+    }
+
+    let client = FyndClientBuilder::new(cfg.fynd_url)
+        .with_timeout(Duration::from_millis(cfg.timeout_ms))
         .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
         .build_quote_only()
         .map_err(|e| anyhow::anyhow!("failed to build Fynd client: {e}"))?;
     let resolver =
-        FyndReSolver { aggregator: FyndAggregator::new(Arc::new(client), timeout_ms, 0.0) };
+        FyndReSolver { aggregator: FyndAggregator::new(Arc::new(client), cfg.timeout_ms, 0.0) };
 
+    // The HTTP resolve path has no in-process solver, so no token prices are available; USD savings
+    // is recorded only by the in-process `monitor`.
+    let prices = crate::usd::PriceMap::new();
     let mut comparisons = Vec::new();
     for block_number in &blocks {
+        let start = Instant::now();
         let trades = decode_block(&provider, *block_number).await?;
-        info!(block = block_number, count = trades.len(), "re-solving decoded trades");
+        let mut block_comparisons = Vec::with_capacity(trades.len());
         for trade in &trades {
-            comparisons.push(compare_trade(&resolver, trade).await);
+            let comparison = compare_trade(&resolver, trade).await;
+            crate::telemetry::record(&comparison, cfg.chain, &prices);
+            block_comparisons.push(comparison);
         }
+        let elapsed_s = start.elapsed().as_secs_f64();
+        crate::telemetry::record_block_seconds(elapsed_s);
+        info!(block = block_number, count = block_comparisons.len(), elapsed_s, "re-solved block");
+        comparisons.extend(block_comparisons);
     }
 
     let summary = summarize(&comparisons);
-    if json {
+    crate::telemetry::record_coverage(summary.total, summary.wins + summary.losses);
+
+    if cfg.json {
         #[derive(Serialize)]
         struct Report<'a> {
             summary: &'a Summary,
             comparisons: &'a [Comparison],
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Report { summary: &summary, comparisons: &comparisons })?
-        );
+        let report = Report { summary: &summary, comparisons: &comparisons };
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         print_summary(&summary);
+    }
+
+    if cfg.metrics_port.is_some() {
+        info!("metrics server still running — press ctrl-c to exit");
+        tokio::signal::ctrl_c().await.ok();
     }
     Ok(())
 }

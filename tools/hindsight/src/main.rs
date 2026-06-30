@@ -1,5 +1,7 @@
 mod decoder;
 mod resolve;
+mod telemetry;
+mod usd;
 
 use std::time::Instant;
 
@@ -96,6 +98,10 @@ struct ResolveArgs {
     #[arg(long, env = "FYND_URL", default_value = "http://localhost:3000")]
     fynd_url: String,
 
+    /// Chain label applied to metrics (the decoder is Ethereum-only for now)
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+
     /// Block number to re-solve (latest if omitted)
     #[arg(long)]
     block: Option<u64>,
@@ -107,6 +113,10 @@ struct ResolveArgs {
     /// Per-quote timeout in milliseconds for Fynd
     #[arg(long, default_value_t = 10_000)]
     timeout_ms: u64,
+
+    /// Serve Prometheus metrics on this port; keeps running after the pass so it can be scraped
+    #[arg(long)]
+    metrics_port: Option<u16>,
 
     /// Output as JSON instead of human-readable
     #[arg(long)]
@@ -126,14 +136,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
         Command::Resolve(args) => {
-            resolve::run::run(
-                &args.rpc_url,
-                &args.fynd_url,
-                args.block,
-                args.range.as_deref(),
-                args.timeout_ms,
-                args.json,
-            )
+            resolve::run::run(resolve::run::ResolveConfig {
+                rpc_url: &args.rpc_url,
+                fynd_url: &args.fynd_url,
+                chain: &args.chain,
+                block: args.block,
+                range: args.range.as_deref(),
+                timeout_ms: args.timeout_ms,
+                metrics_port: args.metrics_port,
+                json: args.json,
+            })
             .await
         }
     }
