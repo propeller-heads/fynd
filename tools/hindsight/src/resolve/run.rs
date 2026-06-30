@@ -31,7 +31,12 @@ impl super::ReSolver for FyndReSolver {
     async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
         match self
             .aggregator
-            .quote(&format!("{token_in:#x}"), &format!("{token_out:#x}"), &amount_in.to_string(), None)
+            .quote(
+                &format!("{token_in:#x}"),
+                &format!("{token_out:#x}"),
+                &amount_in.to_string(),
+                None,
+            )
             .await
         {
             Ok(quote) => quote_to_outcome(quote),
@@ -121,11 +126,8 @@ fn print_summary(summary: &Summary) {
     println!("  HINDSIGHT RE-SOLVE  ({} trades)", summary.total);
     println!("{}", "=".repeat(60));
     let comparable = summary.wins + summary.losses;
-    let win_pct = if comparable > 0 {
-        summary.wins as f64 / comparable as f64 * 100.0
-    } else {
-        0.0
-    };
+    let win_pct =
+        if comparable > 0 { summary.wins as f64 / comparable as f64 * 100.0 } else { 0.0 };
     println!("  Fynd wins:  {}/{} ({win_pct:.1}%)", summary.wins, comparable);
     println!("  losses:     {}", summary.losses);
     println!("  unsolvable: {}", summary.unsolvable);
@@ -157,7 +159,8 @@ pub(crate) async fn run(
         .with_retry(RetryConfig::new(1, Duration::from_millis(0), Duration::from_millis(0)))
         .build_quote_only()
         .map_err(|e| anyhow::anyhow!("failed to build Fynd client: {e}"))?;
-    let resolver = FyndReSolver { aggregator: FyndAggregator::new(Arc::new(client), timeout_ms, 0.0) };
+    let resolver =
+        FyndReSolver { aggregator: FyndAggregator::new(Arc::new(client), timeout_ms, 0.0) };
 
     let mut comparisons = Vec::new();
     for block_number in &blocks {
@@ -175,7 +178,10 @@ pub(crate) async fn run(
             summary: &'a Summary,
             comparisons: &'a [Comparison],
         }
-        println!("{}", serde_json::to_string_pretty(&Report { summary: &summary, comparisons: &comparisons })?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Report { summary: &summary, comparisons: &comparisons })?
+        );
     } else {
         print_summary(&summary);
     }
@@ -222,18 +228,12 @@ mod tests {
 
     #[test]
     fn quote_to_outcome_unsuccessful_is_unsolvable() {
-        assert!(matches!(
-            quote_to_outcome(quote(None, None, false)),
-            Outcome::Unsolvable(_)
-        ));
+        assert!(matches!(quote_to_outcome(quote(None, None, false)), Outcome::Unsolvable(_)));
     }
 
     #[test]
     fn quote_to_outcome_missing_amount_is_unsolvable() {
-        assert!(matches!(
-            quote_to_outcome(quote(None, None, true)),
-            Outcome::Unsolvable(_)
-        ));
+        assert!(matches!(quote_to_outcome(quote(None, None, true)), Outcome::Unsolvable(_)));
     }
 
     fn comparison(verdict: Verdict, raw: Option<f64>, net: Option<f64>) -> Comparison {

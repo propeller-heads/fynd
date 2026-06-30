@@ -12,9 +12,8 @@ pub(crate) mod run;
 
 use alloy::primitives::{Address, U256};
 use async_trait::async_trait;
-use serde::Serialize;
-
 pub(crate) use compare::{Deltas, Verdict};
+use serde::Serialize;
 
 use crate::decoder::DecodedTrade;
 
@@ -68,6 +67,7 @@ pub(crate) async fn compare_trade<R: ReSolver + ?Sized>(
     let outcome = resolver
         .solve(trade.token_in, trade.token_out, trade.amount_in)
         .await;
+    let outcome = compare::served(outcome, trade.amount_out);
     let deltas = compare::compare(&outcome, trade.amount_out);
     let verdict = compare::verdict(&outcome, trade.amount_out);
 
@@ -133,8 +133,9 @@ mod tests {
 
     #[tokio::test]
     async fn compare_trade_unsolvable() {
-        let cmp = compare_trade(&MockSolver(Outcome::Unsolvable("no route".into())), &trade(10_000))
-            .await;
+        let cmp =
+            compare_trade(&MockSolver(Outcome::Unsolvable("no route".into())), &trade(10_000))
+                .await;
         assert_eq!(cmp.verdict, Verdict::Unsolvable);
         assert_eq!(cmp.deltas, Deltas { raw_bps: None, net_bps: None });
     }

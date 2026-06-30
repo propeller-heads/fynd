@@ -31,6 +31,39 @@ pub(crate) enum Verdict {
     Unsolvable,
 }
 
+/// Minimum fraction of the settled output Fynd must produce for the result to count as a real
+/// comparison. Below this, Fynd could not serve the trade's size (it returned a partial route), so
+/// the result is treated as a coverage miss rather than booked as a near-total loss — otherwise a
+/// single un-fillable whale dominates the USD aggregate.
+const MIN_FILL_RATIO: f64 = 0.5;
+
+/// Reclassify a Fynd quote that filled far less than the settled amount as a coverage miss.
+///
+/// Both amounts are in `token_out` units, so their ratio is unit-free. A `Solved` outcome whose raw
+/// output is below [`MIN_FILL_RATIO`] of the settled amount becomes [`Outcome::Unsolvable`]; every
+/// other outcome passes through unchanged.
+pub(crate) fn served(outcome: Outcome, settled_amount_out: U256) -> Outcome {
+    let Outcome::Solved(ref solved) = outcome else {
+        return outcome;
+    };
+    let settled: f64 = settled_amount_out
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
+    let fynd: f64 = solved
+        .amount_out
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
+    if settled > 0.0 && fynd < MIN_FILL_RATIO * settled {
+        return Outcome::Unsolvable(format!(
+            "partial fill: {:.0}% of settled",
+            fynd / settled * 100.0
+        ));
+    }
+    outcome
+}
+
 /// Compute raw and net-of-gas bps deltas of `outcome` against `settled_amount_out`.
 pub(crate) fn compare(outcome: &Outcome, settled_amount_out: U256) -> Deltas {
     let Outcome::Solved(solved) = outcome else {
@@ -109,5 +142,27 @@ mod tests {
             verdict(&Outcome::Unsolvable("missing token".into()), U256::from(10_000u64)),
             Verdict::Unsolvable
         );
+    }
+
+    #[test]
+    fn served_reclassifies_partial_fill_as_unsolvable() {
+        // Fynd produced only 40% of the settled output → coverage miss, not a loss.
+        assert!(matches!(served(solved(400, 390), U256::from(1_000u64)), Outcome::Unsolvable(_)));
+    }
+
+    #[test]
+    fn served_keeps_adequate_fill() {
+        // 90% fill is a real (worse) quote, not a coverage miss; the floor is kept.
+        assert!(matches!(served(solved(900, 880), U256::from(1_000u64)), Outcome::Solved(_)));
+        assert!(matches!(served(solved(500, 490), U256::from(1_000u64)), Outcome::Solved(_)));
+    }
+
+    #[test]
+    fn served_passes_through_unsolvable_and_zero_settled() {
+        assert!(matches!(
+            served(Outcome::Unsolvable("x".into()), U256::from(1_000u64)),
+            Outcome::Unsolvable(_)
+        ));
+        assert!(matches!(served(solved(1, 1), U256::ZERO), Outcome::Solved(_)));
     }
 }
