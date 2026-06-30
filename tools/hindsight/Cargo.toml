@@ -10,8 +10,11 @@ name = "hindsight"
 path = "src/main.rs"
 
 [dependencies]
-# Fynd integration (re-solve via a running solver)
+# Fynd integration: re-solve via a running solver (HTTP) or an in-process stepped solver
 fynd-client = { workspace = true }
+fynd-core = { workspace = true }
+fynd-rpc = { workspace = true }
+tycho-simulation = { workspace = true }
 # Shared tooling (BPS comparison math, FyndAggregator wrapper)
 fynd-tools-common = { workspace = true }
 num-bigint = { workspace = true }
@@ -33,8 +36,13 @@ alloy = { workspace = true, features = [
     "rpc-types-trace",
 ] }
 
-# HTTP (for RPC URL parsing)
+# HTTP (for RPC URL parsing) + metrics server
 reqwest = { workspace = true }
+actix-web = { workspace = true }
+
+# Prometheus metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 # Error handling & logging
 anyhow = { workspace = true }
