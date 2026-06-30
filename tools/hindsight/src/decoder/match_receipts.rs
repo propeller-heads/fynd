@@ -8,14 +8,17 @@ use alloy::{
 };
 use tracing::warn;
 
-use crate::decoder::net::{decode_trade, to_primitive_log, Transfer};
+use crate::decoder::{
+    net::{decode_trade, to_primitive_log, Transfer},
+    registry::is_batch_settler,
+};
 
 /// A matched transaction and how it was found.
 pub(crate) struct Matched<'a> {
     pub receipt: &'a TransactionReceipt,
     pub entry_point: Address,
-    /// Discovered only via a known aggregator log — `tx.to` is a filler, so
-    /// the swapper is the order maker, not the sender.
+    /// The swapper is an order maker, not the sender: either the tx was discovered via a known
+    /// aggregator log (`tx.to` is a filler) or `tx.to` is a batch settler entered by a solver.
     pub intent_fill: bool,
 }
 
@@ -30,7 +33,9 @@ pub(crate) fn match_receipt<'a>(
     }
     let entry_point = receipt.to?;
     if names.contains_key(&entry_point) {
-        return Some(Matched { receipt, entry_point, intent_fill: false });
+        // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is an
+        // order maker's net flow — decode it like a filler-initiated intent fill.
+        return Some(Matched { receipt, entry_point, intent_fill: is_batch_settler(&entry_point) });
     }
     let via_log = receipt
         .logs()

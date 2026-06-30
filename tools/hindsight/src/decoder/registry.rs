@@ -42,6 +42,18 @@ pub(crate) fn known_clients() -> HashMap<Address, &'static str> {
     ])
 }
 
+/// Whether `address` is a batch-settlement venue where `tx.to` is the settlement contract and the
+/// transaction sender is a solver, not the trader.
+///
+/// Such trades must be decoded by finding the order maker (like a filler-initiated intent fill),
+/// not by tracking the sender: a solver settles many orders at once, so its net flow is not a
+/// single swap even when it happens to net to one token on each side.
+pub(crate) fn is_batch_settler(address: &Address) -> bool {
+    // CoW Protocol Settlement.
+    const COW_SETTLEMENT: Address = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
+    *address == COW_SETTLEMENT
+}
+
 /// All known addresses, for resolving an address to a human name.
 pub(crate) fn known_names() -> HashMap<Address, &'static str> {
     let mut names = known_aggregators();
@@ -71,6 +83,15 @@ mod tests {
         assert!(known_clients()
             .values()
             .any(|v| *v == "relay"));
+    }
+
+    #[test]
+    fn cow_is_a_batch_settler() {
+        let cow = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        assert!(is_batch_settler(&cow));
+        assert!(!is_batch_settler(&oneinch));
+        assert!(!is_batch_settler(&addr(123)));
     }
 
     #[test]
