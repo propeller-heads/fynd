@@ -116,8 +116,4 @@ pub(crate) enum DataFeedError {
     /// Update error.
     #[error("stream error: {0}")]
     StreamError(String),
-
-    /// Event send error.
-    #[error("event send error: {0}")]
-    EventChannelError(String),
 }

@@ -12,9 +12,12 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
-use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+use tracing::{debug, info, instrument, span, trace, warn, Instrument, Level};
 use tycho_simulation::{
-    evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
+    evm::{
+        pending::PendingBlockProcessor,
+        stream::{BlockStepController, ProtocolStreamBuilder},
+    },
     protocol::models::Update,
     rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
@@ -439,6 +442,397 @@ impl TychoFeed {
         Ok(())
     }
 
+    /// Like [`run_with_pending`](Self::run_with_pending) but also gates each block behind a
+    /// [`BlockStepController`].
+    ///
+    /// Both the [`PendingBlockProcessor`] and the [`BlockStepController`] are delivered before
+    /// the first block is processed. Only valid when at least one non-RFQ protocol is configured.
+    pub(crate) async fn run_with_pending_and_step_controller(
+        self,
+        pending_tx: oneshot::Sender<Result<PendingBlockProcessor, String>>,
+        controller_tx: oneshot::Sender<Result<BlockStepController, String>>,
+        pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
+    ) -> Result<(), DataFeedError> {
+        info!(
+            tycho_url = %self.config.tycho_url,
+            protocols = ?self.config.protocols,
+            "Starting Data Feed (with pending + step controller)..."
+        );
+
+        if self
+            .config
+            .protocols
+            .iter()
+            .all(|p| p.starts_with("rfq:"))
+        {
+            let msg = "step controller requires at least one non-RFQ protocol".to_string();
+            let _ = pending_tx.send(Err(msg.clone()));
+            let _ = controller_tx.send(Err(msg.clone()));
+            return Err(DataFeedError::Config(msg));
+        }
+
+        let tycho_api_key = self
+            .config
+            .tycho_api_key
+            .clone()
+            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
+
+        let all_tokens = match load_all_tokens(
+            self.config.tycho_url.as_str(),
+            !self.config.use_tls,
+            tycho_api_key.as_deref(),
+            true,
+            self.config.chain,
+            Some(self.config.min_token_quality),
+            self.config.traded_n_days_ago,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let e = DataFeedError::StreamError(e.to_string());
+                let _ = pending_tx.send(Err(e.to_string()));
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        };
+
+        debug!("Loaded {} tokens from Tycho", all_tokens.len());
+
+        let mut stream_builder = match register_exchanges(
+            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                .skip_state_decode_failures(true),
+            ComponentFilter::with_tvl_range(
+                self.config.min_tvl / self.config.tvl_buffer_ratio,
+                self.config.min_tvl,
+            )
+            .blocklist(
+                self.config
+                    .blocklisted_components
+                    .clone(),
+            ),
+            &self.config.protocols,
+        ) {
+            Ok(sb) => sb,
+            Err(e) => {
+                let _ = pending_tx.send(Err(e.to_string()));
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        }
+        .auth_key(self.config.tycho_api_key.clone())
+        .skip_state_decode_failures(true)
+        .min_token_quality(self.config.min_token_quality as u32)
+        .set_tokens(all_tokens.clone())
+        .await;
+
+        for (extractor, indexer) in pending_indexers {
+            stream_builder = match stream_builder.with_pending_indexer(&extractor, indexer) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    let e = DataFeedError::StreamError(e.to_string());
+                    let _ = pending_tx.send(Err(e.to_string()));
+                    let _ = controller_tx.send(Err(e.to_string()));
+                    return Err(e);
+                }
+            };
+        }
+
+        let (stream_builder, controller) = stream_builder.with_step_controller();
+
+        let mut protocol_stream = match stream_builder
+            .build_with_pending()
+            .await
+        {
+            Ok((stream, pending)) => {
+                if pending_tx.send(Ok(pending)).is_err() {
+                    tracing::warn!(
+                        "PendingBlockProcessor receiver dropped before send; continuing without \
+                         pending updates"
+                    );
+                }
+                let _ = controller_tx.send(Ok(controller));
+                Box::pin(stream)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = pending_tx.send(Err(msg.clone()));
+                let _ = controller_tx.send(Err(msg.clone()));
+                return Err(DataFeedError::StreamError(msg));
+            }
+        };
+
+        // Spawn RFQ stream (same as run_with_pending()).
+        let (mut rfq_rx, mut rfq_handle) = if self
+            .config
+            .protocols
+            .iter()
+            .any(|p| p.starts_with("rfq:"))
+        {
+            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
+            let rfq_stream_builder = register_rfq(
+                RFQStreamBuilder::new()
+                    .set_tokens(all_tokens)
+                    .await,
+                self.config.chain,
+                self.config.min_tvl,
+                &self.config.protocols,
+                rfq_tokens,
+            )?;
+            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
+            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
+                rfq_stream_builder
+                    .build(rfq_tx)
+                    .await
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                Ok(())
+            });
+            (Some(rfq_rx), Some(rfq_handle))
+        } else {
+            (None, None)
+        };
+
+        loop {
+            tokio::select! {
+                msg = protocol_stream.next() => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from protocol stream: {:?}", msg);
+                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("Protocol stream ended");
+                            break;
+                        }
+                    }
+                }
+                msg = async {
+                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
+                    else { std::future::pending().await }
+                } => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from RFQ stream: {:?}", msg);
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("RFQ stream ended");
+                            break;
+                        }
+                    }
+                }
+                rfq_result = async {
+                    if let Some(handle) = &mut rfq_handle { handle.await }
+                    else { std::future::pending().await }
+                } => {
+                    match rfq_result {
+                        Ok(Ok(())) => {
+                            return Err(DataFeedError::StreamError(
+                                "RFQ stream task ended unexpectedly".to_string(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
+                        }
+                        Err(e) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Like [`run`](Self::run) but gates each block behind a [`BlockStepController`].
+    ///
+    /// Delivers the controller (or an error string) via `controller_tx` once the stream is
+    /// built and before the first block is processed. The caller must call
+    /// [`BlockStepController::trigger_next_block`] for each block to be processed.
+    ///
+    /// Only valid when at least one non-RFQ protocol is configured. Returns
+    /// [`DataFeedError::Config`] if all protocols are RFQ.
+    pub(crate) async fn run_with_step_controller(
+        self,
+        controller_tx: oneshot::Sender<Result<BlockStepController, String>>,
+    ) -> Result<(), DataFeedError> {
+        info!(
+            tycho_url = %self.config.tycho_url,
+            protocols = ?self.config.protocols,
+            "Starting Data Feed (with step controller)..."
+        );
+
+        if self
+            .config
+            .protocols
+            .iter()
+            .all(|p| p.starts_with("rfq:"))
+        {
+            let msg = "step controller requires at least one non-RFQ protocol".to_string();
+            let _ = controller_tx.send(Err(msg.clone()));
+            return Err(DataFeedError::Config(msg));
+        }
+
+        let tycho_api_key = self
+            .config
+            .tycho_api_key
+            .clone()
+            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
+
+        let all_tokens = match load_all_tokens(
+            self.config.tycho_url.as_str(),
+            !self.config.use_tls,
+            tycho_api_key.as_deref(),
+            true,
+            self.config.chain,
+            Some(self.config.min_token_quality),
+            self.config.traded_n_days_ago,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let e = DataFeedError::StreamError(e.to_string());
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        };
+
+        debug!("Loaded {} tokens from Tycho", all_tokens.len());
+
+        let tvl_filter = ComponentFilter::with_tvl_range(
+            self.config.min_tvl / self.config.tvl_buffer_ratio,
+            self.config.min_tvl,
+        )
+        .blocklist(
+            self.config
+                .blocklisted_components
+                .clone(),
+        );
+
+        let mut stream_builder = match register_exchanges(
+            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                .skip_state_decode_failures(true),
+            tvl_filter,
+            &self.config.protocols,
+        ) {
+            Ok(sb) => sb,
+            Err(e) => {
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        }
+        .auth_key(self.config.tycho_api_key.clone())
+        .skip_state_decode_failures(true)
+        .min_token_quality(self.config.min_token_quality as u32);
+
+        if self.config.partial_blocks {
+            stream_builder = stream_builder.enable_partial_blocks();
+        }
+
+        let stream_builder = stream_builder
+            .set_tokens(all_tokens.clone())
+            .await;
+        let (stream_builder, controller) = stream_builder.with_step_controller();
+
+        let mut protocol_stream = match stream_builder.build().await {
+            Ok(stream) => {
+                let _ = controller_tx.send(Ok(controller));
+                Box::pin(stream)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = controller_tx.send(Err(msg.clone()));
+                return Err(DataFeedError::StreamError(msg));
+            }
+        };
+
+        // Spawn rfq stream (same as run()).
+        let (mut rfq_rx, mut rfq_handle) = if self
+            .config
+            .protocols
+            .iter()
+            .any(|p| p.starts_with("rfq:"))
+        {
+            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
+            let rfq_stream_builder = register_rfq(
+                RFQStreamBuilder::new()
+                    .set_tokens(all_tokens)
+                    .await,
+                self.config.chain,
+                self.config.min_tvl,
+                &self.config.protocols,
+                rfq_tokens,
+            )?;
+            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
+            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
+                rfq_stream_builder
+                    .build(rfq_tx)
+                    .await
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                Ok(())
+            });
+            (Some(rfq_rx), Some(rfq_handle))
+        } else {
+            (None, None)
+        };
+
+        loop {
+            tokio::select! {
+                msg = protocol_stream.next() => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from protocol stream: {:?}", msg);
+                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("Protocol stream ended");
+                            break;
+                        }
+                    }
+                }
+                msg = async {
+                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
+                    else { std::future::pending().await }
+                } => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from RFQ stream: {:?}", msg);
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("RFQ stream ended");
+                            break;
+                        }
+                    }
+                }
+                rfq_result = async {
+                    if let Some(handle) = &mut rfq_handle { handle.await }
+                    else { std::future::pending().await }
+                } => {
+                    match rfq_result {
+                        Ok(Ok(())) => {
+                            return Err(DataFeedError::StreamError(
+                                "RFQ stream task ended unexpectedly".to_string(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
+                        }
+                        Err(e) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
     pub(crate) async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
@@ -549,9 +943,12 @@ impl TychoFeed {
                     .collect(),
             };
 
-            self.event_tx
-                .send(market_update_event)
-                .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;
+            // A broadcast send fails only when no receivers are currently subscribed. The market
+            // state was already updated above; this event is just a notification, so a transient
+            // absence of subscribers must not kill the feed — that would stop the whole solver.
+            if let Err(e) = self.event_tx.send(market_update_event) {
+                warn!(error = %e, "no market-event subscribers; skipping notification");
+            }
         }
 
         Ok(())
@@ -795,6 +1192,37 @@ mod tests {
                 updated_components: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn handle_message_ok_when_no_subscribers() {
+        // A broadcast send fails when no receivers are subscribed; that must not be fatal, or a
+        // transient absence of subscribers would kill the feed and stop the whole solver.
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        drop(feed.subscribe()); // leaves zero live receivers
+
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1, token2]),
+        );
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+
+        // There are changes, so this reaches the broadcast send; it must still return Ok.
+        feed.handle_tycho_message(update)
+            .await
+            .expect("must not fail when there are no subscribers");
+
+        // The market state is applied regardless of whether the notification was delivered.
+        assert!(market_data
+            .read()
+            .await
+            .get_component(component_id)
+            .is_some());
     }
 
     #[tokio::test]
