@@ -217,6 +217,19 @@ where
                 let gas_price = result.gas_price().clone();
                 let route = result.into_route();
 
+                if let Err(err) = route.validate() {
+                    error!(
+                        order_id = %order.id(),
+                        algorithm = self.algorithm.name(),
+                        error = %err,
+                        "algorithm produced an invalid route"
+                    );
+                    return Err(SolveError::AlgorithmError(format!(
+                        "{} produced an invalid route: {err}",
+                        self.algorithm.name()
+                    )));
+                }
+
                 // This is a first naive approach to getting the total gas of this quote
                 // A finer estimation is done during encoding
                 let gas_estimate = route.total_gas();
@@ -525,17 +538,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
     use super::*;
     use crate::{
-        algorithm::{most_liquid::DepthAndPrice, test_utils::setup_market_weighted},
+        algorithm::{
+            most_liquid::DepthAndPrice,
+            test_utils::{component, order, setup_market_weighted, token, MockProtocolSim},
+        },
         derived::{
             computation::DerivedComputation,
             computations::{SpotPriceComputation, TokenGasPriceComputation},
             DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        types::{OrderSide, Route, RouteResult, Swap},
+        AlgorithmError,
     };
 
     /// A minimal mock algorithm for testing the worker.
@@ -581,6 +599,91 @@ mod tests {
 
         fn timeout(&self) -> Duration {
             self.timeout
+        }
+    }
+
+    /// Mock algorithm that returns a structurally invalid route (two disconnected swaps).
+    /// Used to verify the worker rejects invalid routes regardless of which algorithm produced
+    /// them.
+    struct InvalidRouteAlgorithm;
+
+    impl Algorithm for InvalidRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "invalid_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let token_c = token(0x03, "C");
+            let token_d = token(0x04, "D");
+            // A→B then C→D: the first swap's output (B) does not feed the second's input (C),
+            // so `validate` must reject this as `DisconnectedSwaps`.
+            let swap_ab = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(90u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let swap_cd = Swap::new(
+                "p2".to_string(),
+                "mock".to_string(),
+                token_c.address.clone(),
+                token_d.address.clone(),
+                BigUint::from(90u64),
+                BigUint::from(80u64),
+                BigUint::from(1u64),
+                component("p2", &[token_c.clone(), token_d.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route =
+                Route::new(vec![swap_ab, swap_cd], HashMap::new()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(0), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_rejects_invalid_route() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0);
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let result = worker
+            .quote(&ord, SolveParams::default())
+            .await;
+
+        match result {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("invalid route"), "unexpected message: {msg}");
+            }
+            other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
     }
 
