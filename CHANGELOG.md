@@ -1,3 +1,10 @@
+## [0.82.2](https://github.com/propeller-heads/fynd/compare/0.82.1...0.82.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* pin nightly version to work around rustc ICE ([faa03a7](https://github.com/propeller-heads/fynd/commit/faa03a7dd6306dcce1cc1a67d858f72a42981589))
+
 ## [0.82.1](https://github.com/propeller-heads/fynd/compare/0.82.0...0.82.1) (2026-06-29)
 
 
