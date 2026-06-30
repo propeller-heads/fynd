@@ -21,10 +21,20 @@ use tracing::warn;
 
 use crate::decoder::{
     match_receipts::{find_maker_trade, match_receipt, Matched},
-    net::{decode_trade, fee_to_collectors},
-    registry::{known_aggregators, known_fee_collectors, known_names, label},
+    net::{decode_relay_rebalance, decode_trade, fee_to_collectors},
+    registry::{known_aggregators, known_fee_collectors, known_names, label, relay_routers},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
 };
+
+/// Sub-type of a Relay solver-initiated rebalancing fill (see [`net::decode_relay_rebalance`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RelayFill {
+    /// Output delivered to an external recipient — a cross-chain order fill.
+    External,
+    /// Output returns to Relay's fee collector — an internal inventory rebalance.
+    Internal,
+}
 
 /// A decoded aggregator trade: what token went in, what came out.
 ///
@@ -47,6 +57,10 @@ pub(crate) struct DecodedTrade {
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_fee: Option<U256>,
+    /// Set when this trade is a Relay solver rebalancing fill decoded via the fee-collector anchor
+    /// rather than a user's net flow (see [`RelayFill`]); `None` for ordinary user swaps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_fill: Option<RelayFill>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -70,6 +84,7 @@ pub(crate) async fn decode_block<P: Provider>(
     let aggregators = known_aggregators();
     let names = known_names();
     let fee_collectors = known_fee_collectors();
+    let relay_router_set = relay_routers();
 
     let receipts = provider
         .get_block_receipts(block_number.into())
@@ -126,7 +141,33 @@ pub(crate) async fn decode_block<P: Provider>(
                 })
         };
 
+        let aggregator =
+            attribute_aggregator(&root, entry_point, sender, aggregators).unwrap_or(entry_point);
+
         let Some((tracked, (token_in, amount_in, token_out, amount_out))) = decoded else {
+            // No user net flow. A Relay solver rebalancing fill has its sender net to zero, so
+            // anchor on the fee collector instead (Relay funds the swap from it).
+            if relay_router_set.contains(&entry_point) {
+                if let Some((fill, token_in, amount_in, token_out, amount_out)) =
+                    decode_relay_rebalance(logs, &native, &fee_collectors, &relay_router_set)
+                {
+                    trades.push(DecodedTrade {
+                        tx_hash: receipt.transaction_hash,
+                        block_number,
+                        client: label(entry_point, names),
+                        aggregator: label(aggregator, names),
+                        sender,
+                        token_in,
+                        token_out,
+                        amount_in,
+                        amount_out,
+                        // The collector is the funding source here, not a skim — no fee back-out.
+                        client_fee: None,
+                        relay_fill: Some(fill),
+                    });
+                    continue;
+                }
+            }
             warn!(
                 tx = %receipt.transaction_hash,
                 client = %label(entry_point, names),
@@ -134,9 +175,6 @@ pub(crate) async fn decode_block<P: Provider>(
             );
             continue;
         };
-
-        let aggregator =
-            attribute_aggregator(&root, entry_point, sender, aggregators).unwrap_or(entry_point);
 
         // Back out any input-side fee a known client collector skimmed before the swap, so the
         // re-solve compares Fynd against the amount actually routed (not the user's gross spend).
@@ -157,6 +195,7 @@ pub(crate) async fn decode_block<P: Provider>(
             amount_in,
             amount_out,
             client_fee,
+            relay_fill: None,
         });
     }
 

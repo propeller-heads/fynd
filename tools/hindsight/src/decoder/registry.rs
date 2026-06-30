@@ -65,6 +65,18 @@ pub(crate) fn known_fee_collectors() -> HashSet<Address> {
     ])
 }
 
+/// Relay router addresses — the subset of [`known_clients`] labelled `relay`. Used to recognise a
+/// Relay solver-initiated rebalancing fill, where the transaction sender is a rotating solver EOA
+/// with no net flow and the swap moves Relay's own liquidity (see
+/// [`crate::decoder::net::decode_relay_rebalance`]).
+pub(crate) fn relay_routers() -> HashSet<Address> {
+    known_clients()
+        .into_iter()
+        .filter(|(_, name)| *name == "relay")
+        .map(|(address, _)| address)
+        .collect()
+}
+
 /// Whether `address` is a batch-settlement venue where `tx.to` is the settlement contract and the
 /// transaction sender is a solver, not the trader.
 ///
