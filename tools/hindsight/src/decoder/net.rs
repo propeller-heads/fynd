@@ -6,7 +6,6 @@ use alloy::{
     sol,
     sol_types::SolEvent,
 };
-use tracing::warn;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -55,8 +54,13 @@ pub(crate) fn decode_trade(
     net_trade(&sent, &received)
 }
 
-/// Net the sent and received balances and pick the dominant token on
-/// each side. Returns `None` if either side is empty after netting.
+/// Net the sent and received balances into a single swap.
+///
+/// Returns `None` unless exactly one token nets out and exactly one token nets in. A net with more
+/// than one token on a side is a batch settlement (e.g. a CoW solver settling many orders, where
+/// the tracked sender is the solver, not a trader), not a single comparable swap. Amounts across
+/// tokens with different decimals are not comparable, so guessing a "dominant" leg would pair
+/// unrelated tokens — declining keeps the re-solve comparison honest.
 fn net_trade(
     sent: &HashMap<Address, U256>,
     received: &HashMap<Address, U256>,
@@ -85,24 +89,14 @@ fn net_trade(
         }
     }
 
-    if net_sent.is_empty() || net_received.is_empty() {
-        return None;
-    }
-
-    if net_sent.len() > 1 || net_received.len() > 1 {
-        warn!(
-            tokens_in = net_sent.len(),
-            tokens_out = net_received.len(),
-            "multi-token trade detected, using largest amounts"
-        );
-    }
-
     let (&token_in, &amount_in) = net_sent
         .iter()
-        .max_by_key(|(_, v)| *v)?;
+        .next()
+        .filter(|_| net_sent.len() == 1)?;
     let (&token_out, &amount_out) = net_received
         .iter()
-        .max_by_key(|(_, v)| *v)?;
+        .next()
+        .filter(|_| net_received.len() == 1)?;
     Some((token_in, amount_in, token_out, amount_out))
 }
 
@@ -181,5 +175,43 @@ mod tests {
         let sender = addr(1);
         let logs = vec![make_transfer_log(addr(10), addr(50), addr(51), U256::from(1000))];
         assert!(decode_trade(&logs, &[], sender).is_none());
+    }
+
+    #[test]
+    fn multi_token_batch_settlement_declined() {
+        // A batch settler (e.g. a CoW solver) nets two distinct tokens in and two out across
+        // several orders. That is not one swap, so picking a "dominant" leg by raw amount would
+        // pair unrelated tokens. Decline instead of guessing.
+        let settler = addr(1);
+        let token_a = addr(10);
+        let token_b = addr(11);
+        let token_c = addr(12);
+        let token_d = addr(13);
+
+        let logs = vec![
+            make_transfer_log(token_a, settler, addr(50), U256::from(1_000)),
+            make_transfer_log(token_b, settler, addr(51), U256::from(2_000)),
+            make_transfer_log(token_c, addr(52), settler, U256::from(3_000)),
+            make_transfer_log(token_d, addr(53), settler, U256::from(4_000)),
+        ];
+
+        assert!(decode_trade(&logs, &[], settler).is_none());
+    }
+
+    #[test]
+    fn one_in_many_out_declined() {
+        // One token in but two distinct tokens out (a split/batch fill) is also ambiguous.
+        let settler = addr(1);
+        let token_a = addr(10);
+        let token_c = addr(12);
+        let token_d = addr(13);
+
+        let logs = vec![
+            make_transfer_log(token_a, settler, addr(50), U256::from(1_000)),
+            make_transfer_log(token_c, addr(52), settler, U256::from(3_000)),
+            make_transfer_log(token_d, addr(53), settler, U256::from(4_000)),
+        ];
+
+        assert!(decode_trade(&logs, &[], settler).is_none());
     }
 }
