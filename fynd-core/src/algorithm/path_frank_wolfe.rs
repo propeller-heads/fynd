@@ -598,6 +598,14 @@ impl Algorithm for PathFrankWolfeAlgorithm {
 
         // Build the split route and compare with the initial single-path result.
         let split_route = build_split_route(&allocations, &ctx.market_data, order)?;
+
+        // Fall back to the single-path result if the split route is invalid, so a malformed split
+        // doesn't fail the whole solve when a valid route is available.
+        if let Err(e) = split_route.validate() {
+            debug!(error = %e, "split route failed validation, falling back to single path");
+            return Ok(single_path_result);
+        }
+
         let gas_price = ctx
             .gas_price_wei
             .clone()
