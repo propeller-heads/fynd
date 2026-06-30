@@ -133,6 +133,18 @@ impl Algorithm for DirectPoolAlgorithm {
             );
 
             let route = Route::new(vec![swap], HashMap::new())?;
+
+            // Validate every candidate route before returning it. The solver worker rejects
+            // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that
+            // failure drops the whole solution for this worker pool. Skipping invalid candidates
+            // here lets a later pool be chosen instead. Any custom algorithm should validate the
+            // routes it might return, and — when it ranks multiple candidates — fall through to
+            // the next-best valid one rather than returning the invalid route.
+            if let Err(e) = route.validate() {
+                eprintln!("skipping invalid route: {e}");
+                continue;
+            }
+
             let net_amount_out = BigInt::from(result.amount);
 
             return Ok(RouteResult::new(route, net_amount_out, gas_price));

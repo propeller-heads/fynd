@@ -588,6 +588,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         let mut paths_simulated = 0usize;
         let mut simulation_failures = 0usize;
+        let mut validation_failures = 0usize;
 
         // Step 5: Simulate all paths in score order using the local market subset
         let mut best: Option<RouteResult> = None;
@@ -613,6 +614,13 @@ impl Algorithm for MostLiquidAlgorithm {
                     continue;
                 }
             };
+
+            // Skip routes that fail validation so the next-best candidate can win.
+            if let Err(e) = result.route().validate() {
+                trace!(error = %e, "skipping invalid route");
+                validation_failures += 1;
+                continue;
+            }
 
             // Check if this is the best result so far
             if best
@@ -641,6 +649,7 @@ impl Algorithm for MostLiquidAlgorithm {
         // Record metrics
         counter!("algorithm.scoring_failures").increment(scoring_failures as u64);
         counter!("algorithm.simulation_failures").increment(simulation_failures as u64);
+        counter!("algorithm.validation_failures").increment(validation_failures as u64);
         histogram!("algorithm.simulation_coverage_pct").record(coverage_pct);
 
         match &best {
@@ -672,6 +681,7 @@ impl Algorithm for MostLiquidAlgorithm {
                     paths_to_simulate,
                     paths_simulated,
                     simulation_failures,
+                    validation_failures,
                     simulation_coverage_pct = coverage_pct,
                     components_considered = component_ids.len(),
                     tokens_considered = market.token_registry_ref().len(),
@@ -692,6 +702,7 @@ impl Algorithm for MostLiquidAlgorithm {
                     paths_to_simulate,
                     paths_simulated,
                     simulation_failures,
+                    validation_failures,
                     simulation_coverage_pct = coverage_pct,
                     components_considered = component_ids.len(),
                     tokens_considered = market.token_registry_ref().len(),
