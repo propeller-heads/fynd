@@ -21,8 +21,8 @@ use tracing::warn;
 
 use crate::decoder::{
     match_receipts::{find_maker_trade, match_receipt, Matched},
-    net::decode_trade,
-    registry::{known_aggregators, known_names, label},
+    net::{decode_trade, fee_to_collectors},
+    registry::{known_aggregators, known_fee_collectors, known_names, label},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
 };
 
@@ -38,8 +38,15 @@ pub(crate) struct DecodedTrade {
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
+    /// Input amount that actually entered the swap — a client fee skimmed from the input (see
+    /// [`client_fee`]) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
     pub amount_out: U256,
+    /// Client fee skimmed from the input token before swapping (e.g. Relay's fee), in `token_in`
+    /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
+    /// already excluded from `amount_in`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_fee: Option<U256>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -62,6 +69,7 @@ pub(crate) async fn decode_block<P: Provider>(
 ) -> anyhow::Result<Vec<DecodedTrade>> {
     let aggregators = known_aggregators();
     let names = known_names();
+    let fee_collectors = known_fee_collectors();
 
     let receipts = provider
         .get_block_receipts(block_number.into())
@@ -130,6 +138,14 @@ pub(crate) async fn decode_block<P: Provider>(
         let aggregator =
             attribute_aggregator(&root, entry_point, sender, aggregators).unwrap_or(entry_point);
 
+        // Back out any input-side fee a known client collector skimmed before the swap, so the
+        // re-solve compares Fynd against the amount actually routed (not the user's gross spend).
+        let client_fee = fee_to_collectors(logs, &native, &fee_collectors)
+            .get(&token_in)
+            .copied()
+            .filter(|fee| !fee.is_zero());
+        let amount_in = client_fee.map_or(amount_in, |fee| amount_in.saturating_sub(fee));
+
         trades.push(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
@@ -140,6 +156,7 @@ pub(crate) async fn decode_block<P: Provider>(
             token_out,
             amount_in,
             amount_out,
+            client_fee,
         });
     }
 

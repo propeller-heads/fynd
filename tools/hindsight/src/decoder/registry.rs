@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 
 use alloy::primitives::{address, Address};
 
@@ -48,6 +51,18 @@ static KNOWN_CLIENTS: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|
 
 pub(crate) fn known_clients() -> &'static HashMap<Address, &'static str> {
     &KNOWN_CLIENTS
+}
+
+/// Known client fee-collector addresses — where a client (e.g. Relay) skims its fee from the input
+/// token before swapping. Any input-token transfer to one of these is backed out of `amount_in`
+/// (see [`crate::decoder::net::fee_to_collectors`]) so the re-solve does not credit Fynd with the
+/// client's fee.
+pub(crate) fn known_fee_collectors() -> HashSet<Address> {
+    HashSet::from([
+        // Relay fee collector (input-side skim by the Relay router). Sole collector across a 25-tx
+        // on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
+        address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef"),
+    ])
 }
 
 /// Whether `address` is a batch-settlement venue where `tx.to` is the settlement contract and the
@@ -108,6 +123,15 @@ mod tests {
         assert!(is_batch_settler(&cow));
         assert!(!is_batch_settler(&oneinch));
         assert!(!is_batch_settler(&addr(123)));
+    }
+
+    #[test]
+    fn relay_fee_collector_is_known() {
+        let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
+        assert!(known_fee_collectors().contains(&collector));
+        // The router that performs the skim is a known Relay client, not the collector itself.
+        assert!(!known_fee_collectors()
+            .contains(&address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f")));
     }
 
     #[test]

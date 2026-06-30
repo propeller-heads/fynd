@@ -54,6 +54,40 @@ pub(crate) fn decode_trade(
     net_trade(&sent, &received)
 }
 
+/// Total of each token transferred to a known client fee-collector within the transaction, keyed
+/// by token (native ETH is [`Address::ZERO`]).
+///
+/// A client like Relay skims its fee by sending part of the input token to a fee collector before
+/// swapping, so the user's netted `amount_in` includes money that never entered the swap. Backing
+/// that fee out lets the re-solve compare Fynd against the client on the amount actually routed,
+/// rather than crediting Fynd with the client's fee. Matches by recipient regardless of sender, so
+/// it catches both a direct user skim and a router skim.
+pub(crate) fn fee_to_collectors(
+    logs: &[Log],
+    native_transfers: &[(Address, Address, U256)],
+    fee_collectors: &HashSet<Address>,
+) -> HashMap<Address, U256> {
+    let mut fees: HashMap<Address, U256> = HashMap::new();
+    if fee_collectors.is_empty() {
+        return fees;
+    }
+    for &(_, to, value) in native_transfers {
+        if fee_collectors.contains(&to) {
+            *fees.entry(Address::ZERO).or_default() += value;
+        }
+    }
+    for log in logs {
+        let primitive = to_primitive_log(log);
+        let Ok(transfer) = Transfer::decode_log(&primitive) else {
+            continue;
+        };
+        if fee_collectors.contains(&transfer.to) {
+            *fees.entry(log.address()).or_default() += transfer.value;
+        }
+    }
+    fees
+}
+
 /// Net the sent and received balances into a single swap.
 ///
 /// Returns `None` unless exactly one token nets out and exactly one token nets in. A net with more
@@ -168,6 +202,31 @@ mod tests {
 
         let result = decode_trade(&logs, &native, user).unwrap();
         assert_eq!(result, (Address::ZERO, U256::from(1000), token, U256::from(2000)));
+    }
+
+    #[test]
+    fn fee_to_collectors_totals_input_skim() {
+        let user = addr(1);
+        let router = addr(2);
+        let collector = addr(99);
+        let token_in = addr(10);
+        let pool = addr(50);
+        let collectors = HashSet::from([collector]);
+
+        // Router skims part of the input token to the collector; the rest goes to the pool.
+        let logs = vec![
+            make_transfer_log(token_in, user, router, U256::from(1000)),
+            make_transfer_log(token_in, router, collector, U256::from(40)),
+            make_transfer_log(token_in, router, pool, U256::from(960)),
+        ];
+        let fees = fee_to_collectors(&logs, &[], &collectors);
+        assert_eq!(fees.get(&token_in).copied(), Some(U256::from(40)));
+    }
+
+    #[test]
+    fn fee_to_collectors_empty_set_is_noop() {
+        let logs = vec![make_transfer_log(addr(10), addr(1), addr(99), U256::from(40))];
+        assert!(fee_to_collectors(&logs, &[], &HashSet::new()).is_empty());
     }
 
     #[test]
