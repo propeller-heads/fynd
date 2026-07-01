@@ -11,3 +11,13 @@ scale_results*.json
 
 # fynd-gas-audit output artifacts
 tools/fynd-gas-audit/out/
+
+# Slippage-features collection data (archived to S3, never committed)
+slippage-data/
+slippage-data-*/
+ekubo-probe-data/
+trades_10k.json
+
+# Notebook artifacts
+**/.ipynb_checkpoints/
+tools/slippage-features/notebooks/*.pdf
