@@ -53,10 +53,11 @@ pub(crate) struct MonitorConfig<'a> {
     pub metrics_port: Option<u16>,
     /// Stop after this many blocks (`None` runs until interrupted).
     pub max_blocks: Option<u64>,
-    /// Append one JSON line per improvement (Fynd wins at top- or back-of-block) carrying both
-    /// block states — each with its net bps, USD improvement, and a slim route + calldata — plus
-    /// the block and settled tx, for later investigation. Disabled when `None`.
-    pub improvements_jsonl: Option<&'a str>,
+    /// Append one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
+    /// coverage gaps), each carrying both block states with verdict, net bps, USD delta, and a
+    /// slim route/calldata or unsolvable reason. Filter downstream for the improvement or
+    /// coverage view. Disabled when `None`.
+    pub comparisons_jsonl: Option<&'a str>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per [`SteppingSolver::advance`].
@@ -214,14 +215,14 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
-    let mut improvements = match cfg.improvements_jsonl {
+    let mut comparisons = match cfg.comparisons_jsonl {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| anyhow::anyhow!("failed to open improvements jsonl {path}: {e}"))?;
-            info!(path, "appending improvements to JSONL");
+                .map_err(|e| anyhow::anyhow!("failed to open comparisons jsonl {path}: {e}"))?;
+            info!(path, "appending comparisons to JSONL");
             Some(std::io::BufWriter::new(file))
         }
         None => None,
@@ -272,8 +273,8 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         for range in &ranges {
             crate::telemetry::record_range(range, cfg.chain, &prices_top);
         }
-        if let Some(writer) = improvements.as_mut() {
-            write_improvements(writer, &ranges, &prices_top, &prices_back);
+        if let Some(writer) = comparisons.as_mut() {
+            write_comparisons(writer, &ranges, &prices_top, &prices_back);
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         crate::telemetry::record_block_seconds(elapsed_s);
@@ -349,37 +350,36 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
     (bytes.len() == 20).then(|| Address::from_slice(bytes))
 }
 
-/// Append one JSON line per improvement to `writer`. A record is written when Fynd wins at either
-/// top-of-block (optimistic) or back-of-block (the more credible, post-block state); each record
-/// carries both states so the back-of-block figure can be used as the headline.
-fn write_improvements<W: std::io::Write>(
+/// Append one JSON line per re-solved trade to `writer` — every comparison, not just wins. Each
+/// record carries both block states with their verdict (win/loss/unsolvable), so downstream can
+/// filter to wins for the improvement view or to unsolvables for the coverage worklist (where Fynd
+/// needs to improve). Losses keep their route (what path Fynd took and lost on); unsolvables keep
+/// the reason.
+fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
     prices_top: &usd::PriceMap,
     prices_back: &usd::PriceMap,
 ) {
     for range in ranges {
-        if range.top.verdict != Verdict::Win && range.back.verdict != Verdict::Win {
-            continue;
-        }
-        let Ok(line) = serde_json::to_string(&improvement_record(range, prices_top, prices_back))
+        let Ok(line) = serde_json::to_string(&comparison_record(range, prices_top, prices_back))
         else {
             continue;
         };
         if let Err(e) = writeln!(writer, "{line}") {
-            warn!(error = %e, "failed to write improvement record");
+            warn!(error = %e, "failed to write comparison record");
             return;
         }
     }
     if let Err(e) = writer.flush() {
-        warn!(error = %e, "failed to flush improvements writer");
+        warn!(error = %e, "failed to flush comparisons writer");
     }
 }
 
-/// Build the JSON record for one improvement: block, settled tx, decoded amounts, and a `top` and
-/// `back` state (each with its bps, USD improvement, and slim route + calldata). Top is valued at
-/// N-1 prices, back at N prices, matching the state each was solved against.
-fn improvement_record(
+/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, and a `top`
+/// and `back` state (each with its verdict, bps, USD delta, and slim route/calldata or unsolvable
+/// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
+fn comparison_record(
     range: &RangeComparison,
     prices_top: &usd::PriceMap,
     prices_back: &usd::PriceMap,
@@ -411,6 +411,12 @@ fn state_record(
         Outcome::Solved(solved) => Some(solved),
         Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
     };
+    // The reason Fynd could not serve the trade — the coverage-gap signal (missing token,
+    // insufficient liquidity, timeout, partial-fill coverage miss).
+    let unsolvable_reason = match &state.outcome {
+        Outcome::Unsolvable(reason) => Some(reason.as_str()),
+        Outcome::Solved(_) => None,
+    };
     let improvement_usd = solved.and_then(|s| {
         usd::savings_usd(token_out, s.amount_out_net_gas, settled_amount_out, prices)
     });
@@ -425,6 +431,7 @@ fn state_record(
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
         "settled_value_usd": usd::value_usd(token_out, settled_amount_out, prices),
+        "unsolvable_reason": unsolvable_reason,
         "quote": solved
             .and_then(|s| s.quote_json.as_deref())
             .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
@@ -549,7 +556,7 @@ mod tests {
         });
         let range = build_range(&trade, top, back);
 
-        let rec = improvement_record(&range, &prices, &prices);
+        let rec = comparison_record(&range, &prices, &prices);
         let top_usd = rec
             .pointer("/top/improvement_usd")
             .unwrap()
@@ -587,6 +594,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn comparison_record_captures_unsolvable_reason_and_null_quote() {
+        use crate::resolve::build_range;
+        let trade = crate::decoder::DecodedTrade {
+            tx_hash: "0xabc".into(),
+            block_number: 25_000_000,
+            client: "relay".into(),
+            aggregator: "1inch".into(),
+            sender: Address::ZERO,
+            token_in: Address::repeat_byte(0x11),
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(1_000u64),
+            client_fee: None,
+            relay_fill: None,
+        };
+        // A coverage gap: Fynd could not solve at either state.
+        let range = build_range(
+            &trade,
+            Outcome::Unsolvable("missing token in Tycho".into()),
+            Outcome::Unsolvable("missing token in Tycho".into()),
+        );
+        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
+        assert_eq!(
+            rec.pointer("/top/unsolvable_reason")
+                .unwrap(),
+            "missing token in Tycho"
+        );
+        assert!(rec
+            .pointer("/top/quote")
+            .unwrap()
+            .is_null());
+    }
+
     /// End-to-end smoke test of the live two-state monitor against a real solver.
     ///
     /// `#[ignore]`d so it never runs in CI (no Tycho/RPC). Run with:
@@ -615,7 +657,7 @@ mod tests {
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
-            improvements_jsonl: None,
+            comparisons_jsonl: None,
         })
         .await
         .expect("monitor should process one block without error");

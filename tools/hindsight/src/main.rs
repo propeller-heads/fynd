@@ -168,10 +168,10 @@ struct MonitorArgs {
     #[arg(long)]
     max_blocks: Option<u64>,
 
-    /// Append one JSON line per improvement (complete quote, calldata, block, settled tx) to this
-    /// file for later investigation
+    /// Append one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
+    /// coverage gaps) to this file, for the improvement and coverage worklists
     #[arg(long)]
-    improvements_jsonl: Option<String>,
+    comparisons_jsonl: Option<String>,
 }
 
 #[tokio::main]
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
                 timeout_ms: args.timeout_ms,
                 metrics_port: args.metrics_port,
                 max_blocks: args.max_blocks,
-                improvements_jsonl: args.improvements_jsonl.as_deref(),
+                comparisons_jsonl: args.comparisons_jsonl.as_deref(),
             })
             .await
         }
