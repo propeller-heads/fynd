@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use rand::seq::SliceRandom;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -155,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         "starting quote driver"
     );
 
-    let trades = load_trades(&args.trades_file)?;
+    let mut trades = load_trades(&args.trades_file)?;
     info!(trades = trades.len(), "loaded trades");
 
     let client = reqwest::Client::builder()
@@ -168,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         round_count += 1;
+        trades.shuffle(&mut rand::rng());
         let round_stats = run_round(&client, &trades, &args).await;
 
         total_sent += round_stats.sent;
@@ -288,6 +290,42 @@ mod tests {
         let trades = load_trades(&path).expect("load trades");
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].orders[0].token_in, "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+    }
+
+    #[test]
+    fn shuffle_produces_different_batch_each_round() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("trades.json");
+
+        // Build 100 trades with distinct amounts so we can track ordering
+        let trades_json: Vec<serde_json::Value> = (0..100)
+            .map(|i| {
+                serde_json::json!({
+                    "orders": [{
+                        "token_in": "0xaaa",
+                        "token_out": "0xbbb",
+                        "amount": i.to_string()
+                    }]
+                })
+            })
+            .collect();
+        std::fs::write(&path, serde_json::to_string(&trades_json).expect("serialize"))
+            .expect("write");
+
+        let mut trades = load_trades(&path).expect("load trades");
+
+        // Take first 10 amounts before shuffle
+        let before: Vec<String> =
+            trades[..10].iter().map(|t| t.orders[0].amount.clone()).collect();
+
+        trades.shuffle(&mut rand::rng());
+
+        let after: Vec<String> =
+            trades[..10].iter().map(|t| t.orders[0].amount.clone()).collect();
+
+        // With 100 items shuffled and a batch of 10, the probability of getting
+        // the exact same first-10 sequence is astronomically low (~1 in 10^13).
+        assert_ne!(before, after, "shuffle should produce a different ordering");
     }
 
     #[test]
