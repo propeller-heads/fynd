@@ -3,21 +3,16 @@
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 
-/// Widen a token amount to `f64` for ratio math. Amounts can exceed `f64`'s exact integer range,
-/// but every result here is a bps ratio, so the relative precision loss is negligible.
-fn to_f64(amount: &BigUint) -> f64 {
-    amount.to_f64().unwrap_or(0.0)
-}
+// Amounts can exceed `f64`'s exact integer range, but every result here is a bps ratio, so the
+// relative precision loss is negligible. `to_f64` returns `None` if the value is non-finite;
+// combined with the positivity filter, a bad or zero amount propagates as `None`.
 
 /// Compare baseline vs another participant on raw output amounts, in basis points.
 ///
 /// Positive = baseline delivers more output. `None` when either amount is zero.
 pub fn raw_bps_diff(baseline: &BigUint, other: &BigUint) -> Option<f64> {
-    let b = to_f64(baseline);
-    let o = to_f64(other);
-    if b <= 0.0 || o <= 0.0 {
-        return None;
-    }
+    let b = baseline.to_f64().filter(|&v| v > 0.0)?;
+    let o = other.to_f64().filter(|&v| v > 0.0)?;
     Some((b - o) / o * 10_000.0)
 }
 
@@ -43,12 +38,15 @@ pub fn gas_adjusted_bps_diff(
     if baseline_gas_units == 0 || other_gas_units == 0 {
         return None;
     }
-    let b_raw = to_f64(baseline_raw);
-    let b_net = to_f64(baseline_net_gas);
-    let o_raw = to_f64(other_raw);
-    if b_raw <= 0.0 || b_net <= 0.0 || o_raw <= 0.0 {
-        return None;
-    }
+    let b_raw = baseline_raw
+        .to_f64()
+        .filter(|&v| v > 0.0)?;
+    let b_net = baseline_net_gas
+        .to_f64()
+        .filter(|&v| v > 0.0)?;
+    let o_raw = other_raw
+        .to_f64()
+        .filter(|&v| v > 0.0)?;
 
     let gas_cost = b_raw - b_net;
 
@@ -72,11 +70,8 @@ pub fn gas_adjusted_bps_diff(
 /// Negative = on-chain result is less than quoted (the quote was optimistic).
 /// `None` when either amount is zero.
 pub fn eth_call_bps_diff(actual: &BigUint, quoted: &BigUint) -> Option<f64> {
-    let a = to_f64(actual);
-    let q = to_f64(quoted);
-    if a <= 0.0 || q <= 0.0 {
-        return None;
-    }
+    let a = actual.to_f64().filter(|&v| v > 0.0)?;
+    let q = quoted.to_f64().filter(|&v| v > 0.0)?;
     Some((a - q) / q * 10_000.0)
 }
 
