@@ -16,6 +16,11 @@ The algorithm runs in three stages:
 
 The key insight is that price impact is the enemy. A constant-product pool that returns a good rate on 100 USDC returns a progressively worse rate as you push more through it. By splitting the same total input across multiple pools, each pool sees a smaller amount and operates at a better rate.
 
+Two properties hold throughout the optimization:
+
+* **Honest shared-pool accounting**: whenever a set of paths is evaluated, they are simulated sequentially against a shared post-swap state map. A path that reuses a pool another path already touched sees the depleted reserves, so a split can never double-count the same liquidity. Reported route amounts therefore correspond to what the route delivers when executed.
+* **Never lose the single path**: the single-path route is a floor. Every candidate split must beat it net of gas, and any failure inside the split search (missing derived data, invalid split route) falls back to the single-path result instead of failing the solve.
+
 ## When does splitting help?
 
 The algorithm computes a **price impact estimate** before attempting any split. If price impact is negligible relative to gas costs, splitting can't pay for itself — extra swaps cost gas, and the marginal gain from reducing impact is too small. The algorithm skips the Frank-Wolfe loop and returns the single-path result directly.
@@ -52,9 +57,13 @@ If BF returns the same path that already exists in the allocation (same sequence
 
 ### Line search
 
-Once a candidate path is found, the algorithm uses **golden-section search** to find the optimal `step_size ∈ [0, 1]`: the fraction of total flow to shift from the existing allocation to the new candidate. At each probe point, the algorithm re-simulates all paths and computes total output; the step size that maximises output is selected.
+Once a candidate path is found, the algorithm uses **golden-section search** to find the optimal `step_size ∈ [0, 1]`: the fraction of total flow to shift from the existing allocation to the new candidate. At each probe point, the algorithm re-simulates all paths **sequentially against a shared post-swap state map** — later paths see the reserves earlier paths consumed — and scores the result by **net output**: gross output minus the trial's total gas converted into output-token terms. The step size that maximises net output is selected.
 
 This line search is the Frank-Wolfe "descent direction" computation. It runs `line_search_evals` function evaluations (default: 12), which is enough for ~4-5 decimal digits of precision.
+
+### Gas-aware activation
+
+A path's gas cost is constant once it carries any flow, so the line search alone cannot reject a candidate whose extra output never covers its extra gas — it just finds the least-bad step. The activation check handles this: the net output at the chosen step is compared against the net output at step 0, where the candidate carries no flow and no gas. The candidate is only activated when the split genuinely nets more than the current allocation. This mirrors the water-fill activation rule from the split-routing research: a path must pay for its own gas before it gets flow.
 
 ### Applying the step
 
@@ -63,15 +72,17 @@ The chosen step size is applied:
 * All existing path fractions are scaled by `(1 - step_size)`
 * The candidate is added at `step_size`
 * Paths whose fraction falls below `min_split` are dropped and the remaining fractions are renormalized
-* All paths are re-simulated at their new allocations to refresh amounts and per-hop outputs
+* All paths are re-simulated at their new allocations, sequentially against a shared post-swap state map, to refresh amounts and per-hop outputs. Paths that share a pool (including a pool reused by a later hop of the same path) are priced on depleted reserves, so the recorded per-hop amounts match executable reality
 
 The loop then repeats with the updated allocation as the new starting point.
 
 ## Stage 3: Final comparison
 
-After the loop completes (due to `max_paths`, timeout, price impact exit, or duplicate detection), the algorithm builds the full split route and compares it against the initial single-path result by **net amount out** (gross output minus gas cost). The better result is returned.
+After the loop completes (due to `max_paths`, timeout, price impact exit, or duplicate detection), the algorithm builds the full split route, validates it, and compares it against the initial single-path result by **net amount out** (gross output minus gas cost). The better result is returned.
 
 If only one path survived (because all splits were too small), the initial single-path result is returned directly without building a split route.
+
+The entire split search runs behind a fallback boundary: if any step of it errors — a pool missing derived data, a malformed split route, a failed validation — the algorithm logs the failure and returns the single-path result. A solvable order is never failed by the split optimization.
 
 ## Shared pools and route assembly
 
@@ -119,7 +130,11 @@ The cost is additional simulation work: each Frank-Wolfe iteration runs one BF s
 
 ### Single-path fallback
 
-The algorithm always compares the split result against the single-path baseline before returning. If the split route doesn't beat the single path net of gas (this can happen when the gas overhead of extra swaps outweighs the reduced impact), the single-path result wins.
+The algorithm always compares the split result against the single-path baseline before returning. If the split route doesn't beat the single path net of gas (this can happen when the gas overhead of extra swaps outweighs the reduced impact), the single-path result wins. Errors during the split search degrade to the single-path result the same way, so split optimization can only add output, never cost coverage.
+
+### Sequential evaluation versus independent evaluation
+
+An earlier version of the evaluator simulated every path from the original pool states. For pool-disjoint splits the two are identical, but for splits that reuse a pool, independent simulation counts the same liquidity twice and overstates output — the route then under-delivers when executed. Sequential evaluation prices each path on the state the previous paths left behind, which matches how the merged route executes on-chain (a shared hop becomes one combined swap). The optimizer's objective, the recorded per-hop amounts, and the reported net all use the sequential semantics.
 
 ### Timeout safety
 
