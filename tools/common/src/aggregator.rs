@@ -16,6 +16,9 @@ pub enum AggregatorStatus {
     Success,
     NoAmount,
     NoRoute,
+    /// The aggregator is temporarily unavailable (timeout or not-ready condition).
+    /// Distinct from `NoAmount` (no liquidity) — this is a solver-availability issue.
+    Unavailable,
     /// The aggregator returned an HTTP error response (4xx/5xx).
     HttpError {
         code: u16,
@@ -29,6 +32,7 @@ impl fmt::Display for AggregatorStatus {
             Self::Success => f.write_str("success"),
             Self::NoAmount => f.write_str("no_amount"),
             Self::NoRoute => f.write_str("no_route"),
+            Self::Unavailable => f.write_str("unavailable"),
             Self::HttpError { code, snippet } => write!(f, "http_{code}: {snippet}"),
         }
     }
@@ -129,6 +133,7 @@ mod tests {
         assert!(quote_with_status(AggregatorStatus::Success).is_success());
         assert!(!quote_with_status(AggregatorStatus::NoAmount).is_success());
         assert!(!quote_with_status(AggregatorStatus::NoRoute).is_success());
+        assert!(!quote_with_status(AggregatorStatus::Unavailable).is_success());
         assert!(!quote_with_status(AggregatorStatus::HttpError {
             code: 429,
             snippet: "rate limited".to_string()
@@ -140,6 +145,10 @@ mod tests {
     fn status_serialises_to_string() {
         assert_eq!(serde_json::to_string(&AggregatorStatus::Success).unwrap(), r#""success""#);
         assert_eq!(serde_json::to_string(&AggregatorStatus::NoRoute).unwrap(), r#""no_route""#);
+        assert_eq!(
+            serde_json::to_string(&AggregatorStatus::Unavailable).unwrap(),
+            r#""unavailable""#
+        );
         assert_eq!(
             serde_json::to_string(&AggregatorStatus::HttpError {
                 code: 429,

@@ -24,6 +24,10 @@ pub fn raw_bps_diff(baseline: &str, other: &str) -> Option<f64> {
 /// figure is zero, when `baseline_net_gas` is absent, or when gas exceeds 5% of output.
 /// Call this twice with reported and on-chain gas values to keep the two measurements
 /// independent.
+///
+/// **Note:** deriving a per-gas token cost from `(raw - net_gas) / gas_units` is a hack that
+/// compensates for the absence of a gas price denominated in the output token. The result is only
+/// meaningful when the solver's gas estimate is accurate.
 pub fn gas_adjusted_bps_diff(
     baseline_raw: &str,
     baseline_net_gas: Option<&str>,

@@ -11,11 +11,10 @@ use fynd_client::{
 };
 use num_bigint::BigUint;
 
-use crate::aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote, AggregatorStatus};
-
-/// Some trade datasets use 0xeeee…eeee as a sentinel for native ETH; Fynd expects ZERO_ADDRESS.
-const ETH_SENTINEL: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+use crate::{
+    aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote, AggregatorStatus},
+    constants::{ETH_SENTINEL, ZERO_ADDRESS},
+};
 
 /// Wraps [`FyndClient`] so it participates in the same quote loop as external aggregators.
 ///
@@ -131,9 +130,8 @@ pub fn fynd_status_to_agg(status: QuoteStatus) -> AggregatorStatus {
     match status {
         QuoteStatus::Success => AggregatorStatus::Success,
         QuoteStatus::NoRouteFound | QuoteStatus::InsufficientLiquidity => AggregatorStatus::NoRoute,
-        QuoteStatus::Timeout | QuoteStatus::NotReady | QuoteStatus::PriceCheckFailed => {
-            AggregatorStatus::NoAmount
-        }
+        QuoteStatus::Timeout | QuoteStatus::NotReady => AggregatorStatus::Unavailable,
+        QuoteStatus::PriceCheckFailed => AggregatorStatus::NoAmount,
     }
 }
 
@@ -160,10 +158,12 @@ pub fn make_quote_params(
     encoding: Option<EncodingOptions>,
 ) -> anyhow::Result<QuoteParams> {
     let sender = parse_addr(sender_hex.unwrap_or("0x0000000000000000000000000000000000000001"))?;
+    let amount_uint = BigUint::from_str(amount)
+        .map_err(|_| anyhow::anyhow!("invalid amount '{amount}': expected a decimal integer"))?;
     let order = Order::new(
         parse_addr(fynd_addr(token_in))?,
         parse_addr(fynd_addr(token_out))?,
-        BigUint::from_str(amount).unwrap_or_default(),
+        amount_uint,
         OrderSide::Sell,
         sender,
         None,

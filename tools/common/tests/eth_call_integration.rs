@@ -9,7 +9,7 @@
 //! --ignored`.
 
 use alloy::{primitives::Address, providers::ProviderBuilder};
-use fynd_tools_common::eth_call::EthCallRunner;
+use fynd_tools_common::swap_simulation::EthCallRunner;
 use num_bigint::BigUint;
 
 /// Canonical WETH9 contract on Ethereum mainnet.
@@ -22,10 +22,9 @@ const ONE_ETH_WEI: &str = "1000000000000000000";
 #[tokio::test]
 #[ignore = "requires a live Ethereum RPC; run with --ignored and RPC_URL set"]
 async fn eth_simulate_weth_deposit_returns_exact_amount() {
-    let Ok(rpc_url) = std::env::var("RPC_URL") else {
-        eprintln!("skipping eth_call fork test: RPC_URL not set");
-        return;
-    };
+    let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| {
+        panic!("skipping eth_call fork test: set RPC_URL=<https-rpc-url> and run with --ignored")
+    });
 
     let url = rpc_url
         .parse::<reqwest::Url>()

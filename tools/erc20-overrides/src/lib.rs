@@ -279,4 +279,46 @@ mod tests {
             assert_ne!(oz, allowance_slot_at(usdc, weth, position));
         }
     }
+
+    #[test]
+    fn oz_v5_balances_ns_matches_derivation() {
+        use alloy::primitives::{B256, U256};
+
+        // Step 1: keccak256("openzeppelin.storage.ERC20")
+        let name_hash = keccak256(b"openzeppelin.storage.ERC20");
+
+        // Step 2: uint256(name_hash) - 1
+        let name_hash_minus_one = U256::from_be_bytes(*name_hash) - U256::from(1u64);
+
+        // Step 3: abi.encode(uint256(...)) — the 32-byte big-endian representation
+        let encoded: [u8; 32] = name_hash_minus_one.to_be_bytes();
+
+        // Step 4: keccak256(encoded)
+        let hashed = keccak256(encoded);
+
+        // Step 5: & ~bytes32(uint256(0xff)) — clear the last byte
+        let mut derived = *hashed;
+        derived[31] = 0x00;
+        let derived = B256::new(derived);
+
+        // Must match the hardcoded constant exactly — a mismatch means the constant has a typo.
+        assert_eq!(
+            derived, OZ_V5_BALANCES_NS,
+            "OZ_V5_BALANCES_NS does not match the documented derivation formula"
+        );
+    }
+
+    #[test]
+    fn oz_v5_allowances_ns_is_balances_ns_plus_one() {
+        use alloy::primitives::U256;
+
+        // _allowances is field 1 in ERC20Storage, so its base slot is balances_ns + 1.
+        let balances_bytes = U256::from_be_bytes(*OZ_V5_BALANCES_NS);
+        let allowances_bytes = U256::from_be_bytes(*OZ_V5_ALLOWANCES_NS);
+        assert_eq!(
+            allowances_bytes,
+            balances_bytes + U256::from(1u64),
+            "OZ_V5_ALLOWANCES_NS must equal OZ_V5_BALANCES_NS + 1"
+        );
+    }
 }

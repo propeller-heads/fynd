@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 pub use args::Args;
 use fynd_client::{FyndClient, FyndClientBuilder, RetryConfig};
 use fynd_tools_common::{
-    aggregator::AggregatorClient, eth_call::EthCallRunner, fynd::FyndAggregator,
+    aggregator::AggregatorClient, fynd::FyndAggregator, swap_simulation::EthCallRunner,
 };
 use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::{info, warn};
@@ -248,6 +248,23 @@ impl BlockRunner<'_> {
         };
 
         info!("  Block ready — firing {} quote pairs…", chunk.len());
+
+        // Guard: warn when cumulative aggregator delay per chunk approaches one block (~12s).
+        let n_aggs = self
+            .participants
+            .len()
+            .saturating_sub(1);
+        let cumulative_delay_ms = self
+            .args
+            .aggregator_delay_ms
+            .saturating_mul(n_aggs as u64);
+        if cumulative_delay_ms >= 12_000 {
+            warn!(
+                "aggregator_delay_ms ({} ms) × {} aggregators = {} ms ≥ 12 s (one Ethereum \
+                 block); quotes in this chunk may not be comparable across participants",
+                self.args.aggregator_delay_ms, n_aggs, cumulative_delay_ms,
+            );
+        }
 
         let sem = Arc::new(Semaphore::new(self.args.concurrency));
         let mut jset: JoinSet<Result<TradeResult>> = JoinSet::new();

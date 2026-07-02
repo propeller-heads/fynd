@@ -3557,7 +3557,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.82.2"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "anyhow",

@@ -11,7 +11,8 @@ use anyhow::Result;
 use fynd_tools_common::{
     aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote},
     bps::{eth_call_bps_diff, gas_adjusted_bps_diff, raw_bps_diff},
-    eth_call::EthCallRunner,
+    constants::ETH_SENTINEL_ADDRESS,
+    swap_simulation::EthCallRunner,
 };
 use num_bigint::BigUint;
 use tokio::time::sleep;
@@ -44,7 +45,7 @@ type EthCallResult = (Option<String>, Option<f64>, Option<u64>);
 /// Baseline (Fynd) figures used to compute every other participant's diffs.
 struct Baseline {
     amount: String,
-    net_gas: Option<String>,
+    net_gas: Option<BigUint>,
     gas_units: u64,
     eth_call_gas: Option<u64>,
     /// `eth_call` amount scaled up by `baseline_fee_bps` (zero-fee simulation).
@@ -161,7 +162,9 @@ fn extract_baseline(
                 .as_deref()
                 .unwrap_or("0")
                 .to_string(),
-            q.amount_out_net_gas.clone(),
+            q.amount_out_net_gas
+                .as_deref()
+                .and_then(|s| s.parse::<BigUint>().ok()),
             q.gas_units.unwrap_or(0),
             eth_calls
                 .first()
@@ -179,16 +182,22 @@ fn extract_baseline(
 }
 
 /// Scale a decimal token amount up by `fee_bps` basis points. Returns the input unchanged
-/// when `fee_bps == 0` or the amount cannot be parsed.
+/// when `fee_bps == 0`. Returns an empty string and emits a warning when the amount cannot
+/// be parsed (the caller treats an empty string as "no valid data").
 fn apply_fee_bps(amount: &str, fee_bps: u32) -> String {
     if fee_bps == 0 {
         return amount.to_string();
     }
-    amount
-        .parse::<BigUint>()
-        .ok()
-        .map(|v| (v * (10_000u32 + fee_bps) / 10_000u32).to_string())
-        .unwrap_or_else(|| amount.to_string())
+    match amount.parse::<BigUint>() {
+        Ok(v) => (v * (10_000u32 + fee_bps) / 10_000u32).to_string(),
+        Err(_) => {
+            warn!(
+                "apply_fee_bps: cannot parse eth_call amount '{amount}' as integer \
+                 — skipping fee adjustment"
+            );
+            String::new()
+        }
+    }
 }
 
 fn build_participant_result(
@@ -292,18 +301,22 @@ fn compute_diffs(
         return (None, None, None);
     }
     let other_raw = q.amount_out.as_deref().unwrap_or("0");
+    let net_gas_str = baseline
+        .net_gas
+        .as_ref()
+        .map(|v| v.to_string());
     (
         raw_bps_diff(&baseline.amount, other_raw),
         gas_adjusted_bps_diff(
             &baseline.amount,
-            baseline.net_gas.as_deref(),
+            net_gas_str.as_deref(),
             baseline.gas_units,
             other_raw,
             q.gas_units.unwrap_or(0),
         ),
         gas_adjusted_bps_diff(
             &baseline.ec_fee_adj,
-            baseline.net_gas.as_deref(),
+            net_gas_str.as_deref(),
             baseline.eth_call_gas.unwrap_or(0),
             ec_amount.unwrap_or("0"),
             ec_gas.unwrap_or(0),
@@ -350,9 +363,8 @@ async fn run_eth_call_for_calldata(
 
     // Aggregators use 0xeeee…eeee as a sentinel for native ETH; normalise to zero address
     // so the ERC-20 slot probe is skipped and the ETH balance path is used.
-    let eth_sentinel = Address::from([0xeeu8; 20]);
-    let token_in = if token_in == eth_sentinel { Address::ZERO } else { token_in };
-    let token_out = if token_out == eth_sentinel { Address::ZERO } else { token_out };
+    let token_in = if token_in == ETH_SENTINEL_ADDRESS { Address::ZERO } else { token_in };
+    let token_out = if token_out == ETH_SENTINEL_ADDRESS { Address::ZERO } else { token_out };
 
     let Some(router) = parse_address_hex(&cd.to) else {
         warn!("eth_call: invalid router address '{}'", cd.to);

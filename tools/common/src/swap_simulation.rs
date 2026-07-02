@@ -37,8 +37,7 @@ const ETH_BALANCE_READER_ADDR: Address = Address(alloy::primitives::FixedBytes([
     0xf0, 0xf0, 0xf0, 0xf0,
 ]));
 
-/// EVM bytecode: CALLER BALANCE PUSH1 0 MSTORE PUSH1 32 PUSH1 0 RETURN.
-/// Returns the ETH balance of the calling address as a uint256.
+/// Returns the native ETH balance of the calling address as a uint256.
 const ETH_BALANCE_READER_CODE: [u8; 10] =
     [0x33, 0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
 
