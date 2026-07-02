@@ -19,13 +19,14 @@ COPY fynd-rpc/Cargo.toml fynd-rpc/
 COPY fynd-rpc-types/Cargo.toml fynd-rpc-types/
 COPY clients/rust/Cargo.toml clients/rust/
 COPY tools/benchmark/Cargo.toml tools/benchmark/
+COPY tools/common/Cargo.toml tools/common/
 COPY tools/fynd-swap-cli/Cargo.toml tools/fynd-swap-cli/
 COPY tools/erc20-overrides/Cargo.toml tools/erc20-overrides/
 COPY tools/fynd-gas-audit/Cargo.toml tools/fynd-gas-audit/
 COPY tools/record-market/Cargo.toml tools/record-market/
 COPY test-fixtures/Cargo.toml test-fixtures/
 RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
-        clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src \
+        clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/erc20-overrides/src tools/fynd-gas-audit/src \
         tools/record-market/src test-fixtures/src && \
     echo "fn main() {}" > src/main.rs && \
@@ -35,6 +36,7 @@ RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
     echo "" > fynd-rpc-types/src/lib.rs && \
     echo "" > clients/rust/src/lib.rs && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
+    echo "" > tools/common/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
     echo "" > tools/erc20-overrides/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
@@ -42,7 +44,7 @@ RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
     echo "" > test-fixtures/src/lib.rs && \
     cargo build --release --package fynd --package fynd-swap-cli && \
     rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
-        clients/rust/src tools/benchmark/src tools/fynd-swap-cli/src \
+        clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/erc20-overrides/src tools/fynd-gas-audit/src \
         tools/record-market/src test-fixtures/src
 
@@ -54,9 +56,10 @@ COPY fynd-rpc-types/src/ fynd-rpc-types/src/
 COPY clients/rust/src/ clients/rust/src/
 COPY tools/fynd-swap-cli/src/ tools/fynd-swap-cli/src/
 COPY tools/erc20-overrides/src/ tools/erc20-overrides/src/
-RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
+RUN mkdir -p tools/benchmark/src tools/common/src tools/fynd-gas-audit/src \
         tools/record-market/src test-fixtures/src && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
+    echo "" > tools/common/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \

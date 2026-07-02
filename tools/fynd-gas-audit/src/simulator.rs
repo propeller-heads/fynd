@@ -11,7 +11,7 @@ use alloy::{
     providers::{Provider, RootProvider},
 };
 use bytes::Bytes;
-use erc20_overrides::{allowance_slot_at, balance_slot_at, find_allowance_slot, find_balance_slot};
+use erc20_overrides::{find_allowance_slot, find_balance_slot};
 use fynd_client::{
     ExecutionOptions, FyndClient, Quote, SignedSwap, SigningHints, StorageOverrides,
 };
@@ -38,24 +38,24 @@ async fn build_fynd_overrides(
     token_in: Address,
     router: Address,
 ) -> anyhow::Result<StorageOverrides> {
-    let (balance_pos, allowance_pos) = tokio::join!(
+    let (balance_slot, allowance_slot) = tokio::join!(
         find_balance_slot(provider, token_in, sender),
         find_allowance_slot(provider, token_in, sender, router),
     );
-    let balance_pos = balance_pos?;
-    let allowance_pos = allowance_pos?;
+    let balance_slot = balance_slot?;
+    let allowance_slot = allowance_slot?;
 
     let huge = huge_balance();
     let mut overrides = StorageOverrides::default();
     let token_addr = Bytes::copy_from_slice(token_in.as_slice());
     overrides.insert(
         token_addr.clone(),
-        Bytes::copy_from_slice(balance_slot_at(sender, balance_pos).as_slice()),
+        Bytes::copy_from_slice(balance_slot.as_slice()),
         Bytes::copy_from_slice(huge.as_slice()),
     );
     overrides.insert(
         token_addr,
-        Bytes::copy_from_slice(allowance_slot_at(sender, router, allowance_pos).as_slice()),
+        Bytes::copy_from_slice(allowance_slot.as_slice()),
         Bytes::copy_from_slice(huge.as_slice()),
     );
     overrides.set_native_balance(

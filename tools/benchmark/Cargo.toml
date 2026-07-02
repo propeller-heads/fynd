@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 fynd-client = { workspace = true }
 fynd-rpc = { workspace = true }
+fynd-tools-common = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

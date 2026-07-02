@@ -8,7 +8,6 @@ mod audit;
 mod benchmark;
 mod compare;
 mod config;
-mod erc20;
 mod exporter;
 mod pair_selector;
 mod requests;
