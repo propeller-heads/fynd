@@ -2,9 +2,16 @@
 
 use alloy::primitives::U256;
 use fynd_tools_common::bps::raw_bps_diff;
+use num_bigint::BigUint;
 use serde::Serialize;
 
 use crate::resolve::Outcome;
+
+/// Convert an alloy `U256` token amount to `BigUint` for the bps helpers, big-endian and without a
+/// decimal string round-trip.
+fn to_biguint(amount: U256) -> BigUint {
+    BigUint::from_bytes_be(&amount.to_be_bytes::<32>())
+}
 
 /// Basis-point deltas of a Fynd quote against the settled amount (positive = Fynd better).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -69,10 +76,10 @@ pub(crate) fn compare(outcome: &Outcome, settled_amount_out: U256) -> Deltas {
     let Outcome::Solved(solved) = outcome else {
         return Deltas::NONE;
     };
-    let settled = settled_amount_out.to_string();
+    let settled = to_biguint(settled_amount_out);
     Deltas {
-        raw_bps: raw_bps_diff(&solved.amount_out.to_string(), &settled),
-        net_bps: raw_bps_diff(&solved.amount_out_net_gas.to_string(), &settled),
+        raw_bps: raw_bps_diff(&to_biguint(solved.amount_out), &settled),
+        net_bps: raw_bps_diff(&to_biguint(solved.amount_out_net_gas), &settled),
     }
 }
 
