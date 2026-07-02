@@ -44,12 +44,13 @@ type EthCallResult = (Option<String>, Option<f64>, Option<u64>);
 
 /// Baseline (Fynd) figures used to compute every other participant's diffs.
 struct Baseline {
-    amount: String,
+    amount: BigUint,
     net_gas: Option<BigUint>,
     gas_units: u64,
     eth_call_gas: Option<u64>,
-    /// `eth_call` amount scaled up by `baseline_fee_bps` (zero-fee simulation).
-    ec_fee_adj: String,
+    /// `eth_call` amount scaled up by `baseline_fee_bps` (zero-fee simulation). `None` when there
+    /// is no `eth_call` result or it could not be parsed.
+    ec_fee_adj: Option<BigUint>,
     ok: bool,
 }
 
@@ -160,44 +161,54 @@ fn extract_baseline(
         Some((_, Ok(q))) if q.is_success() => (
             q.amount_out
                 .as_deref()
-                .unwrap_or("0")
-                .to_string(),
+                .and_then(parse_amount),
             q.amount_out_net_gas
                 .as_deref()
-                .and_then(|s| s.parse::<BigUint>().ok()),
+                .and_then(parse_amount),
             q.gas_units.unwrap_or(0),
             eth_calls
                 .first()
                 .and_then(|(_, _, g)| *g),
         ),
-        _ => (String::new(), None, 0, None),
+        _ => (None, None, 0, None),
     };
     let ec_fee_adj = eth_calls
         .first()
         .and_then(|(amt, _, _)| amt.as_deref())
-        .map(|s| apply_fee_bps(s, baseline_fee_bps))
-        .unwrap_or_default();
-    let ok = !amount.is_empty() && amount != "0";
-    Baseline { amount, net_gas, gas_units, eth_call_gas, ec_fee_adj, ok }
+        .and_then(parse_amount)
+        .map(|amount| apply_fee_bps(&amount, baseline_fee_bps));
+    let ok = amount
+        .as_ref()
+        .is_some_and(|a| *a > BigUint::ZERO);
+    Baseline {
+        amount: amount.unwrap_or_default(),
+        net_gas,
+        gas_units,
+        eth_call_gas,
+        ec_fee_adj,
+        ok,
+    }
 }
 
-/// Scale a decimal token amount up by `fee_bps` basis points. Returns the input unchanged
-/// when `fee_bps == 0`. Returns an empty string and emits a warning when the amount cannot
-/// be parsed (the caller treats an empty string as "no valid data").
-fn apply_fee_bps(amount: &str, fee_bps: u32) -> String {
-    if fee_bps == 0 {
-        return amount.to_string();
-    }
+/// Parse an aggregator's decimal token amount into a `BigUint`, warning and returning `None`
+/// when it is unparseable so a bad value never silently becomes `0`.
+fn parse_amount(amount: &str) -> Option<BigUint> {
     match amount.parse::<BigUint>() {
-        Ok(v) => (v * (10_000u32 + fee_bps) / 10_000u32).to_string(),
+        Ok(v) => Some(v),
         Err(_) => {
-            warn!(
-                "apply_fee_bps: cannot parse eth_call amount '{amount}' as integer \
-                 — skipping fee adjustment"
-            );
-            String::new()
+            warn!("cannot parse amount '{amount}' as an integer — skipping");
+            None
         }
     }
+}
+
+/// Scale a token amount up by `fee_bps` basis points. Returns the input unchanged when
+/// `fee_bps == 0`.
+fn apply_fee_bps(amount: &BigUint, fee_bps: u32) -> BigUint {
+    if fee_bps == 0 {
+        return amount.clone();
+    }
+    amount * (10_000u32 + fee_bps) / 10_000u32
 }
 
 fn build_participant_result(
@@ -300,28 +311,34 @@ fn compute_diffs(
     if !q.is_success() {
         return (None, None, None);
     }
-    let other_raw = q.amount_out.as_deref().unwrap_or("0");
-    let net_gas_str = baseline
-        .net_gas
-        .as_ref()
-        .map(|v| v.to_string());
-    (
-        raw_bps_diff(&baseline.amount, other_raw),
-        gas_adjusted_bps_diff(
-            &baseline.amount,
-            net_gas_str.as_deref(),
-            baseline.gas_units,
-            other_raw,
-            q.gas_units.unwrap_or(0),
-        ),
-        gas_adjusted_bps_diff(
-            &baseline.ec_fee_adj,
-            net_gas_str.as_deref(),
+    let Some(other_raw) = q
+        .amount_out
+        .as_deref()
+        .and_then(parse_amount)
+    else {
+        return (None, None, None);
+    };
+    let net_gas = baseline.net_gas.as_ref();
+
+    let raw = raw_bps_diff(&baseline.amount, &other_raw);
+    let gas_reported = gas_adjusted_bps_diff(
+        &baseline.amount,
+        net_gas,
+        baseline.gas_units,
+        &other_raw,
+        q.gas_units.unwrap_or(0),
+    );
+    let gas_onchain = match (baseline.ec_fee_adj.as_ref(), ec_amount.and_then(parse_amount)) {
+        (Some(ec_fee_adj), Some(ec_amount)) => gas_adjusted_bps_diff(
+            ec_fee_adj,
+            net_gas,
             baseline.eth_call_gas.unwrap_or(0),
-            ec_amount.unwrap_or("0"),
+            &ec_amount,
             ec_gas.unwrap_or(0),
         ),
-    )
+        _ => None,
+    };
+    (raw, gas_reported, gas_onchain)
 }
 
 /// Decode a 0x-prefixed hex string into a 20-byte `Address`, returning `None` on any error.
