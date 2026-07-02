@@ -100,6 +100,9 @@ pub(crate) struct SimResult {
     pub(crate) marginal_price_product: f64,
     /// Per-hop `(amount_out, gas)` in path order.
     pub(crate) hop_results: Vec<(BigUint, BigUint)>,
+    /// Per-hop post-swap pool states in path order. Apply these as overrides
+    /// before simulating another path so shared pools see depleted reserves.
+    pub(crate) post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
 /// Pool state overrides for passing degraded states to `find_single_route`.
@@ -394,9 +397,10 @@ pub(crate) fn compute_marginal_price_product(
 /// Simulates a path hop-by-hop, threading output of each hop as input to the
 /// next.
 ///
-/// Checks `overrides` before falling back to the live market state for each
-/// hop. Returns the final output amount, raw gas sum, and marginal price
-/// product.
+/// For each hop, the path's own post-swap states are checked first, then
+/// `overrides`, then the live market state. Returns the final output amount,
+/// raw gas sum, marginal price product (spot prices at the state each hop
+/// executed against), and the post-swap pool states.
 pub(crate) fn simulate_path(
     hops: &[HopDescriptor],
     amount_in: &BigUint,
@@ -406,15 +410,32 @@ pub(crate) fn simulate_path(
     let mut current_amount = amount_in.clone();
     let mut total_gas: u64 = 0;
     let mut hop_results = Vec::with_capacity(hops.len());
+    let mut post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
+        Vec::with_capacity(hops.len());
+    let mut marginal_price_product = 1.0;
 
     for hop in hops {
-        let sim = overrides
-            .get(&hop.component_id)
+        // Prefer this path's own post-swap state so a pool reused by an
+        // earlier hop is simulated on depleted reserves, not fresh ones.
+        let sim = post_swap_states
+            .iter()
+            .rev()
+            .find(|(id, _)| id == &hop.component_id)
+            .map(|(_, state)| state.as_ref())
+            .or_else(|| overrides.get(&hop.component_id))
             .or_else(|| market.get_simulation_state(&hop.component_id))
             .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "simulation state",
                 id: Some(hop.component_id.clone()),
             })?;
+
+        let price = sim
+            .spot_price(&hop.token_in, &hop.token_out)
+            .map_err(|e| AlgorithmError::SimulationFailed {
+                component_id: hop.component_id.clone(),
+                error: e.to_string(),
+            })?;
+        marginal_price_product *= price;
 
         let result = sim
             .get_amount_out(current_amount, &hop.token_in, &hop.token_out)
@@ -427,20 +448,24 @@ pub(crate) fn simulate_path(
         total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
         hop_results.push((result.amount.clone(), result.gas));
         current_amount = result.amount;
+        post_swap_states.push((hop.component_id.clone(), result.new_state));
     }
-
-    let marginal_price_product = compute_marginal_price_product(hops, market, overrides)?;
 
     Ok(SimResult {
         amount_out: current_amount,
         gas: total_gas,
         marginal_price_product,
         hop_results,
+        post_swap_states,
     })
 }
 
 /// Simulates all paths at their current fractions and returns
 /// `(total_amount_out, total_gas)`. `paths[i]` corresponds to `fractions[i]`.
+///
+/// Paths are simulated sequentially with a shared post-swap state map: later
+/// paths see the depleted reserves left by earlier paths, so a split that
+/// reuses a pool cannot double-count its liquidity.
 pub(crate) fn evaluate_total_output(
     paths: &[&[HopDescriptor]],
     fractions: &[f64],
@@ -454,6 +479,7 @@ pub(crate) fn evaluate_total_output(
     let mut total_out = BigUint::zero();
     let mut total_gas: u64 = 0;
     let mut seen_hops: HashSet<(ComponentId, Bytes, Bytes)> = HashSet::new();
+    let mut post_swap = MarketOverrides::empty();
 
     for (path, amount) in paths.iter().zip(amounts.iter()) {
         if amount.is_zero() {
@@ -463,8 +489,9 @@ pub(crate) fn evaluate_total_output(
         let mut current_amount = amount.clone();
 
         for hop in path.iter() {
-            let sim = overrides
+            let sim = post_swap
                 .get(&hop.component_id)
+                .or_else(|| overrides.get(&hop.component_id))
                 .or_else(|| market.get_simulation_state(&hop.component_id))
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
@@ -490,6 +517,7 @@ pub(crate) fn evaluate_total_output(
                 total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
             }
             current_amount = result.amount;
+            post_swap = post_swap.with_override(hop.component_id.clone(), result.new_state);
         }
 
         total_out += current_amount;
@@ -801,6 +829,7 @@ pub(crate) fn build_split_route(
 
 #[cfg(test)]
 mod tests {
+    use num_bigint::BigInt;
     use rstest::rstest;
 
     use super::*;
@@ -1180,6 +1209,62 @@ mod tests {
 
         assert_eq!(total_out, BigUint::from(2500u64));
         assert_eq!(total_gas, 110_000);
+    }
+
+    #[test]
+    fn test_evaluate_total_output_shared_pool_depletes() {
+        // Two "paths" through the SAME constant-product pool. Sequential
+        // simulation must thread the post-swap state, so the combined output
+        // matches one full-amount swap instead of double-counting the fresh
+        // reserves for each half.
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let cp = ConstantProductSim {
+            reserve_0: BigUint::from(10_000u64),
+            reserve_1: BigUint::from(10_000u64),
+            gas: 50_000,
+        };
+        let market = make_market(vec![(
+            "pool",
+            vec![token_a.clone(), token_b.clone()],
+            Box::new(cp.clone()),
+        )]);
+
+        let hops_1 = [HopDescriptor::new("pool".to_string(), token_a.clone(), token_b.clone())];
+        let hops_2 = [HopDescriptor::new("pool".to_string(), token_a.clone(), token_b.clone())];
+        let paths: Vec<&[HopDescriptor]> = vec![&hops_1, &hops_2];
+        let total_amount = BigUint::from(1000u64);
+
+        let (total_out, _) = evaluate_total_output(
+            &paths,
+            &[0.5, 0.5],
+            &total_amount,
+            &market,
+            &MarketOverrides::empty(),
+        )
+        .unwrap();
+
+        let full_swap_out = cp
+            .get_amount_out(total_amount, &token_a, &token_b)
+            .unwrap()
+            .amount;
+        let half_fresh_out = cp
+            .get_amount_out(BigUint::from(500u64), &token_a, &token_b)
+            .unwrap()
+            .amount;
+
+        // Double-counting would report ~2 × half_fresh_out; the honest value
+        // equals the full-amount swap up to per-chunk rounding.
+        assert!(
+            total_out < &half_fresh_out * 2u32,
+            "shared pool must deplete between paths: {total_out} >= {}",
+            &half_fresh_out * 2u32
+        );
+        let diff = BigInt::from(total_out) - BigInt::from(full_swap_out);
+        assert!(
+            diff.magnitude() <= &BigUint::from(2u32),
+            "sequential split should match one full swap (±rounding), diff {diff}"
+        );
     }
 
     #[test]
