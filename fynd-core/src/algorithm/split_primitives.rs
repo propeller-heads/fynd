@@ -460,72 +460,6 @@ pub(crate) fn simulate_path(
     })
 }
 
-/// Simulates all paths at their current fractions and returns
-/// `(total_amount_out, total_gas)`. `paths[i]` corresponds to `fractions[i]`.
-///
-/// Paths are simulated sequentially with a shared post-swap state map: later
-/// paths see the depleted reserves left by earlier paths, so a split that
-/// reuses a pool cannot double-count its liquidity.
-pub(crate) fn evaluate_total_output(
-    paths: &[&[HopDescriptor]],
-    fractions: &[f64],
-    total_amount: &BigUint,
-    market: &MarketState,
-    overrides: &MarketOverrides,
-) -> Result<(BigUint, u64), AlgorithmError> {
-    let amounts = fractions_to_amounts(total_amount, fractions)
-        .map_err(|e| AlgorithmError::Other(e.to_string()))?;
-
-    let mut total_out = BigUint::zero();
-    let mut total_gas: u64 = 0;
-    let mut seen_hops: HashSet<(ComponentId, Bytes, Bytes)> = HashSet::new();
-    let mut post_swap = MarketOverrides::empty();
-
-    for (path, amount) in paths.iter().zip(amounts.iter()) {
-        if amount.is_zero() {
-            continue;
-        }
-
-        let mut current_amount = amount.clone();
-
-        for hop in path.iter() {
-            let sim = post_swap
-                .get(&hop.component_id)
-                .or_else(|| overrides.get(&hop.component_id))
-                .or_else(|| market.get_simulation_state(&hop.component_id))
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "simulation state",
-                    id: Some(hop.component_id.clone()),
-                })?;
-
-            let result = sim
-                .get_amount_out(current_amount, &hop.token_in, &hop.token_out)
-                .map_err(|e| AlgorithmError::SimulationFailed {
-                    component_id: hop.component_id.clone(),
-                    error: e.to_string(),
-                })?;
-
-            // Shared pre-split hops appear in multiple paths but are
-            // executed once on-chain — count gas only once per unique
-            // (pool, token_in, token_out).
-            let hop_key = (
-                hop.component_id.clone(),
-                hop.token_in.address.clone(),
-                hop.token_out.address.clone(),
-            );
-            if seen_hops.insert(hop_key) {
-                total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
-            }
-            current_amount = result.amount;
-            post_swap = post_swap.with_override(hop.component_id.clone(), result.new_state);
-        }
-
-        total_out += current_amount;
-    }
-
-    Ok((total_out, total_gas))
-}
-
 /// Builds post-swap pool states after all paths in a split-route solution
 /// have been executed.
 ///
@@ -537,44 +471,52 @@ pub(crate) fn evaluate_total_output(
 /// Curve, and Balancer all reflect their post-swap reserves. Pass the result
 /// to `find_single_route` for the next iteration.
 ///
-/// Paths are processed in order so shared pools accumulate the effects of
-/// all prior paths.
+/// Swaps are simulated in the same topological order as the final route, so
+/// candidate discovery sees the exact state the executable split leaves behind.
 pub(crate) fn build_post_swap_overrides(
     paths: &[PathAllocation],
     market: &MarketState,
-) -> MarketOverrides {
-    let mut overrides = MarketOverrides::empty();
-
-    for path in paths {
-        let mut current_amount = path.amount_in.clone();
-
-        for hop in &path.hops {
-            let desc = &hop.descriptor;
-            let sim = overrides
-                .get(&desc.component_id)
-                .or_else(|| market.get_simulation_state(&desc.component_id));
-
-            let Some(sim) = sim else { break };
-
-            let Ok(result) = sim.get_amount_out(current_amount, &desc.token_in, &desc.token_out)
-            else {
-                break;
-            };
-
-            current_amount = result.amount;
-            overrides = overrides.with_override(desc.component_id.clone(), result.new_state);
-        }
-    }
-
-    overrides
+) -> Result<MarketOverrides, AlgorithmError> {
+    let Some(root_hop) = paths
+        .first()
+        .and_then(|path| path.hops.first())
+    else {
+        return Ok(MarketOverrides::empty());
+    };
+    let total_amount = paths
+        .iter()
+        .map(|path| path.amount_in.clone())
+        .sum();
+    Ok(execute_split_plan(
+        paths,
+        market,
+        &root_hop.descriptor.token_in.address,
+        &total_amount,
+        &MarketOverrides::empty(),
+    )?
+    .post_swap)
 }
 
 struct SplitSwap {
     hop: HopDescriptor,
     split: f64,
     amount_in: BigUint,
+}
+
+struct ExecutedSplitSwap {
+    hop: HopDescriptor,
+    split: f64,
+    amount_in: BigUint,
     amount_out: BigUint,
     gas: BigUint,
+    pre_swap_state: Box<dyn ProtocolSim>,
+}
+
+struct SplitExecution {
+    swaps: Vec<ExecutedSplitSwap>,
+    available: HashMap<Bytes, BigUint>,
+    post_swap: MarketOverrides,
+    total_gas: u64,
 }
 
 /// Merge shared hops across paths, summing their flow fractions, and return
@@ -597,9 +539,6 @@ fn merge_shared_hops(
             hops.entry(key)
                 .and_modify(|h| {
                     h.split += path.flow_fraction;
-                    h.amount_out += &hop.amount_out;
-                    // Gas is not summed: swapping more on the same pool does not
-                    // increase gas compared to swapping less.
                 })
                 .or_insert(SplitSwap {
                     hop: HopDescriptor::new(
@@ -610,8 +549,6 @@ fn merge_shared_hops(
                     split: path.flow_fraction,
                     // Set later by assign_splits_and_amounts.
                     amount_in: BigUint::ZERO,
-                    amount_out: hop.amount_out.clone(),
-                    gas: hop.gas.clone(),
                 });
         }
     }
@@ -628,6 +565,23 @@ fn merge_shared_hops(
             b.split
                 .partial_cmp(&a.split)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.hop
+                        .component_id
+                        .cmp(&b.hop.component_id)
+                })
+                .then_with(|| {
+                    a.hop
+                        .token_in
+                        .address
+                        .cmp(&b.hop.token_in.address)
+                })
+                .then_with(|| {
+                    a.hop
+                        .token_out
+                        .address
+                        .cmp(&b.hop.token_out.address)
+                })
         });
     }
     Ok(branch_collections)
@@ -655,6 +609,201 @@ fn assign_splits_and_amounts(
         swap.split = if i == len - 1 { 0.0 } else { normalized[i] };
     }
     hops
+}
+
+fn build_in_degree(hops_by_token: &HashMap<Bytes, Vec<SplitSwap>>) -> HashMap<Bytes, usize> {
+    let mut in_degree: HashMap<Bytes, usize> = HashMap::new();
+    for (token_in_addr, branch_collection) in hops_by_token {
+        in_degree
+            .entry(token_in_addr.clone())
+            .or_insert(0);
+        for swap in branch_collection {
+            *in_degree
+                .entry(swap.hop.token_out.address.clone())
+                .or_insert(0) += 1;
+        }
+    }
+    in_degree
+}
+
+fn execute_split_plan(
+    paths: &[PathAllocation],
+    market: &MarketState,
+    start_token: &Bytes,
+    start_amount: &BigUint,
+    base_overrides: &MarketOverrides,
+) -> Result<SplitExecution, AlgorithmError> {
+    for path in paths {
+        path.validate_token_cycles()?;
+    }
+
+    let mut hops_by_token = merge_shared_hops(paths)?;
+    let mut in_degree = build_in_degree(&hops_by_token);
+    let mut ready = VecDeque::new();
+    ready.push_back(start_token.clone());
+
+    let mut available: HashMap<Bytes, BigUint> = HashMap::new();
+    available.insert(start_token.clone(), start_amount.clone());
+
+    let mut swaps = Vec::new();
+    let mut post_swap = MarketOverrides::empty();
+    let mut total_gas: u64 = 0;
+
+    while let Some(token_addr) = ready.pop_front() {
+        let Some(branch_collection) = hops_by_token.remove(&token_addr) else {
+            continue;
+        };
+        let total = available
+            .get(&token_addr)
+            .cloned()
+            .unwrap_or_default();
+
+        for split_swap in assign_splits_and_amounts(branch_collection, &total) {
+            let sim = post_swap
+                .get(&split_swap.hop.component_id)
+                .or_else(|| base_overrides.get(&split_swap.hop.component_id))
+                .or_else(|| market.get_simulation_state(&split_swap.hop.component_id))
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "simulation state",
+                    id: Some(split_swap.hop.component_id.clone()),
+                })?;
+
+            let result = sim
+                .get_amount_out(
+                    split_swap.amount_in.clone(),
+                    &split_swap.hop.token_in,
+                    &split_swap.hop.token_out,
+                )
+                .map_err(|e| AlgorithmError::SimulationFailed {
+                    component_id: split_swap.hop.component_id.clone(),
+                    error: e.to_string(),
+                })?;
+
+            let out_addr = split_swap.hop.token_out.address.clone();
+            *available
+                .entry(out_addr.clone())
+                .or_default() += &result.amount;
+            total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
+
+            swaps.push(ExecutedSplitSwap {
+                hop: split_swap.hop.clone(),
+                split: split_swap.split,
+                amount_in: split_swap.amount_in,
+                amount_out: result.amount,
+                gas: result.gas,
+                pre_swap_state: sim.clone_box(),
+            });
+            post_swap = post_swap.with_override(split_swap.hop.component_id, result.new_state);
+
+            // Decrement in-degree; enqueue when all inflows are ready.
+            if let Some(deg) = in_degree.get_mut(&out_addr) {
+                *deg = deg.saturating_sub(1);
+                if *deg == 0 {
+                    ready.push_back(out_addr);
+                }
+            }
+        }
+    }
+
+    if !hops_by_token.is_empty() {
+        let stuck: Vec<_> = hops_by_token
+            .keys()
+            .map(|k| format!("{k}"))
+            .collect();
+        return Err(AlgorithmError::Other(format!(
+            "dependency cycle — unprocessed tokens: [{}]",
+            stuck.join(", "),
+        )));
+    }
+
+    Ok(SplitExecution { swaps, available, post_swap, total_gas })
+}
+
+fn allocations_from_descriptors(
+    paths: &[&[HopDescriptor]],
+    fractions: &[f64],
+    total_amount: &BigUint,
+) -> Result<Vec<PathAllocation>, AlgorithmError> {
+    if paths.len() != fractions.len() {
+        return Err(AlgorithmError::Other(format!(
+            "paths/fractions length mismatch: {} paths, {} fractions",
+            paths.len(),
+            fractions.len(),
+        )));
+    }
+    let amounts = fractions_to_amounts(total_amount, fractions)
+        .map_err(|e| AlgorithmError::Other(e.to_string()))?;
+
+    paths
+        .iter()
+        .zip(fractions.iter())
+        .zip(amounts)
+        .map(|((path, &flow_fraction), amount_in)| {
+            if path.is_empty() {
+                return Err(AlgorithmError::Other("path has no hops".to_string()));
+            }
+            Ok(PathAllocation {
+                hops: path
+                    .iter()
+                    .cloned()
+                    .map(|descriptor| SimulatedHop {
+                        descriptor,
+                        amount_out: BigUint::ZERO,
+                        gas: BigUint::ZERO,
+                    })
+                    .collect(),
+                flow_fraction,
+                amount_in,
+                amount_out: BigUint::ZERO,
+                marginal_price_product: 0.0,
+            })
+        })
+        .collect()
+}
+
+/// Simulates all paths at their current fractions and returns
+/// `(total_amount_out, total_gas)`. `paths[i]` corresponds to `fractions[i]`.
+///
+/// Uses the same merged topological execution plan as `build_split_route`, so
+/// the optimiser scores the route that will actually be emitted.
+pub(crate) fn evaluate_total_output(
+    paths: &[&[HopDescriptor]],
+    fractions: &[f64],
+    total_amount: &BigUint,
+    market: &MarketState,
+    overrides: &MarketOverrides,
+) -> Result<(BigUint, u64), AlgorithmError> {
+    let first_hop = paths
+        .first()
+        .and_then(|path| path.first())
+        .ok_or_else(|| AlgorithmError::Other("paths must not be empty".to_string()))?;
+    let terminal_tokens: HashSet<Bytes> = paths
+        .iter()
+        .map(|path| {
+            path.last()
+                .map(|hop| hop.token_out.address.clone())
+                .ok_or_else(|| AlgorithmError::Other("path has no hops".to_string()))
+        })
+        .collect::<Result<_, AlgorithmError>>()?;
+    let allocations = allocations_from_descriptors(paths, fractions, total_amount)?;
+    let execution = execute_split_plan(
+        &allocations,
+        market,
+        &first_hop.token_in.address,
+        total_amount,
+        overrides,
+    )?;
+    let total_out = terminal_tokens
+        .iter()
+        .map(|token| {
+            execution
+                .available
+                .get(token)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .sum();
+    Ok((total_out, execution.total_gas))
 }
 
 /// Assembles a [`Route`] from split-route path allocations with shared-hop
@@ -711,117 +860,46 @@ pub(crate) fn build_split_route(
     market: &MarketState,
     order: &Order,
 ) -> Result<Route, AlgorithmError> {
-    for path in paths {
-        path.validate_token_cycles()?;
-    }
-    let mut hops_by_token = merge_shared_hops(paths)?;
-
-    // Build in-degree map (Kahn's algorithm): a token is ready to process
-    // only when every upstream token that feeds into it has been processed.
-    // This handles paths of different lengths that converge on the same
-    // intermediate token (e.g. WETH→USDC→DAI and WETH→USDT→USDC→DAI both
-    // feeding Pool A at USDC→DAI).
-    let mut in_degree: HashMap<Bytes, usize> = HashMap::new();
-    for (token_in_addr, branch_collection) in &hops_by_token {
-        in_degree
-            .entry(token_in_addr.clone())
-            .or_insert(0);
-        for swap in branch_collection {
-            *in_degree
-                .entry(swap.hop.token_out.address.clone())
-                .or_insert(0) += 1;
-        }
-    }
-
-    let mut ready = VecDeque::new();
-    ready.push_back(order.token_in().clone());
-
-    let mut available: HashMap<Bytes, BigUint> = HashMap::new();
-    available.insert(order.token_in().clone(), order.amount().clone());
-
+    let execution = execute_split_plan(
+        paths,
+        market,
+        order.token_in(),
+        order.amount(),
+        &MarketOverrides::empty(),
+    )?;
     let mut swaps = Vec::new();
     let mut route_tokens: HashMap<Bytes, Token> = HashMap::new();
 
-    // Topological traversal: process each token only after all its inflows
-    // have been accumulated.
-    while let Some(token_addr) = ready.pop_front() {
-        let Some(branch_collection) = hops_by_token.remove(&token_addr) else {
-            continue;
-        };
-        let total = available
-            .get(&token_addr)
-            .cloned()
-            .unwrap_or_default();
+    for executed in execution.swaps {
+        let component = market
+            .get_component(&executed.hop.component_id)
+            .ok_or_else(|| AlgorithmError::DataNotFound {
+                kind: "protocol component",
+                id: Some(executed.hop.component_id.clone()),
+            })?;
 
-        for split_swap in assign_splits_and_amounts(branch_collection, &total) {
-            let sim = market
-                .get_simulation_state(&split_swap.hop.component_id)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "simulation state",
-                    id: Some(split_swap.hop.component_id.clone()),
-                })?;
-
-            let component = market
-                .get_component(&split_swap.hop.component_id)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "protocol component",
-                    id: Some(split_swap.hop.component_id.clone()),
-                })?;
-
-            let in_addr = split_swap.hop.token_in.address.clone();
-            let out_addr = split_swap.hop.token_out.address.clone();
-            *available
-                .entry(out_addr.clone())
-                .or_default() += &split_swap.amount_out;
-            swaps.push(
-                Swap::new(
-                    split_swap.hop.component_id,
-                    component.protocol_system.clone(),
-                    in_addr.clone(),
-                    out_addr.clone(),
-                    split_swap.amount_in,
-                    split_swap.amount_out,
-                    split_swap.gas,
-                    component.clone(),
-                    sim.clone_box(),
-                )
-                .with_split(split_swap.split),
-            );
-            route_tokens
-                .entry(in_addr)
-                .or_insert(split_swap.hop.token_in);
-            route_tokens
-                .entry(out_addr.clone())
-                .or_insert(split_swap.hop.token_out);
-
-            // Decrement in-degree; enqueue when all inflows are ready.
-            if let Some(deg) = in_degree.get_mut(&out_addr) {
-                *deg = deg.saturating_sub(1);
-                if *deg == 0 {
-                    ready.push_back(out_addr);
-                }
-            }
-        }
-    }
-
-    // If any hops were never reached, the token graph has a cycle and the
-    // topological sort deadlocked. This happens when two paths use the same
-    // pools in opposite order, e.g.:
-    //
-    //   WETH ─┬─ USDC ─ (Pool A) ─ DAI ─ PEPE ─ (Pool B) ─ UNI ─ WBTC
-    //         └─ PEPE ─ (Pool B) ─ UNI ─ USDC ─ (Pool A) ─ DAI ─ WBTC
-    //
-    // merge_shared_hops collapses Pool A (USDC→DAI) and Pool B (PEPE→UNI)
-    // into single swaps, creating the cycle USDC → DAI → PEPE → UNI → USDC.
-    if !hops_by_token.is_empty() {
-        let stuck: Vec<_> = hops_by_token
-            .keys()
-            .map(|k| format!("{k}"))
-            .collect();
-        return Err(AlgorithmError::Other(format!(
-            "dependency cycle — unprocessed tokens: [{}]",
-            stuck.join(", "),
-        )));
+        let in_addr = executed.hop.token_in.address.clone();
+        let out_addr = executed.hop.token_out.address.clone();
+        swaps.push(
+            Swap::new(
+                executed.hop.component_id,
+                component.protocol_system.clone(),
+                in_addr.clone(),
+                out_addr.clone(),
+                executed.amount_in,
+                executed.amount_out,
+                executed.gas,
+                component.clone(),
+                executed.pre_swap_state,
+            )
+            .with_split(executed.split),
+        );
+        route_tokens
+            .entry(in_addr)
+            .or_insert(executed.hop.token_in);
+        route_tokens
+            .entry(out_addr.clone())
+            .or_insert(executed.hop.token_out);
     }
 
     Ok(Route::new(swaps, route_tokens)?)
@@ -1324,6 +1402,100 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_total_output_matches_route_order_for_same_component_branches() {
+        // Both source branches use the same component with different token
+        // pairs. The input path order is B then C, but the route emits C then
+        // B because the C branch has the larger split. Since MockProtocolSim
+        // increments its spot price after each swap, path-order simulation
+        // would produce a different total than route-order simulation.
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let token_c = token(0x0C, "C");
+        let token_d = token(0x0D, "D");
+        let market = make_market(vec![
+            (
+                "tripool",
+                vec![token_a.clone(), token_b.clone(), token_c.clone()],
+                Box::new(MockProtocolSim::new(2.0).with_gas(80_000)),
+            ),
+            (
+                "pool_bd",
+                vec![token_b.clone(), token_d.clone()],
+                Box::new(MockProtocolSim::new(1.0)),
+            ),
+            (
+                "pool_cd",
+                vec![token_c.clone(), token_d.clone()],
+                Box::new(MockProtocolSim::new(1.0)),
+            ),
+        ]);
+
+        let hops_b = [
+            HopDescriptor::new("tripool".to_string(), token_a.clone(), token_b.clone()),
+            HopDescriptor::new("pool_bd".to_string(), token_b, token_d.clone()),
+        ];
+        let hops_c = [
+            HopDescriptor::new("tripool".to_string(), token_a.clone(), token_c.clone()),
+            HopDescriptor::new("pool_cd".to_string(), token_c.clone(), token_d.clone()),
+        ];
+
+        let total_amount = BigUint::from(1000u64);
+        let paths: Vec<&[HopDescriptor]> = vec![&hops_b, &hops_c];
+        let fractions = [0.4, 0.6];
+        let (total_out, total_gas) = evaluate_total_output(
+            &paths,
+            &fractions,
+            &total_amount,
+            &market,
+            &MarketOverrides::empty(),
+        )
+        .unwrap();
+
+        let zero = BigUint::ZERO;
+        let allocations = vec![
+            PathAllocation {
+                hops: hops_b
+                    .iter()
+                    .cloned()
+                    .map(|hop| hop.with_amounts(zero.clone(), zero.clone()))
+                    .collect(),
+                flow_fraction: 0.4,
+                amount_in: BigUint::from(400u64),
+                amount_out: zero.clone(),
+                marginal_price_product: 0.0,
+            },
+            PathAllocation {
+                hops: hops_c
+                    .iter()
+                    .cloned()
+                    .map(|hop| hop.with_amounts(zero.clone(), zero.clone()))
+                    .collect(),
+                flow_fraction: 0.6,
+                amount_in: BigUint::from(600u64),
+                amount_out: zero,
+                marginal_price_product: 0.0,
+            },
+        ];
+        let ord = order(&token_a, &token_d, 1000, OrderSide::Sell);
+        let route = build_split_route(&allocations, &market, &ord).unwrap();
+        let route_out: BigUint = route
+            .swaps()
+            .iter()
+            .filter(|swap| swap.token_out() == &token_d.address)
+            .map(|swap| swap.amount_out().clone())
+            .sum();
+
+        assert_eq!(
+            route.swaps()[0].token_out(),
+            &token_c.address,
+            "larger C branch should execute first"
+        );
+        assert_eq!(total_out, BigUint::from(2400u64));
+        assert_eq!(route_out, total_out);
+        assert_eq!(route.total_gas().to_u64().unwrap(), total_gas);
+    }
+
+    #[test]
     fn test_gas_dedup_different_tokens() {
         // A single 3-token pool used for two different token pairs is two
         // distinct hops — gas must be counted for each.
@@ -1385,7 +1557,7 @@ mod tests {
             marginal_price_product: 2.0,
         };
 
-        let degraded = build_post_swap_overrides(&[allocation], &market);
+        let degraded = build_post_swap_overrides(&[allocation], &market).unwrap();
 
         // xy=k: amount_out = amount_in * reserve_out / (reserve_in + amount_in)
         // Fresh pool (10000/20000): 100 * 20000 / (10000 + 100) = 198
@@ -1508,15 +1680,11 @@ mod tests {
                 hop: HopDescriptor::new("pool1".to_string(), token_a.clone(), token_b.clone()),
                 split: 0.7,
                 amount_in: BigUint::ZERO,
-                amount_out: BigUint::ZERO,
-                gas: BigUint::ZERO,
             },
             SplitSwap {
                 hop: HopDescriptor::new("pool2".to_string(), token_a.clone(), token_b.clone()),
                 split: 0.3,
                 amount_in: BigUint::ZERO,
-                amount_out: BigUint::ZERO,
-                gas: BigUint::ZERO,
             },
         ];
 
@@ -1541,8 +1709,6 @@ mod tests {
             hop: HopDescriptor::new("pool1".to_string(), token_a, token_b),
             split: 1.0,
             amount_in: BigUint::ZERO,
-            amount_out: BigUint::ZERO,
-            gas: BigUint::ZERO,
         }];
 
         let total = BigUint::from(1000u64);
@@ -2127,18 +2293,18 @@ mod tests {
             .find(|s| s.component_id() == "pool_c")
             .expect("pool_c swap must exist");
 
-        // Total DAI = 2400. Pool B gets 0.7 fraction, Pool C gets 0.3.
-        // Pool B amount_out = 3000 + 6000 = 9000 (merged from paths 1+3)
-        // Pool C amount_out = 2400 (path 2 only)
+        // Total DAI = 2400. Pool B gets 0.7 fraction, Pool C gets the
+        // remainder. Amounts are simulated from the emitted route, not summed
+        // from path-local fixtures.
         assert_eq!(
             *pool_b_swap.amount_out(),
-            BigUint::from(9000u64),
-            "pool_b amount_out should be merged total from paths 1+3"
+            BigUint::from(8400u64),
+            "pool_b amount_out should be simulated from emitted amount_in"
         );
         assert_eq!(
             *pool_c_swap.amount_out(),
-            BigUint::from(2400u64),
-            "pool_c amount_out should be path 2 only"
+            BigUint::from(2880u64),
+            "pool_c amount_out should be simulated from remainder amount_in"
         );
 
         // Verify ordering: pool_a must appear before pool_b and pool_c
