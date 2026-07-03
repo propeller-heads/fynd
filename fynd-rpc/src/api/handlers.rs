@@ -78,24 +78,31 @@ pub(crate) async fn quote(
         }
     }
 
-    let core_quote = match state.quote_cache() {
+    let (core_quote, cache_hit_block) = match state.quote_cache() {
         Some(cache) => solve_with_cache(&state, cache, core_request, &http_req).await?,
-        None => {
+        None => (
             state
                 .worker_router()
                 .quote(core_request)
-                .await?
-        }
+                .await?,
+            None,
+        ),
     };
 
     info!(
         solve_time_ms = core_quote.solve_time_ms(),
         num_orders = core_quote.orders().len(),
         num_pools = state.worker_router().num_pools(),
+        cache_hit = cache_hit_block.is_some(),
         "quote completed"
     );
 
-    let dto_quote: dto::Quote = core_quote.into();
+    let mut dto_quote: dto::Quote = core_quote.into();
+    // Stamp cache provenance only on a hit. On a miss or with the cache off the response stays
+    // byte-identical to a live solve, so existing callers see no change.
+    if let Some(solved_at_block) = cache_hit_block {
+        dto_quote.mark_cache_hit(solved_at_block);
+    }
 
     Ok(HttpResponse::Ok().json(dto_quote))
 }
@@ -106,18 +113,25 @@ pub(crate) async fn quote(
 /// Only single-order requests are cached. The cache key and re-encode path are per-order, and
 /// multi-order quote→execute is not a v1 pattern, so multi-order requests bypass the cache and
 /// re-solve every time (counted for visibility).
+///
+/// Returns the encoded quote plus, on a hit, the block the served solve was computed against so the
+/// handler can stamp cache provenance on the response. A miss (or multi-order bypass) returns
+/// `None`, leaving the response byte-identical to a live solve.
 async fn solve_with_cache(
     state: &AppState,
     cache: &Arc<QuoteCache>,
     request: fynd_core::QuoteRequest,
     http_req: &HttpRequest,
-) -> Result<fynd_core::Quote, ApiError> {
+) -> Result<(fynd_core::Quote, Option<u64>), ApiError> {
     if request.orders().len() != 1 {
         counter!("quote_cache_multi_order_bypass_total").increment(1);
-        return Ok(state
-            .worker_router()
-            .quote(request)
-            .await?);
+        return Ok((
+            state
+                .worker_router()
+                .quote(request)
+                .await?,
+            None,
+        ));
     }
     let order = request.orders()[0].clone();
 
@@ -125,10 +139,14 @@ async fn solve_with_cache(
     // (market not yet synced) freshness is unverifiable, so fall through to a fresh solve.
     if let Some(head) = state.current_block().await {
         if let Some(cached) = cache.get(&order, head) {
-            return Ok(state
+            // Read the served solve's block before the entry is moved into the encoder; it is kept
+            // current by the refresher and equals the entry's staleness anchor.
+            let solved_at_block = cached.block().number();
+            let quote = state
                 .worker_router()
                 .encode_cached(cached, &order, request.options())
-                .await?);
+                .await?;
+            return Ok((quote, Some(solved_at_block)));
         }
     }
 
@@ -150,7 +168,7 @@ async fn solve_with_cache(
             cache.insert(&order, candidate, request, &identity, solved_at_block);
         }
     }
-    Ok(quote)
+    Ok((quote, None))
 }
 
 /// Extracts the caller identity from the `User-Identity` header, falling back to the shared
