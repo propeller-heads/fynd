@@ -30,7 +30,8 @@ impl Deltas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    /// Fynd would have produced strictly more output than settled (net of gas).
+    /// Fynd delivered strictly more output than settled after subtracting only its own gas (see
+    /// [`verdict`] for why this comparison is intentionally conservative).
     Win,
     /// Fynd's output was equal to or worse than settled, or it could not be compared.
     Loss,
@@ -86,8 +87,14 @@ pub(crate) fn compare(outcome: &Outcome, settled_amount_out: U256) -> Deltas {
     }
 }
 
-/// Classify a trade by its net-of-gas delta at the given outcome (top-of-block is the default
-/// reference). Fynd wins only when it delivers strictly more output after gas.
+/// Classify a trade by its net-of-gas delta against the settled amount. Fynd wins only when it
+/// delivers strictly more output after subtracting its own estimated gas cost.
+///
+/// The comparison is deliberately conservative and asymmetric: Fynd's output is net of its own
+/// gas, while the settled `amount_out` is gross — the settled swap's gas was paid separately in ETH
+/// and is not subtracted here. Isolating the on-chain trade's true gas cost is hard (it can sit
+/// deep in a larger transaction alongside unrelated activity), so a `Win` under-counts rather than
+/// over-counts Fynd's edge. Symmetric N-1/N gas accounting is a follow-up.
 pub(crate) fn verdict(outcome: &Outcome, settled_amount_out: U256) -> Verdict {
     if let Outcome::Partial(_) = outcome {
         return Verdict::CoverageMiss;
