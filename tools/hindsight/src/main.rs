@@ -61,7 +61,8 @@ struct VerifyArgs {
     allium_key: String,
 
     /// Allium saved query ID, parameterized by `block_number`. A saved query ID is scoped to the
-    /// workspace that created it, so register this SQL in your own Allium workspace and pass its ID:
+    /// workspace that created it, so register this SQL in your own Allium workspace and pass its
+    /// ID:
     ///
     ///   SELECT project, protocol, token_sold_address, token_sold_symbol, token_sold_amount,
     ///          usd_sold_amount, token_bought_address, token_bought_symbol, token_bought_amount,

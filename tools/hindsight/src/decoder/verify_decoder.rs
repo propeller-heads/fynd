@@ -124,15 +124,20 @@ async fn compare_block<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     out: &mut Vec<TxComparison>,
 ) {
-    let our_by_tx: HashMap<TxHash, &DecodedTrade> =
-        ours.iter().map(|t| (t.tx_hash, t)).collect();
+    let our_by_tx: HashMap<TxHash, &DecodedTrade> = ours
+        .iter()
+        .map(|t| (t.tx_hash, t))
+        .collect();
     let mut their_by_tx: HashMap<TxHash, Vec<&AlliumRow>> = HashMap::new();
     for row in theirs {
         let Ok(tx) = row.transaction_hash.parse::<TxHash>() else {
             warn!(hash = %row.transaction_hash, "skipping Allium row with unparseable tx hash");
             continue;
         };
-        their_by_tx.entry(tx).or_default().push(row);
+        their_by_tx
+            .entry(tx)
+            .or_default()
+            .push(row);
     }
 
     for (tx, trade) in &our_by_tx {

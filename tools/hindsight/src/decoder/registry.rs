@@ -65,7 +65,11 @@ pub(crate) fn is_batch_settler(address: &Address) -> bool {
 /// All known addresses, for resolving an address to a human name.
 static KNOWN_NAMES: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
     let mut names = known_aggregators().clone();
-    names.extend(known_clients().iter().map(|(&k, &v)| (k, v)));
+    names.extend(
+        known_clients()
+            .iter()
+            .map(|(&k, &v)| (k, v)),
+    );
     names
 });
 
