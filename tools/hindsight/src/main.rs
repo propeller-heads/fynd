@@ -1,0 +1,250 @@
+mod decoder;
+
+use std::time::Instant;
+
+use alloy::providers::{Provider, ProviderBuilder};
+use anyhow::Context;
+use clap::{Args, Parser, Subcommand};
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser)]
+#[command(name = "hindsight", about = "Decode aggregator swaps from on-chain data")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Decode aggregator trades from a block or range.
+    Decode(DecodeArgs),
+    /// Decode and compare against Allium's aggregator_trades ground truth.
+    Verify(VerifyArgs),
+}
+
+#[derive(Args)]
+struct DecodeArgs {
+    /// Ethereum RPC URL
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: String,
+
+    /// Block number to decode (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to decode (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
+
+    /// Output as JSON instead of human-readable
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct VerifyArgs {
+    /// Ethereum RPC URL
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: String,
+
+    /// Block number to verify (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to verify (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
+
+    /// Allium API key
+    #[arg(long, env = "ALLIUM_API_KEY")]
+    allium_key: String,
+
+    /// Allium saved query ID, parameterized by `block_number`. A saved query ID is scoped to the
+    /// workspace that created it, so register this SQL in your own Allium workspace and pass its
+    /// ID:
+    ///
+    ///   SELECT project, protocol, token_sold_address, token_sold_symbol, token_sold_amount,
+    ///          usd_sold_amount, token_bought_address, token_bought_symbol, token_bought_amount,
+    ///          usd_bought_amount, sender_address, to_address, transaction_hash,
+    ///          transaction_fees_usd, block_number, block_timestamp, log_index
+    ///   FROM ethereum.dex.aggregator_trades
+    ///   WHERE block_number = {{block_number}}
+    ///   ORDER BY log_index
+    #[arg(long, env = "ALLIUM_QUERY_ID")]
+    allium_query_id: String,
+
+    /// Max allowed amount difference vs Allium, in basis points
+    #[arg(long, default_value_t = 50.0)]
+    tolerance_bps: f64,
+
+    /// Output as JSON instead of human-readable
+    #[arg(long)]
+    json: bool,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_env("RUST_LOG").add_directive("hindsight=info".parse().unwrap()),
+        )
+        .with_target(false)
+        .init();
+
+    match Cli::parse().command {
+        Command::Decode(args) => run_decode(args).await,
+        Command::Verify(args) => run_verify(args).await,
+    }
+}
+
+async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
+    let provider = provider_from(&args.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
+
+    let mut all_trades = Vec::new();
+    for block_number in &blocks {
+        info!(block = block_number, "decoding aggregator trades");
+        let start = Instant::now();
+        let trades = match decoder::decode_block(&provider, *block_number).await {
+            Ok(trades) => trades,
+            Err(error) => {
+                warn!(block = block_number, %error, "failed to decode block; skipping");
+                continue;
+            }
+        };
+        let elapsed_ms = start.elapsed().as_millis();
+
+        if trades.is_empty() {
+            info!(block = block_number, elapsed_ms, "no aggregator trades found");
+        } else {
+            info!(block = block_number, count = trades.len(), elapsed_ms, "decoded trades");
+        }
+        all_trades.extend(trades);
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&all_trades)?);
+    } else {
+        print_trades(&all_trades);
+    }
+    Ok(())
+}
+
+async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
+    let provider = provider_from(&args.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
+    let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
+
+    info!(blocks = blocks.len(), "verifying decoded trades against Allium");
+    let start = Instant::now();
+    let report =
+        decoder::verify_decoder::run(&provider, &allium, &blocks, args.tolerance_bps).await?;
+    info!(elapsed_ms = start.elapsed().as_millis(), "verification complete");
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        report.print();
+    }
+    Ok(())
+}
+
+fn provider_from(rpc_url: &str) -> anyhow::Result<impl Provider> {
+    let url: reqwest::Url = rpc_url
+        .parse()
+        .with_context(|| format!("invalid RPC URL: {rpc_url}"))?;
+    Ok(ProviderBuilder::new().connect_http(url))
+}
+
+async fn resolve_blocks<P: Provider>(
+    provider: &P,
+    block: Option<u64>,
+    range: Option<&str>,
+) -> anyhow::Result<Vec<u64>> {
+    if let Some(range) = range {
+        parse_range(range)
+    } else if let Some(block) = block {
+        Ok(vec![block])
+    } else {
+        let latest = provider
+            .get_block_number()
+            .await
+            .context("failed to fetch latest block number")?;
+        Ok(vec![latest])
+    }
+}
+
+fn print_trades(trades: &[decoder::DecodedTrade]) {
+    if trades.is_empty() {
+        println!("No aggregator trades found.");
+        return;
+    }
+
+    println!("\n{} aggregator trade(s) found:\n", trades.len());
+    for trade in trades {
+        println!("  tx:         {}", trade.tx_hash);
+        println!("  block:      {}", trade.block_number);
+        println!("  client:     {}", trade.client);
+        println!("  aggregator: {}", trade.aggregator);
+        println!("  sender:     {}", trade.sender);
+        println!("  token_in:   {}", trade.token_in);
+        println!("  amount_in:  {}", trade.amount_in);
+        println!("  token_out:  {}", trade.token_out);
+        println!("  amount_out: {}", trade.amount_out);
+        println!();
+    }
+}
+
+fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
+    let parts: Vec<&str> = range.split('-').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("invalid range format: expected START-END, got '{range}'");
+    }
+    let start: u64 = parts[0]
+        .parse()
+        .with_context(|| format!("invalid start block: {}", parts[0]))?;
+    let end: u64 = parts[1]
+        .parse()
+        .with_context(|| format!("invalid end block: {}", parts[1]))?;
+    if end < start {
+        anyhow::bail!("end block ({end}) must be >= start block ({start})");
+    }
+    if end - start > 1000 {
+        anyhow::bail!("range too large: {} blocks (max 1000)", end - start);
+    }
+    Ok((start..=end).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_valid() {
+        let blocks = parse_range("100-105").unwrap();
+        assert_eq!(blocks, vec![100, 101, 102, 103, 104, 105]);
+    }
+
+    #[test]
+    fn parse_range_single_block() {
+        let blocks = parse_range("100-100").unwrap();
+        assert_eq!(blocks, vec![100]);
+    }
+
+    #[test]
+    fn parse_range_invalid_format() {
+        assert!(parse_range("100").is_err());
+        assert!(parse_range("100-200-300").is_err());
+    }
+
+    #[test]
+    fn parse_range_reversed() {
+        assert!(parse_range("200-100").is_err());
+    }
+
+    #[test]
+    fn parse_range_too_large() {
+        assert!(parse_range("0-1001").is_err());
+    }
+}
