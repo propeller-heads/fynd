@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{Address, Log as PrimitiveLog, U256},
+    primitives::{Address, Bytes, Log as PrimitiveLog, B256, U256},
     rpc::types::{trace::geth::CallFrame, Log},
     sol_types::SolEvent,
 };
@@ -34,6 +34,24 @@ pub(crate) fn make_transfer_log(token: Address, from: Address, to: Address, valu
     let log_data = event.encode_log_data();
     let primitive =
         PrimitiveLog::new_unchecked(token, log_data.topics().to_vec(), log_data.data.clone());
+    Log { inner: primitive, ..Default::default() }
+}
+
+/// An ERC-721 `Transfer` log: same event signature as ERC-20 but all three parameters indexed
+/// (four topics, empty data).
+pub(crate) fn make_nft_transfer_log(
+    token: Address,
+    from: Address,
+    to: Address,
+    token_id: u64,
+) -> Log {
+    let topics = vec![
+        Transfer::SIGNATURE_HASH,
+        from.into_word(),
+        to.into_word(),
+        B256::from(U256::from(token_id)),
+    ];
+    let primitive = PrimitiveLog::new_unchecked(token, topics, Bytes::new());
     Log { inner: primitive, ..Default::default() }
 }
 

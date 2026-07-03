@@ -10,11 +10,47 @@ use tracing::debug;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event TransferSingle(
+        address indexed operator, address indexed from, address indexed to, uint256 id,
+        uint256 value
+    );
+    event TransferBatch(
+        address indexed operator, address indexed from, address indexed to, uint256[] ids,
+        uint256[] values
+    );
 }
 
 /// Convert an RPC log to a primitive log for event decoding.
 pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
     PrimitiveLog::new_unchecked(log.address(), log.topics().to_vec(), log.data().data.clone())
+}
+
+/// Whether `recipient` received an NFT (ERC-721 or ERC-1155) in the transaction.
+///
+/// An ERC-721 `Transfer` shares the ERC-20 event signature but indexes all three parameters
+/// (four topics, empty data), so it is invisible to ERC-20 netting; ERC-1155 uses its own
+/// events with the recipient as the third indexed parameter.
+pub(crate) fn received_nft(logs: &[Log], recipient: Address) -> bool {
+    for log in logs {
+        let topics = log.topics();
+        let Some(&signature) = topics.first() else {
+            continue;
+        };
+        let to = if signature == Transfer::SIGNATURE_HASH && topics.len() == 4 {
+            topics[2]
+        } else if (signature == TransferSingle::SIGNATURE_HASH ||
+            signature == TransferBatch::SIGNATURE_HASH) &&
+            topics.len() == 4
+        {
+            topics[3]
+        } else {
+            continue;
+        };
+        if Address::from_word(to) == recipient {
+            return true;
+        }
+    }
+    false
 }
 
 /// A netted swap: the single token (and amount) that left an address and the
@@ -162,7 +198,7 @@ fn drop_residue_legs(net: &mut HashMap<Address, U256>, flows: &HashMap<Address, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+    use crate::decoder::test_utils::{addr, make_nft_transfer_log, make_transfer_log, swap};
 
     #[test]
     fn simple_swap() {
@@ -227,6 +263,50 @@ mod tests {
 
         let result = decode_trade(&logs, &native, user).unwrap();
         assert_eq!(result, swap(Address::ZERO, 1000, token, 2000));
+    }
+
+    #[test]
+    fn received_nft_detects_erc721() {
+        // The NFT purchase shape: buyer pays a token and receives an ERC-721, not a token amount.
+        let buyer = addr(1);
+        let seller = addr(2);
+        let collection = addr(60);
+
+        let logs = vec![make_nft_transfer_log(collection, seller, buyer, 4002)];
+        assert!(received_nft(&logs, buyer));
+        assert!(!received_nft(&logs, seller));
+    }
+
+    #[test]
+    fn received_nft_detects_erc1155_single() {
+        let buyer = addr(1);
+        let operator = addr(3);
+        let seller = addr(2);
+        let collection = addr(60);
+
+        let event = TransferSingle {
+            operator,
+            from: seller,
+            to: buyer,
+            id: U256::from(7),
+            value: U256::from(1),
+        };
+        let data = event.encode_log_data();
+        let primitive =
+            PrimitiveLog::new_unchecked(collection, data.topics().to_vec(), data.data.clone());
+        let logs = vec![Log { inner: primitive, ..Default::default() }];
+
+        assert!(received_nft(&logs, buyer));
+        assert!(!received_nft(&logs, seller));
+    }
+
+    #[test]
+    fn received_nft_ignores_erc20_transfers() {
+        // A plain ERC-20 Transfer (three topics, amount in data) must not read as an NFT even
+        // though it shares the event signature.
+        let user = addr(1);
+        let logs = vec![make_transfer_log(addr(10), addr(2), user, U256::from(1000))];
+        assert!(!received_nft(&logs, user));
     }
 
     #[test]

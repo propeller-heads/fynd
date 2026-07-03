@@ -17,10 +17,11 @@ use alloy::{
 };
 use anyhow::Context;
 use futures::stream::{StreamExt, TryStreamExt};
-use tracing::warn;
+use tracing::{debug, warn};
 
 pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
+    net::received_nft,
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
     venues::{Matched, Strategy},
 };
@@ -157,6 +158,19 @@ impl<P: Provider> Decoder<P> {
                 );
                 continue;
             };
+
+            // A trader who received an NFT in the same transaction was buying, not swapping: the
+            // netted token flow is the payment side of a purchase (e.g. an NFT sweep through
+            // Relay + Seaport), and the real consideration is invisible to ERC-20 netting.
+            // Recording it would pair the payment with the change as a phantom swap.
+            if received_nft(logs, flow.tracked) {
+                debug!(
+                    tx = %receipt.transaction_hash,
+                    client = %registry.label(entry_point),
+                    "tracked address received an NFT; skipping purchase"
+                );
+                continue;
+            }
 
             let aggregator =
                 attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
