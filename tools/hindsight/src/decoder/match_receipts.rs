@@ -9,7 +9,7 @@ use alloy::{
 use tracing::warn;
 
 use crate::decoder::{
-    net::{decode_trade, to_primitive_log, Transfer},
+    net::{decode_trade, to_primitive_log, NetSwap, Transfer},
     registry::is_batch_settler,
 };
 
@@ -66,7 +66,7 @@ pub(crate) async fn find_maker_trade<P: Provider>(
     exclude: &[Address],
     names: &HashMap<Address, &'static str>,
     code_cache: &mut HashMap<Address, bool>,
-) -> Option<(Address, (Address, U256, Address, U256))> {
+) -> Option<(Address, NetSwap)> {
     // Prefer externally-owned accounts; pools and routers carry code.
     let mut maker = None;
     for (candidate, trade) in maker_candidates(logs, native, exclude, names) {
@@ -86,7 +86,7 @@ fn maker_candidates(
     native: &[(Address, Address, U256)],
     exclude: &[Address],
     names: &HashMap<Address, &'static str>,
-) -> Vec<(Address, (Address, U256, Address, U256))> {
+) -> Vec<(Address, NetSwap)> {
     let mut candidates: BTreeSet<Address> = BTreeSet::new();
     for log in logs {
         if let Ok(transfer) = Transfer::decode_log(&to_primitive_log(log)) {
@@ -139,7 +139,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::known_names,
-        test_utils::{addr, make_transfer_log},
+        test_utils::{addr, make_transfer_log, swap},
     };
 
     #[test]
@@ -162,9 +162,9 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(found.len(), 2);
-        assert_eq!(found[&maker], (token_a, U256::from(1000), token_b, U256::from(2000)));
+        assert_eq!(found[&maker], swap(token_a, 1000, token_b, 2000));
         // The pool nets the inverse swap; the EOA filter discards it later.
-        assert_eq!(found[&pool], (token_b, U256::from(2000), token_a, U256::from(1000)));
+        assert_eq!(found[&pool], swap(token_b, 2000, token_a, 1000));
     }
 
     #[test]

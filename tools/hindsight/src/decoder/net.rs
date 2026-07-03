@@ -16,13 +16,23 @@ pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
     PrimitiveLog::new_unchecked(log.address(), log.topics().to_vec(), log.data().data.clone())
 }
 
+/// A netted swap: the single token (and amount) that left an address and the
+/// single token that came back. Native ETH is [`Address::ZERO`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NetSwap {
+    pub token_in: Address,
+    pub amount_in: U256,
+    pub token_out: Address,
+    pub amount_out: U256,
+}
+
 /// Determine what the tracked address sent and received, netting
 /// intermediate hops, from ERC-20 Transfer logs and native ETH transfers.
 pub(crate) fn decode_trade(
     logs: &[Log],
     native_transfers: &[(Address, Address, U256)],
     tracked: Address,
-) -> Option<(Address, U256, Address, U256)> {
+) -> Option<NetSwap> {
     let mut sent: HashMap<Address, U256> = HashMap::new();
     let mut received: HashMap<Address, U256> = HashMap::new();
 
@@ -95,10 +105,7 @@ pub(crate) fn fee_to_collectors(
 /// the tracked sender is the solver, not a trader), not a single comparable swap. Amounts across
 /// tokens with different decimals are not comparable, so guessing a "dominant" leg would pair
 /// unrelated tokens — declining keeps the re-solve comparison honest.
-fn net_trade(
-    sent: &HashMap<Address, U256>,
-    received: &HashMap<Address, U256>,
-) -> Option<(Address, U256, Address, U256)> {
+fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -> Option<NetSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
 
@@ -131,7 +138,7 @@ fn net_trade(
         .iter()
         .next()
         .filter(|_| net_received.len() == 1)?;
-    Some((token_in, amount_in, token_out, amount_out))
+    Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
 /// Wrapped ETH — excluded as an output recipient (it appears only as a wrap/unwrap intermediary).
@@ -153,7 +160,7 @@ pub(crate) fn decode_relay_rebalance(
     native_transfers: &[(Address, Address, U256)],
     fee_collectors: &HashSet<Address>,
     relay_routers: &HashSet<Address>,
-) -> Option<(Address, U256, Address, U256)> {
+) -> Option<NetSwap> {
     let mut sent: HashMap<(Address, Address), U256> = HashMap::new();
     let mut received: HashMap<(Address, Address), U256> = HashMap::new();
     let mut senders: HashSet<Address> = HashSet::new();
@@ -227,7 +234,7 @@ pub(crate) fn decode_relay_rebalance(
             return None;
         }
         let (token_out, amount_out) = net_recv[0];
-        return Some((token_in, amount_in, token_out, amount_out));
+        return Some(NetSwap { token_in, amount_in, token_out, amount_out });
     }
 
     // C1 external fill: the single pure-sink recipient (receives but never sends), excluding
@@ -250,13 +257,13 @@ pub(crate) fn decode_relay_rebalance(
         return None;
     }
     let (_, token_out, amount_out) = outputs[0];
-    Some((token_in, amount_in, token_out, amount_out))
+    Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log};
+    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
     fn simple_swap() {
@@ -270,7 +277,7 @@ mod tests {
         ];
 
         let result = decode_trade(&logs, &[], sender).unwrap();
-        assert_eq!(result, (token_a, U256::from(1000), token_b, U256::from(2000)));
+        assert_eq!(result, swap(token_a, 1000, token_b, 2000));
     }
 
     #[test]
@@ -289,7 +296,7 @@ mod tests {
         ];
 
         let result = decode_trade(&logs, &[], sender).unwrap();
-        assert_eq!(result, (token_a, U256::from(1000), token_b, U256::from(2000)));
+        assert_eq!(result, swap(token_a, 1000, token_b, 2000));
     }
 
     #[test]
@@ -305,7 +312,7 @@ mod tests {
         let native = vec![(router, user, U256::from(2000))];
 
         let result = decode_trade(&logs, &native, user).unwrap();
-        assert_eq!(result, (token, U256::from(1000), Address::ZERO, U256::from(2000)));
+        assert_eq!(result, swap(token, 1000, Address::ZERO, 2000));
     }
 
     #[test]
@@ -320,7 +327,7 @@ mod tests {
         let native = vec![(user, router, U256::from(1000))];
 
         let result = decode_trade(&logs, &native, user).unwrap();
-        assert_eq!(result, (Address::ZERO, U256::from(1000), token, U256::from(2000)));
+        assert_eq!(result, swap(Address::ZERO, 1000, token, 2000));
     }
 
     #[test]
@@ -381,7 +388,7 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
-        assert_eq!(got, (token_in, U256::from(1000), token_out, U256::from(2000)));
+        assert_eq!(got, swap(token_in, 1000, token_out, 2000));
     }
 
     #[test]
@@ -397,7 +404,7 @@ mod tests {
         let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
         let native = vec![(router, recipient, U256::from(2000))];
         let got = decode_relay_rebalance(&logs, &native, &collectors, &routers).unwrap();
-        assert_eq!(got, (token_in, U256::from(1000), Address::ZERO, U256::from(2000)));
+        assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
     }
 
     #[test]
@@ -414,7 +421,7 @@ mod tests {
             make_transfer_log(token_out, pool, fee, U256::from(1001)),
         ];
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
-        assert_eq!(got, (token_in, U256::from(1000), token_out, U256::from(1001)));
+        assert_eq!(got, swap(token_in, 1000, token_out, 1001));
     }
 
     #[test]

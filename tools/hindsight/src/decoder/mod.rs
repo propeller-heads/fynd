@@ -137,11 +137,11 @@ pub(crate) async fn decode_block<P: Provider>(
         let aggregator =
             attribute_aggregator(&root, entry_point, sender, aggregators).unwrap_or(entry_point);
 
-        let Some((tracked, (token_in, amount_in, token_out, amount_out))) = decoded else {
+        let Some((tracked, swap)) = decoded else {
             // No user net flow. A Relay solver rebalancing fill has its sender net to zero, so
             // anchor on the fee collector instead (Relay funds the swap from it).
             if relay_router_set.contains(&entry_point) {
-                if let Some((token_in, amount_in, token_out, amount_out)) =
+                if let Some(swap) =
                     decode_relay_rebalance(logs, &native, &fee_collectors, &relay_router_set)
                 {
                     trades.push(DecodedTrade {
@@ -150,10 +150,10 @@ pub(crate) async fn decode_block<P: Provider>(
                         client: label(entry_point, names),
                         aggregator: label(aggregator, names),
                         sender,
-                        token_in,
-                        token_out,
-                        amount_in,
-                        amount_out,
+                        token_in: swap.token_in,
+                        token_out: swap.token_out,
+                        amount_in: swap.amount_in,
+                        amount_out: swap.amount_out,
                         // The collector is the funding source here, not a skim — no fee back-out.
                         client_fee: None,
                         client_fee_out: None,
@@ -175,15 +175,16 @@ pub(crate) async fn decode_block<P: Provider>(
         // so both sides are the amounts actually swapped — the like-for-like basis vs Fynd.
         let fees = fee_to_collectors(logs, &native, &fee_collectors);
         let client_fee = fees
-            .get(&token_in)
+            .get(&swap.token_in)
             .copied()
             .filter(|fee| !fee.is_zero());
-        let amount_in = client_fee.map_or(amount_in, |fee| amount_in.saturating_sub(fee));
+        let amount_in = client_fee.map_or(swap.amount_in, |fee| swap.amount_in.saturating_sub(fee));
         let client_fee_out = fees
-            .get(&token_out)
+            .get(&swap.token_out)
             .copied()
             .filter(|fee| !fee.is_zero());
-        let amount_out = client_fee_out.map_or(amount_out, |fee| amount_out.saturating_add(fee));
+        let amount_out =
+            client_fee_out.map_or(swap.amount_out, |fee| swap.amount_out.saturating_add(fee));
 
         trades.push(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -191,8 +192,8 @@ pub(crate) async fn decode_block<P: Provider>(
             client: label(entry_point, names),
             aggregator: label(aggregator, names),
             sender: tracked,
-            token_in,
-            token_out,
+            token_in: swap.token_in,
+            token_out: swap.token_out,
             amount_in,
             amount_out,
             client_fee,
