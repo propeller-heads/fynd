@@ -393,7 +393,6 @@ fn comparison_record(
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
         "settled_amount_out": range.settled_amount_out.to_string(),
-        "relay_fill": range.relay_fill,
         "top": state_record(&range.top, range.token_out, range.settled_amount_out, prices_top),
         "back": state_record(&range.back, range.token_out, range.settled_amount_out, prices_back),
     })
@@ -531,7 +530,6 @@ mod tests {
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
             client_fee: None,
-            relay_fill: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
         let quote = Some(
@@ -608,7 +606,6 @@ mod tests {
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
             client_fee: None,
-            relay_fill: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(

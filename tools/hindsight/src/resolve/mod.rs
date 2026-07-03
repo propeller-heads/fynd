@@ -16,7 +16,7 @@ use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
 
-use crate::decoder::{DecodedTrade, RelayFill};
+use crate::decoder::DecodedTrade;
 
 /// A Fynd quote for the re-solved order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -101,8 +101,6 @@ pub(crate) struct RangeComparison {
     pub back: StateResult,
     /// Headline verdict — top-of-block (the optimistic default).
     pub verdict: Verdict,
-    /// Set when this is a Relay solver rebalancing fill (vs an ordinary user swap).
-    pub relay_fill: Option<RelayFill>,
 }
 
 /// Solves a sell order at the current block state and steps to the next block. The production
@@ -133,7 +131,6 @@ pub(crate) fn build_range(trade: &DecodedTrade, top: Outcome, back: Outcome) -> 
         top,
         back,
         verdict,
-        relay_fill: trade.relay_fill,
     }
 }
 
@@ -218,7 +215,6 @@ mod tests {
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
             client_fee: None,
-            relay_fill: None,
         }
     }
 

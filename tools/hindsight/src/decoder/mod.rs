@@ -26,16 +26,6 @@ use crate::decoder::{
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
 };
 
-/// Sub-type of a Relay solver-initiated rebalancing fill (see [`net::decode_relay_rebalance`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum RelayFill {
-    /// Output delivered to an external recipient — a cross-chain order fill.
-    External,
-    /// Output returns to Relay's fee collector — an internal inventory rebalance.
-    Internal,
-}
-
 /// A decoded aggregator trade: what token went in, what came out.
 ///
 /// Native ETH is represented as [`Address::ZERO`].
@@ -57,10 +47,6 @@ pub(crate) struct DecodedTrade {
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_fee: Option<U256>,
-    /// Set when this trade is a Relay solver rebalancing fill decoded via the fee-collector anchor
-    /// rather than a user's net flow (see [`RelayFill`]); `None` for ordinary user swaps.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay_fill: Option<RelayFill>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -148,7 +134,7 @@ pub(crate) async fn decode_block<P: Provider>(
             // No user net flow. A Relay solver rebalancing fill has its sender net to zero, so
             // anchor on the fee collector instead (Relay funds the swap from it).
             if relay_router_set.contains(&entry_point) {
-                if let Some((fill, token_in, amount_in, token_out, amount_out)) =
+                if let Some((token_in, amount_in, token_out, amount_out)) =
                     decode_relay_rebalance(logs, &native, &fee_collectors, &relay_router_set)
                 {
                     trades.push(DecodedTrade {
@@ -163,7 +149,6 @@ pub(crate) async fn decode_block<P: Provider>(
                         amount_out,
                         // The collector is the funding source here, not a skim — no fee back-out.
                         client_fee: None,
-                        relay_fill: Some(fill),
                     });
                     continue;
                 }
@@ -195,7 +180,6 @@ pub(crate) async fn decode_block<P: Provider>(
             amount_in,
             amount_out,
             client_fee,
-            relay_fill: None,
         });
     }
 

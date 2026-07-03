@@ -7,7 +7,6 @@ use alloy::{
     sol_types::SolEvent,
 };
 
-use crate::decoder::RelayFill;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -155,7 +154,7 @@ pub(crate) fn decode_relay_rebalance(
     native_transfers: &[(Address, Address, U256)],
     fee_collectors: &HashSet<Address>,
     relay_routers: &HashSet<Address>,
-) -> Option<(RelayFill, Address, U256, Address, U256)> {
+) -> Option<(Address, U256, Address, U256)> {
     let mut sent: HashMap<(Address, Address), U256> = HashMap::new();
     let mut received: HashMap<(Address, Address), U256> = HashMap::new();
     let mut senders: HashSet<Address> = HashSet::new();
@@ -229,7 +228,7 @@ pub(crate) fn decode_relay_rebalance(
             return None;
         }
         let (token_out, amount_out) = net_recv[0];
-        return Some((RelayFill::Internal, token_in, amount_in, token_out, amount_out));
+        return Some((token_in, amount_in, token_out, amount_out));
     }
 
     // C1 external fill: the single pure-sink recipient (receives but never sends), excluding
@@ -252,7 +251,7 @@ pub(crate) fn decode_relay_rebalance(
         return None;
     }
     let (_, token_out, amount_out) = outputs[0];
-    Some((RelayFill::External, token_in, amount_in, token_out, amount_out))
+    Some((token_in, amount_in, token_out, amount_out))
 }
 
 #[cfg(test)]
@@ -367,7 +366,7 @@ mod tests {
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
         assert_eq!(
             got,
-            (RelayFill::External, token_in, U256::from(1000), token_out, U256::from(2000))
+            (token_in, U256::from(1000), token_out, U256::from(2000))
         );
     }
 
@@ -386,7 +385,7 @@ mod tests {
         let got = decode_relay_rebalance(&logs, &native, &collectors, &routers).unwrap();
         assert_eq!(
             got,
-            (RelayFill::External, token_in, U256::from(1000), Address::ZERO, U256::from(2000))
+            (token_in, U256::from(1000), Address::ZERO, U256::from(2000))
         );
     }
 
@@ -406,7 +405,7 @@ mod tests {
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
         assert_eq!(
             got,
-            (RelayFill::Internal, token_in, U256::from(1000), token_out, U256::from(1001))
+            (token_in, U256::from(1000), token_out, U256::from(1001))
         );
     }
 
