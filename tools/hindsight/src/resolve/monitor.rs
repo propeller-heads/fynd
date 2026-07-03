@@ -270,6 +270,17 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
         let prices_back = snapshot_prices(&solver).await;
+        // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
+        // apply a different block, silently pairing the back state with another block's trades.
+        // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is visible.
+        let applied = adapter.current_block().await;
+        if applied != Some(target) {
+            warn!(
+                target,
+                applied = ?applied,
+                "back-of-block state is not the target block; back comparison may be off"
+            );
+        }
         for range in &ranges {
             crate::telemetry::record_range(range, cfg.chain, &prices_top, &prices_back);
         }
