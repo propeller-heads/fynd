@@ -4,14 +4,16 @@
 //! large orders, price impact makes it better to split the order across several routes so the
 //! marginal price stays low. This algorithm is intentionally split-focused:
 //!
-//! 1. Enumerates candidate paths (BFS, reusing `MostLiquidAlgorithm::find_paths`).
+//! 1. Enumerates candidate paths (BFS, reusing `MostLiquidAlgorithm::find_paths`), keeping
+//!    first-hop pool diversity when truncating to the candidate cap.
 //! 2. Uses cheap full-amount probes to rank candidate paths.
 //! 3. Builds a pool-disjoint split candidate.
 //! 4. Builds a shared-pool fill-and-spill candidate that commits chunks through shared pool state.
-//! 5. Returns the better split candidate, or no route if no split route is worth assembling.
+//! 5. Returns the better split candidate if it beats the best single-path probe, or no route if no
+//!    split route is worth assembling.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -136,19 +138,76 @@ impl SplitAlgorithm {
         let mut scored: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
             .map(|path| {
-                let score = MostLiquidAlgorithm::try_score_path(&path).unwrap_or(f64::MIN);
+                // Non-finite scores (skewed spot prices multiplying to inf/NaN) must not poison
+                // the sort: total_cmp keeps the order total and sinks them to the bottom.
+                let score = MostLiquidAlgorithm::try_score_path(&path)
+                    .filter(|score| score.is_finite())
+                    .unwrap_or(f64::MIN);
                 (path, score)
             })
             .collect();
-        scored.sort_by(|(_, a), (_, b)| {
-            b.partial_cmp(a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(max_candidates);
-        Ok(scored
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect())
+        scored.sort_by(|(_, a), (_, b)| b.total_cmp(a));
+        Ok(Self::truncate_with_first_hop_diversity(scored, max_candidates))
+    }
+
+    /// Truncates score-ranked paths to `max_candidates`, round-robining across first-hop pools.
+    ///
+    /// A plain top-N cut lets one heuristically overrated pool claim every slot: all surviving
+    /// paths then exit the sell token through the same pool, and the allocator has nothing to
+    /// spill into when that pool saturates. Taking the best path of every first-hop pool first
+    /// (then every second-best, and so on) keeps each exit pool represented, so the full-amount
+    /// ranking pass can still discover deep pools the cheap spot-depth score undervalues.
+    fn truncate_with_first_hop_diversity<'a>(
+        scored: Vec<(Path<'a, DepthAndPrice>, f64)>,
+        max_candidates: usize,
+    ) -> Vec<Path<'a, DepthAndPrice>> {
+        if scored.len() <= max_candidates {
+            return scored
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+        }
+
+        let mut buckets: HashMap<ComponentId, VecDeque<Path<'a, DepthAndPrice>>> = HashMap::new();
+        let mut bucket_order: Vec<ComponentId> = Vec::new();
+        for (path, _) in scored {
+            let Some(first_hop) = path
+                .edge_iter()
+                .first()
+                .map(|edge| edge.component_id.clone())
+            else {
+                continue;
+            };
+            match buckets.entry(first_hop) {
+                Entry::Occupied(mut entry) => entry.get_mut().push_back(path),
+                Entry::Vacant(entry) => {
+                    bucket_order.push(entry.key().clone());
+                    entry.insert(VecDeque::from([path]));
+                }
+            }
+        }
+
+        let mut selected = Vec::with_capacity(max_candidates);
+        while selected.len() < max_candidates {
+            let mut progressed = false;
+            for id in &bucket_order {
+                let Some(path) = buckets
+                    .get_mut(id)
+                    .and_then(VecDeque::pop_front)
+                else {
+                    continue;
+                };
+                selected.push(path);
+                progressed = true;
+                if selected.len() >= max_candidates {
+                    break;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        selected
     }
 
     async fn token_prices_from(derived: Option<&SharedDerivedDataRef>) -> Option<TokenGasPrices> {
@@ -180,10 +239,14 @@ impl SplitAlgorithm {
         Ok(view.extract_subset_with_overlay(component_ids))
     }
 
+    /// Simulates every candidate at the full order amount and ranks by net output.
+    ///
+    /// Returns the ranked indices and the best single-path net, which later serves as the floor a
+    /// split route must beat.
     fn ranked_simulatable_paths(
         paths: &[Path<DepthAndPrice>],
         ctx: &SplitEvalContext<'_>,
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, Option<BigInt>) {
         let mut ranked = Vec::new();
 
         for (idx, path) in paths.iter().enumerate() {
@@ -199,10 +262,14 @@ impl SplitAlgorithm {
         }
 
         ranked.sort_by(|(_, a), (_, b)| b.cmp(a));
-        ranked
+        let best_single_net = ranked
+            .first()
+            .map(|(_, net)| net.clone());
+        let indices = ranked
             .into_iter()
             .map(|(idx, _)| idx)
-            .collect()
+            .collect();
+        (indices, best_single_net)
     }
 
     fn choose_best_split(candidates: [Option<RouteResult>; 2]) -> Option<RouteResult> {
@@ -790,7 +857,7 @@ impl Algorithm for SplitAlgorithm {
             timeout_ms,
         };
 
-        let ranked_path_indices = Self::ranked_simulatable_paths(&paths, &ctx);
+        let (ranked_path_indices, best_single_net) = Self::ranked_simulatable_paths(&paths, &ctx);
         if ranked_path_indices.is_empty() {
             return Err(AlgorithmError::InsufficientLiquidity);
         }
@@ -803,7 +870,16 @@ impl Algorithm for SplitAlgorithm {
         let disjoint_candidate =
             Self::build_disjoint_route(&paths, &disjoint, &ctx, order, self.num_chunks);
         let shared_candidate = Self::fill_and_spill(&paths, &ranked_path_indices, &ctx, order);
+        // A split route must beat the best single-path candidate the ranking pass already
+        // simulated. A split that nets less than an unsplit route only adds execution complexity
+        // for less output; returning no route lets a single-path worker pool cover the order.
         Self::choose_best_split([disjoint_candidate, shared_candidate])
+            .filter(|route| {
+                best_single_net
+                    .as_ref()
+                    .map(|single| route.net_amount_out() > single)
+                    .unwrap_or(true)
+            })
             .ok_or(AlgorithmError::InsufficientLiquidity)
     }
 
@@ -1188,6 +1264,69 @@ mod tests {
         assert!(
             matches!(result, Err(AlgorithmError::InsufficientLiquidity)),
             "dust order should not produce a split route: {result:?}"
+        );
+    }
+
+    /// One heuristically strong first-hop pool must not claim every candidate slot: the
+    /// truncation keeps at least one path for each way of exiting the sell token.
+    #[tokio::test]
+    async fn candidate_truncation_keeps_first_hop_diversity() {
+        let src = token_with_decimals(0x01, "SRC", 18);
+        let mid = token_with_decimals(0x02, "MID", 18);
+        let dst = token_with_decimals(0x03, "DST", 18);
+        let mut pools: Vec<(&str, Token, Token, Box<dyn ProtocolSim>)> = vec![
+            (
+                "pool_a",
+                src.clone(),
+                mid.clone(),
+                Box::new(v2_pool(1_000_000, 18, 1_000_000, 18)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "pool_b",
+                src.clone(),
+                dst.clone(),
+                Box::new(v2_pool(10_000, 18, 10_000, 18)) as Box<dyn ProtocolSim>,
+            ),
+        ];
+        for mid_pool in ["mid_1", "mid_2", "mid_3", "mid_4"] {
+            pools.push((
+                mid_pool,
+                mid.clone(),
+                dst.clone(),
+                Box::new(v2_pool(200_000, 18, 200_000, 18)) as Box<dyn ProtocolSim>,
+            ));
+        }
+        let (_market, graph_manager) = setup_weighted_market(pools);
+
+        let order = Order::new(
+            src.address.clone(),
+            dst.address.clone(),
+            BigUint::from(5_000u64) * BigUint::from(10u64).pow(18),
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+
+        // Five paths exist (four via pool_a, one via pool_b); the four pool_a paths outscore
+        // pool_b on spot-depth, so a plain top-4 cut would drop the only alternative SRC exit.
+        let paths =
+            SplitAlgorithm::ranked_paths(graph_manager.graph(), &order, 1, 3, 4, None).unwrap();
+        assert_eq!(paths.len(), 4);
+        let first_hops: Vec<&str> = paths
+            .iter()
+            .map(|path| {
+                path.edge_iter()
+                    .first()
+                    .map(|edge| edge.component_id.as_str())
+                    .unwrap_or("")
+            })
+            .collect();
+        assert!(
+            first_hops.contains(&"pool_b"),
+            "truncation must keep the alternative SRC exit, got first hops: {first_hops:?}"
+        );
+        assert!(
+            first_hops.contains(&"pool_a"),
+            "truncation must keep the top-ranked SRC exit, got first hops: {first_hops:?}"
         );
     }
 }

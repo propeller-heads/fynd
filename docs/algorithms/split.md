@@ -51,6 +51,12 @@ Split starts with the same path enumeration machinery as Most Liquid:
 
 This gives Split a broad set of plausible paths without simulating every path in the graph.
 
+The truncation round-robins across first-hop pools: the best path of every way of exiting the sell
+token is kept before any pool gets a second slot. Without this, one heuristically overrated pool
+can claim every candidate slot, leaving the allocator nothing to spill into when that pool
+saturates. The spot-depth score also undervalues concentrated liquidity (Uniswap v3-style pools),
+so keeping every exit represented lets the full-amount ranking pass correct the heuristic.
+
 The default candidate cap is intentionally modest because Split runs as one worker pool in a larger
 algorithm portfolio. It does not try to preserve every path that might win as a standalone route.
 
@@ -64,6 +70,11 @@ This keeps the split search focused:
 * Better full-size paths are considered first for pool-disjoint splitting.
 * The top full-size paths seed the shared-pool candidate set.
 * If no path can be simulated, Split returns `InsufficientLiquidity`.
+
+The best full-size probe also acts as a floor: a split route is only returned when its net output
+beats the best single-path candidate Split has already simulated. A split that loses to an unsplit
+route adds execution complexity for less output, so Split returns no route and lets a single-path
+worker pool cover the order.
 
 ## Pool-disjoint split
 
