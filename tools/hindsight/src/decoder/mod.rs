@@ -7,7 +7,7 @@ pub(crate) mod allium;
 pub(crate) mod verify_decoder;
 
 #[cfg(test)]
-mod test_support;
+mod test_utils;
 
 use std::collections::HashMap;
 

@@ -71,7 +71,7 @@ pub(crate) fn label(address: Address, names: &HashMap<Address, &'static str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_support::addr;
+    use crate::decoder::test_utils::addr;
 
     #[test]
     fn registries_named() {

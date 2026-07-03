@@ -366,7 +366,7 @@ fn names_match(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_support::addr;
+    use crate::decoder::test_utils::addr;
 
     fn trade(token_in: Address, token_out: Address, aggregator: &str) -> DecodedTrade {
         DecodedTrade {

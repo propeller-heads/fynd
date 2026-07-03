@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::known_names,
-        test_support::{addr, make_transfer_log},
+        test_utils::{addr, make_transfer_log},
     };
 
     #[test]

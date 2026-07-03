@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::{known_aggregators, known_names, label},
-        test_support::{addr, frame},
+        test_utils::{addr, frame},
     };
 
     #[test]

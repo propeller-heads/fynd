@@ -103,7 +103,7 @@ fn net_trade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_support::{addr, make_transfer_log};
+    use crate::decoder::test_utils::{addr, make_transfer_log};
 
     #[test]
     fn simple_swap() {
