@@ -2,26 +2,21 @@
 //!
 //! Single-path algorithms (MostLiquid, BellmanFord) send the whole order through one route. For
 //! large orders, price impact makes it better to split the order across several routes so the
-//! marginal price stays low. This algorithm:
+//! marginal price stays low. This algorithm is intentionally split-focused:
 //!
 //! 1. Enumerates candidate paths (BFS, reusing `MostLiquidAlgorithm::find_paths`).
-//! 2. Simulates each at the full amount and keeps the best single-path result (this alone matches
-//!    or beats greedy Bellman-Ford because it re-simulates many candidates end-to-end).
-//! 3. Keeps the existing pool-disjoint split route as the conservative fallback.
-//! 4. Adds a shared-pool fill-and-spill candidate that commits chunks through shared pool state.
-//! 5. Returns whichever is better: best single, disjoint split, or shared split.
+//! 2. Uses cheap full-amount probes to rank candidate paths.
+//! 3. Builds a pool-disjoint split candidate.
+//! 4. Builds a shared-pool fill-and-spill candidate that commits chunks through shared pool state.
+//! 5. Returns the better split candidate, or no route if no split route is worth assembling.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
-use petgraph::{
-    graph::{EdgeIndex, NodeIndex},
-    prelude::EdgeRef,
-};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
 };
@@ -39,26 +34,28 @@ use crate::{
     AlgorithmError,
 };
 
-/// Maximum candidate paths simulated per order (after heuristic ranking). Set high so the cheap
-/// spot×depth pre-ranking never drops the true best single path (which would let a single-path
-/// solver beat us); the per-solve timeout bounds the work for hub tokens with many paths.
-const DEFAULT_MAX_CANDIDATES: usize = 5000;
+/// Maximum candidate paths probed per order after heuristic ranking.
+///
+/// Split runs alongside single-path algorithms in production, so it does not need to preserve every
+/// path that could win as a standalone route. Keep this bounded so split remains close to PFW
+/// speed.
+const DEFAULT_MAX_CANDIDATES: usize = 128;
 /// Maximum number of parallel (pool-disjoint) paths in a split.
 const DEFAULT_MAX_PATHS: usize = 4;
 /// Number of chunks the order is divided into for water-filling.
-const DEFAULT_NUM_CHUNKS: usize = 20;
+const DEFAULT_NUM_CHUNKS: usize = 16;
 /// Number of top full-amount paths always considered for shared-pool splitting.
-const SHARED_FULL_PATHS: usize = 16;
+const SHARED_FULL_PATHS: usize = 8;
 /// Number of heuristic-ranked paths probed with the first shared-pool chunk.
-const SHARED_MARGIN_PROBE_PATHS: usize = 96;
+const SHARED_MARGIN_PROBE_PATHS: usize = 32;
 /// Number of marginal-probe winners added to the shared-pool candidate set.
-const SHARED_MARGIN_PATHS: usize = 12;
+const SHARED_MARGIN_PATHS: usize = 8;
 /// Upper bound on shared-pool candidate paths.
-const SHARED_MAX_CANDIDATES: usize = 24;
+const SHARED_MAX_CANDIDATES: usize = 12;
 /// Upper bound on active paths in the shared-pool allocation.
-const SHARED_MAX_ACTIVE_PATHS: usize = 8;
+const SHARED_MAX_ACTIVE_PATHS: usize = 4;
 /// Number of chunks for shared-pool fill-and-spill.
-const SHARED_NUM_CHUNKS: usize = 64;
+const SHARED_NUM_CHUNKS: usize = 24;
 
 type PoolStateUpdates = Vec<(ComponentId, Box<dyn ProtocolSim>)>;
 type SharedProbe = (BigUint, BigUint, PoolStateUpdates);
@@ -77,11 +74,6 @@ impl SplitEvalContext<'_> {
     fn timed_out(&self) -> bool {
         self.start.elapsed().as_millis() as u64 > self.timeout_ms
     }
-}
-
-struct FullPathResults {
-    best_single: RouteResult,
-    full_outputs: Vec<(usize, BigUint)>,
 }
 
 /// Routes orders by splitting them across multiple paths to minimize price impact.
@@ -186,59 +178,43 @@ impl SplitAlgorithm {
         Ok(view.extract_subset_with_overlay(component_ids))
     }
 
-    fn simulate_full_paths(
+    fn ranked_simulatable_paths(
         paths: &[Path<DepthAndPrice>],
         ctx: &SplitEvalContext<'_>,
-    ) -> Option<FullPathResults> {
-        let mut best_single: Option<RouteResult> = None;
-        let mut full_outputs = Vec::new();
+    ) -> Vec<usize> {
+        let mut ranked = Vec::new();
 
         for (idx, path) in paths.iter().enumerate() {
             if ctx.timed_out() {
                 break;
             }
-            let Ok(result) = MostLiquidAlgorithm::simulate_path(
-                path,
-                ctx.market,
-                ctx.token_prices,
-                ctx.amount_in.clone(),
-            ) else {
+            let Some((gross, gas)) = Self::simulate_amount(path, ctx.market, ctx.amount_in.clone())
+            else {
                 continue;
             };
-            let gross = result
-                .route()
-                .swaps()
-                .last()
-                .map(|swap| swap.amount_out().clone())
-                .unwrap_or_else(BigUint::zero);
-            full_outputs.push((idx, gross));
-            if best_single
-                .as_ref()
-                .map(|best| result.net_amount_out() > best.net_amount_out())
-                .unwrap_or(true)
-            {
-                best_single = Some(result);
-            }
+            let net = Self::combined_net(ctx, gross, &gas);
+            ranked.push((idx, net));
         }
 
-        full_outputs.sort_by(|(_, a), (_, b)| b.cmp(a));
-        Some(FullPathResults { best_single: best_single?, full_outputs })
+        ranked.sort_by(|(_, a), (_, b)| b.cmp(a));
+        ranked
+            .into_iter()
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
-    fn choose_best_route(
-        best_single: RouteResult,
-        candidates: [Option<RouteResult>; 2],
-    ) -> RouteResult {
-        let mut best_net = best_single.net_amount_out().clone();
-        let mut best_route = None;
+    fn choose_best_split(candidates: [Option<RouteResult>; 2]) -> Option<RouteResult> {
+        let mut best_route: Option<RouteResult> = None;
         for candidate in candidates.into_iter().flatten() {
-            if candidate.net_amount_out() > &best_net {
-                best_net = candidate.net_amount_out().clone();
+            if best_route
+                .as_ref()
+                .map(|best| candidate.net_amount_out() > best.net_amount_out())
+                .unwrap_or(true)
+            {
                 best_route = Some(candidate);
             }
         }
-
-        best_route.unwrap_or(best_single)
+        best_route
     }
 
     /// Simulates a single path at `amount`, returning `(gross_output, total_gas)`.
@@ -446,64 +422,14 @@ impl SplitAlgorithm {
             .collect()
     }
 
-    fn collect_reachable_components(
-        graph: &StableDiGraph<DepthAndPrice>,
-        token_in: &Address,
-        max_hops: usize,
-        out: &mut HashSet<ComponentId>,
-    ) {
-        let Some(from_idx) = Self::find_node(graph, token_in) else {
-            return;
-        };
-        let mut visited = HashSet::from([from_idx]);
-        let mut queue = VecDeque::from([(from_idx, 0usize)]);
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= max_hops {
-                continue;
-            }
-            for edge in graph.edges(node) {
-                out.insert(edge.weight().component_id.clone());
-                let target = edge.target();
-                if visited.insert(target) {
-                    queue.push_back((target, depth + 1));
-                }
-            }
-        }
-    }
-
-    fn append_bellman_ford_rescues<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
-        paths: &mut Vec<Path<'a, DepthAndPrice>>,
-        ctx: &SplitEvalContext<'_>,
-        order: &Order,
-        max_hops: usize,
-        connector_tokens: Option<&HashSet<Address>>,
-    ) {
-        let bf_paths =
-            Self::bellman_ford_paths(graph, ctx, order.token_in(), max_hops, connector_tokens);
-        if bf_paths.is_empty() {
-            return;
-        }
-
-        let mut seen: HashSet<Vec<(Address, ComponentId, Address)>> = paths
-            .iter()
-            .map(Self::path_key)
-            .collect();
-        for path in bf_paths {
-            if seen.insert(Self::path_key(&path)) {
-                paths.push(path);
-            }
-        }
-    }
-
     fn select_shared_candidates(
         paths: &[Path<DepthAndPrice>],
-        full_outputs: &[(usize, BigUint)],
+        ranked_path_indices: &[usize],
         first_chunk: &BigUint,
         ctx: &SplitEvalContext<'_>,
     ) -> Vec<usize> {
         let mut candidates = Vec::with_capacity(SHARED_MAX_CANDIDATES);
-        for (idx, _) in full_outputs
+        for idx in ranked_path_indices
             .iter()
             .take(SHARED_FULL_PATHS)
         {
@@ -640,7 +566,7 @@ impl SplitAlgorithm {
 
     fn fill_and_spill(
         paths: &[Path<DepthAndPrice>],
-        full_outputs: &[(usize, BigUint)],
+        ranked_path_indices: &[usize],
         ctx: &SplitEvalContext<'_>,
         order: &Order,
     ) -> Option<RouteResult> {
@@ -648,7 +574,8 @@ impl SplitAlgorithm {
         if chunks.is_empty() {
             return None;
         }
-        let candidates = Self::select_shared_candidates(paths, full_outputs, &chunks[0], ctx);
+        let candidates =
+            Self::select_shared_candidates(paths, ranked_path_indices, &chunks[0], ctx);
         if candidates.len() < 2 {
             return None;
         }
@@ -790,234 +717,6 @@ impl SplitAlgorithm {
         let net = Self::combined_net(ctx, total_gross, &total_gas);
         Some(RouteResult::new(route, net, ctx.gas_price.clone()))
     }
-
-    fn bellman_ford_paths<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
-        ctx: &SplitEvalContext<'_>,
-        token_in: &Address,
-        max_hops: usize,
-        connector_tokens: Option<&HashSet<Address>>,
-    ) -> Vec<Path<'a, DepthAndPrice>> {
-        let (Some(from_idx), Some(to_idx)) =
-            (Self::find_node(graph, token_in), Self::find_node(graph, ctx.token_out))
-        else {
-            return Vec::new();
-        };
-        if from_idx == to_idx {
-            return Vec::new();
-        }
-
-        let mut paths = Vec::new();
-        let mut seen = HashSet::new();
-        for gas_aware in [true, false] {
-            let Some(path) = Self::spfa_best_path(
-                graph,
-                ctx,
-                from_idx,
-                to_idx,
-                max_hops,
-                gas_aware,
-                connector_tokens,
-            ) else {
-                continue;
-            };
-            if seen.insert(Self::path_key(&path)) {
-                paths.push(path);
-            }
-        }
-        paths
-    }
-
-    fn find_node(graph: &StableDiGraph<DepthAndPrice>, token: &Address) -> Option<NodeIndex> {
-        graph
-            .node_indices()
-            .find(|&node| &graph[node] == token)
-    }
-
-    fn path_key(path: &Path<DepthAndPrice>) -> Vec<(Address, ComponentId, Address)> {
-        path.iter()
-            .map(|(from, edge, to)| (from.clone(), edge.component_id.clone(), to.clone()))
-            .collect()
-    }
-
-    fn spfa_best_path<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
-        ctx: &SplitEvalContext<'_>,
-        from_idx: NodeIndex,
-        to_idx: NodeIndex,
-        max_hops: usize,
-        gas_aware: bool,
-        connector_tokens: Option<&HashSet<Address>>,
-    ) -> Option<Path<'a, DepthAndPrice>> {
-        let max_idx = graph
-            .node_indices()
-            .map(|node| node.index())
-            .max()? +
-            1;
-        let mut amount = vec![BigUint::zero(); max_idx];
-        let mut cumul_gas = vec![BigUint::zero(); max_idx];
-        let mut predecessor: Vec<Option<(NodeIndex, EdgeIndex)>> = vec![None; max_idx];
-        amount[from_idx.index()] = ctx.amount_in.clone();
-
-        let mut active = vec![from_idx];
-        for _ in 0..max_hops {
-            if ctx.timed_out() || active.is_empty() {
-                break;
-            }
-            let mut next = HashSet::new();
-            for &node in &active {
-                let node_idx = node.index();
-                if amount[node_idx].is_zero() {
-                    continue;
-                }
-                let Some(token_in) = ctx.market.get_token(&graph[node]) else {
-                    continue;
-                };
-                for edge in graph.edges(node) {
-                    let target = edge.target();
-                    let component_id = &edge.weight().component_id;
-                    if Self::spfa_conflicts(node, target, component_id, &predecessor, graph) {
-                        continue;
-                    }
-                    if let Some(tokens) = connector_tokens {
-                        let address = &graph[target];
-                        if target != to_idx && target != from_idx && !tokens.contains(address) {
-                            continue;
-                        }
-                    }
-                    let Some(token_out) = ctx.market.get_token(&graph[target]) else {
-                        continue;
-                    };
-                    let Some(state) = ctx
-                        .market
-                        .get_simulation_state(component_id)
-                    else {
-                        continue;
-                    };
-                    let Ok(result) =
-                        state.get_amount_out(amount[node_idx].clone(), token_in, token_out)
-                    else {
-                        continue;
-                    };
-                    let candidate_gas = &cumul_gas[node_idx] + &result.gas;
-                    let target_idx = target.index();
-                    if Self::spfa_is_better(
-                        &result.amount,
-                        &candidate_gas,
-                        &amount[target_idx],
-                        &cumul_gas[target_idx],
-                        &graph[target],
-                        gas_aware,
-                        ctx,
-                    ) {
-                        amount[target_idx] = result.amount;
-                        cumul_gas[target_idx] = candidate_gas;
-                        predecessor[target_idx] = Some((node, edge.id()));
-                        next.insert(target);
-                    }
-                }
-            }
-            active = next.into_iter().collect();
-            active.sort_unstable();
-        }
-
-        if amount[to_idx.index()].is_zero() {
-            return None;
-        }
-        Self::reconstruct_spfa_path(graph, from_idx, to_idx, &predecessor)
-    }
-
-    fn spfa_is_better(
-        candidate_amount: &BigUint,
-        candidate_gas: &BigUint,
-        existing_amount: &BigUint,
-        existing_gas: &BigUint,
-        token_out: &Address,
-        gas_aware: bool,
-        ctx: &SplitEvalContext<'_>,
-    ) -> bool {
-        if existing_amount.is_zero() {
-            return true;
-        }
-        if gas_aware {
-            let candidate = Self::spfa_net(candidate_amount, candidate_gas, token_out, ctx);
-            let existing = Self::spfa_net(existing_amount, existing_gas, token_out, ctx);
-            candidate > existing
-        } else {
-            candidate_amount > existing_amount
-        }
-    }
-
-    fn spfa_net(
-        gross: &BigUint,
-        gas: &BigUint,
-        token_out: &Address,
-        ctx: &SplitEvalContext<'_>,
-    ) -> BigInt {
-        match Self::gas_cost_in_token(gas, ctx.gas_price, ctx.token_prices, token_out) {
-            Some(cost) => BigInt::from(gross.clone()) - BigInt::from(cost),
-            None => BigInt::from(gross.clone()),
-        }
-    }
-
-    fn spfa_conflicts(
-        from: NodeIndex,
-        target_node: NodeIndex,
-        target_pool: &ComponentId,
-        predecessor: &[Option<(NodeIndex, EdgeIndex)>],
-        graph: &StableDiGraph<DepthAndPrice>,
-    ) -> bool {
-        let mut current = from;
-        loop {
-            if current == target_node {
-                return true;
-            }
-            match predecessor[current.index()] {
-                Some((prev, edge_idx)) => {
-                    if graph
-                        .edge_weight(edge_idx)
-                        .map(|weight| &weight.component_id == target_pool)
-                        .unwrap_or(false)
-                    {
-                        return true;
-                    }
-                    current = prev;
-                }
-                None => return false,
-            }
-        }
-    }
-
-    fn reconstruct_spfa_path<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
-        from_idx: NodeIndex,
-        to_idx: NodeIndex,
-        predecessor: &[Option<(NodeIndex, EdgeIndex)>],
-    ) -> Option<Path<'a, DepthAndPrice>> {
-        let mut hops = Vec::new();
-        let mut current = to_idx;
-        let mut visited = HashSet::new();
-        while current != from_idx {
-            if !visited.insert(current) {
-                return None;
-            }
-            let (prev, edge_idx) = predecessor[current.index()]?;
-            hops.push((prev, edge_idx, current));
-            current = prev;
-        }
-        hops.reverse();
-
-        let mut path = Path::new();
-        for (prev, edge_idx, current) in hops {
-            let edge = graph.edge_weight(edge_idx)?;
-            path.add_hop(&graph[prev], edge, &graph[current]);
-        }
-        if path.is_empty() {
-            None
-        } else {
-            Some(path)
-        }
-    }
 }
 
 impl Algorithm for SplitAlgorithm {
@@ -1043,7 +742,7 @@ impl Algorithm for SplitAlgorithm {
 
         let token_prices = Self::token_prices_from(derived.as_ref()).await;
         let amount_in = order.amount().clone();
-        let mut paths = Self::ranked_paths(
+        let paths = Self::ranked_paths(
             graph,
             order,
             self.min_hops,
@@ -1051,15 +750,7 @@ impl Algorithm for SplitAlgorithm {
             self.max_candidates,
             self.connector_tokens.as_ref(),
         )?;
-        let split_path_count = paths.len();
-
-        let mut component_ids = Self::component_ids_for_paths(&paths);
-        Self::collect_reachable_components(
-            graph,
-            order.token_in(),
-            self.max_hops,
-            &mut component_ids,
-        );
+        let component_ids = Self::component_ids_for_paths(&paths);
         let market = Self::market_subset(&market, label.as_ref(), &component_ids).await?;
         let gas_price = market
             .gas_price()
@@ -1076,33 +767,22 @@ impl Algorithm for SplitAlgorithm {
             start: &start,
             timeout_ms,
         };
-        Self::append_bellman_ford_rescues(
-            graph,
-            &mut paths,
-            &ctx,
-            order,
-            self.max_hops,
-            self.connector_tokens.as_ref(),
-        );
 
-        let FullPathResults { best_single, full_outputs } =
-            Self::simulate_full_paths(&paths, &ctx).ok_or(AlgorithmError::InsufficientLiquidity)?;
-
-        let split_outputs: Vec<(usize, BigUint)> = full_outputs
+        let ranked_path_indices = Self::ranked_simulatable_paths(&paths, &ctx);
+        if ranked_path_indices.is_empty() {
+            return Err(AlgorithmError::InsufficientLiquidity);
+        }
+        let ranked: Vec<(usize, &Path<DepthAndPrice>)> = ranked_path_indices
             .iter()
-            .filter(|(idx, _)| *idx < split_path_count)
-            .cloned()
-            .collect();
-        let ranked: Vec<(usize, &Path<DepthAndPrice>)> = split_outputs
-            .iter()
-            .map(|(idx, _)| (*idx, &paths[*idx]))
+            .map(|idx| (*idx, &paths[*idx]))
             .collect();
         let disjoint = Self::select_disjoint(&ranked, self.max_paths);
 
         let disjoint_candidate =
             Self::build_disjoint_route(&paths, &disjoint, &ctx, order, self.num_chunks);
-        let shared_candidate = Self::fill_and_spill(&paths, &full_outputs, &ctx, order);
-        Ok(Self::choose_best_route(best_single, [disjoint_candidate, shared_candidate]))
+        let shared_candidate = Self::fill_and_spill(&paths, &ranked_path_indices, &ctx, order);
+        Self::choose_best_split([disjoint_candidate, shared_candidate])
+            .ok_or(AlgorithmError::InsufficientLiquidity)
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -1415,53 +1095,36 @@ mod tests {
         Solution::try_from(&quote).expect("hardened split route should encode");
     }
 
-    /// A tiny order shouldn't split (gas/impact make one pool optimal) and must not lose to
-    /// single-path.
+    /// Split is not a single-path fallback. Production pools should run a single-path algorithm
+    /// alongside it and let the worker router choose the best result.
     #[tokio::test]
-    async fn small_order_does_not_lose_to_single_path() {
+    async fn single_path_market_returns_no_split_route() {
         let weth = token_with_decimals(0x01, "WETH", 18);
         let usdc = token_with_decimals(0x02, "USDC", 6);
-        let (market, graph_manager) = setup_weighted_market(vec![
-            (
-                "pool_a",
-                weth.clone(),
-                usdc.clone(),
-                Box::new(weth_usdc_pool(1000, 3_000_000)) as Box<dyn ProtocolSim>,
-            ),
-            (
-                "pool_b",
-                weth.clone(),
-                usdc.clone(),
-                Box::new(weth_usdc_pool(1000, 3_000_000)) as Box<dyn ProtocolSim>,
-            ),
-        ]);
+        let (market, graph_manager) = setup_weighted_market(vec![(
+            "pool_a",
+            weth.clone(),
+            usdc.clone(),
+            Box::new(weth_usdc_pool(1000, 3_000_000)) as Box<dyn ProtocolSim>,
+        )]);
 
         let order = Order::new(
             weth.address.clone(),
             usdc.address.clone(),
-            BigUint::from(10u64).pow(15), // 0.001 WETH
+            BigUint::from(10u64).pow(18),
             OrderSide::Sell,
             addr(0xFF),
         );
         let config =
             AlgorithmConfig::new(1, 3, std::time::Duration::from_millis(2000), None).unwrap();
 
-        let split = SplitAlgorithm::with_config(config.clone())
-            .unwrap()
-            .find_best_route(graph_manager.graph(), market.clone(), None, None, &order)
-            .await
-            .expect("split solves");
-        let ml = MostLiquidAlgorithm::with_config(config)
+        let result = SplitAlgorithm::with_config(config)
             .unwrap()
             .find_best_route(graph_manager.graph(), market, None, None, &order)
-            .await
-            .expect("ml solves");
-
+            .await;
         assert!(
-            split.net_amount_out() >= ml.net_amount_out(),
-            "split must never lose to single-path: split={} ml={}",
-            split.net_amount_out(),
-            ml.net_amount_out()
+            matches!(result, Err(AlgorithmError::InsufficientLiquidity)),
+            "single-path-only market should not produce a split route: {result:?}"
         );
     }
 }

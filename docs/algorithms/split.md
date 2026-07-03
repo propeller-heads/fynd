@@ -5,8 +5,9 @@ icon: route
 # Split
 
 The Split algorithm routes a sell order across several paths when one path would create too much
-price impact. It keeps the single best path as a fallback, builds split candidates, then returns the
-route with the highest output after gas.
+price impact. It is intentionally split-focused: if it cannot assemble a real split route, it
+returns no route and lets another worker pool, such as Bellman-Ford or Path Frank-Wolfe, cover the
+single-path case.
 
 Single-path algorithms answer one question: "which path should receive the whole order?" Split asks
 a larger question: "which portfolio of paths should receive the order, and how much flow should
@@ -14,16 +15,15 @@ each path get?"
 
 ## Overview
 
-The algorithm evaluates three route families for every order:
+The algorithm evaluates two split route families for every order:
 
-1. **Best single path**: simulate each candidate path at the full order size and keep the best one.
-2. **Pool-disjoint split**: split the order across paths that do not reuse pools.
-3. **Shared-pool split**: split the order across paths that may share pools, while simulating the
+1. **Pool-disjoint split**: split the order across paths that do not reuse pools.
+2. **Shared-pool split**: split the order across paths that may share pools, while simulating the
    shared pool state in execution order.
 
-The final selector compares the three candidates by net output and returns the best one. This keeps
-small trades on the best single path and uses splitting only when the extra output pays for the
-extra gas.
+The final selector compares the split candidates by net output and returns the best one. If neither
+candidate uses at least two paths, Split returns `InsufficientLiquidity`. Production deployments
+should run Split alongside single-path algorithms and let the worker router pick the best net result.
 
 ## Why splitting helps
 
@@ -51,23 +51,19 @@ Split starts with the same path enumeration machinery as Most Liquid:
 
 This gives Split a broad set of plausible paths without simulating every path in the graph.
 
-Split also injects Bellman-Ford-style rescue paths. It runs a small SPFA-style search in both
-gas-aware and gross-output modes, then adds any new path it finds to the candidate set. These rescue
-paths protect against cases where spot-price and depth ranking bury a path that Bellman-Ford can
-still find.
+The default candidate cap is intentionally modest because Split runs as one worker pool in a larger
+algorithm portfolio. It does not try to preserve every path that might win as a standalone route.
 
-## Full-path simulation
+## Candidate ranking
 
-Every candidate path is simulated at the full order amount with real pool math. The algorithm keeps
-the best full-size result as the **best single path**.
+Every candidate path is probed at the full order amount with real pool math. These probes are used
+only to rank paths before allocation. They are not returned as fallback routes.
 
-This candidate matters for two reasons:
+This keeps the split search focused:
 
-* It protects small trades where splitting would only add gas.
-* It gives Split a high-quality baseline before it tries any allocation logic.
-
-The final route can only beat this baseline. If neither split candidate improves net output, Split
-returns the best single path.
+* Better full-size paths are considered first for pool-disjoint splitting.
+* The top full-size paths seed the shared-pool candidate set.
+* If no path can be simulated, Split returns `InsufficientLiquidity`.
 
 ## Pool-disjoint split
 
@@ -130,8 +126,8 @@ net_output = gross_output - (total_gas * gas_price * token_price_ratio)
 ```
 
 If token price data is unavailable, the algorithm falls back to gross output for that comparison.
-When price data is available, gas can prevent unnecessary fragmentation. A split route only wins if
-its extra output covers its extra execution cost.
+When price data is available, gas can prevent unnecessary fragmentation inside the split allocation.
+A split route is only returned if the allocator uses at least two paths.
 
 ## When it works well
 
@@ -139,17 +135,17 @@ its extra output covers its extra execution cost.
 * **Pairs with parallel liquidity** across several pools or token paths.
 * **Routes with shared prefixes or downstream splits**, for example one entry pool feeding two
   output-side pools.
-* **Cases where Bellman-Ford finds a useful path** that the spot-depth ranking would otherwise miss.
 
 ## When it struggles
 
-* **Small trades** where gas dominates the price-impact benefit.
+* **Small trades** where gas dominates the price-impact benefit. These should usually be handled by
+  Bellman-Ford, Path Frank-Wolfe, or another single-path-capable worker pool.
 * **Strict latency budgets**. Split does more simulation work than Bellman-Ford and Path
   Frank-Wolfe.
 * **Fine-grained allocation cases**. The allocation is chunk-based, not a continuous optimizer, so a
   smoother method can still win some trades.
-* **Heuristic constants**. Candidate caps, chunk counts, and active-path limits are hand-tuned and
-  need a dedicated ablation grid before production promotion.
+* **Heuristic path ranking**. Split starts from Most Liquid's spot-depth path ranking, so a useful
+  route that is buried by that heuristic can still be missed.
 
 ## Source reference
 
