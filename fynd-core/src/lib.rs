@@ -80,4 +80,6 @@ pub use worker_pool::{
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };
-pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+pub use worker_pool_router::{
+    config::WorkerPoolRouterConfig, SolvedQuote, SolverPoolHandle, WorkerPoolRouter,
+};
