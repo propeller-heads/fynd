@@ -10,9 +10,16 @@ name = "hindsight"
 path = "src/main.rs"
 
 [dependencies]
+# Fynd integration (re-solve via a running solver)
+fynd-client = { workspace = true }
+# Shared tooling (BPS comparison math, FyndAggregator wrapper)
+fynd-tools-common = { workspace = true }
+num-bigint = { workspace = true }
+
 # Async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 
 # CLI
 clap = { workspace = true }
