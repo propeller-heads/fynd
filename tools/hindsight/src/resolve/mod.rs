@@ -30,9 +30,12 @@ pub(crate) struct SolvedAmount {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub(crate) enum Outcome {
-    /// Fynd produced a quote.
+    /// Fynd produced a quote for the trade's full size.
     Solved(SolvedAmount),
-    /// Fynd could not solve (missing token in Tycho, insufficient liquidity, timeout).
+    /// Fynd returned a route but for far less than the settled size — a liquidity-limited partial
+    /// route. Tracked apart from [`Outcome::Unsolvable`] so a coverage gap is not read as a loss.
+    Partial(String),
+    /// Fynd could not solve at all (missing token in Tycho, insufficient liquidity, timeout).
     Unsolvable(String),
 }
 
@@ -145,5 +148,14 @@ mod tests {
         // Raw better but net-of-gas worse → loss.
         let cmp = compare_trade(&MockSolver(solved(10_100, 9_980)), &trade(10_000)).await;
         assert_eq!(cmp.verdict, Verdict::Loss);
+    }
+
+    #[tokio::test]
+    async fn compare_trade_partial_route_is_coverage_miss() {
+        // Fynd covers only 30% of the settled size → coverage miss, deltas suppressed.
+        let cmp = compare_trade(&MockSolver(solved(3_000, 2_900)), &trade(10_000)).await;
+        assert_eq!(cmp.verdict, Verdict::CoverageMiss);
+        assert!(matches!(cmp.outcome, Outcome::Partial(_)));
+        assert_eq!(cmp.deltas, Deltas { raw_bps: None, net_bps: None });
     }
 }

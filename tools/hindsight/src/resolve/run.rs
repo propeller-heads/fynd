@@ -129,6 +129,9 @@ pub(crate) struct Summary {
     pub total: usize,
     pub wins: usize,
     pub losses: usize,
+    /// Trades where Fynd only returned a partial route for the settled size (a coverage gap,
+    /// tracked apart from `unsolvable`).
+    pub coverage_miss: usize,
     pub unsolvable: usize,
     /// Median raw bps delta over solvable trades (positive = Fynd better).
     pub median_raw_bps: Option<f64>,
@@ -145,6 +148,7 @@ pub(crate) fn summarize(comparisons: &[Comparison]) -> Summary {
         match cmp.verdict {
             Verdict::Win => summary.wins += 1,
             Verdict::Loss => summary.losses += 1,
+            Verdict::CoverageMiss => summary.coverage_miss += 1,
             Verdict::Unsolvable => summary.unsolvable += 1,
         }
         if let Some(d) = cmp.deltas.raw_bps {
@@ -179,8 +183,9 @@ fn print_summary(summary: &Summary) {
     let win_pct =
         if comparable > 0 { summary.wins as f64 / comparable as f64 * 100.0 } else { 0.0 };
     println!("  Fynd wins:  {}/{} ({win_pct:.1}%)", summary.wins, comparable);
-    println!("  losses:     {}", summary.losses);
-    println!("  unsolvable: {}", summary.unsolvable);
+    println!("  losses:        {}", summary.losses);
+    println!("  coverage miss: {}", summary.coverage_miss);
+    println!("  unsolvable:    {}", summary.unsolvable);
     match summary.median_raw_bps {
         Some(d) => println!("  median raw:     {d:+.2} bps"),
         None => println!("  median raw:     n/a"),
@@ -315,12 +320,14 @@ mod tests {
             comparison(Verdict::Win, Some(100.0), Some(80.0)),
             comparison(Verdict::Win, Some(50.0), Some(40.0)),
             comparison(Verdict::Loss, Some(-30.0), Some(-50.0)),
+            comparison(Verdict::CoverageMiss, None, None),
             comparison(Verdict::Unsolvable, None, None),
         ];
         let s = summarize(&comparisons);
-        assert_eq!(s.total, 4);
+        assert_eq!(s.total, 5);
         assert_eq!(s.wins, 2);
         assert_eq!(s.losses, 1);
+        assert_eq!(s.coverage_miss, 1);
         assert_eq!(s.unsolvable, 1);
         // Median of [-30, 50, 100] = 50.
         assert_eq!(s.median_raw_bps, Some(50.0));
