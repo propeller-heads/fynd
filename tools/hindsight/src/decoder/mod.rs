@@ -1,7 +1,7 @@
-mod match_receipts;
 mod net;
 mod registry;
 mod trace;
+mod venues;
 
 pub(crate) mod allium;
 pub(crate) mod verify_decoder;
@@ -21,9 +21,8 @@ use tracing::warn;
 
 pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
-    match_receipts::{find_maker_trade, match_receipt, Matched},
-    net::{decode_relay_rebalance, decode_trade, fee_to_collectors},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
+    venues::{Matched, Strategy},
 };
 
 /// A decoded aggregator trade: what token went in, what came out.
@@ -107,7 +106,7 @@ impl<P: Provider> Decoder<P> {
 
         let matched: Vec<Matched> = receipts
             .iter()
-            .filter_map(|receipt| match_receipt(receipt, registry))
+            .filter_map(|receipt| venues::select(receipt, registry))
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -125,70 +124,32 @@ impl<P: Provider> Decoder<P> {
 
         let mut trades = Vec::with_capacity(matched.len());
         for (matched, root) in matched.into_iter().zip(traces) {
-            let Matched { receipt, entry_point, intent_fill } = matched;
+            let Matched { receipt, entry_point, strategy } = matched;
             let logs = receipt.logs();
             let sender = receipt.from;
 
             let mut native = Vec::new();
             collect_native_transfers(&root, &mut native);
 
-            // For an intent fill the sender is the filler, so find the order maker
-            // by its net flow. Otherwise track the sender, falling back to the
-            // entry point for the rare case where output is delivered there.
-            let decoded = if intent_fill {
-                find_maker_trade(
-                    provider,
-                    logs,
-                    &native,
-                    &[entry_point, sender],
-                    registry,
-                    code_cache,
-                )
-                .await
-            } else {
-                decode_trade(logs, &native, sender)
-                    .map(|trade| (sender, trade))
-                    .or_else(|| {
-                        decode_trade(logs, &native, entry_point).map(|trade| (entry_point, trade))
-                    })
-            };
-
-            let aggregator =
-                attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
-
-            let Some((tracked, swap)) = decoded else {
-                // No user net flow. A Relay solver rebalancing fill has its sender net to zero, so
-                // anchor on the fee collector instead (Relay funds the swap from it).
-                if registry
-                    .relay()
-                    .routers
-                    .contains(&entry_point)
-                {
-                    if let Some(swap) = decode_relay_rebalance(
+            let flow = match strategy {
+                Strategy::Sender => venues::sender_flow(logs, &native, sender, entry_point),
+                Strategy::Maker => {
+                    venues::intent::find_maker_trade(
+                        provider,
                         logs,
                         &native,
-                        &registry.relay().fee_collectors,
-                        &registry.relay().routers,
-                        registry.wrapped_native(),
-                    ) {
-                        trades.push(DecodedTrade {
-                            tx_hash: receipt.transaction_hash,
-                            block_number,
-                            client: registry.label(entry_point),
-                            aggregator: registry.label(aggregator),
-                            sender,
-                            token_in: swap.token_in,
-                            token_out: swap.token_out,
-                            amount_in: swap.amount_in,
-                            amount_out: swap.amount_out,
-                            // The collector is the funding source here, not a skim — no fee
-                            // back-out.
-                            client_fee: None,
-                            client_fee_out: None,
-                        });
-                        continue;
-                    }
+                        &[entry_point, sender],
+                        registry,
+                        code_cache,
+                    )
+                    .await
                 }
+                Strategy::Relay => {
+                    venues::relay::decode(logs, &native, sender, entry_point, registry)
+                }
+            };
+
+            let Some(flow) = flow else {
                 warn!(
                     tx = %receipt.transaction_hash,
                     client = %registry.label(entry_point),
@@ -197,37 +158,21 @@ impl<P: Provider> Decoder<P> {
                 continue;
             };
 
-            // A known client collector can skim a fee on either side. Back an input-side skim out
-            // of `amount_in` (the user's gross spend included money that never entered the swap)
-            // and add an output-side skim back into `amount_out` (the swap produced more than the
-            // user kept), so both sides are the amounts actually swapped — the like-for-like basis
-            // vs Fynd.
-            let fees = fee_to_collectors(logs, &native, &registry.relay().fee_collectors);
-            let client_fee = fees
-                .get(&swap.token_in)
-                .copied()
-                .filter(|fee| !fee.is_zero());
-            let amount_in =
-                client_fee.map_or(swap.amount_in, |fee| swap.amount_in.saturating_sub(fee));
-            let client_fee_out = fees
-                .get(&swap.token_out)
-                .copied()
-                .filter(|fee| !fee.is_zero());
-            let amount_out =
-                client_fee_out.map_or(swap.amount_out, |fee| swap.amount_out.saturating_add(fee));
+            let aggregator =
+                attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
                 client: registry.label(entry_point),
                 aggregator: registry.label(aggregator),
-                sender: tracked,
-                token_in: swap.token_in,
-                token_out: swap.token_out,
-                amount_in,
-                amount_out,
-                client_fee,
-                client_fee_out,
+                sender: flow.tracked,
+                token_in: flow.swap.token_in,
+                token_out: flow.swap.token_out,
+                amount_in: flow.swap.amount_in,
+                amount_out: flow.swap.amount_out,
+                client_fee: flow.client_fee,
+                client_fee_out: flow.client_fee_out,
             });
         }
 

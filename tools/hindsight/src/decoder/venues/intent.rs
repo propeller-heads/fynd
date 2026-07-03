@@ -1,9 +1,15 @@
+//! Maker-finding for intent fills and batch settlements.
+//!
+//! Covers transactions where the sender is not the trader: filler-initiated
+//! intent fills (UniswapX, 1inch limit orders) and batch settlements (CoW),
+//! where the real swap is an order maker's net flow.
+
 use std::collections::{BTreeSet, HashMap};
 
 use alloy::{
     primitives::{Address, U256},
     providers::Provider,
-    rpc::types::{Log, TransactionReceipt},
+    rpc::types::Log,
     sol_types::SolEvent,
 };
 use tracing::warn;
@@ -11,41 +17,8 @@ use tracing::warn;
 use crate::decoder::{
     net::{decode_trade, to_primitive_log, NetSwap, Transfer},
     registry::Registry,
+    venues::Flow,
 };
-
-/// A matched transaction and how it was found.
-pub(crate) struct Matched<'a> {
-    pub receipt: &'a TransactionReceipt,
-    pub entry_point: Address,
-    /// The swapper is an order maker, not the sender: either the tx was discovered via a known
-    /// aggregator log (`tx.to` is a filler) or `tx.to` is a batch settler entered by a solver.
-    pub intent_fill: bool,
-}
-
-/// Match a receipt by entry point or by a known aggregator log emitter.
-pub(crate) fn match_receipt<'a>(
-    receipt: &'a TransactionReceipt,
-    registry: &Registry,
-) -> Option<Matched<'a>> {
-    if !receipt.status() {
-        return None;
-    }
-    let entry_point = receipt.to?;
-    if registry.is_known(entry_point) {
-        // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is an
-        // order maker's net flow — decode it like a filler-initiated intent fill.
-        return Some(Matched {
-            receipt,
-            entry_point,
-            intent_fill: registry.is_batch_settler(entry_point),
-        });
-    }
-    let via_log = receipt
-        .logs()
-        .iter()
-        .any(|log| registry.is_aggregator(log.address()));
-    via_log.then_some(Matched { receipt, entry_point, intent_fill: true })
-}
 
 /// Find the order maker's trade in a filler-initiated intent fill.
 ///
@@ -69,14 +42,14 @@ pub(crate) async fn find_maker_trade<P: Provider>(
     exclude: &[Address],
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
-) -> Option<(Address, NetSwap)> {
+) -> Option<Flow> {
     // Prefer externally-owned accounts; pools and routers carry code.
     let mut maker = None;
     for (candidate, trade) in maker_candidates(logs, native, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
-            return Some((candidate, trade));
+            return Some(Flow::without_fees(candidate, trade));
         }
-        maker.get_or_insert((candidate, trade));
+        maker.get_or_insert(Flow::without_fees(candidate, trade));
     }
     maker
 }
@@ -113,8 +86,9 @@ fn maker_candidates(
     swaps
 }
 
-/// Whether an address has contract code, cached per block. On RPC failure the
-/// address is treated as a contract so it is not mistaken for an EOA maker.
+/// Whether an address has contract code, cached across blocks. On RPC failure
+/// the address is treated as a contract so it is not mistaken for an EOA
+/// maker.
 ///
 /// v0 limitation: an EIP-7702-delegated account carries code, so a 7702 maker EOA is classified as
 /// a contract and dropped. 7702 is not yet widely used, so this is accepted for now.
