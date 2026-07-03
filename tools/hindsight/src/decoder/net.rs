@@ -6,6 +6,7 @@ use alloy::{
     sol,
     sol_types::SolEvent,
 };
+use tracing::debug;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -71,6 +72,12 @@ pub(crate) fn decode_trade(
 /// the tracked sender is the solver, not a trader), not a single comparable swap. Amounts across
 /// tokens with different decimals are not comparable, so guessing a "dominant" leg would pair
 /// unrelated tokens — declining keeps the re-solve comparison honest.
+///
+/// Known limitation: this also declines genuine single swaps whose flow carries a residue token —
+/// an RFQ hop consumes an exact intermediate amount and the surplus lands on the trader, rebasing
+/// tokens leave rounding residue, and some protocols take their fee in a fixed third token. Each
+/// shows up as an extra net token on a side, and without prices the dominant leg cannot be chosen
+/// safely. Such declines are logged at debug level.
 fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -> Option<NetSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
@@ -96,14 +103,17 @@ fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -
         }
     }
 
-    let (&token_in, &amount_in) = net_sent
-        .iter()
-        .next()
-        .filter(|_| net_sent.len() == 1)?;
-    let (&token_out, &amount_out) = net_received
-        .iter()
-        .next()
-        .filter(|_| net_received.len() == 1)?;
+    if net_sent.len() != 1 || net_received.len() != 1 {
+        // Flow on both sides but more than one token on one of them: either a real batch
+        // settlement or a single swap with a residue leg (see the docstring). Declined either way,
+        // but visibly.
+        if !net_sent.is_empty() && !net_received.is_empty() {
+            debug!(?net_sent, ?net_received, "declining multi-token net flow");
+        }
+        return None;
+    }
+    let (&token_in, &amount_in) = net_sent.iter().next()?;
+    let (&token_out, &amount_out) = net_received.iter().next()?;
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
