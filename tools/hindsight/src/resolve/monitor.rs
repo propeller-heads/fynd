@@ -530,6 +530,7 @@ mod tests {
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
             client_fee: None,
+            client_fee_out: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
         let quote = Some(
@@ -606,6 +607,7 @@ mod tests {
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
             client_fee: None,
+            client_fee_out: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(

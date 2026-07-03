@@ -7,7 +7,6 @@ use alloy::{
     sol_types::SolEvent,
 };
 
-
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
 }
@@ -344,6 +343,24 @@ mod tests {
     }
 
     #[test]
+    fn fee_to_collectors_totals_output_skim() {
+        let user = addr(1);
+        let pool = addr(50);
+        let collector = addr(99);
+        let token_out = addr(11);
+        let collectors = HashSet::from([collector]);
+
+        // Pool sends the output; part is skimmed to the collector, the rest to the user. The fee
+        // map keys this by token_out so the decoder can add it back to the gross swap output.
+        let logs = vec![
+            make_transfer_log(token_out, pool, collector, U256::from(30)),
+            make_transfer_log(token_out, pool, user, U256::from(970)),
+        ];
+        let fees = fee_to_collectors(&logs, &[], &collectors);
+        assert_eq!(fees.get(&token_out).copied(), Some(U256::from(30)));
+    }
+
+    #[test]
     fn fee_to_collectors_empty_set_is_noop() {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(99), U256::from(40))];
         assert!(fee_to_collectors(&logs, &[], &HashSet::new()).is_empty());
@@ -364,10 +381,7 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
-        assert_eq!(
-            got,
-            (token_in, U256::from(1000), token_out, U256::from(2000))
-        );
+        assert_eq!(got, (token_in, U256::from(1000), token_out, U256::from(2000)));
     }
 
     #[test]
@@ -383,10 +397,7 @@ mod tests {
         let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
         let native = vec![(router, recipient, U256::from(2000))];
         let got = decode_relay_rebalance(&logs, &native, &collectors, &routers).unwrap();
-        assert_eq!(
-            got,
-            (token_in, U256::from(1000), Address::ZERO, U256::from(2000))
-        );
+        assert_eq!(got, (token_in, U256::from(1000), Address::ZERO, U256::from(2000)));
     }
 
     #[test]
@@ -403,10 +414,7 @@ mod tests {
             make_transfer_log(token_out, pool, fee, U256::from(1001)),
         ];
         let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
-        assert_eq!(
-            got,
-            (token_in, U256::from(1000), token_out, U256::from(1001))
-        );
+        assert_eq!(got, (token_in, U256::from(1000), token_out, U256::from(1001)));
     }
 
     #[test]

@@ -41,12 +41,19 @@ pub(crate) struct DecodedTrade {
     /// Input amount that actually entered the swap — a client fee skimmed from the input (see
     /// [`client_fee`]) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
+    /// Gross swap output — a client fee skimmed from the output (see [`client_fee_out`]) is added
+    /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
     /// Client fee skimmed from the input token before swapping (e.g. Relay's fee), in `token_in`
     /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_fee: Option<U256>,
+    /// Client fee skimmed from the output token after swapping, in `token_out` units. `None` when
+    /// no known fee collector took a cut. Recorded for transparency; it is already added back into
+    /// `amount_out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_fee_out: Option<U256>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -149,6 +156,7 @@ pub(crate) async fn decode_block<P: Provider>(
                         amount_out,
                         // The collector is the funding source here, not a skim — no fee back-out.
                         client_fee: None,
+                        client_fee_out: None,
                     });
                     continue;
                 }
@@ -161,13 +169,21 @@ pub(crate) async fn decode_block<P: Provider>(
             continue;
         };
 
-        // Back out any input-side fee a known client collector skimmed before the swap, so the
-        // re-solve compares Fynd against the amount actually routed (not the user's gross spend).
-        let client_fee = fee_to_collectors(logs, &native, &fee_collectors)
+        // A known client collector can skim a fee on either side. Back an input-side skim out of
+        // `amount_in` (the user's gross spend included money that never entered the swap) and add
+        // an output-side skim back into `amount_out` (the swap produced more than the user kept),
+        // so both sides are the amounts actually swapped — the like-for-like basis vs Fynd.
+        let fees = fee_to_collectors(logs, &native, &fee_collectors);
+        let client_fee = fees
             .get(&token_in)
             .copied()
             .filter(|fee| !fee.is_zero());
         let amount_in = client_fee.map_or(amount_in, |fee| amount_in.saturating_sub(fee));
+        let client_fee_out = fees
+            .get(&token_out)
+            .copied()
+            .filter(|fee| !fee.is_zero());
+        let amount_out = client_fee_out.map_or(amount_out, |fee| amount_out.saturating_add(fee));
 
         trades.push(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -180,6 +196,7 @@ pub(crate) async fn decode_block<P: Provider>(
             amount_in,
             amount_out,
             client_fee,
+            client_fee_out,
         });
     }
 
