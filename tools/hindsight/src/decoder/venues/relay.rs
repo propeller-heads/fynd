@@ -33,6 +33,16 @@ pub(crate) fn decode(
     registry: &Registry,
 ) -> Option<Flow> {
     if let Some(flow) = sender_flow(logs, native, sender, entry_point) {
+        // A treasury operation: the collector itself is the trader (e.g. converting collected
+        // fees). Its receipts are its own output, not a skim — backing them "out" would add the
+        // output to itself and double it.
+        if registry
+            .relay()
+            .fee_collectors
+            .contains(&flow.tracked)
+        {
+            return Some(flow);
+        }
         return Some(back_out_client_fees(flow, logs, native, &registry.relay().fee_collectors));
     }
     decode_rebalance(
@@ -384,6 +394,31 @@ mod tests {
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.client_fee, Some(U256::from(40)));
+        assert_eq!(flow.client_fee_out, None);
+    }
+
+    #[test]
+    fn decode_skips_fee_back_out_for_collector_trader() {
+        // Treasury op (live tx 0x80a4c0…): the fee collector itself unwraps WETH via the router.
+        // Its 1:1 native receipt must not be treated as a skim and added back — that doubled the
+        // output.
+        let registry = Registry::ethereum();
+        let collector = *registry
+            .relay()
+            .fee_collectors
+            .iter()
+            .next()
+            .unwrap();
+        let router = addr(2);
+        let weth = addr(10);
+
+        let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
+        let native = vec![(router, collector, U256::from(1000))];
+
+        let flow = decode(&logs, &native, collector, router, &registry).unwrap();
+        assert_eq!(flow.tracked, collector);
+        assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
+        assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, None);
     }
 
