@@ -27,6 +27,17 @@ pub(crate) struct NetSwap {
     pub amount_out: U256,
 }
 
+/// A token's flow through the whole transaction, tracked alongside the netted
+/// per-address balances so residue legs can be told apart from real ones.
+#[derive(Default)]
+struct TokenFlow {
+    /// Total value of the token moved in the transaction, by any party.
+    gross: U256,
+    /// Whether the token also moved between two parties other than the
+    /// tracked address — the signature of a routing intermediate.
+    intermediate: bool,
+}
+
 /// Determine what the tracked address sent and received, netting
 /// intermediate hops, from ERC-20 Transfer logs and native ETH transfers.
 pub(crate) fn decode_trade(
@@ -34,36 +45,42 @@ pub(crate) fn decode_trade(
     native_transfers: &[(Address, Address, U256)],
     tracked: Address,
 ) -> Option<NetSwap> {
-    let mut sent: HashMap<Address, U256> = HashMap::new();
-    let mut received: HashMap<Address, U256> = HashMap::new();
-
+    // (token, from, to, value) for every transfer in the transaction; native ETH is token ZERO.
+    let mut transfers: Vec<(Address, Address, Address, U256)> = Vec::new();
     for &(from, to, value) in native_transfers {
-        if from == tracked {
-            *sent.entry(Address::ZERO).or_default() += value;
-        }
-        if to == tracked {
-            *received
-                .entry(Address::ZERO)
-                .or_default() += value;
-        }
+        transfers.push((Address::ZERO, from, to, value));
     }
-
     for log in logs {
         let primitive = to_primitive_log(log);
         let Ok(transfer) = Transfer::decode_log(&primitive) else {
             continue;
         };
-        let token = log.address();
-        if transfer.from == tracked {
-            *sent.entry(token).or_default() += transfer.value;
+        transfers.push((log.address(), transfer.from, transfer.to, transfer.value));
+    }
+
+    let mut sent: HashMap<Address, U256> = HashMap::new();
+    let mut received: HashMap<Address, U256> = HashMap::new();
+    let mut flows: HashMap<Address, TokenFlow> = HashMap::new();
+    for &(token, from, to, value) in &transfers {
+        let flow = flows.entry(token).or_default();
+        flow.gross = flow.gross.saturating_add(value);
+        if from != tracked && to != tracked {
+            flow.intermediate = true;
         }
-        if transfer.to == tracked {
-            *received.entry(token).or_default() += transfer.value;
+        if from == tracked {
+            *sent.entry(token).or_default() += value;
+        }
+        if to == tracked {
+            *received.entry(token).or_default() += value;
         }
     }
 
-    net_trade(&sent, &received)
+    net_trade(&sent, &received, &flows)
 }
+
+/// A net leg is residue when its token routed between third parties and the leg is under this
+/// fraction of the token's gross transaction flow: `net * RESIDUE_GROSS_RATIO < gross` (1%).
+const RESIDUE_GROSS_RATIO: u64 = 100;
 
 /// Net the sent and received balances into a single swap.
 ///
@@ -73,12 +90,19 @@ pub(crate) fn decode_trade(
 /// tokens with different decimals are not comparable, so guessing a "dominant" leg would pair
 /// unrelated tokens — declining keeps the re-solve comparison honest.
 ///
-/// Known limitation: this also declines genuine single swaps whose flow carries a residue token —
-/// an RFQ hop consumes an exact intermediate amount and the surplus lands on the trader, rebasing
-/// tokens leave rounding residue, and some protocols take their fee in a fixed third token. Each
-/// shows up as an extra net token on a side, and without prices the dominant leg cannot be chosen
-/// safely. Such declines are logged at debug level.
-fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -> Option<NetSwap> {
+/// One exception: a genuine single swap can carry a **residue leg** — an RFQ hop consumes an exact
+/// intermediate amount and the surplus lands on the trader, or rounding leaves dust of a routing
+/// token. An ambiguous side first drops legs that are provably residue: the token also moved
+/// between parties other than the tracked address (a routing intermediate) *and* the leg is under
+/// 1% of the token's gross flow in the transaction. Both conditions are same-token comparisons, so
+/// no prices are needed, and a real batch leg (all of its token's flow) is never dropped. Residue
+/// on a token that never routed third-party (e.g. a rebasing input token) and fixed-token protocol
+/// fees still decline, logged at debug level.
+fn net_trade(
+    sent: &HashMap<Address, U256>,
+    received: &HashMap<Address, U256>,
+    flows: &HashMap<Address, TokenFlow>,
+) -> Option<NetSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
 
@@ -103,10 +127,12 @@ fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -
         }
     }
 
+    drop_residue_legs(&mut net_sent, flows);
+    drop_residue_legs(&mut net_received, flows);
+
     if net_sent.len() != 1 || net_received.len() != 1 {
-        // Flow on both sides but more than one token on one of them: either a real batch
-        // settlement or a single swap with a residue leg (see the docstring). Declined either way,
-        // but visibly.
+        // Flow on both sides but more than one significant token on one of them: a real batch
+        // settlement, or a residue leg the pruning rules cannot prove (see the docstring).
         if !net_sent.is_empty() && !net_received.is_empty() {
             debug!(?net_sent, ?net_received, "declining multi-token net flow");
         }
@@ -115,6 +141,22 @@ fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -
     let (&token_in, &amount_in) = net_sent.iter().next()?;
     let (&token_out, &amount_out) = net_received.iter().next()?;
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
+}
+
+/// Drop residue legs from one side of an ambiguous net (see [`net_trade`]). Only runs when the
+/// side has more than one leg — a lone leg is the swap itself, however small.
+fn drop_residue_legs(net: &mut HashMap<Address, U256>, flows: &HashMap<Address, TokenFlow>) {
+    if net.len() <= 1 {
+        return;
+    }
+    net.retain(|token, amount| {
+        let Some(flow) = flows.get(token) else {
+            return true;
+        };
+        let residue = flow.intermediate &&
+            amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < flow.gross;
+        !residue
+    });
 }
 
 #[cfg(test)]
@@ -185,6 +227,69 @@ mod tests {
 
         let result = decode_trade(&logs, &native, user).unwrap();
         assert_eq!(result, swap(Address::ZERO, 1000, token, 2000));
+    }
+
+    #[test]
+    fn rfq_surplus_residue_dropped() {
+        // USDC -> WETH -> DAI where the second hop is an RFQ consuming an exact WETH amount: the
+        // surplus WETH lands on the user as a second net-in token. WETH routed third-party
+        // (pool -> router) and the surplus is <1% of its gross flow, so it is provably residue.
+        let user = addr(1);
+        let pool = addr(50);
+        let router = addr(2);
+        let token_a = addr(10);
+        let token_mid = addr(12);
+        let token_b = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_a, user, pool, U256::from(1000)),
+            make_transfer_log(token_mid, pool, router, U256::from(10_000)),
+            make_transfer_log(token_mid, router, user, U256::from(50)),
+            make_transfer_log(token_b, router, user, U256::from(2000)),
+        ];
+
+        let result = decode_trade(&logs, &[], user).unwrap();
+        assert_eq!(result, swap(token_a, 1000, token_b, 2000));
+    }
+
+    #[test]
+    fn residue_needs_third_party_flow() {
+        // A small extra token received straight from the pool never routed third-party, so it
+        // cannot be proven residue — the trade stays declined.
+        let user = addr(1);
+        let pool = addr(50);
+        let token_a = addr(10);
+        let token_b = addr(11);
+        let token_c = addr(12);
+
+        let logs = vec![
+            make_transfer_log(token_a, user, pool, U256::from(1000)),
+            make_transfer_log(token_b, pool, user, U256::from(2000)),
+            make_transfer_log(token_c, pool, user, U256::from(5)),
+        ];
+
+        assert!(decode_trade(&logs, &[], user).is_none());
+    }
+
+    #[test]
+    fn residue_needs_small_share_of_gross() {
+        // An extra leg that routed third-party but is a large share of its token's gross flow is
+        // a real leg, not residue — the trade stays declined.
+        let user = addr(1);
+        let pool = addr(50);
+        let router = addr(2);
+        let token_a = addr(10);
+        let token_mid = addr(12);
+        let token_b = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_a, user, pool, U256::from(1000)),
+            make_transfer_log(token_mid, pool, router, U256::from(1000)),
+            make_transfer_log(token_mid, router, user, U256::from(600)),
+            make_transfer_log(token_b, router, user, U256::from(2000)),
+        ];
+
+        assert!(decode_trade(&logs, &[], user).is_none());
     }
 
     #[test]
