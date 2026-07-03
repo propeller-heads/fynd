@@ -271,7 +271,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         // back-of-block improvement is valued against the state it was solved at.
         let prices_back = snapshot_prices(&solver).await;
         for range in &ranges {
-            crate::telemetry::record_range(range, cfg.chain, &prices_top);
+            crate::telemetry::record_range(range, cfg.chain, &prices_top, &prices_back);
         }
         if let Some(writer) = comparisons.as_mut() {
             write_comparisons(writer, &ranges, &prices_top, &prices_back);
