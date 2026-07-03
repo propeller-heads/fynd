@@ -4,12 +4,19 @@
 //! optimally split the input amount across them. The inner BF instance handles
 //! single-path discovery; this module layers on the Frank-Wolfe optimisation
 //! loop to determine the best split fractions.
+//!
+//! The optimisation objective is output net of gas, evaluated by simulating
+//! paths sequentially against a shared post-swap state map — paths that share
+//! a pool see its depleted reserves instead of double-counting liquidity. The
+//! single-path route is a floor: any failure while optimising the split falls
+//! back to it rather than failing the solve.
 
 use std::time::{Duration, Instant};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
 use tracing::debug;
+use tycho_simulation::tycho_core::models::Address;
 
 use super::{
     bellman_ford::{BellmanFordContext, FindRouteOptions},
@@ -162,7 +169,7 @@ impl PathFrankWolfeAlgorithm {
         current_allocations: &[PathAllocation],
         probe_amount: &BigUint,
     ) -> Result<Vec<SimulatedHop>, AlgorithmError> {
-        let mut overrides = build_post_swap_overrides(current_allocations, &ctx.market_data);
+        let mut overrides = build_post_swap_overrides(current_allocations, &ctx.market_data)?;
 
         // Pools committed in the current solution are executed once on-chain — their gas is
         // already priced into the combined transaction. Zero out protocol gas so BF doesn't
@@ -245,25 +252,37 @@ impl PathFrankWolfeAlgorithm {
         route: &Route,
         ctx: &BellmanFordContext,
     ) -> Result<f64, AlgorithmError> {
-        let gas_price = match &ctx.gas_price_wei {
-            Some(gp) if !gp.is_zero() => gp,
-            _ => return Ok(0.0),
-        };
         let last_swap = route
             .swaps()
             .last()
             .ok_or_else(|| AlgorithmError::Other("route has no swaps".to_string()))?;
+        Ok(Self::gas_units_to_output_tokens(&route.total_gas(), last_swap.token_out(), ctx))
+    }
+
+    /// Converts a raw gas amount into output-token cost as `f64`.
+    ///
+    /// Returns `0.0` when the gas price or the output token's price is
+    /// unavailable — gas is then simply not part of the objective.
+    fn gas_units_to_output_tokens(
+        gas: &BigUint,
+        output_token: &Address,
+        ctx: &BellmanFordContext,
+    ) -> f64 {
+        let gas_price = match &ctx.gas_price_wei {
+            Some(gp) if !gp.is_zero() => gp,
+            _ => return 0.0,
+        };
         let price = match ctx
             .token_prices
             .as_ref()
-            .and_then(|tp| tp.get(last_swap.token_out()))
+            .and_then(|tp| tp.get(output_token))
         {
             Some(p) if !p.denominator.is_zero() => p,
-            _ => return Ok(0.0),
+            _ => return 0.0,
         };
-        let gas_cost_wei = &route.total_gas() * gas_price;
+        let gas_cost_wei = gas * gas_price;
         let gas_cost_tokens = &gas_cost_wei * &price.numerator / &price.denominator;
-        Ok(gas_cost_tokens.to_f64().unwrap_or(0.0))
+        gas_cost_tokens.to_f64().unwrap_or(0.0)
     }
 
     /// Converts a `Route` (from BF's initial solve) into a single `PathAllocation`.
@@ -335,7 +354,8 @@ impl PathFrankWolfeAlgorithm {
     ///
     /// At each probe point, builds trial fractions (existing paths scaled by
     /// `1 − step_size`, candidate at `step_size`) and evaluates the combined
-    /// output via `evaluate_total_output`.
+    /// output net of gas via `evaluate_total_output` — a candidate whose extra
+    /// gas outweighs its extra output is never worth a step.
     fn optimize_step_size(
         &self,
         current_allocations: &[PathAllocation],
@@ -356,22 +376,29 @@ impl PathFrankWolfeAlgorithm {
             .iter()
             .map(|h| h.descriptor.clone())
             .collect();
+        let Some(last_hop) = candidate_descriptors.last() else {
+            return 0.0;
+        };
+        let output_token = last_hop.token_out.address.clone();
         let overrides = MarketOverrides::empty();
 
-        // Evaluates the total output of the split that results from shifting
+        // Evaluates the net output of the split that results from shifting
         // `step_size` fraction of flow from existing paths to the candidate.
+        // At step 0 the candidate is left out entirely so it can't pick up
+        // rounding dust (and its gas) from the remainder convention.
         let evaluate_split = |step_size: f64| -> f64 {
             let mut trial_fractions: Vec<f64> = current_allocations
                 .iter()
                 .map(|a| a.flow_fraction * (1.0 - step_size))
                 .collect();
-            trial_fractions.push(step_size);
-
             let mut trial_paths: Vec<&[HopDescriptor]> = existing_descriptors
                 .iter()
                 .map(|v| v.as_slice())
                 .collect();
-            trial_paths.push(&candidate_descriptors);
+            if step_size > 0.0 {
+                trial_fractions.push(step_size);
+                trial_paths.push(&candidate_descriptors);
+            }
 
             match evaluate_total_output(
                 &trial_paths,
@@ -380,17 +407,32 @@ impl PathFrankWolfeAlgorithm {
                 &ctx.market_data,
                 &overrides,
             ) {
-                Ok((total_output, _gas)) => total_output.to_f64().unwrap_or(0.0),
+                Ok((total_output, gas)) => {
+                    let gross = total_output.to_f64().unwrap_or(0.0);
+                    gross -
+                        Self::gas_units_to_output_tokens(&BigUint::from(gas), &output_token, ctx)
+                }
                 Err(_) => 0.0,
             }
         };
 
-        golden_section_search(evaluate_split, 0.0, 1.0, self.config.line_search_evals)
+        let step_size =
+            golden_section_search(evaluate_split, 0.0, 1.0, self.config.line_search_evals);
+
+        // Gas-aware activation: at step 0 the candidate carries no flow and no
+        // gas, so this comparison only accepts the candidate when its extra
+        // output covers its extra gas.
+        if evaluate_split(step_size) <= evaluate_split(0.0) {
+            return 0.0;
+        }
+        step_size
     }
 
     /// Applies a Frank-Wolfe step: shifts `step_size` fraction of flow to the
-    /// candidate path, re-simulates all paths, and drops any path whose fraction
-    /// falls below `config.min_split` (renormalizing the remainder).
+    /// candidate path, re-simulates all paths sequentially against a shared
+    /// post-swap state map (so shared pools see depleted reserves), and drops
+    /// any path whose fraction falls below `config.min_split` (renormalizing
+    /// the remainder).
     fn apply_step(
         &self,
         allocations: &mut Vec<PathAllocation>,
@@ -419,7 +461,7 @@ impl PathFrankWolfeAlgorithm {
             .collect();
         normalize_fractions(&mut remaining_fractions)
             .map_err(|e| AlgorithmError::Other(e.to_string()))?;
-        let overrides = MarketOverrides::empty();
+        let mut post_swap = MarketOverrides::empty();
         for (alloc, &frac) in allocations
             .iter_mut()
             .zip(remaining_fractions.iter())
@@ -432,7 +474,7 @@ impl PathFrankWolfeAlgorithm {
                 .map(|h| h.descriptor.clone())
                 .collect();
             let sim =
-                simulate_path(&hop_descriptors, &alloc_amount_in, &ctx.market_data, &overrides)?;
+                simulate_path(&hop_descriptors, &alloc_amount_in, &ctx.market_data, &post_swap)?;
             alloc.amount_in = alloc_amount_in;
             alloc.amount_out = sim.amount_out;
             alloc.marginal_price_product = sim.marginal_price_product;
@@ -447,9 +489,109 @@ impl PathFrankWolfeAlgorithm {
                 hop.amount_out = amount_out;
                 hop.gas = gas;
             }
+
+            // Later paths must see the reserves this path consumed.
+            for (component_id, state) in sim.post_swap_states {
+                post_swap = post_swap.with_override(component_id, state);
+            }
         }
 
         Ok(())
+    }
+
+    /// Runs the Frank-Wolfe split search seeded from the single-path route.
+    ///
+    /// Returns `Ok(None)` when splitting is not worthwhile: price impact too
+    /// low to cover another path's gas, no second path found, or the split
+    /// route failed validation.
+    fn optimize_split(
+        &self,
+        ctx: &BellmanFordContext,
+        order: &Order,
+        single_path_result: &RouteResult,
+        start: Instant,
+    ) -> Result<Option<RouteResult>, AlgorithmError> {
+        let mut allocations =
+            vec![Self::route_to_allocation(single_path_result.route(), order, ctx)?];
+
+        // Compute gas cost and initial probe.
+        let gas_cost = Self::gas_cost_output_tokens(single_path_result.route(), ctx)?;
+        let total_amount = order.amount();
+        let initial_pi = Self::compute_average_price_impact(&allocations)?;
+        if self
+            .compute_probe_amount(total_amount, initial_pi, gas_cost)
+            .is_none()
+        {
+            debug!(pi = initial_pi, gas_cost, "price impact too low to justify splitting");
+            return Ok(None);
+        }
+
+        // Frank-Wolfe loop — discover up to max_paths - 1 additional paths.
+        for iteration in 1..self.config.max_paths {
+            if start.elapsed() >= self.timeout() {
+                debug!(iteration, "pfw timeout, returning partial result");
+                break;
+            }
+
+            let pi = Self::compute_average_price_impact(&allocations)?;
+            let probe_amount = match self.compute_probe_amount(total_amount, pi, gas_cost) {
+                Some(p) => p,
+                None => {
+                    debug!(iteration, pi, "probe exceeds cap, stopping");
+                    break;
+                }
+            };
+
+            let candidate = match self.find_candidate_path(ctx, &allocations, &probe_amount) {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!(
+                        iteration,
+                        ?e,
+                        "no additional candidate path found, stopping further searches"
+                    );
+                    break;
+                }
+            };
+
+            if Self::is_duplicate_path(&candidate, &allocations) {
+                debug!(iteration, "duplicate path, exploration exhausted");
+                break;
+            }
+
+            // golden-section line search for optimal step size.
+            let step_size = self.optimize_step_size(&allocations, &candidate, total_amount, ctx);
+
+            // step too small → no benefit.
+            if step_size < self.config.min_split {
+                debug!(iteration, step_size, "step size below min_split, stopping");
+                break;
+            }
+
+            self.apply_step(&mut allocations, &candidate, step_size, total_amount, ctx)?;
+            debug!(iteration, paths = allocations.len(), step_size, "pfw iteration complete");
+        }
+
+        // With a single path, the initial result is already optimal.
+        if allocations.len() <= 1 {
+            return Ok(None);
+        }
+
+        let split_route = build_split_route(&allocations, &ctx.market_data, order)?;
+
+        // A malformed split must not fail the whole solve when a valid route
+        // is available.
+        if let Err(e) = split_route.validate() {
+            debug!(error = %e, "split route failed validation, falling back to single path");
+            return Ok(None);
+        }
+
+        let gas_price = ctx
+            .gas_price_wei
+            .clone()
+            .unwrap_or_default();
+        let split_net = Self::compute_split_net_amount_out(&split_route, ctx)?;
+        Ok(Some(RouteResult::new(split_route, split_net, gas_price)))
     }
 
     /// Computes `net_amount_out` for a split route, mirroring
@@ -530,104 +672,28 @@ impl Algorithm for PathFrankWolfeAlgorithm {
             self.inner
                 .find_single_route(&ctx, order, FindRouteOptions::default())?;
 
-        let mut allocations =
-            vec![Self::route_to_allocation(single_path_result.route(), order, &ctx)?];
-
-        // Compute gas cost and initial probe.
-        let gas_cost = Self::gas_cost_output_tokens(single_path_result.route(), &ctx)?;
-        let total_amount = order.amount();
-        let initial_pi = Self::compute_average_price_impact(&allocations)?;
-        if self
-            .compute_probe_amount(total_amount, initial_pi, gas_cost)
-            .is_none()
-        {
-            debug!(pi = initial_pi, gas_cost, "price impact too low to justify splitting");
-            return Ok(single_path_result);
-        }
-
-        // Step 2: Frank-Wolfe loop — discover up to max_paths - 1 additional paths.
-        for iteration in 1..self.config.max_paths {
-            if start.elapsed() >= self.timeout() {
-                debug!(iteration, "pfw timeout, returning partial result");
-                break;
+        // Step 2: try to improve on it with a split route. A failure here must
+        // never lose the valid single-path route — fall back instead of
+        // propagating the error.
+        let split_result = match self.optimize_split(&ctx, order, &single_path_result, start) {
+            Ok(result) => result,
+            Err(e) => {
+                debug!(error = ?e, "split optimization failed, falling back to single path");
+                None
             }
+        };
 
-            let pi = Self::compute_average_price_impact(&allocations)?;
-            let probe_amount = match self.compute_probe_amount(total_amount, pi, gas_cost) {
-                Some(p) => p,
-                None => {
-                    debug!(iteration, pi, "probe exceeds cap, stopping");
-                    break;
-                }
-            };
-
-            let candidate = match self.find_candidate_path(&ctx, &allocations, &probe_amount) {
-                Ok(c) => c,
-                Err(e) => {
-                    debug!(
-                        iteration,
-                        ?e,
-                        "no additional candidate path found, stopping further searches"
-                    );
-                    break;
-                }
-            };
-
-            if Self::is_duplicate_path(&candidate, &allocations) {
-                debug!(iteration, "duplicate path, exploration exhausted");
-                break;
+        // Step 3: return whichever route nets more after gas.
+        match split_result {
+            Some(split) if split.net_amount_out() > single_path_result.net_amount_out() => {
+                debug!(
+                    split_net = %split.net_amount_out(),
+                    initial_net = %single_path_result.net_amount_out(),
+                    "split route beats single path"
+                );
+                Ok(split)
             }
-
-            // golden-section line search for optimal step size.
-            let step_size = self.optimize_step_size(&allocations, &candidate, total_amount, &ctx);
-
-            // step too small → no benefit.
-            if step_size < self.config.min_split {
-                debug!(iteration, step_size, "step size below min_split, stopping");
-                break;
-            }
-
-            self.apply_step(&mut allocations, &candidate, step_size, total_amount, &ctx)?;
-            debug!(iteration, paths = allocations.len(), step_size, "pfw iteration complete");
-        }
-
-        // Step 3: if we only have one path, the initial result is already optimal.
-        if allocations.len() <= 1 {
-            return Ok(single_path_result);
-        }
-
-        // Build the split route and compare with the initial single-path result.
-        let split_route = build_split_route(&allocations, &ctx.market_data, order)?;
-
-        // Fall back to the single-path result if the split route is invalid, so a malformed split
-        // doesn't fail the whole solve when a valid route is available.
-        if let Err(e) = split_route.validate() {
-            debug!(error = %e, "split route failed validation, falling back to single path");
-            return Ok(single_path_result);
-        }
-
-        let gas_price = ctx
-            .gas_price_wei
-            .clone()
-            .unwrap_or_default();
-        let split_net = Self::compute_split_net_amount_out(&split_route, &ctx)?;
-        let split_result = RouteResult::new(split_route, split_net, gas_price);
-
-        if split_result.net_amount_out() > single_path_result.net_amount_out() {
-            debug!(
-                split_net = %split_result.net_amount_out(),
-                initial_net = %single_path_result.net_amount_out(),
-                paths = allocations.len(),
-                "split route beats single path"
-            );
-            Ok(split_result)
-        } else {
-            debug!(
-                split_net = %split_result.net_amount_out(),
-                initial_net = %single_path_result.net_amount_out(),
-                "single path still best"
-            );
-            Ok(single_path_result)
+            _ => Ok(single_path_result),
         }
     }
 
@@ -988,6 +1054,68 @@ mod tests {
             result_lo.route().swaps().len(),
             3,
             "without PI exit, all three pools should be used"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_size_rejects_gas_losing_candidate() {
+        // Two identical parallel pools; the candidate's gas is so large that
+        // splitting improves gross output but loses net of gas. The net-aware
+        // line search must return a step below min_split, while a normal-gas
+        // candidate on the same market is worth a real step.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let cp = |gas: u64| -> Box<dyn ProtocolSim> {
+            Box::new(ConstantProductSim {
+                reserve_0: BigUint::from(100_000u64),
+                reserve_1: BigUint::from(100_000u64),
+                gas,
+            })
+        };
+
+        // With price 1 token = 1e6 wei and gas_price 100 wei, 5e9 gas units
+        // cost 500_000 output tokens — far more than any split can gain.
+        let (market, graph_manager) = setup_market_unweighted(vec![
+            ("P1", &token_a, &token_b, cp(50_000)),
+            ("P2_expensive", &token_a, &token_b, cp(5_000_000_000)),
+            ("P3_cheap", &token_a, &token_b, cp(50_000)),
+        ]);
+
+        let algo = pfw_algo(2);
+        let derived = derived_with_token_prices(&[&token_a, &token_b]);
+        let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
+
+        let ctx = algo
+            .inner
+            .build_context(graph_manager.graph(), market, None, Some(derived), &ord)
+            .await
+            .unwrap();
+
+        let hop = |pool: &str| {
+            HopDescriptor::new(pool.to_string(), token_a.clone(), token_b.clone())
+                .with_amounts(BigUint::ZERO, BigUint::ZERO)
+        };
+        let allocations = [PathAllocation {
+            hops: vec![hop("P1")],
+            flow_fraction: 1.0,
+            amount_in: ord.amount().clone(),
+            amount_out: BigUint::from(9_090u64),
+            marginal_price_product: 1.0,
+        }];
+
+        let expensive_step =
+            algo.optimize_step_size(&allocations, &[hop("P2_expensive")], ord.amount(), &ctx);
+        assert!(
+            expensive_step < algo.config.min_split,
+            "gas-losing candidate must not be activated, got step {expensive_step}"
+        );
+
+        let cheap_step =
+            algo.optimize_step_size(&allocations, &[hop("P3_cheap")], ord.amount(), &ctx);
+        assert!(
+            cheap_step >= algo.config.min_split,
+            "identical cheap pool should get a real allocation, got step {cheap_step}"
         );
     }
 
