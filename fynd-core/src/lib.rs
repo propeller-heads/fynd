@@ -65,8 +65,7 @@ pub use tycho_simulation::evm::pending::PendingBlockProcessor;
 pub use tycho_simulation::evm::pending::PendingError;
 /// A pending transaction bundle passed to [`PendingBlockProcessor`] for simulation.
 pub use tycho_simulation::evm::pending::PendingUpdate;
-/// Handle returned by [`FyndBuilder::build_with_step_controller`] or
-/// [`FyndBuilder::build_with_pending_and_step_controller`] that controls when each buffered
+/// Handle returned by [`FyndBuilder::build_with_step_controller`] that controls when each buffered
 /// block is released for decoding. See [`tycho_simulation`] for the full API.
 pub use tycho_simulation::evm::stream::BlockStepController;
 /// Implement this trait and register it via
