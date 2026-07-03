@@ -22,6 +22,7 @@ const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
+const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -80,6 +81,11 @@ pub(crate) fn describe() {
     );
     describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
+    describe_counter!(
+        SKIPPED_BLOCKS,
+        "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
+         stream past the retry budget, or the block genuinely failed to decode)"
+    );
 }
 
 /// Record a two-state range: the top-of-block (N-1) and back-of-block (N) outcomes, each tagged
@@ -171,9 +177,12 @@ fn record_state(
         .record(usd);
     }
 
-    if let Some(uplift) =
-        usd::savings_usd(range.token_out, solved.amount_out_net_gas, range.settled_amount_out, prices)
-    {
+    if let Some(uplift) = usd::savings_usd(
+        range.token_out,
+        solved.amount_out_net_gas,
+        range.settled_amount_out,
+        prices,
+    ) {
         if uplift > 0.0 {
             histogram!(
                 IMPROVEMENT_USD,
@@ -193,6 +202,10 @@ pub(crate) fn record_coverage(total: usize, comparable: usize) {
 
 pub(crate) fn record_block_seconds(seconds: f64) {
     histogram!(BLOCK_SECONDS).record(seconds);
+}
+
+pub(crate) fn record_skipped_block() {
+    counter!(SKIPPED_BLOCKS).increment(1);
 }
 
 async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {

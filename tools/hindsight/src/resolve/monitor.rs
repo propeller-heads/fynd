@@ -9,7 +9,10 @@
 
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, U256};
+use alloy::{
+    primitives::{Address, U256},
+    providers::Provider,
+};
 use async_trait::async_trait;
 use fynd_core::{
     types::{
@@ -38,6 +41,12 @@ use crate::{
 /// this.
 const BLOCK_SETTLE_TIMEOUT: Duration = Duration::from_secs(1800);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The HTTP RPC used to decode receipts can trail the Tycho stream by a few seconds, so `target`
+/// (which tracks the stream's tip) may not be indexed yet on the first look. Wait for the RPC head
+/// to reach it, retrying a bounded number of times before treating it as a genuine failure.
+const DECODE_RPC_LAG_RETRIES: usize = 5;
+const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
 
 /// Inputs for the live monitor.
 pub(crate) struct MonitorConfig<'a> {
@@ -162,6 +171,28 @@ fn biguint_to_u256(value: &BigUint) -> U256 {
         .unwrap_or(U256::ZERO)
 }
 
+/// Decode `block`, first waiting out any RPC lag. The HTTP RPC used for receipts can trail the
+/// Tycho stream that drives `block`, so poll the RPC head until it reaches `block` (bounded retries
+/// with backoff) — that distinguishes a transient race from a real failure. A block still
+/// undecodable once the RPC has indexed it is a genuine error and surfaces to the caller.
+async fn decode_block_when_available<P: Provider>(
+    provider: &P,
+    block: u64,
+) -> anyhow::Result<Vec<crate::decoder::DecodedTrade>> {
+    for attempt in 0..DECODE_RPC_LAG_RETRIES {
+        let head = provider
+            .get_block_number()
+            .await
+            .unwrap_or(0);
+        if head >= block {
+            break;
+        }
+        warn!(block, head, attempt, "RPC lags the tycho stream; waiting for it to index the block");
+        tokio::time::sleep(DECODE_RPC_LAG_BACKOFF).await;
+    }
+    decode_block(provider, block).await
+}
+
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
 /// range.
 pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
@@ -237,6 +268,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     let mut processed = 0u64;
     let mut total_trades = 0usize;
     let mut comparable_trades = 0usize;
+    let mut skipped_blocks = 0u64;
     loop {
         if controller
             .peek_next_block()
@@ -253,10 +285,16 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         };
         let target = top_block + 1;
 
-        let trades = match decode_block(&provider, target).await {
+        let trades = match decode_block_when_available(&provider, target).await {
             Ok(trades) => trades,
             Err(e) => {
-                warn!(block = target, "decode failed, skipping block: {e}");
+                skipped_blocks += 1;
+                crate::telemetry::record_skipped_block();
+                warn!(
+                    block = target,
+                    skipped_total = skipped_blocks,
+                    "decode failed, skipping block: {e}"
+                );
                 adapter.advance().await?;
                 continue;
             }
