@@ -1,6 +1,10 @@
 //! HTTP request handlers for the solver API.
 
-use actix_web::{web, HttpResponse};
+use std::sync::Arc;
+
+use actix_web::{web, HttpRequest, HttpResponse};
+use fynd_core::{QuoteCache, QuoteStatus};
+use metrics::counter;
 #[cfg(feature = "experimental")]
 use tracing::warn;
 use tracing::{info, instrument};
@@ -12,6 +16,9 @@ use crate::api::prices::{
     price_to_f64, ComputationBlocks, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse,
     SpotPriceEntry, TokenPriceEntry,
 };
+
+/// Header the auth proxy sets to identify the calling API key. Absent when Fynd is self-hosted.
+const USER_IDENTITY_HEADER: &str = "User-Identity";
 
 /// Configures API routes under /v1 namespace.
 pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -48,10 +55,11 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
-#[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
+#[instrument(skip(state, request, http_req), fields(num_orders = request.orders().len()))]
 pub(crate) async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let dto_request = request.into_inner();
 
@@ -70,10 +78,15 @@ pub(crate) async fn quote(
         }
     }
 
-    let core_quote = state
-        .worker_router()
-        .quote(core_request)
-        .await?;
+    let core_quote = match state.quote_cache() {
+        Some(cache) => solve_with_cache(&state, cache, core_request, &http_req).await?,
+        None => {
+            state
+                .worker_router()
+                .quote(core_request)
+                .await?
+        }
+    };
 
     info!(
         solve_time_ms = core_quote.solve_time_ms(),
@@ -85,6 +98,70 @@ pub(crate) async fn quote(
     let dto_quote: dto::Quote = core_quote.into();
 
     Ok(HttpResponse::Ok().json(dto_quote))
+}
+
+/// Serves `request` through the quote cache: a hit re-encodes the cached solve at encode-only
+/// latency; a miss solves, caches the winning solve, then encodes for this caller.
+///
+/// Only single-order requests are cached. The cache key and re-encode path are per-order, and
+/// multi-order quote→execute is not a v1 pattern, so multi-order requests bypass the cache and
+/// re-solve every time (counted for visibility).
+async fn solve_with_cache(
+    state: &AppState,
+    cache: &Arc<QuoteCache>,
+    request: fynd_core::QuoteRequest,
+    http_req: &HttpRequest,
+) -> Result<fynd_core::Quote, ApiError> {
+    if request.orders().len() != 1 {
+        counter!("quote_cache_multi_order_bypass_total").increment(1);
+        return Ok(state
+            .worker_router()
+            .quote(request)
+            .await?);
+    }
+    let order = request.orders()[0].clone();
+
+    // A hit must be validated against the chain head to honor the staleness cutoff. Without a head
+    // (market not yet synced) freshness is unverifiable, so fall through to a fresh solve.
+    if let Some(head) = state.current_block().await {
+        if let Some(cached) = cache.get(&order, head) {
+            return Ok(state
+                .worker_router()
+                .encode_cached(cached, &order, request.options())
+                .await?);
+        }
+    }
+
+    let identity = extract_identity(http_req);
+    let solved = state
+        .worker_router()
+        .solve(request.clone())
+        .await?;
+    let candidate = solved.order_quotes().first().cloned();
+    let quote = state
+        .worker_router()
+        .encode_quote(solved, request.options())
+        .await?;
+
+    // Cache only successful solves; placeholders (no route / timeout) must never be served later.
+    if let Some(candidate) = candidate {
+        if candidate.status() == QuoteStatus::Success {
+            let solved_at_block = candidate.block().number();
+            cache.insert(&order, candidate, request, &identity, solved_at_block);
+        }
+    }
+    Ok(quote)
+}
+
+/// Extracts the caller identity from the `User-Identity` header, falling back to the shared
+/// anonymous identity when the header is absent or empty (self-hosted Fynd, no auth proxy).
+fn extract_identity(req: &HttpRequest) -> String {
+    req.headers()
+        .get(USER_IDENTITY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|identity| !identity.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fynd_core::ANONYMOUS_IDENTITY.to_string())
 }
 
 /// GET /v1/health - Health check endpoint.
@@ -592,5 +669,29 @@ mod tests {
             addr.contains("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
             "expected Ethereum Tycho Router address, got {addr}"
         );
+    }
+
+    // ── Cache identity extraction ──────────────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_extract_identity_from_header() {
+        let req = test::TestRequest::default()
+            .insert_header(("User-Identity", "key-1"))
+            .to_http_request();
+        assert_eq!(super::extract_identity(&req), "key-1");
+    }
+
+    #[actix_web::test]
+    async fn test_extract_identity_absent_is_anonymous() {
+        let req = test::TestRequest::default().to_http_request();
+        assert_eq!(super::extract_identity(&req), fynd_core::ANONYMOUS_IDENTITY);
+    }
+
+    #[actix_web::test]
+    async fn test_extract_identity_empty_is_anonymous() {
+        let req = test::TestRequest::default()
+            .insert_header(("User-Identity", ""))
+            .to_http_request();
+        assert_eq!(super::extract_identity(&req), fynd_core::ANONYMOUS_IDENTITY);
     }
 }
