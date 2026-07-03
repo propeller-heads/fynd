@@ -12,7 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
-use tracing::{debug, info, instrument, span, trace, warn, Instrument, Level};
+use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 use tycho_simulation::{
     evm::{
         pending::PendingBlockProcessor,
@@ -943,12 +943,9 @@ impl TychoFeed {
                     .collect(),
             };
 
-            // A broadcast send fails only when no receivers are currently subscribed. The market
-            // state was already updated above; this event is just a notification, so a transient
-            // absence of subscribers must not kill the feed — that would stop the whole solver.
-            if let Err(e) = self.event_tx.send(market_update_event) {
-                warn!(error = %e, "no market-event subscribers; skipping notification");
-            }
+            self.event_tx
+                .send(market_update_event)
+                .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;
         }
 
         Ok(())
@@ -1195,9 +1192,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_ok_when_no_subscribers() {
-        // A broadcast send fails when no receivers are subscribed; that must not be fatal, or a
-        // transient absence of subscribers would kill the feed and stop the whole solver.
+    async fn handle_message_errs_when_no_subscribers() {
+        // A broadcast send fails when no receivers are subscribed. The feed surfaces that as an
+        // error rather than silently dropping the market event, which could leave worker graphs
+        // stale; the underlying subscriber-exit is debugged separately.
         let market_data = new_shared_market_data();
         let feed = TychoFeed::new(create_test_config(), market_data.clone());
         drop(feed.subscribe()); // leaves zero live receivers
@@ -1212,12 +1210,13 @@ mod tests {
         );
         let update = Update::new(12345, HashMap::new(), new_pairs);
 
-        // There are changes, so this reaches the broadcast send; it must still return Ok.
-        feed.handle_tycho_message(update)
+        // There are changes, so this reaches the broadcast send, which errors with no receivers.
+        assert!(feed
+            .handle_tycho_message(update)
             .await
-            .expect("must not fail when there are no subscribers");
+            .is_err());
 
-        // The market state is applied regardless of whether the notification was delivered.
+        // The market state is still applied before the (failed) notification.
         assert!(market_data
             .read()
             .await
