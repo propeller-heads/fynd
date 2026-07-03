@@ -57,11 +57,21 @@ fn quote_to_outcome(quote: AggregatorQuote) -> Outcome {
     else {
         return Outcome::Unsolvable("missing amount_out".to_string());
     };
-    let amount_out_net_gas = quote
+    let amount_out_net_gas = match quote
         .amount_out_net_gas
         .as_deref()
         .and_then(parse_u256)
-        .unwrap_or(amount_out);
+    {
+        Some(net) => net,
+        None => {
+            warn!(
+                %amount_out,
+                "quote missing amount_out_net_gas; using raw amount_out (net-of-gas delta is \
+                 biased in Fynd's favour for this trade)"
+            );
+            amount_out
+        }
+    };
     let gas_estimate = quote
         .gas_units
         .map(U256::from)
