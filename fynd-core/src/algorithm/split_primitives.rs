@@ -503,7 +503,8 @@ struct SplitSwap {
     amount_in: BigUint,
 }
 
-struct ExecutedSplitSwap {
+/// One pool swap in a split route, after it has been simulated.
+struct SimulatedSplitSwap {
     hop: HopDescriptor,
     split: f64,
     amount_in: BigUint,
@@ -512,8 +513,9 @@ struct ExecutedSplitSwap {
     pre_swap_state: Box<dyn ProtocolSim>,
 }
 
+/// The outcome of simulating a whole split route.
 struct SplitExecution {
-    swaps: Vec<ExecutedSplitSwap>,
+    swaps: Vec<SimulatedSplitSwap>,
     available: HashMap<Bytes, BigUint>,
     post_swap: MarketOverrides,
     total_gas: u64,
@@ -611,6 +613,8 @@ fn assign_splits_and_amounts(
     hops
 }
 
+/// Counts, per token, how many swaps produce it, so the traversal only swaps a
+/// token once all its inflows have arrived.
 fn build_in_degree(hops_by_token: &HashMap<Bytes, Vec<SplitSwap>>) -> HashMap<Bytes, usize> {
     let mut in_degree: HashMap<Bytes, usize> = HashMap::new();
     for (token_in_addr, branch_collection) in hops_by_token {
@@ -626,6 +630,17 @@ fn build_in_degree(hops_by_token: &HashMap<Bytes, Vec<SplitSwap>>) -> HashMap<By
     in_degree
 }
 
+/// Simulates a split route from start token to outputs and returns the outcome.
+///
+/// Swaps run in dependency order, so each token is fully pooled from all its
+/// inflows before being re-split downstream, and every swap sees the pool state
+/// left by the swaps before it — so paths sharing a pool no longer each assume
+/// fresh liquidity. This one pass backs scoring, candidate discovery, and route
+/// assembly, so all three agree on the same executable route. Round-trips that
+/// end on the input token are supported.
+///
+/// Errors if a path revisits an intermediate token, a pool cannot be simulated,
+/// or the merged swaps cannot be ordered (a genuine dependency cycle).
 fn execute_split_plan(
     paths: &[PathAllocation],
     market: &MarketState,
@@ -685,7 +700,7 @@ fn execute_split_plan(
                 .or_default() += &result.amount;
             total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
 
-            swaps.push(ExecutedSplitSwap {
+            swaps.push(SimulatedSplitSwap {
                 hop: split_swap.hop.clone(),
                 split: split_swap.split,
                 amount_in: split_swap.amount_in,
@@ -719,6 +734,12 @@ fn execute_split_plan(
     Ok(SplitExecution { swaps, available, post_swap, total_gas })
 }
 
+/// Turns the parallel paths/fractions the line search works in into the
+/// allocations `execute_split_plan` consumes, dividing the input amount across
+/// paths by fraction. Simulation-derived fields are left empty for the plan to
+/// fill in.
+///
+/// Errors if the two slices differ in length or any path is empty.
 fn allocations_from_descriptors(
     paths: &[&[HopDescriptor]],
     fractions: &[f64],
