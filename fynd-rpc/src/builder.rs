@@ -7,7 +7,8 @@ use std::{
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use fynd_core::{
-    encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
+    encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, QuoteCache,
+    QuoteCachePolicy, SolverBuildError,
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -28,6 +29,8 @@ pub struct FyndRPCBuilder {
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
+    /// Enables the quote cache. Disabled by default; hosted values turn it on.
+    enable_quote_cache: bool,
 }
 
 impl FyndRPCBuilder {
@@ -67,6 +70,7 @@ impl FyndRPCBuilder {
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
+            enable_quote_cache: false,
         })
     }
 
@@ -187,6 +191,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Enables the in-process quote cache (default: disabled).
+    ///
+    /// When enabled, repeat single-order quote requests are served from a cache of recent solves at
+    /// encode-only latency. Disabled ⇒ every request runs the full solve path.
+    pub fn enable_quote_cache(mut self, enabled: bool) -> Self {
+        self.enable_quote_cache = enabled;
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -259,6 +272,13 @@ impl FyndRPCBuilder {
             computation_shutdown_tx,
         ) = parts.into_components();
 
+        let quote_cache = self
+            .enable_quote_cache
+            .then(|| Arc::new(QuoteCache::new(QuoteCachePolicy::default())));
+        if quote_cache.is_some() {
+            info!("quote cache enabled");
+        }
+
         let app_state = AppState::new(
             router,
             health_tracker,
@@ -269,7 +289,8 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
-        );
+        )
+        .with_quote_cache(quote_cache);
 
         let server = HttpServer::new(move || {
             App::new()
