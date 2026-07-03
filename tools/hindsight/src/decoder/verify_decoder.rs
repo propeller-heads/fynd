@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use alloy::{
-    primitives::{Address, Bytes, U256},
+    primitives::{Address, Bytes, TxHash, U256},
     providers::Provider,
     rpc::types::{TransactionInput, TransactionRequest},
 };
@@ -44,7 +44,7 @@ impl Status {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TxComparison {
-    pub tx_hash: String,
+    pub tx_hash: TxHash,
     pub status: Status,
     pub detail: String,
 }
@@ -118,16 +118,15 @@ async fn compare_block<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     out: &mut Vec<TxComparison>,
 ) {
-    let our_by_tx: HashMap<String, &DecodedTrade> = ours
-        .iter()
-        .map(|t| (t.tx_hash.to_lowercase(), t))
-        .collect();
-    let mut their_by_tx: HashMap<String, Vec<&AlliumRow>> = HashMap::new();
+    let our_by_tx: HashMap<TxHash, &DecodedTrade> =
+        ours.iter().map(|t| (t.tx_hash, t)).collect();
+    let mut their_by_tx: HashMap<TxHash, Vec<&AlliumRow>> = HashMap::new();
     for row in theirs {
-        their_by_tx
-            .entry(row.transaction_hash.to_lowercase())
-            .or_default()
-            .push(row);
+        let Ok(tx) = row.transaction_hash.parse::<TxHash>() else {
+            warn!(hash = %row.transaction_hash, "skipping Allium row with unparseable tx hash");
+            continue;
+        };
+        their_by_tx.entry(tx).or_default().push(row);
     }
 
     for (tx, trade) in &our_by_tx {
@@ -136,7 +135,7 @@ async fn compare_block<P: Provider>(
                 out.push(compare_trade(provider, trade, rows, tolerance_bps, decimals).await);
             }
             None => out.push(TxComparison {
-                tx_hash: tx.clone(),
+                tx_hash: *tx,
                 status: Status::OursOnly,
                 detail: format!("decoded a {} trade Allium does not list", trade.aggregator),
             }),
@@ -151,7 +150,7 @@ async fn compare_block<P: Provider>(
             .find_map(|r| r.project.clone())
             .unwrap_or_else(|| "unknown".to_string());
         out.push(TxComparison {
-            tx_hash: tx.clone(),
+            tx_hash: *tx,
             status: Status::AlliumOnly,
             detail: format!("Allium has a {project} trade we did not decode"),
         });
@@ -180,7 +179,7 @@ async fn compare_trade<P: Provider>(
         Status::Match
     };
 
-    TxComparison { tx_hash: ours.tx_hash.to_lowercase(), status, detail: detail.join("; ") }
+    TxComparison { tx_hash: ours.tx_hash, status, detail: detail.join("; ") }
 }
 
 /// Allium splits a trade into per-leg rows. Treat the decode as agreeing if
@@ -370,7 +369,7 @@ mod tests {
 
     fn trade(token_in: Address, token_out: Address, aggregator: &str) -> DecodedTrade {
         DecodedTrade {
-            tx_hash: "0xabc".to_string(),
+            tx_hash: TxHash::ZERO,
             block_number: 1,
             client: "relay".to_string(),
             aggregator: aggregator.to_string(),

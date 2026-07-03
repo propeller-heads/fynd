@@ -12,7 +12,7 @@ mod test_utils;
 use std::collections::HashMap;
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, TxHash, U256},
     providers::Provider,
 };
 use anyhow::Context;
@@ -31,7 +31,7 @@ use crate::decoder::{
 /// Native ETH is represented as [`Address::ZERO`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DecodedTrade {
-    pub tx_hash: String,
+    pub tx_hash: TxHash,
     pub block_number: u64,
     pub client: String,
     pub aggregator: String,
@@ -131,7 +131,7 @@ pub(crate) async fn decode_block<P: Provider>(
             attribute_aggregator(&root, entry_point, sender, &aggregators).unwrap_or(entry_point);
 
         trades.push(DecodedTrade {
-            tx_hash: format!("{}", receipt.transaction_hash),
+            tx_hash: receipt.transaction_hash,
             block_number,
             client: label(entry_point, &names),
             aggregator: label(aggregator, &names),
