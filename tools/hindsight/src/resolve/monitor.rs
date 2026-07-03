@@ -26,9 +26,10 @@ use tracing::{info, warn};
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
-    decoder::decode_block,
+    decoder::{decode_block, DecodedTrade},
+    provider_from,
     resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
-    usd,
+    telemetry, usd,
 };
 
 /// How long to wait for the solver to apply the next block after releasing it. Generous because the
@@ -175,7 +176,7 @@ fn biguint_to_u256(value: &BigUint) -> U256 {
 async fn decode_block_when_available<P: Provider>(
     provider: &P,
     block: u64,
-) -> anyhow::Result<Vec<crate::decoder::DecodedTrade>> {
+) -> anyhow::Result<Vec<DecodedTrade>> {
     for attempt in 0..DECODE_RPC_LAG_RETRIES {
         let head = provider
             .get_block_number()
@@ -236,10 +237,10 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))?;
 
-    let provider = crate::provider_from(cfg.rpc_url)?;
+    let provider = provider_from(cfg.rpc_url)?;
 
     if let Some(port) = cfg.metrics_port {
-        crate::telemetry::install_exporter(port)?;
+        telemetry::install_exporter(port)?;
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
@@ -286,7 +287,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
             Ok(trades) => trades,
             Err(e) => {
                 skipped_blocks += 1;
-                crate::telemetry::record_skipped_block();
+                telemetry::record_skipped_block();
                 warn!(
                     block = target,
                     skipped_total = skipped_blocks,
@@ -307,7 +308,8 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         let prices_back = snapshot_prices(&solver).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
-        // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is visible.
+        // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
+        // visible.
         let applied = adapter.current_block().await;
         if applied != Some(target) {
             warn!(
@@ -317,20 +319,20 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
             );
         }
         for range in &ranges {
-            crate::telemetry::record_range(range, cfg.chain, &prices_top, &prices_back);
+            telemetry::record_range(range, cfg.chain, &prices_top, &prices_back);
         }
         if let Some(writer) = comparisons.as_mut() {
             super::jsonl::write_comparisons(writer, &ranges, &prices_top, &prices_back);
         }
         let elapsed_s = start.elapsed().as_secs_f64();
-        crate::telemetry::record_block_seconds(elapsed_s);
+        telemetry::record_block_seconds(elapsed_s);
 
         total_trades += ranges.len();
         comparable_trades += ranges
             .iter()
             .filter(|r| matches!(r.verdict, Verdict::Win | Verdict::Loss))
             .count();
-        crate::telemetry::record_coverage(total_trades, comparable_trades);
+        telemetry::record_coverage(total_trades, comparable_trades);
 
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
