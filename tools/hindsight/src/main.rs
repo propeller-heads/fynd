@@ -26,7 +26,7 @@ enum Command {
 #[derive(Args)]
 struct DecodeArgs {
     /// Ethereum RPC URL
-    #[arg(long, env = "ETH_RPC_URL")]
+    #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
     /// Block number to decode (latest if omitted)
@@ -45,7 +45,7 @@ struct DecodeArgs {
 #[derive(Args)]
 struct VerifyArgs {
     /// Ethereum RPC URL
-    #[arg(long, env = "ETH_RPC_URL")]
+    #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
     /// Block number to verify (latest if omitted)
@@ -60,8 +60,17 @@ struct VerifyArgs {
     #[arg(long, env = "ALLIUM_API_KEY")]
     allium_key: String,
 
-    /// Allium saved query ID (parameterized by block_number)
-    #[arg(long, env = "ALLIUM_QUERY_ID", default_value = "vGDdbPGNAxCmcCJaYQPH")]
+    /// Allium saved query ID, parameterized by `block_number`. A saved query ID is scoped to the
+    /// workspace that created it, so register this SQL in your own Allium workspace and pass its ID:
+    ///
+    ///   SELECT project, protocol, token_sold_address, token_sold_symbol, token_sold_amount,
+    ///          usd_sold_amount, token_bought_address, token_bought_symbol, token_bought_amount,
+    ///          usd_bought_amount, sender_address, to_address, transaction_hash,
+    ///          transaction_fees_usd, block_number, block_timestamp, log_index
+    ///   FROM ethereum.dex.aggregator_trades
+    ///   WHERE block_number = {{block_number}}
+    ///   ORDER BY log_index
+    #[arg(long, env = "ALLIUM_QUERY_ID")]
     allium_query_id: String,
 
     /// Max allowed amount difference vs Allium, in basis points
