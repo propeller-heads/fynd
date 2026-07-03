@@ -1208,6 +1208,7 @@ impl Solver {
             computation_shutdown_tx: self.computation_shutdown_tx,
             chain: self.chain,
             router_address: self.router_address,
+            market_event_tx: self.market_event_tx,
         }
     }
 }
@@ -1240,12 +1241,23 @@ pub struct SolverParts {
     chain: Chain,
     /// Address of the Tycho Router contract on this chain.
     router_address: Bytes,
+    /// Broadcast sender for market events. Kept alive by the feed task; parts holds it so callers
+    /// can subscribe a receiver before consuming the components.
+    market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
 impl SolverParts {
     /// Returns the chain this solver is configured for.
     pub fn chain(&self) -> Chain {
         self.chain
+    }
+
+    /// Returns a new receiver for [`MarketEvent`]s broadcast on every block update.
+    ///
+    /// Call before [`into_components`](Self::into_components); the channel stays open as long as
+    /// the feed task (returned among the components) runs.
+    pub fn subscribe_market_events(&self) -> broadcast::Receiver<MarketEvent> {
+        self.market_event_tx.subscribe()
     }
 
     /// Returns the Tycho Router contract address for this chain.
