@@ -99,7 +99,13 @@ pub async fn run<P: Provider>(
     let mut comparisons = Vec::new();
     let mut decimals = HashMap::new();
     for &block in blocks {
-        let ours = decode_block(provider, block).await?;
+        let ours = match decode_block(provider, block).await {
+            Ok(ours) => ours,
+            Err(error) => {
+                warn!(block, %error, "failed to decode block; skipping");
+                continue;
+            }
+        };
         let theirs = allium
             .fetch_block(block)
             .await

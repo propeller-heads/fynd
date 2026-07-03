@@ -5,7 +5,7 @@ use std::time::Instant;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -96,7 +96,13 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     for block_number in &blocks {
         info!(block = block_number, "decoding aggregator trades");
         let start = Instant::now();
-        let trades = decoder::decode_block(&provider, *block_number).await?;
+        let trades = match decoder::decode_block(&provider, *block_number).await {
+            Ok(trades) => trades,
+            Err(error) => {
+                warn!(block = block_number, %error, "failed to decode block; skipping");
+                continue;
+            }
+        };
         let elapsed_ms = start.elapsed().as_millis();
 
         if trades.is_empty() {
