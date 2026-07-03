@@ -6,7 +6,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy::primitives::{Address, U256};
+use alloy::{
+    primitives::{Address, U256},
+    providers::Provider,
+};
 use async_trait::async_trait;
 use fynd_client::{FyndClientBuilder, RetryConfig};
 use fynd_tools_common::{
@@ -81,6 +84,43 @@ fn quote_to_outcome(quote: AggregatorQuote) -> Outcome {
 
 fn parse_u256(s: &str) -> Option<U256> {
     s.parse().ok()
+}
+
+/// Blocks farther behind chain head than this make a re-solve misleading: Fynd solves against the
+/// chain's *current* state, so comparing that quote to a much older settled amount mixes present
+/// liquidity with a historical baseline. ~100 blocks is roughly 20 minutes on Ethereum.
+const STALE_BLOCK_THRESHOLD: u64 = 100;
+
+/// Whether the newest requested block trails chain head by more than `threshold` blocks.
+fn is_stale(head: u64, newest_requested: u64, threshold: u64) -> bool {
+    head.saturating_sub(newest_requested) > threshold
+}
+
+/// Warn if `blocks` are far enough behind chain head that a current-state re-solve is misleading.
+///
+/// This is the guardrail against accidentally re-solving a historical block against the live Fynd
+/// state, which yields nonsensical deltas. A fetch failure is itself only a warning — it must not
+/// abort the run.
+async fn warn_if_stale<P: Provider>(provider: &P, blocks: &[u64]) {
+    let Some(&newest) = blocks.iter().max() else {
+        return;
+    };
+    let head = match provider.get_block_number().await {
+        Ok(head) => head,
+        Err(error) => {
+            warn!(%error, "could not fetch chain head to check block staleness");
+            return;
+        }
+    };
+    if is_stale(head, newest, STALE_BLOCK_THRESHOLD) {
+        warn!(
+            head,
+            newest_requested = newest,
+            blocks_behind = head.saturating_sub(newest),
+            "re-solving blocks far behind chain head; Fynd solves at current state, so these \
+             comparisons pit present liquidity against a historical settled amount"
+        );
+    }
 }
 
 /// Aggregate win/loss statistics over a set of comparisons.
@@ -163,6 +203,7 @@ pub(crate) async fn run(
 ) -> anyhow::Result<()> {
     let provider = crate::provider_from(rpc_url)?;
     let blocks = crate::resolve_blocks(&provider, block, range).await?;
+    warn_if_stale(&provider, &blocks).await;
 
     let client = FyndClientBuilder::new(fynd_url)
         .with_timeout(Duration::from_millis(timeout_ms))
@@ -288,5 +329,14 @@ mod tests {
     #[test]
     fn summarize_empty() {
         assert_eq!(summarize(&[]), Summary::default());
+    }
+
+    #[test]
+    fn is_stale_flags_only_far_behind_blocks() {
+        assert!(is_stale(1_000, 800, 100));
+        assert!(!is_stale(1_000, 950, 100));
+        assert!(!is_stale(1_000, 1_000, 100));
+        // Requested block ahead of head (e.g. head moved back on a reorg) is not stale.
+        assert!(!is_stale(1_000, 1_050, 100));
     }
 }
