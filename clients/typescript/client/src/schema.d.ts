@@ -99,6 +99,33 @@ export interface components {
             timestamp: number;
         };
         /**
+         * @description Cache provenance for a quote served from Fynd's in-memory quote cache.
+         *
+         *     Present on an [`OrderQuote`] only when the quote cache is enabled (`--enable-quote-cache`) and
+         *     the request was a cache hit; absent on a miss or when the cache is disabled. A hit re-solved at
+         *     the current block's start is as fresh as a live solve: the cache returns the winning solve from
+         *     that block and only re-encodes it for this caller. `solved_at_block` exposes the bounded
+         *     staleness that remains when a per-block refresh was shed under load — the served solve is then
+         *     at most the cache's staleness cutoff behind the chain head.
+         *
+         *     A cache hit returns the cached entry's server-generated `order_id` (the id from the solve that
+         *     first populated the entry), not a fresh id minted for this request.
+         */
+        CacheInfo: {
+            /**
+             * @description Always `true`: this marker is present only on a cache hit.
+             * @example true
+             */
+            hit: boolean;
+            /**
+             * Format: int64
+             * @description Block the served solve was computed against. Equals the chain head on a fresh per-block
+             *     refresh; lags by up to the cache's staleness cutoff when a refresh was shed.
+             * @example 21000000
+             */
+            solved_at_block: number;
+        };
+        /**
          * @description Client fee configuration for the Tycho Router.
          *
          *     When provided, the router charges a client fee on the swap output. The `signature`
@@ -309,6 +336,7 @@ export interface components {
             amount_out_net_gas: string;
             /** @description Block at which this quote was computed. */
             block: components["schemas"]["BlockInfo"];
+            cache?: null | components["schemas"]["CacheInfo"];
             fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
             /**
              * @description Estimated gas cost for executing this route (as decimal string).
