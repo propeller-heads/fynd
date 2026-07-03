@@ -170,7 +170,7 @@ mod tests {
         let aggregators = known_aggregators();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let root = frame("CALL", addr(1), oneinch, 0);
-        assert_eq!(attribute_aggregator(&root, oneinch, addr(1), &aggregators), Some(oneinch));
+        assert_eq!(attribute_aggregator(&root, oneinch, addr(1), aggregators), Some(oneinch));
     }
 
     #[test]
@@ -185,9 +185,9 @@ mod tests {
         let mut root = frame("CALL", sender, relay, 0);
         root.calls = vec![frame("CALL", relay, relay, 0), frame("CALL", relay, zerox, 1000)];
 
-        let found = attribute_aggregator(&root, relay, sender, &aggregators).unwrap();
+        let found = attribute_aggregator(&root, relay, sender, aggregators).unwrap();
         assert_eq!(found, zerox);
-        assert_eq!(label(found, &known_names()), "0x");
+        assert_eq!(label(found, known_names()), "0x");
     }
 
     #[test]
@@ -205,9 +205,9 @@ mod tests {
         let mut root = frame("CALL", sender, relay_proxy, 0);
         root.calls = vec![router_call];
 
-        let found = attribute_aggregator(&root, relay_proxy, sender, &aggregators).unwrap();
+        let found = attribute_aggregator(&root, relay_proxy, sender, aggregators).unwrap();
         assert_eq!(found, tycho);
-        assert_eq!(label(found, &known_names()), "tycho");
+        assert_eq!(label(found, known_names()), "tycho");
     }
 
     #[test]
@@ -227,9 +227,9 @@ mod tests {
             frame("CALL", client, unknown_router, 5000), // largest external call
         ];
 
-        let found = attribute_aggregator(&root, client, sender, &aggregators).unwrap();
+        let found = attribute_aggregator(&root, client, sender, aggregators).unwrap();
         assert_eq!(found, unknown_router);
-        assert_eq!(label(found, &known_names()), unknown_router.to_string());
+        assert_eq!(label(found, known_names()), unknown_router.to_string());
     }
 
     #[test]
@@ -242,6 +242,6 @@ mod tests {
         let mut root = frame("CALL", addr(1), addr(2), 0);
         root.calls = vec![reverted];
 
-        assert_eq!(find_known_aggregator(&root, &aggregators), None);
+        assert_eq!(find_known_aggregator(&root, aggregators), None);
     }
 }

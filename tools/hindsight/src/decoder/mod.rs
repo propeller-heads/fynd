@@ -71,7 +71,7 @@ pub(crate) async fn decode_block<P: Provider>(
 
     let matched: Vec<Matched> = receipts
         .iter()
-        .filter_map(|receipt| match_receipt(receipt, &names, &aggregators))
+        .filter_map(|receipt| match_receipt(receipt, names, aggregators))
         .collect();
 
     // Per-block batch: trace every matched tx concurrently (bounded),
@@ -106,7 +106,7 @@ pub(crate) async fn decode_block<P: Provider>(
                 logs,
                 &native,
                 &[entry_point, sender],
-                &names,
+                names,
                 &mut code_cache,
             )
             .await
@@ -121,20 +121,20 @@ pub(crate) async fn decode_block<P: Provider>(
         let Some((tracked, (token_in, amount_in, token_out, amount_out))) = decoded else {
             warn!(
                 tx = %receipt.transaction_hash,
-                client = %label(entry_point, &names),
+                client = %label(entry_point, names),
                 "no token or native ETH flow found"
             );
             continue;
         };
 
         let aggregator =
-            attribute_aggregator(&root, entry_point, sender, &aggregators).unwrap_or(entry_point);
+            attribute_aggregator(&root, entry_point, sender, aggregators).unwrap_or(entry_point);
 
         trades.push(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
-            client: label(entry_point, &names),
-            aggregator: label(aggregator, &names),
+            client: label(entry_point, names),
+            aggregator: label(aggregator, names),
             sender: tracked,
             token_in,
             token_out,

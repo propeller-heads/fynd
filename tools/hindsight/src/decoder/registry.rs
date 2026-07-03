@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 use alloy::primitives::{address, Address};
 
 /// Known aggregator routers — the venue that actually settles a swap.
 /// Start with top aggregators — expand later.
-pub(crate) fn known_aggregators() -> HashMap<Address, &'static str> {
+static KNOWN_AGGREGATORS: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
     HashMap::from([
         // 1inch v6 and v5 Aggregation Routers
         (address!("0x111111125421ca6dc452d289314280a0f8842a65"), "1inch"),
@@ -27,11 +27,15 @@ pub(crate) fn known_aggregators() -> HashMap<Address, &'static str> {
         (address!("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35"), "tycho"),
         (address!("0xda892c989d07a18b5dd3f392d949f00df15c5736"), "tycho"),
     ])
+});
+
+pub(crate) fn known_aggregators() -> &'static HashMap<Address, &'static str> {
+    &KNOWN_AGGREGATORS
 }
 
 /// Known client contracts — the platform that initiates a trade and routes
 /// it through an aggregator. The settling aggregator is found in the trace.
-pub(crate) fn known_clients() -> HashMap<Address, &'static str> {
+static KNOWN_CLIENTS: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
     HashMap::from([
         // Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies
         (address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222"), "relay"),
@@ -40,6 +44,10 @@ pub(crate) fn known_clients() -> HashMap<Address, &'static str> {
         (address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be"), "relay"),
         (address!("0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7"), "relay"),
     ])
+});
+
+pub(crate) fn known_clients() -> &'static HashMap<Address, &'static str> {
+    &KNOWN_CLIENTS
 }
 
 /// Whether `address` is a batch-settlement venue where `tx.to` is the settlement contract and the
@@ -55,10 +63,14 @@ pub(crate) fn is_batch_settler(address: &Address) -> bool {
 }
 
 /// All known addresses, for resolving an address to a human name.
-pub(crate) fn known_names() -> HashMap<Address, &'static str> {
-    let mut names = known_aggregators();
-    names.extend(known_clients());
+static KNOWN_NAMES: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
+    let mut names = known_aggregators().clone();
+    names.extend(known_clients().iter().map(|(&k, &v)| (k, v)));
     names
+});
+
+pub(crate) fn known_names() -> &'static HashMap<Address, &'static str> {
+    &KNOWN_NAMES
 }
 
 /// Resolve an address to its known name, or its hex address if unknown.
@@ -99,7 +111,7 @@ mod tests {
         let names = known_names();
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
         let unknown = addr(123);
-        assert_eq!(label(relay, &names), "relay");
-        assert_eq!(label(unknown, &names), unknown.to_string());
+        assert_eq!(label(relay, names), "relay");
+        assert_eq!(label(unknown, names), unknown.to_string());
     }
 }

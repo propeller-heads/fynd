@@ -147,7 +147,7 @@ mod tests {
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
 
-        let found: HashMap<Address, _> = maker_candidates(&logs, &[], &[filler], &names)
+        let found: HashMap<Address, _> = maker_candidates(&logs, &[], &[filler], names)
             .into_iter()
             .collect();
         assert_eq!(found.len(), 2);
@@ -170,7 +170,7 @@ mod tests {
         ];
 
         // Excluding the maker leaves only the pool.
-        let candidates = maker_candidates(&logs, &[], &[maker], &names);
+        let candidates = maker_candidates(&logs, &[], &[maker], names);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, pool);
     }
