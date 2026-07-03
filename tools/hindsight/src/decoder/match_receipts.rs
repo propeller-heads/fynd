@@ -51,6 +51,14 @@ pub(crate) fn match_receipt<'a>(
 /// swap, so we exclude contracts (via `eth_getCode`) and keep the
 /// externally-owned maker. Known registry contracts and the excluded
 /// addresses (filler, entry point) never qualify.
+///
+/// v0 limitations (tracked for a decode/attribution rework):
+/// - **One maker per transaction.** The first clean-net EOA wins, so a batch that settles several
+///   retail orders in one tx contributes a single decoded trade; the rest surface as "Allium only"
+///   gaps and batch volume is under-counted.
+/// - **No settlement-tied tiebreak.** When several non-excluded EOAs each net to a clean two-token
+///   swap, the winner is just the first in `maker_candidates`' address-ordered iteration, so a
+///   decode can attribute the wrong account's flow.
 pub(crate) async fn find_maker_trade<P: Provider>(
     provider: &P,
     logs: &[Log],
@@ -104,6 +112,9 @@ fn maker_candidates(
 
 /// Whether an address has contract code, cached per block. On RPC failure the
 /// address is treated as a contract so it is not mistaken for an EOA maker.
+///
+/// v0 limitation: an EIP-7702-delegated account carries code, so a 7702 maker EOA is classified as
+/// a contract and dropped. 7702 is not yet widely used, so this is accepted for now.
 async fn is_contract<P: Provider>(
     provider: &P,
     address: Address,

@@ -236,6 +236,10 @@ async fn amounts_agree<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     detail: &mut Vec<String>,
 ) -> bool {
+    // Allium records each leg of a split swap as its own row, so a single decoded trade can map to
+    // several Allium rows for the same tx. We net the whole swap into one in/out pair, which has no
+    // per-leg counterpart to compare against, so only compare amounts when Allium also reported a
+    // single leg.
     let [row] = rows else {
         detail.push(format!("amount not compared ({} Allium legs for this tx)", rows.len()));
         return true;
