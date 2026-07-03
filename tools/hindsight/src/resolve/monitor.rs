@@ -19,7 +19,7 @@ use fynd_core::{
         parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
         QuoteStatus,
     },
-    BlockStepController, FyndBuilder, PoolConfig, Solver,
+    BlockStepController, FyndBuilder, Solver,
 };
 use num_bigint::BigUint;
 use tracing::{info, warn};
@@ -54,8 +54,9 @@ pub(crate) struct MonitorConfig<'a> {
     pub protocols: Vec<String>,
     pub min_tvl: f64,
     pub tycho_api_key: Option<&'a str>,
-    /// Worker-pools TOML config path; defaults to a single `most_liquid` pool when absent.
-    pub worker_pools_config: Option<&'a str>,
+    /// Worker-pools TOML config path; the default path falls back to Fynd's built-in default
+    /// pools when absent, like `fynd serve`. Custom paths that don't exist fail fast.
+    pub worker_pools_config: &'a std::path::Path,
     pub timeout_ms: u64,
     pub metrics_port: Option<u16>,
     /// Stop after this many blocks (`None` runs until interrupted).
@@ -217,22 +218,27 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     if let Some(key) = cfg.tycho_api_key {
         builder = builder.tycho_api_key(key);
     }
-    builder = match cfg.worker_pools_config {
-        Some(path) => {
-            let config = fynd_rpc::config::WorkerPoolsConfig::load_from_file(path)
-                .map_err(|e| anyhow::anyhow!("failed to load worker pools config {path}: {e}"))?;
-            let mut builder = builder;
-            for (name, pool) in config.pools() {
-                builder = builder
-                    .add_pool(name, pool)
-                    .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
-            }
-            builder
-        }
-        None => builder
-            .add_pool("hindsight", &PoolConfig::new("most_liquid"))
-            .map_err(|e| anyhow::anyhow!("failed to configure worker pool: {e}"))?,
+    // Load worker pools like `fynd serve`: the default path falls back to the built-in default
+    // pools when absent; custom paths that don't exist fail fast.
+    let default_path = std::path::Path::new("worker_pools.toml");
+    let pools_config = if cfg.worker_pools_config == default_path && !default_path.exists() {
+        info!("worker_pools.toml not found; using Fynd's built-in default pools");
+        fynd_rpc::config::WorkerPoolsConfig::builtin_default()
+    } else {
+        fynd_rpc::config::WorkerPoolsConfig::load_from_file(cfg.worker_pools_config).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "failed to load worker pools config {}: {e}",
+                    cfg.worker_pools_config.display()
+                )
+            },
+        )?
     };
+    for (name, pool) in pools_config.pools() {
+        builder = builder
+            .add_pool(name, pool)
+            .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
+    }
     let (solver, controller) = builder
         .build_with_step_controller()
         .await
@@ -426,7 +432,7 @@ mod tests {
             // High TVL floor → fewer pools → faster load for a smoke test.
             min_tvl: 10_000.0,
             tycho_api_key: api_key.as_deref(),
-            worker_pools_config: None,
+            worker_pools_config: std::path::Path::new("worker_pools.toml"),
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),

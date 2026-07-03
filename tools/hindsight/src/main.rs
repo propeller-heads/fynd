@@ -103,8 +103,9 @@ struct MonitorArgs {
     #[arg(long, default_value = "ethereum")]
     chain: String,
 
-    /// Protocols to index, comma-separated (e.g. uniswap_v2,uniswap_v3)
-    #[arg(long, value_delimiter = ',', default_value = "uniswap_v2,uniswap_v3")]
+    /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
+    /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
+    #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
     protocols: Vec<String>,
 
     /// Minimum pool TVL filter for the solver
@@ -115,9 +116,10 @@ struct MonitorArgs {
     #[arg(long, env = "TYCHO_API_KEY")]
     tycho_api_key: Option<String>,
 
-    /// Worker-pools TOML config (algorithm/hops/workers); defaults to a single most_liquid pool
-    #[arg(long)]
-    worker_pools_config: Option<String>,
+    /// Worker-pools TOML config (algorithm/hops/workers); falls back to Fynd's built-in default
+    /// pools when the default path is absent, like `fynd serve`
+    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
+    worker_pools_config: std::path::PathBuf,
 
     /// Per-quote timeout in milliseconds
     #[arg(long, default_value_t = 10_000)]
@@ -157,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
                 protocols: args.protocols,
                 min_tvl: args.min_tvl,
                 tycho_api_key: args.tycho_api_key.as_deref(),
-                worker_pools_config: args.worker_pools_config.as_deref(),
+                worker_pools_config: &args.worker_pools_config,
                 timeout_ms: args.timeout_ms,
                 metrics_port: args.metrics_port,
                 max_blocks: args.max_blocks,
