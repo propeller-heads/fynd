@@ -24,8 +24,6 @@ enum Command {
     Decode(DecodeArgs),
     /// Decode and compare against Allium's aggregator_trades ground truth.
     Verify(VerifyArgs),
-    /// Decode a block's trades and re-solve each through a running Fynd instance.
-    Resolve(ResolveArgs),
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
     Monitor(MonitorArgs),
@@ -92,41 +90,6 @@ struct VerifyArgs {
 }
 
 #[derive(Args)]
-struct ResolveArgs {
-    /// Ethereum RPC URL (used to decode the block's settled trades)
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
-
-    /// Base URL of a running Fynd solver to re-solve trades through
-    #[arg(long, env = "FYND_URL", default_value = "http://localhost:3000")]
-    fynd_url: String,
-
-    /// Chain label applied to metrics (the decoder is Ethereum-only for now)
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
-
-    /// Block number to re-solve (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to re-solve (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
-
-    /// Per-quote timeout in milliseconds for Fynd
-    #[arg(long, default_value_t = 10_000)]
-    timeout_ms: u64,
-
-    /// Serve Prometheus metrics on this port; keeps running after the pass so it can be scraped
-    #[arg(long)]
-    metrics_port: Option<u16>,
-
-    /// Output as JSON instead of human-readable
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
 struct MonitorArgs {
     /// Ethereum RPC URL (used to decode each block's settled trades and feed the solver)
     #[arg(long, env = "RPC_URL")]
@@ -186,19 +149,6 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
-        Command::Resolve(args) => {
-            resolve::run::run(resolve::run::ResolveConfig {
-                rpc_url: &args.rpc_url,
-                fynd_url: &args.fynd_url,
-                chain: &args.chain,
-                block: args.block,
-                range: args.range.as_deref(),
-                timeout_ms: args.timeout_ms,
-                metrics_port: args.metrics_port,
-                json: args.json,
-            })
-            .await
-        }
         Command::Monitor(args) => {
             resolve::monitor::run(resolve::monitor::MonitorConfig {
                 rpc_url: &args.rpc_url,
