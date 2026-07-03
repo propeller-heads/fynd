@@ -14,7 +14,7 @@ use fynd_tools_common::{
     fynd::FyndAggregator,
 };
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     decoder::decode_block,
@@ -164,7 +164,13 @@ pub(crate) async fn run(
 
     let mut comparisons = Vec::new();
     for block_number in &blocks {
-        let trades = decode_block(&provider, *block_number).await?;
+        let trades = match decode_block(&provider, *block_number).await {
+            Ok(trades) => trades,
+            Err(error) => {
+                warn!(block = block_number, %error, "failed to decode block; skipping");
+                continue;
+            }
+        };
         info!(block = block_number, count = trades.len(), "re-solving decoded trades");
         for trade in &trades {
             comparisons.push(compare_trade(&resolver, trade).await);
