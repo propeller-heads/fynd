@@ -16,10 +16,12 @@ use num_cpus;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+#[cfg(feature = "experimental")]
+use tycho_simulation::evm::stream::BlockStepController;
 #[cfg(feature = "test-utils")]
 use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 use tycho_simulation::{
-    evm::{pending::PendingBlockProcessor, stream::BlockStepController},
+    evm::pending::PendingBlockProcessor,
     tycho_common::{models::Chain, traits::TxDeltaIndexer, Bytes},
     tycho_core::models::Address,
     tycho_ethereum::rpc::EthereumRpcClient,
@@ -303,6 +305,7 @@ pub enum SolverBuildError {
     PendingChannelClosed,
     /// The step-controller oneshot closed without delivering a value, meaning the feed task
     /// panicked rather than returning an error through the channel.
+    #[cfg(feature = "experimental")]
     #[error("step controller channel closed before controller was delivered")]
     StepControllerChannelClosed,
 }
@@ -932,6 +935,7 @@ impl FyndBuilder {
     ///
     /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are RFQ,
     /// or the step-controller channel closes before the controller is delivered.
+    #[cfg(feature = "experimental")]
     pub async fn build_with_step_controller(
         self,
     ) -> Result<(Solver, BlockStepController), SolverBuildError> {
@@ -985,7 +989,6 @@ impl FyndBuilder {
             controller,
         ))
     }
-
 } // impl FyndBuilder
 
 /// A running solver assembled by [`FyndBuilder`].

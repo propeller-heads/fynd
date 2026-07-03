@@ -13,11 +13,10 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+#[cfg(feature = "experimental")]
+use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
-    evm::{
-        pending::PendingBlockProcessor,
-        stream::{BlockStepController, ProtocolStreamBuilder},
-    },
+    evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
     protocol::models::Update,
     rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
@@ -450,6 +449,7 @@ impl TychoFeed {
     ///
     /// Only valid when at least one non-RFQ protocol is configured. Returns
     /// [`DataFeedError::Config`] if all protocols are RFQ.
+    #[cfg(feature = "experimental")]
     pub(crate) async fn run_with_step_controller(
         self,
         controller_tx: oneshot::Sender<Result<BlockStepController, String>>,
