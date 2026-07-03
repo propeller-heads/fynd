@@ -4,7 +4,6 @@
 //! and serve its rendered output on a dedicated port via Actix.
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use alloy::primitives::Address;
 use metrics::{
     counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
 };
@@ -34,12 +33,6 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
     }
 }
 
-/// Pair label as lowercase `token_in->token_out` addresses. Symbol resolution is a future
-/// enhancement; raw addresses keep label cardinality deterministic.
-pub(crate) fn pair_label(token_in: Address, token_out: Address) -> String {
-    format!("{token_in:#x}->{token_out:#x}")
-}
-
 /// Fraction of trades that were comparable (solvable) out of the total seen.
 pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
     if total == 0 {
@@ -53,7 +46,9 @@ pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by client / aggregator / pair / chain / outcome"
+        "Re-solved trades, labeled by client / aggregator / chain / outcome. Per-pair detail lives \
+         in the JSONL comparison output; a token-pair label here is unbounded on mainnet and would \
+         explode Prometheus series cardinality over a long run."
     );
     describe_histogram!(
         SAVINGS_BPS,
@@ -84,7 +79,6 @@ pub(crate) fn record(cmp: &Comparison, chain: &str, prices: &usd::PriceMap) {
         TRADES_TOTAL,
         "client" => cmp.client.clone(),
         "aggregator" => cmp.aggregator.clone(),
-        "pair" => pair_label(cmp.token_in, cmp.token_out),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(cmp.verdict).to_string(),
     )
@@ -195,7 +189,7 @@ pub(crate) fn install_exporter(port: u16) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, U256};
+    use alloy::primitives::{address, Address, U256};
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
@@ -223,15 +217,6 @@ mod tests {
         assert_eq!(outcome_label(Verdict::Loss), "loss");
         assert_eq!(outcome_label(Verdict::CoverageMiss), "coverage_miss");
         assert_eq!(outcome_label(Verdict::Unsolvable), "unsolvable");
-    }
-
-    #[test]
-    fn pair_label_is_directional_hex() {
-        let label = pair_label(Address::repeat_byte(0x11), Address::repeat_byte(0x22));
-        assert!(label.starts_with("0x"));
-        assert!(label.contains("->"));
-        // Direction matters: in->out differs from out->in.
-        assert_ne!(label, pair_label(Address::repeat_byte(0x22), Address::repeat_byte(0x11)));
     }
 
     #[test]
