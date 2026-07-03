@@ -21,6 +21,8 @@
 
 /// Cache key derivation ([`QuoteCacheKey`], [`KeyNormalizer`]).
 pub mod key;
+/// Per-block refresh of live entries ([`RefreshScheduler`](refresh::RefreshScheduler)).
+pub mod refresh;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -68,8 +70,8 @@ impl Default for QuoteCachePolicy {
 pub struct CacheEntry {
     /// The winning pre-encode order quote (gas already refined by `solve`).
     solved: OrderQuote,
-    /// The originating request, kept so the ENG-6237 refresher can re-solve this entry each block.
-    #[allow(dead_code)] // Consumed by the ENG-6237 refresh scheduler.
+    /// The originating request, kept so the [`RefreshScheduler`](crate::RefreshScheduler) can
+    /// re-solve this entry each block.
     request: QuoteRequest,
     /// Block the solve was computed against, for the staleness cutoff.
     solved_at_block: u64,
@@ -85,8 +87,8 @@ impl CacheEntry {
         &self.solved
     }
 
-    /// Returns the originating request (used by the ENG-6237 refresher to re-solve).
-    #[allow(dead_code)] // Consumed by the ENG-6237 refresh scheduler.
+    /// Returns the originating request (used by the [`RefreshScheduler`](crate::RefreshScheduler)
+    /// to re-solve).
     pub fn request(&self) -> &QuoteRequest {
         &self.request
     }
@@ -263,8 +265,8 @@ impl QuoteCache {
         }
     }
 
-    /// Snapshots every live entry with its key, for the ENG-6237 refresher to iterate and re-solve.
-    #[allow(dead_code)] // Consumed by the ENG-6237 refresh scheduler.
+    /// Snapshots every live entry with its key, for the
+    /// [`RefreshScheduler`](crate::RefreshScheduler) to iterate and re-solve.
     pub fn snapshot(&self) -> Vec<(QuoteCacheKey, CacheEntry)> {
         let inner = self
             .inner
