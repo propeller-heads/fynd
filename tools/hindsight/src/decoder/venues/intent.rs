@@ -23,10 +23,13 @@ use crate::decoder::{
 /// Find the order maker's trade in a filler-initiated intent fill.
 ///
 /// The transaction sender is the filler, not the swapper, so we look for the
-/// account whose net flow is a clean two-token swap. Pools net the inverse
-/// swap, so we exclude contracts (via `eth_getCode`) and keep the
-/// externally-owned maker. Known registry contracts and the excluded
-/// addresses (filler, entry point) never qualify.
+/// externally-owned account whose net flow is a clean two-token swap. Pools
+/// and routers net the inverse swap or residue dust but carry code, so
+/// contracts (via `eth_getCode`) never qualify — a fill with no clean-net EOA
+/// is declined rather than guessed: a routing intermediary's leftover dust
+/// nets as an absurd "swap" (seen live as a WETH → 2.4e-7 AAVE decode).
+/// Known registry contracts and the excluded addresses (filler, entry point)
+/// never qualify either.
 ///
 /// v0 limitations (tracked for a decode/attribution rework):
 /// - **One maker per transaction.** The first clean-net EOA wins, so a batch that settles several
@@ -35,6 +38,8 @@ use crate::decoder::{
 /// - **No settlement-tied tiebreak.** When several non-excluded EOAs each net to a clean two-token
 ///   swap, the winner is just the first in `maker_candidates`' address-ordered iteration, so a
 ///   decode can attribute the wrong account's flow.
+/// - **Smart-wallet makers are declined.** A maker behind contract code (account abstraction,
+///   EIP-7702 delegation) is indistinguishable from a pool here, so its fills are dropped.
 pub(crate) async fn find_maker_trade<P: Provider>(
     provider: &P,
     logs: &[Log],
@@ -43,15 +48,12 @@ pub(crate) async fn find_maker_trade<P: Provider>(
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
 ) -> Option<Flow> {
-    // Prefer externally-owned accounts; pools and routers carry code.
-    let mut maker = None;
     for (candidate, trade) in maker_candidates(logs, native, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
             return Some(Flow::without_fees(candidate, trade));
         }
-        maker.get_or_insert(Flow::without_fees(candidate, trade));
     }
-    maker
+    None
 }
 
 /// Addresses with a clean two-token net swap, excluding the zero address, the
@@ -113,8 +115,60 @@ async fn is_contract<P: Provider>(
 
 #[cfg(test)]
 mod tests {
+    use alloy::{
+        primitives::Bytes, providers::RootProvider, rpc::client::RpcClient,
+        transports::mock::Asserter,
+    };
+
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+
+    fn mocked_provider(asserter: &Asserter) -> RootProvider {
+        RootProvider::new(RpcClient::mocked(asserter.clone()))
+    }
+
+    /// The maker/pool inverse-swap fixture: maker sells token_a for token_b, pool nets the
+    /// inverse.
+    fn inverse_swap_logs() -> Vec<Log> {
+        vec![
+            make_transfer_log(addr(10), addr(100), addr(101), U256::from(1000)),
+            make_transfer_log(addr(11), addr(101), addr(100), U256::from(2000)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn find_maker_trade_picks_eoa_maker() {
+        let asserter = Asserter::new();
+        // Candidates in address order: addr(100) first — an EOA (empty code).
+        asserter.push_success(&Bytes::default());
+        let provider = mocked_provider(&asserter);
+
+        let registry = Registry::ethereum();
+        let mut cache = HashMap::new();
+        let flow =
+            find_maker_trade(&provider, &inverse_swap_logs(), &[], &[], &registry, &mut cache)
+                .await
+                .unwrap();
+        assert_eq!(flow.tracked, addr(100));
+        assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
+    }
+
+    #[tokio::test]
+    async fn find_maker_trade_declines_when_all_candidates_are_contracts() {
+        let asserter = Asserter::new();
+        // Both candidates carry code: a routing intermediary and a pool. Guessing one would net
+        // residue dust as an absurd swap, so the fill must be declined.
+        asserter.push_success(&Bytes::from(vec![0xfe]));
+        asserter.push_success(&Bytes::from(vec![0xfe]));
+        let provider = mocked_provider(&asserter);
+
+        let registry = Registry::ethereum();
+        let mut cache = HashMap::new();
+        let flow =
+            find_maker_trade(&provider, &inverse_swap_logs(), &[], &[], &registry, &mut cache)
+                .await;
+        assert!(flow.is_none());
+    }
 
     #[test]
     fn maker_candidates_finds_swap_sides_excluding_filler() {
