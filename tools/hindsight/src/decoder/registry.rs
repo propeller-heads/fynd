@@ -71,9 +71,9 @@ pub(crate) fn known_fee_collectors() -> HashSet<Address> {
 /// [`crate::decoder::net::decode_relay_rebalance`]).
 pub(crate) fn relay_routers() -> HashSet<Address> {
     known_clients()
-        .into_iter()
-        .filter(|(_, name)| *name == "relay")
-        .map(|(address, _)| address)
+        .iter()
+        .filter(|(_, name)| **name == "relay")
+        .map(|(address, _)| *address)
         .collect()
 }
 

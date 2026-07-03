@@ -116,6 +116,7 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
+            quote_json: None,
         })
     }
 

@@ -129,7 +129,7 @@ struct ResolveArgs {
 #[derive(Args)]
 struct MonitorArgs {
     /// Ethereum RPC URL (used to decode each block's settled trades and feed the solver)
-    #[arg(long, env = "ETH_RPC_URL")]
+    #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
     /// Tycho WebSocket URL feeding the in-process solver

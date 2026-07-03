@@ -5,7 +5,7 @@
 //! [`BlockStepController::trigger_next_block`], we wait until the solver's `MarketData` reports the
 //! next applied block before re-solving back-of-block. The pure orchestration is unit-tested in the
 //! parent module via a mock [`SteppingSolver`]; this live driver is exercised by the gated
-//! integration test in `tests/` (requires `TYCHO_URL` + `ETH_RPC_URL`).
+//! integration test in `tests/` (requires `TYCHO_URL` + `RPC_URL`).
 
 use std::time::{Duration, Instant};
 
@@ -414,7 +414,7 @@ fn state_record(
     // The reason Fynd could not serve the trade — the coverage-gap signal (missing token,
     // insufficient liquidity, timeout, partial-fill coverage miss).
     let unsolvable_reason = match &state.outcome {
-        Outcome::Unsolvable(reason) => Some(reason.as_str()),
+        Outcome::Unsolvable(reason) | Outcome::Partial(reason) => Some(reason.as_str()),
         Outcome::Solved(_) => None,
     };
     let improvement_usd = solved.and_then(|s| {
@@ -521,7 +521,7 @@ mod tests {
         let prices = usd::PriceMap::from([(usdc, 2e-9), (weth, 1.0)]);
 
         let trade = crate::decoder::DecodedTrade {
-            tx_hash: "0xabc".into(),
+            tx_hash: Default::default(),
             block_number: 25_000_000,
             client: "relay".into(),
             aggregator: "1inch".into(),
@@ -598,7 +598,7 @@ mod tests {
     fn comparison_record_captures_unsolvable_reason_and_null_quote() {
         use crate::resolve::build_range;
         let trade = crate::decoder::DecodedTrade {
-            tx_hash: "0xabc".into(),
+            tx_hash: Default::default(),
             block_number: 25_000_000,
             client: "relay".into(),
             aggregator: "1inch".into(),
@@ -632,15 +632,14 @@ mod tests {
     /// End-to-end smoke test of the live two-state monitor against a real solver.
     ///
     /// `#[ignore]`d so it never runs in CI (no Tycho/RPC). Run with:
-    /// `TYCHO_URL=<ws> ETH_RPC_URL=<https> cargo test -p hindsight --bin hindsight \
+    /// `TYCHO_URL=<ws> RPC_URL=<https> cargo test -p hindsight --bin hindsight \
     ///   resolve::monitor -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "requires live TYCHO_URL + ETH_RPC_URL"]
+    #[ignore = "requires live TYCHO_URL + RPC_URL"]
     async fn monitor_one_block_smoke() {
-        let (Ok(rpc_url), Ok(tycho_url)) =
-            (std::env::var("ETH_RPC_URL"), std::env::var("TYCHO_URL"))
+        let (Ok(rpc_url), Ok(tycho_url)) = (std::env::var("RPC_URL"), std::env::var("TYCHO_URL"))
         else {
-            eprintln!("skipping: set ETH_RPC_URL and TYCHO_URL");
+            eprintln!("skipping: set RPC_URL and TYCHO_URL");
             return;
         };
 
