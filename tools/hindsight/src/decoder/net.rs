@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use alloy::{
-    primitives::{address, Address, Log as PrimitiveLog, U256},
+    primitives::{Address, Log as PrimitiveLog, U256},
     rpc::types::Log,
     sol,
     sol_types::SolEvent,
@@ -141,9 +141,6 @@ fn net_trade(sent: &HashMap<Address, U256>, received: &HashMap<Address, U256>) -
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
-/// Wrapped ETH — excluded as an output recipient (it appears only as a wrap/unwrap intermediary).
-const WETH: Address = address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
-
 /// Decode a Relay solver-initiated rebalancing fill, where `tx.from` is a rotating solver EOA with
 /// no net flow (so [`decode_trade`] finds nothing) and the swap moves Relay's own liquidity.
 ///
@@ -160,6 +157,7 @@ pub(crate) fn decode_relay_rebalance(
     native_transfers: &[(Address, Address, U256)],
     fee_collectors: &HashSet<Address>,
     relay_routers: &HashSet<Address>,
+    wrapped_native: Address,
 ) -> Option<NetSwap> {
     let mut sent: HashMap<(Address, Address), U256> = HashMap::new();
     let mut received: HashMap<(Address, Address), U256> = HashMap::new();
@@ -238,7 +236,8 @@ pub(crate) fn decode_relay_rebalance(
     }
 
     // C1 external fill: the single pure-sink recipient (receives but never sends), excluding
-    // infrastructure (routers, collector, WETH, the zero address) and the input token.
+    // infrastructure (routers, collector, the wrapped-native token, the zero address) and the
+    // input token.
     let mut outputs: Vec<(Address, Address, U256)> = Vec::new(); // (recipient, token_out, amount)
     for (&(addr, token), &v) in &received {
         if token == token_in || v.is_zero() || senders.contains(&addr) {
@@ -247,7 +246,7 @@ pub(crate) fn decode_relay_rebalance(
         if relay_routers.contains(&addr) ||
             fee_collectors.contains(&addr) ||
             addr == Address::ZERO ||
-            addr == WETH
+            addr == wrapped_native
         {
             continue;
         }
@@ -387,7 +386,7 @@ mod tests {
             make_transfer_log(token_in, fee, pool, U256::from(1000)),
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
-        let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
+        let got = decode_relay_rebalance(&logs, &[], &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, token_out, 2000));
     }
 
@@ -403,7 +402,7 @@ mod tests {
         let routers = HashSet::from([router]);
         let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
         let native = vec![(router, recipient, U256::from(2000))];
-        let got = decode_relay_rebalance(&logs, &native, &collectors, &routers).unwrap();
+        let got = decode_relay_rebalance(&logs, &native, &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
     }
 
@@ -420,7 +419,7 @@ mod tests {
             make_transfer_log(token_in, fee, pool, U256::from(1000)),
             make_transfer_log(token_out, pool, fee, U256::from(1001)),
         ];
-        let got = decode_relay_rebalance(&logs, &[], &collectors, &routers).unwrap();
+        let got = decode_relay_rebalance(&logs, &[], &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, token_out, 1001));
     }
 
@@ -438,7 +437,7 @@ mod tests {
             make_transfer_log(token_out, pool, addr(7), U256::from(1000)),
             make_transfer_log(token_out, pool, addr(8), U256::from(1000)),
         ];
-        assert!(decode_relay_rebalance(&logs, &[], &collectors, &routers).is_none());
+        assert!(decode_relay_rebalance(&logs, &[], &collectors, &routers, addr(200)).is_none());
     }
 
     #[test]
@@ -447,7 +446,7 @@ mod tests {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000))];
         let collectors = HashSet::from([addr(99)]);
         let routers = HashSet::from([addr(2)]);
-        assert!(decode_relay_rebalance(&logs, &[], &collectors, &routers).is_none());
+        assert!(decode_relay_rebalance(&logs, &[], &collectors, &routers, addr(200)).is_none());
     }
 
     #[test]

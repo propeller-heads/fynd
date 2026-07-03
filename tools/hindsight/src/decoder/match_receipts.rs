@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::decoder::{
     net::{decode_trade, to_primitive_log, NetSwap, Transfer},
-    registry::is_batch_settler,
+    registry::Registry,
 };
 
 /// A matched transaction and how it was found.
@@ -25,22 +25,25 @@ pub(crate) struct Matched<'a> {
 /// Match a receipt by entry point or by a known aggregator log emitter.
 pub(crate) fn match_receipt<'a>(
     receipt: &'a TransactionReceipt,
-    names: &HashMap<Address, &'static str>,
-    aggregators: &HashMap<Address, &'static str>,
+    registry: &Registry,
 ) -> Option<Matched<'a>> {
     if !receipt.status() {
         return None;
     }
     let entry_point = receipt.to?;
-    if names.contains_key(&entry_point) {
+    if registry.is_known(entry_point) {
         // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is an
         // order maker's net flow — decode it like a filler-initiated intent fill.
-        return Some(Matched { receipt, entry_point, intent_fill: is_batch_settler(&entry_point) });
+        return Some(Matched {
+            receipt,
+            entry_point,
+            intent_fill: registry.is_batch_settler(entry_point),
+        });
     }
     let via_log = receipt
         .logs()
         .iter()
-        .any(|log| aggregators.contains_key(&log.address()));
+        .any(|log| registry.is_aggregator(log.address()));
     via_log.then_some(Matched { receipt, entry_point, intent_fill: true })
 }
 
@@ -64,12 +67,12 @@ pub(crate) async fn find_maker_trade<P: Provider>(
     logs: &[Log],
     native: &[(Address, Address, U256)],
     exclude: &[Address],
-    names: &HashMap<Address, &'static str>,
+    registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
 ) -> Option<(Address, NetSwap)> {
     // Prefer externally-owned accounts; pools and routers carry code.
     let mut maker = None;
-    for (candidate, trade) in maker_candidates(logs, native, exclude, names) {
+    for (candidate, trade) in maker_candidates(logs, native, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
             return Some((candidate, trade));
         }
@@ -85,7 +88,7 @@ fn maker_candidates(
     logs: &[Log],
     native: &[(Address, Address, U256)],
     exclude: &[Address],
-    names: &HashMap<Address, &'static str>,
+    registry: &Registry,
 ) -> Vec<(Address, NetSwap)> {
     let mut candidates: BTreeSet<Address> = BTreeSet::new();
     for log in logs {
@@ -99,7 +102,7 @@ fn maker_candidates(
         candidates.insert(to);
     }
     candidates.remove(&Address::ZERO);
-    candidates.retain(|address| !exclude.contains(address) && !names.contains_key(address));
+    candidates.retain(|address| !exclude.contains(address) && !registry.is_known(*address));
 
     let mut swaps = Vec::new();
     for candidate in candidates {
@@ -137,16 +140,13 @@ async fn is_contract<P: Provider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::{
-        registry::known_names,
-        test_utils::{addr, make_transfer_log, swap},
-    };
+    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
     fn maker_candidates_finds_swap_sides_excluding_filler() {
         // Intent fill: the maker sells token_a for token_b; the pool is the
         // counterparty. The filler is excluded.
-        let names = known_names();
+        let registry = Registry::ethereum();
         let maker = addr(100);
         let pool = addr(101);
         let filler = addr(102);
@@ -158,7 +158,7 @@ mod tests {
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
 
-        let found: HashMap<Address, _> = maker_candidates(&logs, &[], &[filler], names)
+        let found: HashMap<Address, _> = maker_candidates(&logs, &[], &[filler], &registry)
             .into_iter()
             .collect();
         assert_eq!(found.len(), 2);
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn maker_candidates_drops_excluded_and_known() {
-        let names = known_names();
+        let registry = Registry::ethereum();
         let maker = addr(100);
         let pool = addr(101);
         let token_a = addr(10);
@@ -181,7 +181,7 @@ mod tests {
         ];
 
         // Excluding the maker leaves only the pool.
-        let candidates = maker_candidates(&logs, &[], &[maker], names);
+        let candidates = maker_candidates(&logs, &[], &[maker], &registry);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, pool);
     }

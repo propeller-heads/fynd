@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
-    let mut decoder = decoder::Decoder::new(provider);
+    let mut decoder = decoder::Decoder::new(provider, decoder::Registry::ethereum());
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
@@ -209,7 +209,7 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
     let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let mut decoder = decoder::Decoder::new(provider);
+    let mut decoder = decoder::Decoder::new(provider, decoder::Registry::ethereum());
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();

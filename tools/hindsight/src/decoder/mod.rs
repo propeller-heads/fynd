@@ -19,10 +19,10 @@ use anyhow::Context;
 use futures::stream::{StreamExt, TryStreamExt};
 use tracing::warn;
 
+pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
     match_receipts::{find_maker_trade, match_receipt, Matched},
     net::{decode_relay_rebalance, decode_trade, fee_to_collectors},
-    registry::{known_aggregators, known_fee_collectors, known_names, label, relay_routers},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
 };
 
@@ -61,10 +61,11 @@ pub(crate) struct DecodedTrade {
 /// without tripping provider rate limits.
 const TRACE_CONCURRENCY: usize = 10;
 
-/// Stateful trade decoder: owns the RPC provider and the caches that are
-/// worth keeping across blocks.
+/// Stateful trade decoder: owns the RPC provider, the chain's address
+/// registry, and the caches that are worth keeping across blocks.
 pub(crate) struct Decoder<P> {
     provider: P,
+    registry: Registry,
     /// Whether an address had contract code when first checked, kept for the
     /// life of the decoder. An address gaining code mid-run (a deploy or an
     /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
@@ -73,8 +74,8 @@ pub(crate) struct Decoder<P> {
 }
 
 impl<P: Provider> Decoder<P> {
-    pub(crate) fn new(provider: P) -> Self {
-        Self { provider, code_cache: HashMap::new() }
+    pub(crate) fn new(provider: P, registry: Registry) -> Self {
+        Self { provider, registry, code_cache: HashMap::new() }
     }
 
     /// The decoder's RPC provider, for adjacent lookups (chain head, token
@@ -96,11 +97,7 @@ impl<P: Provider> Decoder<P> {
         &mut self,
         block_number: u64,
     ) -> anyhow::Result<Vec<DecodedTrade>> {
-        let Self { provider, code_cache } = self;
-        let aggregators = known_aggregators();
-        let names = known_names();
-        let fee_collectors = known_fee_collectors();
-        let relay_router_set = relay_routers();
+        let Self { provider, registry, code_cache } = self;
 
         let receipts = provider
             .get_block_receipts(block_number.into())
@@ -110,7 +107,7 @@ impl<P: Provider> Decoder<P> {
 
         let matched: Vec<Matched> = receipts
             .iter()
-            .filter_map(|receipt| match_receipt(receipt, names, aggregators))
+            .filter_map(|receipt| match_receipt(receipt, registry))
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -139,8 +136,15 @@ impl<P: Provider> Decoder<P> {
             // by its net flow. Otherwise track the sender, falling back to the
             // entry point for the rare case where output is delivered there.
             let decoded = if intent_fill {
-                find_maker_trade(provider, logs, &native, &[entry_point, sender], names, code_cache)
-                    .await
+                find_maker_trade(
+                    provider,
+                    logs,
+                    &native,
+                    &[entry_point, sender],
+                    registry,
+                    code_cache,
+                )
+                .await
             } else {
                 decode_trade(logs, &native, sender)
                     .map(|trade| (sender, trade))
@@ -149,21 +153,29 @@ impl<P: Provider> Decoder<P> {
                     })
             };
 
-            let aggregator = attribute_aggregator(&root, entry_point, sender, aggregators)
-                .unwrap_or(entry_point);
+            let aggregator =
+                attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
 
             let Some((tracked, swap)) = decoded else {
                 // No user net flow. A Relay solver rebalancing fill has its sender net to zero, so
                 // anchor on the fee collector instead (Relay funds the swap from it).
-                if relay_router_set.contains(&entry_point) {
-                    if let Some(swap) =
-                        decode_relay_rebalance(logs, &native, &fee_collectors, &relay_router_set)
-                    {
+                if registry
+                    .relay()
+                    .routers
+                    .contains(&entry_point)
+                {
+                    if let Some(swap) = decode_relay_rebalance(
+                        logs,
+                        &native,
+                        &registry.relay().fee_collectors,
+                        &registry.relay().routers,
+                        registry.wrapped_native(),
+                    ) {
                         trades.push(DecodedTrade {
                             tx_hash: receipt.transaction_hash,
                             block_number,
-                            client: label(entry_point, names),
-                            aggregator: label(aggregator, names),
+                            client: registry.label(entry_point),
+                            aggregator: registry.label(aggregator),
                             sender,
                             token_in: swap.token_in,
                             token_out: swap.token_out,
@@ -179,7 +191,7 @@ impl<P: Provider> Decoder<P> {
                 }
                 warn!(
                     tx = %receipt.transaction_hash,
-                    client = %label(entry_point, names),
+                    client = %registry.label(entry_point),
                     "no token or native ETH flow found"
                 );
                 continue;
@@ -190,7 +202,7 @@ impl<P: Provider> Decoder<P> {
             // and add an output-side skim back into `amount_out` (the swap produced more than the
             // user kept), so both sides are the amounts actually swapped — the like-for-like basis
             // vs Fynd.
-            let fees = fee_to_collectors(logs, &native, &fee_collectors);
+            let fees = fee_to_collectors(logs, &native, &registry.relay().fee_collectors);
             let client_fee = fees
                 .get(&swap.token_in)
                 .copied()
@@ -207,8 +219,8 @@ impl<P: Provider> Decoder<P> {
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
-                client: label(entry_point, names),
-                aggregator: label(aggregator, names),
+                client: registry.label(entry_point),
+                aggregator: registry.label(aggregator),
                 sender: tracked,
                 token_in: swap.token_in,
                 token_out: swap.token_out,

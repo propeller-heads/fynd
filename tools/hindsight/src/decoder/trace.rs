@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-
 use alloy::{
     primitives::{Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
     rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
 };
 use anyhow::Context;
+
+use crate::decoder::registry::Registry;
 
 /// Fetch the callTracer root frame for a transaction.
 ///
@@ -67,12 +67,12 @@ pub(crate) fn attribute_aggregator(
     root: &CallFrame,
     entry_point: Address,
     sender: Address,
-    aggregators: &HashMap<Address, &'static str>,
+    registry: &Registry,
 ) -> Option<Address> {
-    if aggregators.contains_key(&entry_point) {
+    if registry.is_aggregator(entry_point) {
         return Some(entry_point);
     }
-    if let Some(found) = find_known_aggregator(root, aggregators) {
+    if let Some(found) = find_known_aggregator(root, registry) {
         return Some(found);
     }
     largest_external_call(root, entry_point, sender)
@@ -80,20 +80,17 @@ pub(crate) fn attribute_aggregator(
 
 /// Depth-first search for the first call into a known aggregator, skipping
 /// reverted frames (and their subtrees), which settle nothing.
-fn find_known_aggregator(
-    frame: &CallFrame,
-    aggregators: &HashMap<Address, &'static str>,
-) -> Option<Address> {
+fn find_known_aggregator(frame: &CallFrame, registry: &Registry) -> Option<Address> {
     if frame.error.is_some() {
         return None;
     }
     if let Some(to) = frame.to {
-        if aggregators.contains_key(&to) {
+        if registry.is_aggregator(to) {
             return Some(to);
         }
     }
     for child in &frame.calls {
-        if let Some(found) = find_known_aggregator(child, aggregators) {
+        if let Some(found) = find_known_aggregator(child, registry) {
             return Some(found);
         }
     }
@@ -129,10 +126,7 @@ mod tests {
     use alloy::primitives::address;
 
     use super::*;
-    use crate::decoder::{
-        registry::{known_aggregators, known_names, label},
-        test_utils::{addr, frame},
-    };
+    use crate::decoder::test_utils::{addr, frame};
 
     #[test]
     fn native_transfers_skip_delegatecall_and_staticcall() {
@@ -167,17 +161,17 @@ mod tests {
 
     #[test]
     fn direct_swap_attributes_entry_point() {
-        let aggregators = known_aggregators();
+        let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let root = frame("CALL", addr(1), oneinch, 0);
-        assert_eq!(attribute_aggregator(&root, oneinch, addr(1), aggregators), Some(oneinch));
+        assert_eq!(attribute_aggregator(&root, oneinch, addr(1), &registry), Some(oneinch));
     }
 
     #[test]
     fn relay_attributes_internal_aggregator() {
         // Mirrors the real Relay tx: the client router calls 0x's AllowanceHolder.
         // root(relay) -> [ relay (self-call), 0x AllowanceHolder (the aggregator) ]
-        let aggregators = known_aggregators();
+        let registry = Registry::ethereum();
         let sender = addr(1);
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
         let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
@@ -185,16 +179,16 @@ mod tests {
         let mut root = frame("CALL", sender, relay, 0);
         root.calls = vec![frame("CALL", relay, relay, 0), frame("CALL", relay, zerox, 1000)];
 
-        let found = attribute_aggregator(&root, relay, sender, aggregators).unwrap();
+        let found = attribute_aggregator(&root, relay, sender, &registry).unwrap();
         assert_eq!(found, zerox);
-        assert_eq!(label(found, known_names()), "0x");
+        assert_eq!(registry.label(found), "0x");
     }
 
     #[test]
     fn relay_attributes_tycho_router() {
         // Real tx 0x8b461c…: Relay ApprovalProxy -> Relay router -> Tycho router.
         // The settling venue is Tycho even though it sits two levels deep.
-        let aggregators = known_aggregators();
+        let registry = Registry::ethereum();
         let sender = addr(1);
         let relay_proxy = address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be");
         let relay_router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
@@ -205,16 +199,16 @@ mod tests {
         let mut root = frame("CALL", sender, relay_proxy, 0);
         root.calls = vec![router_call];
 
-        let found = attribute_aggregator(&root, relay_proxy, sender, aggregators).unwrap();
+        let found = attribute_aggregator(&root, relay_proxy, sender, &registry).unwrap();
         assert_eq!(found, tycho);
-        assert_eq!(label(found, known_names()), "tycho");
+        assert_eq!(registry.label(found), "tycho");
     }
 
     #[test]
     fn unknown_aggregator_falls_back_to_largest_external_call() {
         // No known aggregator in the trace: pick the largest external call,
         // skipping the client self-call and the refund back to the sender.
-        let aggregators = known_aggregators();
+        let registry = Registry::ethereum();
         let sender = addr(1);
         let client = addr(2);
         let unknown_router = addr(50);
@@ -227,14 +221,14 @@ mod tests {
             frame("CALL", client, unknown_router, 5000), // largest external call
         ];
 
-        let found = attribute_aggregator(&root, client, sender, aggregators).unwrap();
+        let found = attribute_aggregator(&root, client, sender, &registry).unwrap();
         assert_eq!(found, unknown_router);
-        assert_eq!(label(found, known_names()), unknown_router.to_string());
+        assert_eq!(registry.label(found), unknown_router.to_string());
     }
 
     #[test]
     fn find_known_aggregator_skips_reverted() {
-        let aggregators = known_aggregators();
+        let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 
         let mut reverted = frame("CALL", addr(2), oneinch, 0);
@@ -242,6 +236,6 @@ mod tests {
         let mut root = frame("CALL", addr(1), addr(2), 0);
         root.calls = vec![reverted];
 
-        assert_eq!(find_known_aggregator(&root, aggregators), None);
+        assert_eq!(find_known_aggregator(&root, &registry), None);
     }
 }

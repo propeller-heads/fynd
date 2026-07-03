@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
-    decoder::{DecodedTrade, Decoder},
+    decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
     resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
     telemetry, usd,
@@ -238,7 +238,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))?;
 
-    let mut decoder = Decoder::new(provider_from(cfg.rpc_url)?);
+    let mut decoder = Decoder::new(provider_from(cfg.rpc_url)?, Registry::for_chain(cfg.chain)?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
