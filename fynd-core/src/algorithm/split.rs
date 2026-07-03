@@ -17,6 +17,7 @@ use std::{
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use tracing::debug;
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
 };
@@ -82,6 +83,7 @@ pub struct SplitAlgorithm {
     max_hops: usize,
     timeout: Duration,
     /// Cap on candidate paths simulated (defaults to `max_routes` or [`DEFAULT_MAX_CANDIDATES`]).
+    /// Floored at [`DEFAULT_MAX_PATHS`] so the disjoint allocator always has paths to choose from.
     max_candidates: usize,
     /// Max parallel paths in a split.
     max_paths: usize,
@@ -303,6 +305,7 @@ impl SplitAlgorithm {
         }
         let remainder = amount - &base * count;
         let mut chunks = Vec::with_capacity(count);
+        // The first chunk absorbs the division remainder so the chunks sum exactly to `amount`.
         chunks.push(&base + &remainder);
         for _ in 1..count {
             chunks.push(base.clone());
@@ -538,6 +541,19 @@ impl SplitAlgorithm {
             used[best_i] = true;
         }
 
+        // If the fill loop stopped early (timeout or probe failure), top up the largest path so
+        // the allocations cover the full order. `build_split_route` always distributes the full
+        // order amount across branches, so a partial allocation would produce a route whose
+        // simulated outputs do not match the amounts execution will actually swap.
+        let allocated: BigUint = alloc.iter().sum();
+        if &allocated < ctx.amount_in {
+            let leftover = ctx.amount_in - &allocated;
+            let best_i = (0..alloc.len())
+                .filter(|&i| used[i])
+                .max_by(|&a, &b| alloc[a].cmp(&alloc[b]))?;
+            alloc[best_i] += leftover;
+        }
+
         Self::assemble_disjoint_route(paths, selected, &alloc, ctx, order)
     }
 
@@ -704,7 +720,13 @@ impl SplitAlgorithm {
         ctx: &SplitEvalContext<'_>,
         order: &Order,
     ) -> Option<RouteResult> {
-        let route = build_split_route(allocations, ctx.market, order).ok()?;
+        let route = match build_split_route(allocations, ctx.market, order) {
+            Ok(route) => route,
+            Err(err) => {
+                debug!(error = %err, "failed to assemble split route, dropping candidate");
+                return None;
+            }
+        };
         let total_gross = route
             .swaps()
             .iter()
@@ -1125,6 +1147,47 @@ mod tests {
         assert!(
             matches!(result, Err(AlgorithmError::InsufficientLiquidity)),
             "single-path-only market should not produce a split route: {result:?}"
+        );
+    }
+
+    /// An order smaller than the chunk count cannot be divided into chunks, so no split route
+    /// exists.
+    #[tokio::test]
+    async fn dust_order_returns_no_split_route() {
+        let weth = token_with_decimals(0x01, "WETH", 18);
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let (market, graph_manager) = setup_weighted_market(vec![
+            (
+                "pool_a",
+                weth.clone(),
+                usdc.clone(),
+                Box::new(weth_usdc_pool(1000, 3_000_000)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "pool_b",
+                weth.clone(),
+                usdc.clone(),
+                Box::new(weth_usdc_pool(1000, 3_000_000)) as Box<dyn ProtocolSim>,
+            ),
+        ]);
+
+        let order = Order::new(
+            weth.address.clone(),
+            usdc.address.clone(),
+            BigUint::from(10u64), // 10 wei of WETH, fewer than the chunk count
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+        let config =
+            AlgorithmConfig::new(1, 3, std::time::Duration::from_millis(2000), None).unwrap();
+
+        let result = SplitAlgorithm::with_config(config)
+            .unwrap()
+            .find_best_route(graph_manager.graph(), market, None, None, &order)
+            .await;
+        assert!(
+            matches!(result, Err(AlgorithmError::InsufficientLiquidity)),
+            "dust order should not produce a split route: {result:?}"
         );
     }
 }

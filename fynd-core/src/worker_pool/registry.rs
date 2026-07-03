@@ -392,4 +392,33 @@ mod tests {
         let _ = shutdown_tx.send(());
         drop(event_tx);
     }
+
+    #[test]
+    fn test_registry_spawns_split() {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let (_task_tx, task_rx) = async_channel::bounded(10);
+        let market_data = MarketData::new_shared();
+        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
+        let (event_tx, event_rx) = broadcast::channel(10);
+        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
+
+        let params = SpawnWorkersParams {
+            algorithm: "split".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data,
+            derived_data,
+            event_rx,
+            derived_event_rx,
+            shutdown_tx: shutdown_tx.clone(),
+        };
+
+        let workers = AlgorithmSpawner::Registry { algorithm: "split".to_string() }.spawn(params);
+        assert!(workers.is_ok());
+        assert_eq!(workers.unwrap().len(), 1);
+
+        let _ = shutdown_tx.send(());
+        drop(event_tx);
+    }
 }
