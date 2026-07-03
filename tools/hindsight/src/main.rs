@@ -171,12 +171,16 @@ async fn main() -> anyhow::Result<()> {
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
+    let mut decoder = decoder::Decoder::new(provider);
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
         info!(block = block_number, "decoding aggregator trades");
         let start = Instant::now();
-        let trades = match decoder::decode_block(&provider, *block_number).await {
+        let trades = match decoder
+            .decode_block(*block_number)
+            .await
+        {
             Ok(trades) => trades,
             Err(error) => {
                 warn!(block = block_number, %error, "failed to decode block; skipping");
@@ -205,11 +209,12 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
     let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
+    let mut decoder = decoder::Decoder::new(provider);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
     let report =
-        decoder::verify_decoder::run(&provider, &allium, &blocks, args.tolerance_bps).await?;
+        decoder::verify_decoder::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
     info!(elapsed_ms = start.elapsed().as_millis(), "verification complete");
 
     if args.json {

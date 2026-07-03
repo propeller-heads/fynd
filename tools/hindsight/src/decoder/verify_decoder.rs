@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::decoder::{
     allium::{AlliumClient, AlliumRow},
-    decode_block, DecodedTrade,
+    DecodedTrade, Decoder,
 };
 
 const NATIVE_DECIMALS: u8 = 18;
@@ -91,7 +91,7 @@ impl VerifyReport {
 
 /// Decode each block locally and compare against Allium's `aggregator_trades`.
 pub async fn run<P: Provider>(
-    provider: &P,
+    decoder: &mut Decoder<P>,
     allium: &AlliumClient,
     blocks: &[u64],
     tolerance_bps: f64,
@@ -99,7 +99,7 @@ pub async fn run<P: Provider>(
     let mut comparisons = Vec::new();
     let mut decimals = HashMap::new();
     for &block in blocks {
-        let ours = match decode_block(provider, block).await {
+        let ours = match decoder.decode_block(block).await {
             Ok(ours) => ours,
             Err(error) => {
                 warn!(block, %error, "failed to decode block; skipping");
@@ -110,8 +110,15 @@ pub async fn run<P: Provider>(
             .fetch_block(block)
             .await
             .with_context(|| format!("failed to fetch Allium trades for block {block}"))?;
-        compare_block(provider, &ours, &theirs, tolerance_bps, &mut decimals, &mut comparisons)
-            .await;
+        compare_block(
+            decoder.provider(),
+            &ours,
+            &theirs,
+            tolerance_bps,
+            &mut decimals,
+            &mut comparisons,
+        )
+        .await;
     }
     Ok(VerifyReport { comparisons })
 }

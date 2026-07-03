@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
-    decoder::{decode_block, DecodedTrade},
+    decoder::{DecodedTrade, Decoder},
     provider_from,
     resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
     telemetry, usd,
@@ -174,11 +174,12 @@ fn biguint_to_u256(value: &BigUint) -> U256 {
 /// with backoff) — that distinguishes a transient race from a real failure. A block still
 /// undecodable once the RPC has indexed it is a genuine error and surfaces to the caller.
 async fn decode_block_when_available<P: Provider>(
-    provider: &P,
+    decoder: &mut Decoder<P>,
     block: u64,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
     for attempt in 0..DECODE_RPC_LAG_RETRIES {
-        let head = provider
+        let head = decoder
+            .provider()
             .get_block_number()
             .await
             .unwrap_or(0);
@@ -188,7 +189,7 @@ async fn decode_block_when_available<P: Provider>(
         warn!(block, head, attempt, "RPC lags the tycho stream; waiting for it to index the block");
         tokio::time::sleep(DECODE_RPC_LAG_BACKOFF).await;
     }
-    decode_block(provider, block).await
+    decoder.decode_block(block).await
 }
 
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
@@ -237,7 +238,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))?;
 
-    let provider = provider_from(cfg.rpc_url)?;
+    let mut decoder = Decoder::new(provider_from(cfg.rpc_url)?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
@@ -283,7 +284,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         };
         let target = top_block + 1;
 
-        let trades = match decode_block_when_available(&provider, target).await {
+        let trades = match decode_block_when_available(&mut decoder, target).await {
             Ok(trades) => trades,
             Err(e) => {
                 skipped_blocks += 1;
