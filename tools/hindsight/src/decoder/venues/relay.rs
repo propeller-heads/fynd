@@ -222,7 +222,7 @@ fn decode_rebalance(
     // input token.
     let mut outputs: Vec<(Address, Address, U256)> = Vec::new(); // (recipient, token_out, amount)
     for (&(addr, token), &v) in &received {
-        if token == token_in || v.is_zero() || senders.contains(&addr) {
+        if v.is_zero() || senders.contains(&addr) {
             continue;
         }
         if relay_routers.contains(&addr) ||
@@ -231,6 +231,14 @@ fn decode_rebalance(
             addr == wrapped_native
         {
             continue;
+        }
+        // A payout, not a swap: the collector's token reached an external recipient unconverted
+        // (a cross-chain order settled from same-token inventory). There is no conversion to
+        // re-solve — pairing the leftover (e.g. a gas top-up) as "the output" fabricated
+        // seven-figure-bps wins. A genuine fill routes token_in into a pool, which sends
+        // something back and is therefore never a pure sink.
+        if token == token_in {
+            return None;
         }
         outputs.push((addr, token, v));
     }
@@ -309,16 +317,17 @@ mod tests {
 
     #[test]
     fn rebalance_external_native_eth_out() {
-        // C1 with native-ETH output: collector sends token_in, router delivers ETH to recipient.
+        // C1 with native-ETH output: collector funds token_in into a pool, which converts and
+        // sends native ETH on to the recipient. The pool both receives and sends, marking a
+        // genuine conversion (an absorbing counterparty would read as an unconverted payout).
         let fee = addr(99);
-        let router = addr(2);
         let pool = addr(50);
         let recipient = addr(7);
         let token_in = addr(10);
         let collectors = HashSet::from([fee]);
-        let routers = HashSet::from([router]);
+        let routers = HashSet::from([addr(2)]);
         let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
-        let native = vec![(router, recipient, U256::from(2000))];
+        let native = vec![(pool, recipient, U256::from(2000))];
         let got = decode_rebalance(&logs, &native, &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
     }
@@ -355,6 +364,27 @@ mod tests {
             make_transfer_log(token_out, pool, addr(8), U256::from(1000)),
         ];
         assert!(decode_rebalance(&logs, &[], &collectors, &routers, addr(200)).is_none());
+    }
+
+    #[test]
+    fn rebalance_declines_unconverted_payout() {
+        // Live tx 0x455f5202…: the collector pays out its token unconverted to an external
+        // recipient (cross-chain order settled from same-token inventory) plus a tiny native gas
+        // top-up. Pairing the top-up as "the output" fabricated a 10-million-bps win — a payout
+        // has no conversion to re-solve and must decline.
+        let fee = addr(99);
+        let router = addr(2);
+        let recipient = addr(7);
+        let gas_recipient = addr(8);
+        let token_in = addr(10);
+        let collectors = HashSet::from([fee]);
+        let routers = HashSet::from([router]);
+        let logs = vec![
+            make_transfer_log(token_in, fee, router, U256::from(2_002_781_016u64)),
+            make_transfer_log(token_in, router, recipient, U256::from(2_002_781_016u64)),
+        ];
+        let native = vec![(router, gas_recipient, U256::from(1_139_527_584_556_489u64))];
+        assert!(decode_rebalance(&logs, &native, &collectors, &routers, addr(200)).is_none());
     }
 
     #[test]
