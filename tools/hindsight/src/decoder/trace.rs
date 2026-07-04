@@ -1,11 +1,15 @@
 use alloy::{
-    primitives::{Address, TxHash, U256},
+    primitives::{address, Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
     rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
 };
 use anyhow::Context;
 
 use crate::decoder::registry::Registry;
+
+/// The canonical Permit2 deployment (same address on every chain) — token-pull infrastructure
+/// that routers call first, never the venue settling a swap.
+const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
 
 /// Fetch the callTracer root frame for a transaction.
 ///
@@ -97,8 +101,12 @@ fn find_known_aggregator(frame: &CallFrame, registry: &Registry) -> Option<Addre
     None
 }
 
-/// The client's direct child call that moved the most value, excluding
-/// self-calls and refunds to the sender. Best guess at an unknown router.
+/// The client's direct child call that moved the most native value, excluding
+/// self-calls, refunds to the sender, and Permit2. Best guess at an unknown router.
+///
+/// Returns `None` when no candidate moved any value: on a token→token swap every call carries
+/// zero value, so "largest" would degenerate to the first child — typically the token pull, not
+/// the venue. The caller then labels the trade with its entry point instead.
 fn largest_external_call(
     root: &CallFrame,
     entry_point: Address,
@@ -110,7 +118,7 @@ fn largest_external_call(
             continue;
         }
         let Some(to) = child.to else { continue };
-        if to == entry_point || to == sender {
+        if to == entry_point || to == sender || to == PERMIT2 {
             continue;
         }
         let value = child.value.unwrap_or_default();
@@ -118,7 +126,10 @@ fn largest_external_call(
             best = Some((to, value));
         }
     }
-    best.map(|(to, _)| to)
+    match best {
+        Some((to, value)) if value > U256::ZERO => Some(to),
+        Some(_) | None => None,
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +235,38 @@ mod tests {
         let found = attribute_aggregator(&root, client, sender, &registry).unwrap();
         assert_eq!(found, unknown_router);
         assert_eq!(registry.label(found), unknown_router.to_string());
+    }
+
+    #[test]
+    fn attribution_declines_zero_value_fallback() {
+        // Unknown venue, token->token swap: every child call moves zero value, so the fallback
+        // would degenerate to the first child (the Permit2 token pull). Decline instead; the
+        // caller labels the trade with its entry point.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![
+            frame("CALL", client, PERMIT2, 0),  // token pull
+            frame("CALL", client, addr(50), 0), // unknown venue, zero value
+        ];
+
+        assert_eq!(attribute_aggregator(&root, client, sender, &registry), None);
+    }
+
+    #[test]
+    fn attribution_never_picks_permit2() {
+        // Even when Permit2 is the highest-value direct call, it is infrastructure, not a venue.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+        let venue = addr(50);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![frame("CALL", client, PERMIT2, 9000), frame("CALL", client, venue, 100)];
+
+        assert_eq!(attribute_aggregator(&root, client, sender, &registry), Some(venue));
     }
 
     #[test]
