@@ -137,8 +137,12 @@ async fn compare_block<P: Provider>(
         .collect();
     let mut their_by_tx: HashMap<TxHash, Vec<&AlliumRow>> = HashMap::new();
     for row in theirs {
-        let Ok(tx) = row.transaction_hash.parse::<TxHash>() else {
-            warn!(hash = %row.transaction_hash, "skipping Allium row with unparseable tx hash");
+        let Some(tx) = row
+            .transaction_hash
+            .as_deref()
+            .and_then(|hash| hash.parse::<TxHash>().ok())
+        else {
+            warn!(hash = ?row.transaction_hash, "skipping Allium row with unusable tx hash");
             continue;
         };
         their_by_tx
@@ -206,11 +210,19 @@ async fn compare_trade<P: Provider>(
 fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
     let sold: HashSet<Address> = rows
         .iter()
-        .filter_map(|r| parse_addr(&r.token_sold_address))
+        .filter_map(|r| {
+            r.token_sold_address
+                .as_deref()
+                .and_then(parse_addr)
+        })
         .collect();
     let bought: HashSet<Address> = rows
         .iter()
-        .filter_map(|r| parse_addr(&r.token_bought_address))
+        .filter_map(|r| {
+            r.token_bought_address
+                .as_deref()
+                .and_then(parse_addr)
+        })
         .collect();
 
     let in_ok = sold.contains(&ours.token_in);
@@ -408,11 +420,11 @@ mod tests {
     fn row(sold: Address, bought: Address, project: &str) -> AlliumRow {
         AlliumRow {
             project: Some(project.to_string()),
-            token_sold_address: sold.to_string(),
+            token_sold_address: Some(sold.to_string()),
             token_sold_amount: Some(1.0),
-            token_bought_address: bought.to_string(),
+            token_bought_address: Some(bought.to_string()),
             token_bought_amount: Some(2.0),
-            transaction_hash: "0xabc".to_string(),
+            transaction_hash: Some("0xabc".to_string()),
         }
     }
 
