@@ -8,7 +8,7 @@ use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, QuoteCache,
-    QuoteCachePolicy, SolverBuildError,
+    QuoteCachePolicy, RefreshConfig, RefreshScheduler, SolverBuildError,
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -260,10 +260,13 @@ impl FyndRPCBuilder {
             native_token(&chain).context("gas token not configured for chain")?
         };
 
+        // Subscribe before consuming the parts: the feed task keeps the channel open afterwards.
+        let market_events = parts.subscribe_market_events();
+
         let (
             router,
             worker_pools,
-            _market_data,
+            market_data,
             _derived_data,
             feed_handle,
             gas_price_handle,
@@ -292,6 +295,20 @@ impl FyndRPCBuilder {
         )
         .with_quote_cache(quote_cache);
 
+        // Start the per-block refresh scheduler only when the cache is on; it re-solves live
+        // entries each block so repeat requests hit a current-block route. Shares the
+        // router Arc and cache handle with the HTTP handlers.
+        let refresh_scheduler_handle = app_state.quote_cache().map(|cache| {
+            let scheduler = RefreshScheduler::new(
+                Arc::clone(app_state.worker_router()),
+                Arc::clone(cache),
+                market_data.clone(),
+                RefreshConfig::default(),
+            );
+            info!("quote cache refresh scheduler started");
+            scheduler.spawn(market_events)
+        });
+
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
@@ -317,6 +334,7 @@ impl FyndRPCBuilder {
             router_fee_worker_handle: router_fee_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
+            refresh_scheduler_handle,
         })
     }
 }
@@ -332,6 +350,8 @@ pub struct FyndRPC {
     router_fee_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// Per-block quote-cache refresh scheduler. `None` unless the quote cache is enabled.
+    refresh_scheduler_handle: Option<JoinHandle<()>>,
 }
 
 impl FyndRPC {
@@ -351,6 +371,7 @@ impl FyndRPC {
             router_fee_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
+            refresh_scheduler_handle,
         } = self;
 
         info!("HTTP server started");
@@ -396,6 +417,9 @@ impl FyndRPC {
         }
 
         router_fee_worker_handle.abort();
+        if let Some(handle) = refresh_scheduler_handle {
+            handle.abort();
+        }
 
         info!("shutting down worker pools");
         for pool in worker_pools {

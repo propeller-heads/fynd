@@ -30,7 +30,7 @@ use std::{
 
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
 use tycho_execution::encoding::{
@@ -154,6 +154,30 @@ impl WorkerPoolRouter {
         self.solver_pools.len()
     }
 
+    /// Returns the total approximate depth of pending solve tasks across all pools.
+    ///
+    /// Sums each pool's [`TaskQueueHandle::approximate_depth`]. The refresh scheduler compares this
+    /// against its shed threshold to skip a refresh cycle when live traffic is already saturating
+    /// the pools.
+    pub fn queue_depth(&self) -> usize {
+        self.solver_pools
+            .iter()
+            .map(|pool| pool.queue().approximate_depth())
+            .sum()
+    }
+
+    /// Publishes each pool's live queue depth to the `worker_pool_queue_depth` gauge.
+    ///
+    /// The gauge name and its `pool` label are a stable autoscaling contract (a future KEDA/HPA
+    /// hook, TECH_DOC §3 B3) — keep them stable across refactors. Called on the live solve path and
+    /// once per refresh cycle so the gauge tracks depth at request rate.
+    pub fn record_queue_depth_gauge(&self) {
+        for pool in &self.solver_pools {
+            gauge!("worker_pool_queue_depth", "pool" => pool.name().to_string())
+                .set(pool.queue().approximate_depth() as f64);
+        }
+    }
+
     /// Returns a quote by fanning out to all solver pools.
     ///
     /// For each order in the request:
@@ -179,6 +203,10 @@ impl WorkerPoolRouter {
     /// wrapped in a [`SolvedQuote`] that also carries the timing context the encode tail needs.
     /// Callers finish the quote with [`encode_quote`](Self::encode_quote).
     pub async fn solve(&self, request: QuoteRequest) -> Result<SolvedQuote, SolveError> {
+        // Sample live queue depth at request rate so the autoscaling gauge tracks the busy path,
+        // not only the once-per-block refresh cycle.
+        self.record_queue_depth_gauge();
+
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request

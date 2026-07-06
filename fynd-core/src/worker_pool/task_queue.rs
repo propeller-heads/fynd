@@ -60,10 +60,10 @@ impl TaskQueueHandle {
             .map_err(|_| SolveError::Internal("worker dropped response channel".to_string()))?
     }
 
-    /// Returns the current approximate queue depth.
+    /// Returns the current approximate queue depth (pending, not-yet-claimed tasks).
     ///
-    /// Note: This is not exact due to the async nature of the queue.
-    #[cfg(test)]
+    /// Not exact: the count races with workers claiming tasks. The refresh scheduler sums this
+    /// across pools to decide load-shedding, and it feeds the `worker_pool_queue_depth` gauge.
     pub fn approximate_depth(&self) -> usize {
         self.sender.len()
     }

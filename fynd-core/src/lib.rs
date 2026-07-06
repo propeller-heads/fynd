@@ -52,7 +52,11 @@ pub mod worker_pool_router;
 pub use algorithm::{
     Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
 };
-pub use cache::{key::QuoteCacheKey, QuoteCache, QuoteCachePolicy, ANONYMOUS_IDENTITY};
+pub use cache::{
+    key::QuoteCacheKey,
+    refresh::{RefreshConfig, RefreshRouter, RefreshScheduler},
+    QuoteCache, QuoteCachePolicy, ANONYMOUS_IDENTITY,
+};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
 pub use feed::{events::MarketEvent, market_data::StateLabel};
