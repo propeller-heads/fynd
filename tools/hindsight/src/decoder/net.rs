@@ -63,6 +63,27 @@ pub(crate) struct NetSwap {
     pub amount_out: U256,
 }
 
+/// A wrap-pair trade (native <-> wrapped native) more than this factor off 1:1 is mis-paired:
+/// wrapping is exactly 1:1 by construction, and fee skims only shave a few percent, so nothing
+/// legitimate strays this far.
+const WRAP_PAIR_MAX_RATIO: u64 = 2;
+
+/// Whether a "swap" between the native token and its wrapped form has amounts a wrap or unwrap
+/// cannot produce.
+///
+/// Seen with cross-chain deposits where the trader sends WETH and the only same-chain receipt is
+/// a dust remainder refund in native ETH — netting pairs the two into a phantom trade orders of
+/// magnitude off parity.
+pub(crate) fn wrap_pair_mispaired(swap: &NetSwap, wrapped_native: Address) -> bool {
+    let pair = [swap.token_in, swap.token_out];
+    if !(pair.contains(&Address::ZERO) && pair.contains(&wrapped_native)) {
+        return false;
+    }
+    let max = U256::from(WRAP_PAIR_MAX_RATIO);
+    swap.amount_in > swap.amount_out.saturating_mul(max) ||
+        swap.amount_out > swap.amount_in.saturating_mul(max)
+}
+
 /// A token's flow through the whole transaction, tracked alongside the netted
 /// per-address balances so residue legs can be told apart from real ones.
 #[derive(Default)]
@@ -370,6 +391,36 @@ mod tests {
         ];
 
         assert!(decode_trade(&logs, &[], user).is_none());
+    }
+
+    #[test]
+    fn wrap_pair_mispaired_flags_dust_refund() {
+        // Relay cross-chain deposit shape (tx 0xc9de04eb…): 0.02 WETH in, a billionth of it
+        // refunded back as native ETH — not an unwrap.
+        let weth = addr(20);
+        let deposit = swap(weth, 20_129_551_554_664_188, Address::ZERO, 1_554_664_188);
+        assert!(wrap_pair_mispaired(&deposit, weth));
+
+        let reversed = swap(Address::ZERO, 1_000_000, weth, 100);
+        assert!(wrap_pair_mispaired(&reversed, weth));
+    }
+
+    #[test]
+    fn wrap_pair_near_parity_kept() {
+        let weth = addr(20);
+        assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 1000), weth));
+        // A fee-skimmed unwrap stays within the 2x band.
+        assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 900), weth));
+    }
+
+    #[test]
+    fn non_wrap_pair_never_flagged() {
+        // Ordinary token pairs legitimately trade at any rate (decimals differ), and a
+        // token <-> wrapped-native trade without the native side is a real swap too.
+        let weth = addr(20);
+        assert!(!wrap_pair_mispaired(&swap(addr(10), 1_000_000_000, addr(11), 5), weth));
+        assert!(!wrap_pair_mispaired(&swap(addr(10), 1_000_000_000, weth, 5), weth));
+        assert!(!wrap_pair_mispaired(&swap(Address::ZERO, 1_000_000_000, addr(11), 5), weth));
     }
 
     #[test]

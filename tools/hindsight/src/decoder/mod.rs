@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 
 pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
-    net::received_nft,
+    net::{received_nft, wrap_pair_mispaired},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
     venues::{started_bridge_order, Matched, Strategy},
 };
@@ -182,6 +182,19 @@ impl<P: Provider> Decoder<P> {
                     tx = %receipt.transaction_hash,
                     client = %registry.label(entry_point),
                     "tracked address received an NFT; skipping purchase"
+                );
+                continue;
+            }
+
+            // A native <-> wrapped-native "swap" is a wrap or unwrap, which is 1:1 by
+            // construction. Far off parity it is a mis-paired record: a cross-chain deposit
+            // whose only same-chain receipt is a dust remainder refund (seen via Relay: WETH
+            // in, a billionth of it back as ETH).
+            if wrap_pair_mispaired(&flow.swap, registry.wrapped_native()) {
+                debug!(
+                    tx = %receipt.transaction_hash,
+                    client = %registry.label(entry_point),
+                    "wrap pair far off 1:1; skipping mis-paired trade"
                 );
                 continue;
             }
