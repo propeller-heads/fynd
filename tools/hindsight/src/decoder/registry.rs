@@ -23,6 +23,11 @@ pub(crate) struct Registry {
     /// Batch-settlement venues where `tx.to` is the settlement contract and
     /// the transaction sender is a solver, not the trader.
     batch_settlers: HashSet<Address>,
+    /// Display names for entry points that are neither clients nor venues — market-maker
+    /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
+    /// because `is_known` drives strategy selection and filler-entered transactions have to
+    /// keep matching via their aggregator logs (Maker), not sender netting.
+    labels: HashMap<Address, &'static str>,
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
@@ -57,6 +62,12 @@ impl Registry {
             (address!("0x00000011f84b9aa48e5f8aa8b9897600006289be"), "uniswapx"),
             // OKX DEX Router
             (address!("0xf3de3c0d654fda23dad170f0f320a92172509127"), "okx"),
+            // KyberSwap MetaAggregationRouter v2
+            (address!("0x6131b5fae19ea4f9d964eac0408e4408b66337b5"), "kyberswap"),
+            // OKX DEX Router 6 (per OKX docs; the prior entry is an older deployment)
+            (address!("0x28b1dc1a5e3699a428bc51d234dfab7c9cb2a183"), "okx"),
+            // LiFi Diamond
+            (address!("0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"), "lifi"),
             // Tycho (PropellerHeads) router — current, v2, and prior deployment
             (address!("0x1f8db310f32d48b6180ff902ec60c586128cef47"), "tycho"),
             (address!("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35"), "tycho"),
@@ -72,6 +83,8 @@ impl Registry {
             (address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"), "relay"),
             (address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be"), "relay"),
             (address!("0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7"), "relay"),
+            // MetaMask Swap Router
+            (address!("0x881d40237659c251811cec9c364ef91dc08d300c"), "metamask"),
         ]);
 
         let relay = RelayAddresses {
@@ -85,6 +98,33 @@ impl Registry {
             fee_collectors: HashSet::from([address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef")]),
         };
 
+        // Entry points identified from public labels (Etherscan tags, Dune spellbook solver
+        // lists, project sites), ranked by observed volume in monitor runs. Display-only: most
+        // are solver/filler/MEV flow — not clients routing user orders — and their transactions
+        // must keep matching via aggregator logs, so they stay out of `names`.
+        let labels = HashMap::from([
+            // Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan
+            // "Market Maker"; the 0xbee… vanity family is Kipseli across CoW/1inch listings).
+            (address!("0xbee162fa5ae892be74f3f3e01c23da89adbccccc"), "kipseli"),
+            (address!("0xbee3211ab312a8d065c4fef0247448e17a8da000"), "kipseli"),
+            // Average Solutions: intent solver for UniswapX / 1inch Fusion
+            // (average-solutions.xyz; operated by average-solutions.eth).
+            (address!("0xdeadc0de0000e54725ad1bf220324717043e02bf"), "average-solutions"),
+            // Rizzolver (Wintermute): UniswapX filler, CoW solver, 1inch Fusion resolver.
+            (address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17"), "rizzolver"),
+            (address!("0x8f5835e9d756c9bd934bce527157a4b0ef3c5cb7"), "rizzolver"),
+            (address!("0xa8c1c98aaf99a5dfc907d61b892b2ad624901185"), "rizzolver"),
+            // CoW solvers (spellbook cow_protocol_ethereum_solvers).
+            (address!("0x1921e0ff550c09066edd4df05d304151c45e77de"), "barter"),
+            (address!("0xa9d635ef85bc37eb9ff9d6165481ea230ed32392"), "quasi"),
+            // MEV bots (Etherscan public tags); c0ffeebabe.eth's is the only named operator.
+            (address!("0xe08d97e151473a848c3d9ca3f323cb720472d015"), "c0ffeebabe"),
+            (address!("0x06cff7088619c7178f5e14f0b119458d08d2f5ef"), "mev-bot"),
+            (address!("0x81463b0f960f247f704377661ec81c1fd65b5128"), "mev-bot"),
+            // Pendle Router V4 (Etherscan name tag) — a protocol router, not an aggregator.
+            (address!("0x888888888889758f76e7103c6cbf23abbf58f946"), "pendle"),
+        ]);
+
         let mut names = aggregators.clone();
         names.extend(clients);
 
@@ -93,6 +133,7 @@ impl Registry {
             names,
             // CoW Protocol Settlement.
             batch_settlers: HashSet::from([address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41")]),
+            labels,
             // WETH
             wrapped_native: address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
             relay,
@@ -128,6 +169,7 @@ impl Registry {
     pub(crate) fn label(&self, address: Address) -> String {
         self.names
             .get(&address)
+            .or_else(|| self.labels.get(&address))
             .map_or_else(|| address.to_string(), |name| (*name).to_string())
     }
 }
@@ -190,5 +232,17 @@ mod tests {
         let unknown = addr(123);
         assert_eq!(registry.label(relay), "relay");
         assert_eq!(registry.label(unknown), unknown.to_string());
+    }
+
+    #[test]
+    fn display_labels_resolve_without_becoming_known() {
+        // Solver/filler labels are display-only: is_known drives strategy selection, and a
+        // filler-entered tx must keep matching via its aggregator logs (Maker), not as a
+        // known-client Sender flow.
+        let registry = Registry::ethereum();
+        let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");
+        assert_eq!(registry.label(rizzolver), "rizzolver");
+        assert!(!registry.is_known(rizzolver));
+        assert!(!registry.is_aggregator(rizzolver));
     }
 }
