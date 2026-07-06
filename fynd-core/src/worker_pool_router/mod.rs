@@ -97,6 +97,26 @@ pub struct SolvedQuote {
     start: Instant,
 }
 
+impl SolvedQuote {
+    /// Builds a solved quote from ranked pre-encode order quotes and the solve-start instant.
+    ///
+    /// [`WorkerPoolRouter::encode_cached`] uses this to reconstruct a `SolvedQuote` from a cached
+    /// order quote on a cache hit. `start` is the encode-latency clock: a cache hit passes
+    /// `Instant::now()` so `solve_time_ms` reflects encode-only time.
+    pub(crate) fn new(order_quotes: Vec<OrderQuote>, start: Instant) -> Self {
+        Self { order_quotes, start }
+    }
+
+    /// Returns the ranked pre-encode order quotes (one per order, request order).
+    ///
+    /// The quote cache clones the winning order quote from here (on a miss) to store it before
+    /// encoding. `pub` because the cache and its handler hook live in the separate `fynd-rpc`
+    /// crate.
+    pub fn order_quotes(&self) -> &[OrderQuote] {
+        &self.order_quotes
+    }
+}
+
 /// Orchestrates multiple solver pools to find the best quote.
 pub struct WorkerPoolRouter {
     /// All registered solver pools.
@@ -254,6 +274,25 @@ impl WorkerPoolRouter {
         let solve_time_ms = start.elapsed().as_millis() as u64;
 
         Ok(Quote::new(order_quotes, total_gas_estimate, solve_time_ms))
+    }
+
+    /// Encodes a cached pre-encode order quote for a fresh caller — the quote-cache hit path.
+    ///
+    /// Re-stamps the cached solve's sender/receiver to `order`'s addresses, then encodes fresh
+    /// calldata with the caller's `options`. The cached quote already carries gas refined by
+    /// [`solve`](Self::solve); `encode_quote` recomputes the transaction, gas estimate, and fee
+    /// breakdown, so the result matches a live solve at the cached block. `solve_time_ms` reflects
+    /// encode-only latency.
+    pub async fn encode_cached(
+        &self,
+        mut cached: OrderQuote,
+        order: &Order,
+        options: &QuoteOptions,
+    ) -> Result<Quote, SolveError> {
+        cached.set_sender(order.sender().clone());
+        cached.set_receiver(order.effective_receiver());
+        let solved = SolvedQuote::new(vec![cached], Instant::now());
+        self.encode_quote(solved, options).await
     }
 
     /// Solves a single order by fanning out to all solver pools.
@@ -996,5 +1035,101 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(*result[0].amount_out_net_gas(), BigUint::from(950u64));
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
+    }
+
+    /// Re-encoding a cached solve at the same block reproduces the live-solve output.
+    ///
+    /// The quote cache stores the pre-encode `OrderQuote` from `solve` and re-encodes it on a hit
+    /// via [`SolvedQuote::new`] + [`encode_quote`]. This is the focused encode-path stand-in for
+    /// the "same block + same request ⇒ cache-hit output == live-solve output" invariant; a
+    /// full recorded-market integration test would be disproportionate for the encode tail
+    /// alone.
+    #[tokio::test]
+    async fn encode_cached_matches_live_solve() {
+        let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_quote(900)), 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
+
+        let request = QuoteRequest::new(vec![make_order()], options.clone());
+        let solved = router.solve(request).await.unwrap();
+        let cached_order_quotes = solved.order_quotes().to_vec();
+        let live = router
+            .encode_quote(solved, &options)
+            .await
+            .unwrap();
+
+        // Re-encode the cached solve as a hit would: same block, same options.
+        let hit = router
+            .encode_quote(SolvedQuote::new(cached_order_quotes, Instant::now()), &options)
+            .await
+            .unwrap();
+
+        assert_eq!(live.orders()[0].amount_out(), hit.orders()[0].amount_out());
+        assert_eq!(live.orders()[0].gas_estimate(), hit.orders()[0].gas_estimate());
+        assert_eq!(
+            live.orders()[0]
+                .transaction()
+                .unwrap()
+                .data(),
+            hit.orders()[0]
+                .transaction()
+                .unwrap()
+                .data(),
+            "cache-hit calldata should match a live solve at the same block"
+        );
+
+        drop(router);
+        worker.abort();
+    }
+
+    /// `encode_cached` encodes with the caller's options and re-stamped addresses, not the cached
+    /// ones.
+    #[tokio::test]
+    async fn encode_cached_honors_new_options_and_addresses() {
+        let (pool, worker) = create_mock_pool("pool_a", Ok(make_single_quote(900)), 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let tight = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.001));
+        let request = QuoteRequest::new(vec![make_order()], tight.clone());
+        let solved = router.solve(request).await.unwrap();
+        let cached = solved.order_quotes()[0].clone();
+        let tight_quote = router
+            .encode_quote(solved, &tight)
+            .await
+            .unwrap();
+
+        // A fresh caller with a distinct sender/receiver and looser slippage.
+        let caller = Order::new(
+            make_address(0x01),
+            make_address(0x02),
+            BigUint::from(1000u64),
+            OrderSide::Sell,
+            make_address(0xCC),
+        )
+        .with_receiver(make_address(0xDD));
+        let loose = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.05));
+        let loose_quote = router
+            .encode_cached(cached, &caller, &loose)
+            .await
+            .unwrap();
+
+        // Re-stamped addresses appear on the encoded quote.
+        assert_eq!(loose_quote.orders()[0].sender(), &Bytes::from(make_address(0xCC).as_ref()));
+        assert_eq!(loose_quote.orders()[0].receiver(), &Bytes::from(make_address(0xDD).as_ref()));
+        // Looser slippage lowers the minimum received, proving the caller's options drove encoding.
+        assert!(
+            loose_quote.orders()[0]
+                .fee_breakdown()
+                .unwrap()
+                .min_amount_received() <
+                tight_quote.orders()[0]
+                    .fee_breakdown()
+                    .unwrap()
+                    .min_amount_received()
+        );
+
+        drop(router);
+        worker.abort();
     }
 }

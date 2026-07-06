@@ -24,6 +24,8 @@
 /// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`], and the
 /// pluggable [`Algorithm`] trait.
 pub mod algorithm;
+/// In-process cache of recently solved quotes ([`QuoteCache`](cache::QuoteCache)).
+pub mod cache;
 /// Derived data computations: spot prices, pool depths, and gas prices.
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
@@ -50,6 +52,7 @@ pub mod worker_pool_router;
 pub use algorithm::{
     Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
 };
+pub use cache::{key::QuoteCacheKey, QuoteCache, QuoteCachePolicy, ANONYMOUS_IDENTITY};
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
 pub use feed::{events::MarketEvent, market_data::StateLabel};

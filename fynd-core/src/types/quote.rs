@@ -653,7 +653,7 @@ impl Order {
 ///
 /// Currently only `Sell` is supported. `Buy` will be added in a future version.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderSide {
     /// Sell exactly the specified amount of the input token.

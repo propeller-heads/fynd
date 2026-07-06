@@ -128,6 +128,11 @@ pub struct ServeArgs {
     #[arg(long)]
     pub enable_price_guard: bool,
 
+    /// Enable the in-process quote cache: repeat single-order requests are served from recent
+    /// solves at encode-only latency. Disabled by default.
+    #[arg(long)]
+    pub enable_quote_cache: bool,
+
     /// Port for the Prometheus metrics HTTP server (requires `metrics` feature).
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
@@ -207,6 +212,7 @@ mod cli_tests {
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.blocklist_config, None);
         assert!(!args.partial_blocks);
+        assert!(!args.enable_quote_cache);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);
     }

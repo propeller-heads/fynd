@@ -20,7 +20,7 @@ pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData,
-    worker_pool_router::WorkerPoolRouter,
+    worker_pool_router::WorkerPoolRouter, QuoteCache,
 };
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
@@ -151,6 +151,18 @@ impl HealthTracker {
             .await
             .derived_data_ready()
     }
+
+    /// Returns the number of the most recent block Fynd has processed, if any.
+    ///
+    /// The quote cache uses this as the chain head to reject solves older than its staleness
+    /// cutoff.
+    pub(crate) async fn current_block(&self) -> Option<u64> {
+        self.market_data
+            .read()
+            .await
+            .last_updated()
+            .map(|block| block.number())
+    }
 }
 
 /// Shared application state for HTTP handlers.
@@ -161,6 +173,9 @@ pub struct AppState {
     chain_id: u64,
     router_address: Bytes,
     permit2_address: Bytes,
+    /// Quote cache, shared across actix workers. `None` unless `--enable-quote-cache` is set, in
+    /// which case the handler serves repeat single-order requests at encode-only latency.
+    quote_cache: Option<Arc<QuoteCache>>,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
@@ -168,7 +183,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates new application state.
+    /// Creates new application state. The quote cache is off by default; enable it with
+    /// [`with_quote_cache`](Self::with_quote_cache).
     pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
@@ -184,11 +200,29 @@ impl AppState {
             chain_id,
             router_address,
             permit2_address,
+            quote_cache: None,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
         }
+    }
+
+    /// Attaches a shared quote cache. Absent cache ⇒ the handler's solve path is unchanged.
+    pub(crate) fn with_quote_cache(mut self, quote_cache: Option<Arc<QuoteCache>>) -> Self {
+        self.quote_cache = quote_cache;
+        self
+    }
+
+    pub(crate) fn quote_cache(&self) -> Option<&Arc<QuoteCache>> {
+        self.quote_cache.as_ref()
+    }
+
+    /// Returns the most recent block Fynd has processed, if any.
+    pub(crate) async fn current_block(&self) -> Option<u64> {
+        self.health_tracker
+            .current_block()
+            .await
     }
 
     pub(crate) fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
