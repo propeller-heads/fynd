@@ -138,9 +138,11 @@ tracing-actix-web = "0.7"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
-# Tycho
-tycho-execution = ">=0.304"
-tycho-simulation = ">=0.304"
+# Tycho — local fork with Flare chain support (aspensprotocol/tycho, branch feat/flare-chain).
+# Assumes the tycho monorepo is checked out as a sibling of this repo. Swap `path` for
+# git = "https://github.com/aspensprotocol/tycho" in CI/docker builds.
+tycho-execution = { path = "../tycho/crates/tycho-execution" }
+tycho-simulation = { path = "../tycho/crates/tycho-simulation" }
 typetag = "0.2"
 
 # Compression

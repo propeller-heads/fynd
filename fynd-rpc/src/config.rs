@@ -181,6 +181,7 @@ pub mod defaults {
             "bsc" => Ok("https://bsc-dataseed.bnbchain.org"),
             "arbitrum" => Ok("https://arbitrum.drpc.org"),
             "polygon" => Ok("https://polygon.drpc.org"),
+            "flare" => Ok("https://flare-api.flare.network/ext/C/rpc"),
             other => Err(format!(
                 "no default RPC URL for chain '{}'. Please provide --rpc-url explicitly.",
                 other
@@ -196,7 +197,9 @@ pub mod defaults {
 
     /// Returns the default Tycho Fynd endpoint URL for the given chain.
     ///
-    /// Returns an error if the chain is not recognized.
+    /// Returns an error if the chain is not recognized. Chains without a hosted Tycho
+    /// endpoint (e.g. Flare) always require an explicit `--tycho-url` pointing at a
+    /// self-run indexer.
     pub fn default_tycho_url(chain: &str) -> Result<&str, String> {
         match chain.to_lowercase().as_str() {
             "ethereum" => Ok("tycho-fynd-ethereum.propellerheads.xyz"),
