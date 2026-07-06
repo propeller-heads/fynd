@@ -9,6 +9,13 @@ pub(crate) struct RelayAddresses {
     pub fee_collectors: HashSet<Address>,
 }
 
+/// MetaMask's addresses on one chain: the swap router users enter through and
+/// the wallets its fee skims land on.
+pub(crate) struct MetamaskAddresses {
+    pub router: Address,
+    pub fee_collectors: HashSet<Address>,
+}
+
 /// Per-chain address book for trade decoding: which contracts are aggregators,
 /// clients, batch settlers, and venue infrastructure.
 ///
@@ -32,6 +39,7 @@ pub(crate) struct Registry {
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
     relay: RelayAddresses,
+    metamask: MetamaskAddresses,
 }
 
 impl Registry {
@@ -98,6 +106,18 @@ impl Registry {
             fee_collectors: HashSet::from([address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef")]),
         };
 
+        let metamask = MetamaskAddresses {
+            router: address!("0x881d40237659c251811cec9c364ef91dc08d300c"),
+            // MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the
+            // two, the rest were genuinely fee-free pairs); the skim is ~87.5 bps plus a gas
+            // recoup on gasless "smart swaps", taken from whichever swap side is native ETH,
+            // else from a swap token directly.
+            fee_collectors: HashSet::from([
+                address!("0xe3478b0bb1a5084567c319096437924948be1964"),
+                address!("0xf326e4de8f66a0bdc0970b79e0924e33c79f1915"),
+            ]),
+        };
+
         // Entry points identified from public labels (Etherscan tags, Dune spellbook solver
         // lists, project sites), ranked by observed volume in monitor runs. Display-only: most
         // are solver/filler/MEV flow — not clients routing user orders — and their transactions
@@ -137,6 +157,7 @@ impl Registry {
             // WETH
             wrapped_native: address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
             relay,
+            metamask,
         }
     }
 
@@ -163,6 +184,10 @@ impl Registry {
 
     pub(crate) fn relay(&self) -> &RelayAddresses {
         &self.relay
+    }
+
+    pub(crate) fn metamask(&self) -> &MetamaskAddresses {
+        &self.metamask
     }
 
     /// Resolve an address to its known name, or its hex address if unknown.

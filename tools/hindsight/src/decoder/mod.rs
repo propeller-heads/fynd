@@ -162,6 +162,9 @@ impl<P: Provider> Decoder<P> {
                 Strategy::Relay => {
                     venues::relay::decode(logs, &native, sender, entry_point, registry)
                 }
+                Strategy::Metamask => {
+                    venues::metamask::decode(logs, &native, sender, entry_point, registry)
+                }
             };
 
             let Some(flow) = flow else {
