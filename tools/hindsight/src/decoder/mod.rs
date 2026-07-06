@@ -23,7 +23,7 @@ pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
     net::received_nft,
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
-    venues::{Matched, Strategy},
+    venues::{started_bridge_order, Matched, Strategy},
 };
 
 /// A decoded aggregator trade: what token went in, what came out.
@@ -108,6 +108,20 @@ impl<P: Provider> Decoder<P> {
         let matched: Vec<Matched> = receipts
             .iter()
             .filter_map(|receipt| venues::select(receipt, registry))
+            .filter(|matched| {
+                // A cross-chain bridge order's real output lands on the destination chain; the
+                // same-chain flow (deposit in, leftover refund out) is not a swap. Filtered
+                // before tracing, so bridge orders cost no trace call.
+                if started_bridge_order(matched.receipt.logs()) {
+                    debug!(
+                        tx = %matched.receipt.transaction_hash,
+                        client = %registry.label(matched.entry_point),
+                        "cross-chain bridge order; skipping"
+                    );
+                    return false;
+                }
+                true
+            })
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
