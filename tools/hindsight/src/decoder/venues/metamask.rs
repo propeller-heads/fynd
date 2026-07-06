@@ -10,12 +10,54 @@
 use alloy::{
     primitives::{Address, U256},
     rpc::types::Log,
+    sol,
+    sol_types::SolCall,
 };
 
 use crate::decoder::{
     registry::Registry,
     venues::{back_out_client_fees, sender_flow, Flow},
 };
+
+sol! {
+    /// The MetaMask Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
+    /// aggregator API that produced the route.
+    function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
+}
+
+/// The venue label declared in the router calldata's `aggregatorId`, normalized to the
+/// registry's venue names.
+///
+/// MetaMask states which aggregator API it routed through (e.g. "oneInchV6FeeDynamic",
+/// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
+/// route moves no native value and enters through Permit2 — so the calldata declaration is the
+/// authoritative source. Unrecognized ids pass through as-is: "airswapV4" is still more
+/// informative than a raw executor address.
+pub(crate) fn aggregator_from_calldata(input: &[u8]) -> Option<String> {
+    let call = swapCall::abi_decode(input).ok()?;
+    Some(normalize(&call.aggregatorId))
+}
+
+fn normalize(id: &str) -> String {
+    let lower = id.to_lowercase();
+    let names = [
+        ("oneinch", "1inch"),
+        ("zeroex", "0x"),
+        ("uniswap", "uniswap"),
+        ("okx", "okx"),
+        ("kyber", "kyberswap"),
+        ("paraswap", "paraswap"),
+        ("airswap", "airswap"),
+        ("openocean", "openocean"),
+        ("hashflow", "hashflow"),
+    ];
+    for (needle, name) in names {
+        if lower.contains(needle) {
+            return name.to_string();
+        }
+    }
+    id.to_string()
+}
 
 /// Decode a MetaMask-entered transaction: net the sender's flow, then back the
 /// client fee out of it.
@@ -52,6 +94,36 @@ mod tests {
             .iter()
             .next()
             .unwrap()
+    }
+
+    #[test]
+    fn swap_selector_matches_deployed_router() {
+        // The sol! declaration must match the on-chain function (verified against live calldata).
+        assert_eq!(swapCall::SELECTOR, [0x5f, 0x57, 0x55, 0x29]);
+    }
+
+    #[test]
+    fn aggregator_from_calldata_normalizes_known_ids() {
+        for (id, want) in [
+            ("oneInchV6FeeDynamic", "1inch"),
+            ("uniswapPermit2FeeDynamic", "uniswap"),
+            ("okx6", "okx"),
+            ("someFutureAggregator", "someFutureAggregator"),
+        ] {
+            let call = swapCall {
+                aggregatorId: id.to_string(),
+                tokenFrom: addr(10),
+                amount: U256::from(1000),
+                data: Default::default(),
+            };
+            assert_eq!(aggregator_from_calldata(&call.abi_encode()).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn aggregator_from_calldata_declines_other_selectors() {
+        assert_eq!(aggregator_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
+        assert_eq!(aggregator_from_calldata(&[]), None);
     }
 
     #[test]

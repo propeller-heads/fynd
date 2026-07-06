@@ -44,6 +44,7 @@ pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
 }
 
 /// How to recover the swap from a matched transaction.
+#[derive(Clone, Copy)]
 pub(crate) enum Strategy {
     /// The sender is the trader: net its flow (direct aggregator swaps).
     Sender,

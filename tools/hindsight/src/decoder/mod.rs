@@ -202,14 +202,21 @@ impl<P: Provider> Decoder<P> {
                 continue;
             }
 
-            let aggregator =
+            let attributed =
                 attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
+            // MetaMask declares its venue in the router calldata; that beats trace attribution,
+            // which cannot resolve token→token routes entered through Permit2.
+            let aggregator = match strategy {
+                Strategy::Metamask => venues::metamask::aggregator_from_calldata(&root.input)
+                    .unwrap_or_else(|| registry.label(attributed)),
+                Strategy::Sender | Strategy::Maker | Strategy::Relay => registry.label(attributed),
+            };
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
                 client: registry.label(entry_point),
-                aggregator: registry.label(aggregator),
+                aggregator,
                 sender: flow.tracked,
                 token_in: flow.swap.token_in,
                 token_out: flow.swap.token_out,
