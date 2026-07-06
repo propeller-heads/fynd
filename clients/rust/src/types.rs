@@ -836,6 +836,34 @@ pub struct Quote {
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
+    /// Cache provenance. Present only when the server served this quote from its quote cache;
+    /// `None` on a fresh solve or when the server's cache is disabled.
+    pub(crate) cache: Option<CacheInfo>,
+}
+
+/// Provenance for a quote the server served from its in-memory quote cache.
+///
+/// A cache hit re-solved at the current block's start is as fresh as a live solve; the server only
+/// re-encodes the cached solve for this request. [`solved_at_block`](Self::solved_at_block) exposes
+/// the bounded staleness that remains when a per-block refresh was shed under load.
+///
+/// A cache hit carries the cached entry's server-generated `order_id` — the id from the solve that
+/// first populated the entry, not a fresh id for this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheInfo {
+    solved_at_block: u64,
+}
+
+impl CacheInfo {
+    pub(crate) fn new(solved_at_block: u64) -> Self {
+        Self { solved_at_block }
+    }
+
+    /// Block the served solve was computed against. Equals the chain head on a fresh per-block
+    /// refresh; lags by up to the server's staleness cutoff when a refresh was shed.
+    pub fn solved_at_block(&self) -> u64 {
+        self.solved_at_block
+    }
 }
 
 impl Quote {
@@ -933,6 +961,13 @@ impl Quote {
         self.solve_time_ms
     }
 
+    /// Cache provenance, present only when the server served this quote from its quote cache.
+    ///
+    /// `None` on a fresh solve or when the server's cache is disabled.
+    pub fn cache(&self) -> Option<&CacheInfo> {
+        self.cache.as_ref()
+    }
+
     /// Patches the 65-byte client fee EIP-712 signature into the transaction
     /// calldata at the offset returned by the server.
     ///
@@ -1000,6 +1035,7 @@ impl Quote {
             transaction,
             fee_breakdown,
             solve_time_ms: 0,
+            cache: None,
         }
     }
 }

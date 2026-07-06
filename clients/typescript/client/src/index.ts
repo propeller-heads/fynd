@@ -3,6 +3,7 @@ export type {
   ApprovalParams,
   BackendKind,
   BlockInfo,
+  CacheInfo,
   ClientFeeParams,
   EncodingOptions,
   FeeBreakdown,

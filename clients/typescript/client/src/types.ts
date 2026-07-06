@@ -152,6 +152,21 @@ export interface FeeBreakdown {
   minAmountReceived: bigint;
 }
 
+/**
+ * Provenance for a quote the server served from its in-memory quote cache.
+ *
+ * A cache hit re-solved at the current block's start is as fresh as a live solve; the server only
+ * re-encodes the cached solve for this request. `solvedAtBlock` exposes the bounded staleness that
+ * remains when a per-block refresh was shed under load. A hit carries the cached entry's original
+ * server-generated `orderId`, not a fresh id for this request.
+ */
+export interface CacheInfo {
+  /** Always `true`: present only when the quote was served from the cache. */
+  hit: boolean;
+  /** Block the served solve was computed against; lags the head by up to the staleness cutoff. */
+  solvedAtBlock: number;
+}
+
 /** A solver quote containing the best route, amounts, and optional encoded transaction. */
 export interface Quote {
   orderId: string;
@@ -172,6 +187,8 @@ export interface Quote {
   transaction?: Transaction;
   /** Fee breakdown; present only when `encodingOptions` was set in the quote request. */
   feeBreakdown?: FeeBreakdown;
+  /** Cache provenance; present only when the server served this quote from its quote cache. */
+  cache?: CacheInfo;
 }
 
 /** Solver health status and readiness information. */

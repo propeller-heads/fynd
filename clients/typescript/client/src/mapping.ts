@@ -3,6 +3,7 @@ import { FyndError } from "./error.js";
 import type {
     Address,
     BlockInfo,
+    CacheInfo,
     ClientFeeParams,
     EncodingOptions,
     FeeBreakdown,
@@ -33,6 +34,7 @@ type WirePermitSingle = components["schemas"]["PermitSingle"];
 type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
+type WireCacheInfo = components["schemas"]["CacheInfo"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -87,6 +89,9 @@ export function fromWireQuote(
     const feeBreakdown = orderSolution.fee_breakdown != null
         ? fromWireFeeBreakdown(orderSolution.fee_breakdown)
         : undefined;
+    const cache = orderSolution.cache != null
+        ? fromWireCacheInfo(orderSolution.cache)
+        : undefined;
     return {
         orderId: orderSolution.order_id,
         status: orderSolution.status,
@@ -102,6 +107,14 @@ export function fromWireQuote(
         ...(transaction !== undefined ? {transaction} : {}),
         ...(priceImpactBps !== undefined ? {priceImpactBps} : {}),
         ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
+        ...(cache !== undefined ? {cache} : {}),
+    };
+}
+
+function fromWireCacheInfo(wire: WireCacheInfo): CacheInfo {
+    return {
+        hit: wire.hit,
+        solvedAtBlock: wire.solved_at_block,
     };
 }
 

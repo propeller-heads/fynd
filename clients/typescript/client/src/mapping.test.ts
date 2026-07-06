@@ -352,6 +352,25 @@ describe('fromWireQuote', () => {
     const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
     expect(quote.transaction).toBeUndefined();
   });
+
+  it('cache is undefined on a miss', () => {
+    const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
+    expect(quote.cache).toBeUndefined();
+  });
+
+  it('maps cache provenance on a hit', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          cache: { hit: true, solved_at_block: 20999998 },
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.cache).toEqual({ hit: true, solvedAtBlock: 20999998 });
+  });
 });
 
 describe('fromWireHealth', () => {

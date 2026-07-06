@@ -673,6 +673,16 @@ impl Quote {
     pub fn solve_time_ms(&self) -> u64 {
         self.solve_time_ms
     }
+
+    /// Marks the sole order quote as served from the cache, solved at `solved_at_block`.
+    ///
+    /// The quote cache only serves single-order requests, so the marker always lands on the one
+    /// order in the response; a no-op if the response somehow has no orders.
+    pub fn mark_cache_hit(&mut self, solved_at_block: u64) {
+        if let Some(first_order) = self.orders.first_mut() {
+            first_order.cache = Some(CacheInfo::new(solved_at_block));
+        }
+    }
 }
 
 /// A single swap order to be solved.
@@ -850,6 +860,12 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Cache provenance, present only when this quote was served from the quote cache.
+    ///
+    /// Absent on a cache miss and when the cache is disabled, so responses are byte-identical to a
+    /// non-cached solve unless the entry was served from the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache: Option<CacheInfo>,
 }
 
 impl OrderQuote {
@@ -911,6 +927,52 @@ impl OrderQuote {
     /// Fee breakdown, if encoding options were provided in the request.
     pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
         self.fee_breakdown.as_ref()
+    }
+
+    /// Cache provenance, present only when this quote was served from the quote cache.
+    pub fn cache(&self) -> Option<&CacheInfo> {
+        self.cache.as_ref()
+    }
+}
+
+/// Cache provenance for a quote served from Fynd's in-memory quote cache.
+///
+/// Present on an [`OrderQuote`] only when the quote cache is enabled (`--enable-quote-cache`) and
+/// the request was a cache hit; absent on a miss or when the cache is disabled. A hit re-solved at
+/// the current block's start is as fresh as a live solve: the cache returns the winning solve from
+/// that block and only re-encodes it for this caller. `solved_at_block` exposes the bounded
+/// staleness that remains when a per-block refresh was shed under load — the served solve is then
+/// at most the cache's staleness cutoff behind the chain head.
+///
+/// A cache hit returns the cached entry's server-generated `order_id` (the id from the solve that
+/// first populated the entry), not a fresh id minted for this request.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheInfo {
+    /// Always `true`: this marker is present only on a cache hit.
+    #[cfg_attr(feature = "openapi", schema(example = true))]
+    hit: bool,
+    /// Block the served solve was computed against. Equals the chain head on a fresh per-block
+    /// refresh; lags by up to the cache's staleness cutoff when a refresh was shed.
+    #[cfg_attr(feature = "openapi", schema(example = 21000000))]
+    solved_at_block: u64,
+}
+
+impl CacheInfo {
+    /// Create a cache marker for a hit whose solve was computed at `solved_at_block`.
+    pub fn new(solved_at_block: u64) -> Self {
+        Self { hit: true, solved_at_block }
+    }
+
+    /// Whether this quote was served from the cache. Always `true` when the marker is present.
+    pub fn hit(&self) -> bool {
+        self.hit
+    }
+
+    /// Block the served solve was computed against.
+    pub fn solved_at_block(&self) -> u64 {
+        self.solved_at_block
     }
 }
 
@@ -1461,6 +1523,57 @@ mod wire_format_tests {
         assert_eq!(swap.split(), 0.0);
     }
 
+    // ── CacheInfo: cache marker presence/absence ──────────────────────────────
+    //
+    // The marker is additive: absent on a miss so cached-off responses stay
+    // byte-identical, present with `hit: true` + `solved_at_block` on a hit.
+
+    fn order_quote_without_cache() -> OrderQuote {
+        let json = r#"{
+            "order_id": "order-1",
+            "status": "success",
+            "amount_in": "1000000000000000000",
+            "amount_out": "2000000000",
+            "gas_estimate": "150000",
+            "amount_out_net_gas": "1999000000",
+            "block": { "number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000 }
+        }"#;
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn order_quote_omits_cache_when_absent() {
+        let quote = order_quote_without_cache();
+        assert_eq!(quote.cache(), None);
+
+        let value = serde_json::to_value(&quote).unwrap();
+        assert!(value.get("cache").is_none(), "cache key must be absent on a miss, got: {value}");
+    }
+
+    #[test]
+    fn quote_serializes_cache_marker_on_hit() {
+        let mut quote = Quote::new(vec![order_quote_without_cache()], BigUint::from(150_000u64), 3);
+        quote.mark_cache_hit(21_000_123);
+
+        let value = serde_json::to_value(&quote).unwrap();
+        assert_eq!(
+            value["orders"][0]["cache"],
+            serde_json::json!({ "hit": true, "solved_at_block": 21_000_123u64 })
+        );
+    }
+
+    #[test]
+    fn cache_info_roundtrips() {
+        let json = r#"{ "hit": true, "solved_at_block": 21000123 }"#;
+        let cache: CacheInfo = serde_json::from_str(json).unwrap();
+        assert!(cache.hit());
+        assert_eq!(cache.solved_at_block(), 21_000_123);
+        assert_eq!(
+            serde_json::to_value(cache).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+    }
+
     // ── EncodingOptions: full request JSON shape ──────────────────────────────
     //
     // Verifies transfer_type serializes as "transfer_from" (snake_case, not
@@ -1732,6 +1845,9 @@ mod conversions {
                 gas_price,
                 transaction,
                 fee_breakdown,
+                // Cache provenance is stamped by the fynd-rpc handler on a hit, never by the
+                // core→DTO conversion; a freshly solved quote is always a miss.
+                cache: None,
             }
         }
     }

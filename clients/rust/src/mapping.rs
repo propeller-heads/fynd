@@ -9,9 +9,9 @@ use fynd_rpc_types::OrderQuote;
 use crate::{
     error::{ErrorCode, FyndError},
     types::{
-        BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
-        Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
-        QuoteStatus, Route, Swap, Transaction, UserTransferType,
+        BackendKind, BatchQuoteParams, BlockInfo, CacheInfo, EncodingOptions, FeeBreakdown,
+        HealthStatus, Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions,
+        QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -238,7 +238,10 @@ fn order_quote_to_quote(
             swaps_hash,
         )
     });
-    Ok(Quote::new(
+    let cache = order_quote
+        .cache()
+        .map(|info| CacheInfo::new(info.solved_at_block()));
+    let mut quote = Quote::new(
         order_quote.order_id().to_string(),
         status,
         BackendKind::Fynd,
@@ -253,7 +256,9 @@ fn order_quote_to_quote(
         receiver,
         transaction,
         fee_breakdown,
-    ))
+    );
+    quote.cache = cache;
+    Ok(quote)
 }
 
 impl From<dto::Transaction> for Transaction {
@@ -562,6 +567,32 @@ mod tests {
         // token_out and receiver are left empty until populated by quote()
         assert!(quote.token_out().is_empty());
         assert!(quote.receiver().is_empty());
+        // A quote without the wire cache marker maps to no cache provenance.
+        assert_eq!(quote.cache(), None);
+    }
+
+    #[test]
+    fn quote_from_dto_with_cache_hit() {
+        let ds: dto::OrderQuote = serde_json::from_str(
+            r#"{
+            "order_id": "test-order-id",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "999",
+            "gas_estimate": "100000",
+            "amount_out_net_gas": "998",
+            "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000},
+            "cache": {"hit": true, "solved_at_block": 20999998}
+        }"#,
+        )
+        .expect("valid order quote JSON");
+        let quote = order_quote_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
+        assert_eq!(
+            quote
+                .cache()
+                .map(CacheInfo::solved_at_block),
+            Some(20_999_998)
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -158,6 +158,28 @@
           }
         }
       },
+      "CacheInfo": {
+        "type": "object",
+        "description": "Cache provenance for a quote served from Fynd's in-memory quote cache.\n\nPresent on an [`OrderQuote`] only when the quote cache is enabled (`--enable-quote-cache`) and\nthe request was a cache hit; absent on a miss or when the cache is disabled. A hit re-solved at\nthe current block's start is as fresh as a live solve: the cache returns the winning solve from\nthat block and only re-encodes it for this caller. `solved_at_block` exposes the bounded\nstaleness that remains when a per-block refresh was shed under load — the served solve is then\nat most the cache's staleness cutoff behind the chain head.\n\nA cache hit returns the cached entry's server-generated `order_id` (the id from the solve that\nfirst populated the entry), not a fresh id minted for this request.",
+        "required": [
+          "hit",
+          "solved_at_block"
+        ],
+        "properties": {
+          "hit": {
+            "type": "boolean",
+            "description": "Always `true`: this marker is present only on a cache hit.",
+            "example": true
+          },
+          "solved_at_block": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block the served solve was computed against. Equals the chain head on a fresh per-block\nrefresh; lags by up to the cache's staleness cutoff when a refresh was shed.",
+            "example": 21000000,
+            "minimum": 0
+          }
+        }
+      },
       "ClientFeeParams": {
         "type": "object",
         "description": "Client fee configuration for the Tycho Router.\n\nWhen provided, the router charges a client fee on the swap output. The `signature`\nmust be an EIP-712 signature by the `receiver` over the `ClientFee` typed data.",
@@ -466,6 +488,17 @@
           "block": {
             "$ref": "#/components/schemas/BlockInfo",
             "description": "Block at which this quote was computed."
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheInfo",
+                "description": "Cache provenance, present only when this quote was served from the quote cache.\n\nAbsent on a cache miss and when the cache is disabled, so responses are byte-identical to a\nnon-cached solve unless the entry was served from the cache."
+              }
+            ]
           },
           "fee_breakdown": {
             "oneOf": [
