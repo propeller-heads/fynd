@@ -44,7 +44,6 @@ pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
 }
 
 /// How to recover the swap from a matched transaction.
-#[derive(Clone, Copy)]
 pub(crate) enum Strategy {
     /// The sender is the trader: net its flow (direct aggregator swaps).
     Sender,
@@ -77,11 +76,14 @@ pub(crate) struct Flow {
     /// Client fee skimmed from the output token, already added back into
     /// `swap.amount_out`.
     pub client_fee_out: Option<U256>,
+    /// Venue label asserted by the strategy itself (e.g. MetaMask declares its
+    /// venue in calldata), overriding trace-based attribution.
+    pub aggregator_override: Option<String>,
 }
 
 impl Flow {
     fn without_fees(tracked: Address, swap: NetSwap) -> Self {
-        Self { tracked, swap, client_fee: None, client_fee_out: None }
+        Self { tracked, swap, client_fee: None, client_fee_out: None, aggregator_override: None }
     }
 }
 
@@ -169,6 +171,7 @@ fn back_out_client_fees(
         swap: NetSwap { amount_in, amount_out, ..flow.swap },
         client_fee,
         client_fee_out,
+        aggregator_override: flow.aggregator_override,
     }
 }
 

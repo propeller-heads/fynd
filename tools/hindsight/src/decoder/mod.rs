@@ -163,11 +163,11 @@ impl<P: Provider> Decoder<P> {
                     venues::relay::decode(logs, &native, sender, entry_point, registry)
                 }
                 Strategy::Metamask => {
-                    venues::metamask::decode(logs, &native, sender, entry_point, registry)
+                    venues::metamask::decode(logs, &native, sender, &root.input, registry)
                 }
             };
 
-            let Some(flow) = flow else {
+            let Some(mut flow) = flow else {
                 warn!(
                     tx = %receipt.transaction_hash,
                     client = %registry.label(entry_point),
@@ -202,15 +202,17 @@ impl<P: Provider> Decoder<P> {
                 continue;
             }
 
-            let attributed =
-                attribute_aggregator(&root, entry_point, sender, registry).unwrap_or(entry_point);
-            // MetaMask declares its venue in the router calldata; that beats trace attribution,
-            // which cannot resolve token→token routes entered through Permit2.
-            let aggregator = match strategy {
-                Strategy::Metamask => venues::metamask::aggregator_from_calldata(&root.input)
-                    .unwrap_or_else(|| registry.label(attributed)),
-                Strategy::Sender | Strategy::Maker | Strategy::Relay => registry.label(attributed),
-            };
+            // A strategy that knows its venue asserts it on the flow (e.g. MetaMask declares it
+            // in calldata); otherwise attribute from the trace.
+            let aggregator = flow
+                .aggregator_override
+                .take()
+                .unwrap_or_else(|| {
+                    registry.label(
+                        attribute_aggregator(&root, entry_point, sender, registry)
+                            .unwrap_or(entry_point),
+                    )
+                });
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,

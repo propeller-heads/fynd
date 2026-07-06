@@ -33,7 +33,7 @@ sol! {
 /// route moves no native value and enters through Permit2 — so the calldata declaration is the
 /// authoritative source. Unrecognized ids pass through as-is: "airswapV4" is still more
 /// informative than a raw executor address.
-pub(crate) fn aggregator_from_calldata(input: &[u8]) -> Option<String> {
+fn aggregator_from_calldata(input: &[u8]) -> Option<String> {
     let call = swapCall::abi_decode(input).ok()?;
     Some(normalize(&call.aggregatorId))
 }
@@ -59,26 +59,27 @@ fn normalize(id: &str) -> String {
     id.to_string()
 }
 
-/// Decode a MetaMask-entered transaction: net the sender's flow, then back the
-/// client fee out of it.
+/// Decode a MetaMask-entered transaction: net the sender's flow, back the client fee out of it,
+/// and attribute the venue from the router calldata (`input`).
 pub(crate) fn decode(
     logs: &[Log],
     native: &[(Address, Address, U256)],
     sender: Address,
-    entry_point: Address,
+    input: &[u8],
     registry: &Registry,
 ) -> Option<Flow> {
-    let flow = sender_flow(logs, native, sender, entry_point)?;
+    let metamask = registry.metamask();
+    let mut flow = sender_flow(logs, native, sender, metamask.router)?;
+    flow.aggregator_override = aggregator_from_calldata(input);
     // A fee wallet trading through the router is moving its own money; its receipts are its
     // output, not a skim to back out.
-    if registry
-        .metamask()
+    if metamask
         .fee_collectors
         .contains(&flow.tracked)
     {
         return Some(flow);
     }
-    Some(back_out_client_fees(flow, logs, native, &registry.metamask().fee_collectors))
+    Some(back_out_client_fees(flow, logs, native, &metamask.fee_collectors))
 }
 
 #[cfg(test)]
@@ -144,7 +145,7 @@ mod tests {
             (router, user, U256::from(7_525)),
         ];
 
-        let flow = decode(&logs, &native, user, router, &registry).unwrap();
+        let flow = decode(&logs, &native, user, &[], &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.client_fee, None);
@@ -169,10 +170,32 @@ mod tests {
         ];
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
 
-        let flow = decode(&logs, &native, user, router, &registry).unwrap();
+        let flow = decode(&logs, &native, user, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.client_fee, Some(U256::from(9)));
         assert_eq!(flow.client_fee_out, None);
+    }
+
+    #[test]
+    fn decode_asserts_venue_from_calldata() {
+        // The declared aggregatorId lands on the flow as the venue override, so the orchestrator
+        // needs no MetaMask-specific attribution branch.
+        let registry = Registry::ethereum();
+        let user = addr(1);
+        let pool = addr(50);
+        let logs = vec![
+            make_transfer_log(addr(10), user, pool, U256::from(1_000)),
+            make_transfer_log(addr(11), pool, user, U256::from(2_000)),
+        ];
+        let call = swapCall {
+            aggregatorId: "oneInchV6FeeDynamic".to_string(),
+            tokenFrom: addr(10),
+            amount: U256::from(1_000),
+            data: Default::default(),
+        };
+
+        let flow = decode(&logs, &[], user, &call.abi_encode(), &registry).unwrap();
+        assert_eq!(flow.aggregator_override.as_deref(), Some("1inch"));
     }
 
     #[test]
@@ -180,7 +203,6 @@ mod tests {
         // Some pairs are genuinely fee-free; nothing reached a fee wallet, nothing is backed out.
         let registry = Registry::ethereum();
         let user = addr(1);
-        let router = registry.metamask().router;
         let pool = addr(50);
         let token_in = addr(10);
         let token_out = addr(11);
@@ -190,7 +212,7 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2_000)),
         ];
 
-        let flow = decode(&logs, &[], user, router, &registry).unwrap();
+        let flow = decode(&logs, &[], user, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, None);
