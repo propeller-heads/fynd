@@ -140,6 +140,26 @@ pub(crate) fn sender_flow(
         })
 }
 
+/// Net the sender's flow and back the client's fee skim out of it — the shared shape of every
+/// fee-skimming client entry (Relay, MetaMask).
+///
+/// One exception: when the tracked trader IS a fee collector, the transaction is a treasury
+/// operation — the collector's receipts are its own output, not a skim, and backing them "out"
+/// would add the output to itself and double it.
+pub(super) fn client_fee_flow(
+    logs: &[Log],
+    native: &[(Address, Address, U256)],
+    sender: Address,
+    entry_point: Address,
+    fee_collectors: &HashSet<Address>,
+) -> Option<Flow> {
+    let flow = sender_flow(logs, native, sender, entry_point)?;
+    if fee_collectors.contains(&flow.tracked) {
+        return Some(flow);
+    }
+    Some(back_out_client_fees(flow, logs, native, fee_collectors))
+}
+
 /// Back a client-fee skim out of a decoded user flow.
 ///
 /// The collector can skim on either side. An input-side skim is subtracted

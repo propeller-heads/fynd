@@ -15,7 +15,7 @@ use alloy::{
 use crate::decoder::{
     net::{to_primitive_log, NetSwap, Transfer},
     registry::Registry,
-    venues::{back_out_client_fees, sender_flow, Flow},
+    venues::{client_fee_flow, Flow},
 };
 
 /// Decode a Relay-entered transaction.
@@ -32,18 +32,10 @@ pub(crate) fn decode(
     entry_point: Address,
     registry: &Registry,
 ) -> Option<Flow> {
-    if let Some(flow) = sender_flow(logs, native, sender, entry_point) {
-        // A treasury operation: the collector itself is the trader (e.g. converting collected
-        // fees). Its receipts are its own output, not a skim — backing them "out" would add the
-        // output to itself and double it.
-        if registry
-            .relay()
-            .fee_collectors
-            .contains(&flow.tracked)
-        {
-            return Some(flow);
-        }
-        return Some(back_out_client_fees(flow, logs, native, &registry.relay().fee_collectors));
+    if let Some(flow) =
+        client_fee_flow(logs, native, sender, entry_point, &registry.relay().fee_collectors)
+    {
+        return Some(flow);
     }
     decode_rebalance(
         logs,

@@ -16,7 +16,7 @@ use alloy::{
 
 use crate::decoder::{
     registry::Registry,
-    venues::{back_out_client_fees, sender_flow, Flow},
+    venues::{client_fee_flow, Flow},
 };
 
 sol! {
@@ -69,17 +69,10 @@ pub(crate) fn decode(
     registry: &Registry,
 ) -> Option<Flow> {
     let metamask = registry.metamask();
-    let mut flow = sender_flow(logs, native, sender, metamask.router)?;
+    let mut flow =
+        client_fee_flow(logs, native, sender, metamask.router, &metamask.fee_collectors)?;
     flow.aggregator_override = aggregator_from_calldata(input);
-    // A fee wallet trading through the router is moving its own money; its receipts are its
-    // output, not a skim to back out.
-    if metamask
-        .fee_collectors
-        .contains(&flow.tracked)
-    {
-        return Some(flow);
-    }
-    Some(back_out_client_fees(flow, logs, native, &metamask.fee_collectors))
+    Some(flow)
 }
 
 #[cfg(test)]
