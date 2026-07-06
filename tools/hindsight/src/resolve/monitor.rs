@@ -23,7 +23,7 @@ use fynd_core::{
 };
 use num_bigint::BigUint;
 use tracing::{info, warn};
-use tycho_simulation::tycho_common::models::Address as CoreAddress;
+use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
@@ -32,12 +32,17 @@ use crate::{
     telemetry, usd,
 };
 
-/// How long to wait for the solver to apply the next block after releasing it. Generous because the
-/// Tycho stream periodically goes silent for minutes while it reconnects/resyncs the large
-/// `all_onchain` synchronizer set; the stream recovers on its own, so the monitor should wait it
-/// out rather than exit (which would reset all metrics). Only a truly dead feed should ever hit
-/// this.
-const BLOCK_SETTLE_TIMEOUT: Duration = Duration::from_secs(1800);
+/// How often to warn while the solver has not applied the next block.
+const STALL_WARN_INTERVAL: Duration = Duration::from_secs(300);
+/// No block for this long means the feed is dead, not slow. The observed failure mode: one
+/// server-side subscription goes silent, tycho-client's block synchronizer stops emitting while
+/// it waits for it, and ~35 minutes later backpressure kills the remaining subscriptions
+/// ("Buffer full, unsubscribing!"). Nothing resubscribes, so the stream never recovers — the
+/// monitor rebuilds the solver instead of waiting.
+const FEED_DEAD_TIMEOUT: Duration = Duration::from_secs(900);
+/// Pause between solver rebuild attempts after a feed death, so a struggling Tycho server is not
+/// hammered in a tight loop.
+const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The HTTP RPC used to decode receipts can trail the Tycho stream by a few seconds, so `target`
@@ -127,21 +132,42 @@ impl SteppingSolver for StepAdapter<'_> {
         let before = self.current_block().await;
         self.controller
             .trigger_next_block()
-            .map_err(|_| anyhow::anyhow!("block stream ended"))?;
+            .map_err(|_| anyhow::anyhow!("tycho stream ended (trigger channel closed)"))?;
 
         // Deterministic barrier: wait until the solver applies a block strictly newer than
-        // `before`.
-        let deadline = Instant::now() + BLOCK_SETTLE_TIMEOUT;
+        // `before`. An error here means the feed died — either its stream ended (peek returns
+        // None once the gating task exits) or it jammed without ending (no block within
+        // FEED_DEAD_TIMEOUT). The caller rebuilds the solver on any error.
+        let stall_started = Instant::now();
+        let mut next_warn = stall_started + STALL_WARN_INTERVAL;
         loop {
             if let Some(now) = self.current_block().await {
                 if before.is_none_or(|b| now > b) {
                     return Ok(());
                 }
             }
-            if Instant::now() >= deadline {
-                anyhow::bail!("timed out waiting for solver to apply the next block");
+            if stall_started.elapsed() >= FEED_DEAD_TIMEOUT {
+                anyhow::bail!(
+                    "no block applied in {}s; tycho feed presumed dead",
+                    stall_started.elapsed().as_secs()
+                );
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            if Instant::now() >= next_warn {
+                warn!(
+                    waited_s = stall_started.elapsed().as_secs(),
+                    last_applied_block = ?before,
+                    "tycho stream stalled; waiting for the next block"
+                );
+                next_warn += STALL_WARN_INTERVAL;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                peeked = self.controller.peek_next_block() => {
+                    if peeked.is_none() {
+                        anyhow::bail!("tycho stream ended while waiting for the next block");
+                    }
+                }
+            }
         }
     }
 }
@@ -193,8 +219,54 @@ async fn decode_block_when_available<P: Provider>(
     decoder.decode_block(block).await
 }
 
+/// One session's terminal condition: the run completed (`--max-blocks` reached) or the feed died
+/// and the caller should rebuild the solver.
+enum SessionEnd {
+    Complete,
+    FeedDead(String),
+}
+
+/// Counters that survive feed rebuilds, so coverage metrics and `--max-blocks` span the whole run.
+#[derive(Default)]
+struct Totals {
+    processed: u64,
+    total_trades: usize,
+    comparable_trades: usize,
+    skipped_blocks: u64,
+}
+
+/// Build the in-process solver and its block-step controller.
+async fn build_solver(
+    cfg: &MonitorConfig<'_>,
+    chain: Chain,
+    protocols: &[String],
+    pools_config: &fynd_rpc::config::WorkerPoolsConfig,
+) -> anyhow::Result<(Solver, BlockStepController)> {
+    info!(
+        chain = cfg.chain,
+        protocols = protocols.len(),
+        "building in-process solver (loading tokens may take minutes)…"
+    );
+    let mut builder =
+        FyndBuilder::new(chain, cfg.tycho_url, cfg.rpc_url, protocols.to_vec(), cfg.min_tvl);
+    if let Some(key) = cfg.tycho_api_key {
+        builder = builder.tycho_api_key(key);
+    }
+    for (name, pool) in pools_config.pools() {
+        builder = builder
+            .add_pool(name, pool)
+            .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
+    }
+    builder
+        .build_with_step_controller()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))
+}
+
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
-/// range.
+/// range. When the tycho feed dies (its stream ends, or no block arrives within
+/// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
+/// same decoder cache and comparisons file — so a long unattended run survives feed failures.
 pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     let chain = parse_chain(cfg.chain)
         .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain))?;
@@ -209,15 +281,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to resolve protocols: {e}"))?;
-    info!(
-        chain = cfg.chain,
-        protocols = protocols.len(),
-        "building in-process solver (loading tokens may take minutes)…"
-    );
-    let mut builder = FyndBuilder::new(chain, cfg.tycho_url, cfg.rpc_url, protocols, cfg.min_tvl);
-    if let Some(key) = cfg.tycho_api_key {
-        builder = builder.tycho_api_key(key);
-    }
+
     // Load worker pools like `fynd serve`: the default path falls back to the built-in default
     // pools when absent; custom paths that don't exist fail fast.
     let default_path = std::path::Path::new("worker_pools.toml");
@@ -234,15 +298,6 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
             },
         )?
     };
-    for (name, pool) in pools_config.pools() {
-        builder = builder
-            .add_pool(name, pool)
-            .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
-    }
-    let (solver, controller) = builder
-        .build_with_step_controller()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))?;
 
     let mut decoder = Decoder::new(provider_from(cfg.rpc_url)?, Registry::for_chain(cfg.chain)?);
 
@@ -264,43 +319,79 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         None => None,
     };
 
-    let adapter =
-        StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
-
-    // Establish a baseline applied state (N-1) before the first comparison.
-    establish_baseline(&adapter).await?;
-
-    let mut processed = 0u64;
-    let mut total_trades = 0usize;
-    let mut comparable_trades = 0usize;
-    let mut skipped_blocks = 0u64;
+    let mut totals = Totals::default();
+    // The first build fails fast — an error here is a configuration problem. Rebuilds after a
+    // feed death retry forever, since the config is known good and failures are transient.
+    let (mut solver, mut controller) = build_solver(&cfg, chain, &protocols, &pools_config).await?;
     loop {
-        if controller
+        let adapter =
+            StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
+        match run_session(&cfg, &adapter, &mut decoder, &mut comparisons, &mut totals).await {
+            SessionEnd::Complete => return Ok(()),
+            SessionEnd::FeedDead(reason) => {
+                warn!(reason, "tycho feed died; rebuilding the solver to resubscribe");
+                telemetry::record_feed_rebuild();
+            }
+        }
+        solver.shutdown();
+        (solver, controller) = loop {
+            tokio::time::sleep(REBUILD_BACKOFF).await;
+            match build_solver(&cfg, chain, &protocols, &pools_config).await {
+                Ok(built) => break built,
+                Err(e) => warn!(error = %e, "solver rebuild failed; retrying"),
+            }
+        };
+    }
+}
+
+/// Drive one solver session: step blocks and re-solve each block's settled trades until the run
+/// completes or the feed dies.
+async fn run_session<P: Provider>(
+    cfg: &MonitorConfig<'_>,
+    adapter: &StepAdapter<'_>,
+    decoder: &mut Decoder<P>,
+    comparisons: &mut Option<std::io::BufWriter<std::fs::File>>,
+    totals: &mut Totals,
+) -> SessionEnd {
+    // Establish a baseline applied state (N-1) before the first comparison.
+    if adapter.current_block().await.is_none() {
+        info!("waiting for solver to apply its first block…");
+        if let Err(e) = adapter.advance().await {
+            return SessionEnd::FeedDead(e.to_string());
+        }
+    }
+
+    loop {
+        if adapter
+            .controller
             .peek_next_block()
             .await
             .is_none()
         {
-            info!("block stream ended");
-            break;
+            return SessionEnd::FeedDead("block stream ended".to_string());
         }
         let Some(top_block) = adapter.current_block().await else {
             warn!("no applied block yet; advancing");
-            adapter.advance().await?;
+            if let Err(e) = adapter.advance().await {
+                return SessionEnd::FeedDead(e.to_string());
+            }
             continue;
         };
         let target = top_block + 1;
 
-        let trades = match decode_block_when_available(&mut decoder, target).await {
+        let trades = match decode_block_when_available(decoder, target).await {
             Ok(trades) => trades,
             Err(e) => {
-                skipped_blocks += 1;
+                totals.skipped_blocks += 1;
                 telemetry::record_skipped_block();
                 warn!(
                     block = target,
-                    skipped_total = skipped_blocks,
+                    skipped_total = totals.skipped_blocks,
                     "decode failed, skipping block: {e}"
                 );
-                adapter.advance().await?;
+                if let Err(e) = adapter.advance().await {
+                    return SessionEnd::FeedDead(e.to_string());
+                }
                 continue;
             }
         };
@@ -308,11 +399,14 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
-        let prices_top = snapshot_prices(&solver).await;
-        let ranges = resolve_block_range(&adapter, &trades).await?;
+        let prices_top = snapshot_prices(adapter.solver).await;
+        let ranges = match resolve_block_range(adapter, &trades).await {
+            Ok(ranges) => ranges,
+            Err(e) => return SessionEnd::FeedDead(e.to_string()),
+        };
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
-        let prices_back = snapshot_prices(&solver).await;
+        let prices_back = snapshot_prices(adapter.solver).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
         // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
@@ -334,36 +428,24 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
 
-        total_trades += ranges.len();
-        comparable_trades += ranges
+        totals.total_trades += ranges.len();
+        totals.comparable_trades += ranges
             .iter()
             .filter(|r| matches!(r.verdict, Verdict::Win | Verdict::Loss))
             .count();
-        telemetry::record_coverage(total_trades, comparable_trades);
+        telemetry::record_coverage(totals.total_trades, totals.comparable_trades);
 
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
-        processed += 1;
+        totals.processed += 1;
         if cfg
             .max_blocks
-            .is_some_and(|max| processed >= max)
+            .is_some_and(|max| totals.processed >= max)
         {
-            info!(processed, "reached --max-blocks");
-            break;
+            info!(processed = totals.processed, "reached --max-blocks");
+            return SessionEnd::Complete;
         }
     }
-    Ok(())
-}
-
-/// Release blocks until the solver has an applied market state, so the first comparison has a
-/// genuine top-of-block (N-1) reference.
-async fn establish_baseline(adapter: &StepAdapter<'_>) -> anyhow::Result<()> {
-    if adapter.current_block().await.is_some() {
-        return Ok(());
-    }
-    info!("waiting for solver to apply its first block…");
-    adapter.advance().await?;
-    Ok(())
 }
 
 /// Snapshot the solver's current token prices as a [`usd::PriceMap`] (token native-units per

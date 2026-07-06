@@ -23,6 +23,7 @@ const VOLUME_USD: &str = "hindsight_volume_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
+const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -85,6 +86,11 @@ pub(crate) fn describe() {
         SKIPPED_BLOCKS,
         "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
          stream past the retry budget, or the block genuinely failed to decode)"
+    );
+    describe_counter!(
+        FEED_REBUILDS,
+        "Times the tycho feed died (stream ended or no block within the dead-feed timeout) and \
+         the monitor rebuilt the solver to resubscribe"
     );
 }
 
@@ -206,6 +212,10 @@ pub(crate) fn record_block_seconds(seconds: f64) {
 
 pub(crate) fn record_skipped_block() {
     counter!(SKIPPED_BLOCKS).increment(1);
+}
+
+pub(crate) fn record_feed_rebuild() {
+    counter!(FEED_REBUILDS).increment(1);
 }
 
 async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
