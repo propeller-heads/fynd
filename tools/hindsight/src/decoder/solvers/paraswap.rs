@@ -24,8 +24,10 @@ pub(crate) fn embedded_quote(input: &[u8], amount_in: U256) -> Option<SolverQuot
         return None;
     }
     let words: Vec<U256> = input[4..]
-        .chunks_exact(32)
-        .map(U256::from_be_slice)
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .map(|word| U256::from_be_slice(word))
         .collect();
     for window in words.windows(3) {
         let (from_amount, to_amount, quoted) = (window[0], window[1], window[2]);
