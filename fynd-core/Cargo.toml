@@ -40,6 +40,10 @@ alloy = { workspace = true, features = ["sol-types"] }
 
 [features]
 test-utils = []
+# Block-step-controller build path: lets a caller release buffered blocks one at
+# a time (deterministic stepping). Used by the hindsight monitor; the API is not
+# yet stable, so it is opt-in.
+experimental = []
 
 [dev-dependencies]
 rstest.workspace = true

@@ -393,6 +393,8 @@ mod tests {
             token_out,
             amount_in: U256::from(1000),
             amount_out: U256::from(2000),
+            client_fee: None,
+            client_fee_out: None,
         }
     }
 

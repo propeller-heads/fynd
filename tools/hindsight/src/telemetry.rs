@@ -8,10 +8,10 @@ use metrics::{
     counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
-    resolve::{Comparison, Outcome, Verdict},
+    resolve::{Outcome, RangeComparison, StateResult, Verdict},
     usd,
 };
 
@@ -22,6 +22,17 @@ const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
+const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
+
+/// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
+/// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
+/// from the ETH-anchored valuation).
+const USD_OUTLIER_THRESHOLD: f64 = 1_000.0;
+
+/// Whether a USD savings value is large enough to log for inspection.
+fn is_usd_outlier(usd: f64) -> bool {
+    usd.abs() >= USD_OUTLIER_THRESHOLD
+}
 
 /// Metric label for a trade's headline verdict.
 pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
@@ -46,9 +57,9 @@ pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by client / aggregator / chain / outcome. Per-pair detail lives \
-         in the JSONL comparison output; a token-pair label here is unbounded on mainnet and would \
-         explode Prometheus series cardinality over a long run."
+        "Re-solved trades, labeled by client / aggregator / chain / outcome / state (top|back). \
+         Per-pair detail lives in the JSONL comparison output; a token-pair label here is unbounded \
+         on mainnet and would explode Prometheus series cardinality over a long run."
     );
     describe_histogram!(
         SAVINGS_BPS,
@@ -70,70 +81,117 @@ pub(crate) fn describe() {
     );
     describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
+    describe_counter!(
+        SKIPPED_BLOCKS,
+        "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
+         stream past the retry budget, or the block genuinely failed to decode)"
+    );
 }
 
-/// Record a single re-solve comparison. `prices` is the solver's token-price snapshot used to value
-/// savings in USD; an empty map disables USD recording.
-pub(crate) fn record(cmp: &Comparison, chain: &str, prices: &usd::PriceMap) {
-    counter!(
-        TRADES_TOTAL,
-        "client" => cmp.client.clone(),
-        "aggregator" => cmp.aggregator.clone(),
-        "chain" => chain.to_string(),
-        "outcome" => outcome_label(cmp.verdict).to_string(),
-    )
-    .increment(1);
-
-    // Observed volume covers every trade (including unsolvable) so per-client coverage is accurate.
-    if let Some(volume) = usd::value_usd(cmp.token_out, cmp.settled_amount_out, prices) {
+/// Record a two-state range: the top-of-block (N-1) and back-of-block (N) outcomes, each tagged
+/// with a `state` label ("top"/"back"). `prices_top`/`prices_back` are the solver's token-price
+/// snapshots at each state, used to value savings in USD; an empty map disables USD for that state.
+pub(crate) fn record_range(
+    range: &RangeComparison,
+    chain: &str,
+    prices_top: &usd::PriceMap,
+    prices_back: &usd::PriceMap,
+) {
+    // Observed volume is a per-trade quantity (the settled amount), not per-state, so record it
+    // once — valued at the top-of-block snapshot to match the headline.
+    if let Some(volume) = usd::value_usd(range.token_out, range.settled_amount_out, prices_top) {
         histogram!(
             VOLUME_USD,
-            "client" => cmp.client.clone(),
-            "aggregator" => cmp.aggregator.clone(),
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
             "chain" => chain.to_string(),
         )
         .record(volume);
     }
 
-    if let Some(bps) = cmp.deltas.net_bps {
+    record_state(range, &range.top, "top", chain, prices_top);
+    record_state(range, &range.back, "back", chain, prices_back);
+}
+
+/// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
+/// solved state — the net-of-gas bps delta, the signed USD savings, and the USD uplift (only when
+/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse).
+fn record_state(
+    range: &RangeComparison,
+    state: &StateResult,
+    state_label: &'static str,
+    chain: &str,
+    prices: &usd::PriceMap,
+) {
+    counter!(
+        TRADES_TOTAL,
+        "client" => range.client.clone(),
+        "aggregator" => range.aggregator.clone(),
+        "chain" => chain.to_string(),
+        "outcome" => outcome_label(state.verdict).to_string(),
+        "state" => state_label,
+    )
+    .increment(1);
+
+    if let Some(bps) = state.deltas.net_bps {
         histogram!(
             SAVINGS_BPS,
-            "client" => cmp.client.clone(),
-            "aggregator" => cmp.aggregator.clone(),
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
             "chain" => chain.to_string(),
+            "state" => state_label,
         )
         .record(bps);
     }
 
-    if let Outcome::Solved(solved) = &cmp.outcome {
-        if let Some(usd) =
-            usd::savings_usd(cmp.token_out, solved.amount_out, cmp.settled_amount_out, prices)
-        {
-            histogram!(
-                SAVINGS_USD,
-                "client" => cmp.client.clone(),
-                "aggregator" => cmp.aggregator.clone(),
-                "chain" => chain.to_string(),
-            )
-            .record(usd);
+    let Outcome::Solved(solved) = &state.outcome else {
+        return;
+    };
+    if let Some(usd) =
+        usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)
+    {
+        if is_usd_outlier(usd) {
+            warn!(
+                tx = %range.tx_hash,
+                block = range.block_number,
+                state = state_label,
+                client = %range.client,
+                aggregator = %range.aggregator,
+                token_in = %range.token_in,
+                token_out = %range.token_out,
+                amount_in = %range.amount_in,
+                settled_out = %range.settled_amount_out,
+                fynd_out = %solved.amount_out,
+                token_out_price = ?prices.get(&range.token_out),
+                usd,
+                "USD outlier — inspect for token mispricing vs genuinely large trade"
+            );
         }
+        histogram!(
+            SAVINGS_USD,
+            "client" => range.client.clone(),
+            "aggregator" => range.aggregator.clone(),
+            "chain" => chain.to_string(),
+            "state" => state_label,
+        )
+        .record(usd);
+    }
 
-        // Client-benefit uplift: net-of-gas improvement, recorded only when Fynd beats settled.
-        if let Some(uplift) = usd::savings_usd(
-            cmp.token_out,
-            solved.amount_out_net_gas,
-            cmp.settled_amount_out,
-            prices,
-        ) {
-            if uplift > 0.0 {
-                histogram!(
-                    IMPROVEMENT_USD,
-                    "client" => cmp.client.clone(),
-                    "aggregator" => cmp.aggregator.clone(),
-                    "chain" => chain.to_string(),
-                )
-                .record(uplift);
-            }
+    if let Some(uplift) = usd::savings_usd(
+        range.token_out,
+        solved.amount_out_net_gas,
+        range.settled_amount_out,
+        prices,
+    ) {
+        if uplift > 0.0 {
+            histogram!(
+                IMPROVEMENT_USD,
+                "client" => range.client.clone(),
+                "aggregator" => range.aggregator.clone(),
+                "chain" => chain.to_string(),
+                "state" => state_label,
+            )
+            .record(uplift);
         }
     }
 }
@@ -144,6 +202,10 @@ pub(crate) fn record_coverage(total: usize, comparable: usize) {
 
 pub(crate) fn record_block_seconds(seconds: f64) {
     histogram!(BLOCK_SECONDS).record(seconds);
+}
+
+pub(crate) fn record_skipped_block() {
+    counter!(SKIPPED_BLOCKS).increment(1);
 }
 
 async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
@@ -193,22 +255,34 @@ mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
-    use crate::resolve::{Deltas, SolvedAmount};
+    use crate::{
+        decoder::DecodedTrade,
+        resolve::{build_range, SolvedAmount},
+    };
 
-    fn comparison(verdict: Verdict, net_bps: Option<f64>) -> Comparison {
-        Comparison {
-            tx_hash: "0xabc".into(),
+    fn trade(token_out: Address, settled: u64) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: Default::default(),
             block_number: 21_000_000,
             client: "relay".into(),
             aggregator: "tycho".into(),
+            sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
-            token_out: Address::repeat_byte(0x22),
-            amount_in: U256::ZERO,
-            settled_amount_out: U256::ZERO,
-            outcome: Outcome::Unsolvable("x".into()),
-            deltas: Deltas { raw_bps: None, net_bps },
-            verdict,
+            token_out,
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(settled),
+            client_fee: None,
+            client_fee_out: None,
         }
+    }
+
+    fn solved(amount_out: u64, net: u64) -> Outcome {
+        Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(amount_out),
+            amount_out_net_gas: U256::from(net),
+            gas_estimate: U256::from(21_000),
+            quote_json: None,
+        })
     }
 
     #[test]
@@ -220,6 +294,15 @@ mod tests {
     }
 
     #[test]
+    fn usd_outlier_threshold() {
+        assert!(!is_usd_outlier(0.0));
+        assert!(!is_usd_outlier(USD_OUTLIER_THRESHOLD - 1.0));
+        assert!(!is_usd_outlier(-(USD_OUTLIER_THRESHOLD - 1.0)));
+        assert!(is_usd_outlier(USD_OUTLIER_THRESHOLD));
+        assert!(is_usd_outlier(-(USD_OUTLIER_THRESHOLD * 100.0)));
+    }
+
+    #[test]
     fn coverage_ratio_math() {
         assert_eq!(coverage_ratio(0, 0), 0.0);
         assert_eq!(coverage_ratio(10, 4), 0.4);
@@ -227,79 +310,53 @@ mod tests {
     }
 
     #[test]
-    fn record_emits_labeled_metrics() {
-        // Isolated recorder (not global) so the test is deterministic and re-runnable.
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || {
-            record(&comparison(Verdict::Win, Some(42.0)), "ethereum", &usd::PriceMap::new());
-            record_coverage(2, 1);
-        });
-        let rendered = handle.render();
-
-        assert!(rendered.contains("hindsight_trades_total"), "rendered: {rendered}");
-        assert!(rendered.contains("outcome=\"win\""));
-        assert!(rendered.contains("client=\"relay\""));
-        assert!(rendered.contains("hindsight_savings_bps"));
-        assert!(rendered.contains("hindsight_coverage_ratio"));
-    }
-
-    #[test]
-    fn record_emits_usd_for_stablecoin_out() {
+    fn record_range_labels_both_states() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
-        let mut cmp = comparison(Verdict::Win, Some(10.0));
-        cmp.token_out = usdc;
-        cmp.settled_amount_out = U256::from(1_000_000_000u64); // 1000 USDC
-        cmp.outcome = Outcome::Solved(SolvedAmount {
-            amount_out: U256::from(1_010_000_000u64), // 1010 USDC
-            amount_out_net_gas: U256::from(1_005_000_000u64),
-            gas_estimate: U256::from(120_000u64),
-        });
+        // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
+        let range = build_range(
+            &trade(usdc, 1_000_000_000),
+            solved(1_010_000_000, 1_005_000_000),
+            solved(998_000_000, 995_000_000),
+        );
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let prices = usd::PriceMap::from([(usdc, 2e-9)]);
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || record(&cmp, "ethereum", &prices));
-        let rendered = handle.render();
-        assert!(rendered.contains("hindsight_savings_usd"), "rendered: {rendered}");
-        // Volume is valued from the same price snapshot and labeled by client.
-        assert!(rendered.contains("hindsight_volume_usd"), "rendered: {rendered}");
-        // Fynd's net-of-gas output (1005 USDC) beats settled (1000) → uplift recorded.
-        assert!(rendered.contains("hindsight_improvement_usd"), "rendered: {rendered}");
-    }
-
-    #[test]
-    fn record_skips_improvement_when_fynd_worse() {
-        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
-        let mut cmp = comparison(Verdict::Loss, Some(-10.0));
-        cmp.token_out = usdc;
-        cmp.settled_amount_out = U256::from(1_000_000_000u64); // 1000 USDC
-        cmp.outcome = Outcome::Solved(SolvedAmount {
-            amount_out: U256::from(995_000_000u64),
-            amount_out_net_gas: U256::from(990_000_000u64), // worse than settled
-            gas_estimate: U256::from(120_000u64),
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices);
+            record_coverage(2, 1);
         });
-        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
-
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || record(&cmp, "ethereum", &prices));
         let rendered = handle.render();
-        // Fynd is worse → no uplift (client would route elsewhere).
-        assert!(!rendered.contains("hindsight_improvement_usd"), "rendered: {rendered}");
+
+        // Both states are counted, each under its own `state` label and verdict.
+        assert!(rendered.contains("state=\"top\""), "rendered: {rendered}");
+        assert!(rendered.contains("state=\"back\""), "rendered: {rendered}");
+        assert!(rendered.contains("outcome=\"win\""));
+        assert!(rendered.contains("outcome=\"loss\""));
+        assert!(rendered.contains("client=\"relay\""));
+        // Top beats settled → uplift recorded; volume recorded once.
+        assert!(rendered.contains("hindsight_improvement_usd"));
+        assert!(rendered.contains("hindsight_volume_usd"));
+        assert!(rendered.contains("hindsight_coverage_ratio"));
     }
 
     #[test]
-    fn record_skips_savings_when_unsolvable() {
+    fn record_range_skips_savings_when_unsolvable() {
+        let range = build_range(
+            &trade(Address::repeat_byte(0x22), 1_000),
+            Outcome::Unsolvable("x".into()),
+            Outcome::Unsolvable("x".into()),
+        );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record(&comparison(Verdict::Unsolvable, None), "ethereum", &usd::PriceMap::new());
+            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
         });
         let rendered = handle.render();
         assert!(rendered.contains("outcome=\"unsolvable\""));
-        // No net bps → no savings sample recorded.
+        // No solved state and no prices → no savings/improvement samples.
         assert!(!rendered.contains("hindsight_savings_bps"));
+        assert!(!rendered.contains("hindsight_improvement_usd"));
     }
 }
