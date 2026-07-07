@@ -56,6 +56,8 @@ pub(crate) struct MonitorConfig<'a> {
     pub rpc_url: &'a str,
     pub tycho_url: &'a str,
     pub chain: &'a str,
+    /// Decoder address-book TOML; `None` uses the chain's built-in book.
+    pub registry: Option<&'a std::path::Path>,
     pub protocols: Vec<String>,
     pub min_tvl: f64,
     pub tycho_api_key: Option<&'a str>,
@@ -299,7 +301,8 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
         )?
     };
 
-    let mut decoder = Decoder::new(provider_from(cfg.rpc_url)?, Registry::for_chain(cfg.chain)?);
+    let mut decoder =
+        Decoder::new(provider_from(cfg.rpc_url)?, Registry::load(cfg.chain, cfg.registry)?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
@@ -510,6 +513,7 @@ mod tests {
             rpc_url: &rpc_url,
             tycho_url: &tycho_url,
             chain: "ethereum",
+            registry: None,
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
             min_tvl: 10_000.0,

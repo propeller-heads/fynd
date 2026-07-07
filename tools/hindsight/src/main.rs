@@ -43,6 +43,10 @@ struct DecodeArgs {
     #[arg(long, conflicts_with = "block")]
     range: Option<String>,
 
+    /// Decoder address-book TOML (defaults to the built-in Ethereum book)
+    #[arg(long, env = "HINDSIGHT_REGISTRY")]
+    registry: Option<std::path::PathBuf>,
+
     /// Output as JSON instead of human-readable
     #[arg(long)]
     json: bool,
@@ -80,6 +84,10 @@ struct VerifyArgs {
     #[arg(long, env = "ALLIUM_QUERY_ID")]
     allium_query_id: String,
 
+    /// Decoder address-book TOML (defaults to the built-in Ethereum book)
+    #[arg(long, env = "HINDSIGHT_REGISTRY")]
+    registry: Option<std::path::PathBuf>,
+
     /// Max allowed amount difference vs Allium, in basis points
     #[arg(long, default_value_t = 50.0)]
     tolerance_bps: f64,
@@ -102,6 +110,10 @@ struct MonitorArgs {
     /// Chain to monitor (the decoder is Ethereum-only for now)
     #[arg(long, default_value = "ethereum")]
     chain: String,
+
+    /// Decoder address-book TOML (defaults to the chain's built-in book)
+    #[arg(long, env = "HINDSIGHT_REGISTRY")]
+    registry: Option<std::path::PathBuf>,
 
     /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
     /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
@@ -156,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url: &args.rpc_url,
                 tycho_url: &args.tycho_url,
                 chain: &args.chain,
+                registry: args.registry.as_deref(),
                 protocols: args.protocols,
                 min_tvl: args.min_tvl,
                 tycho_api_key: args.tycho_api_key.as_deref(),
@@ -173,7 +186,8 @@ async fn main() -> anyhow::Result<()> {
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
-    let mut decoder = decoder::Decoder::new(provider, decoder::Registry::ethereum());
+    let registry = decoder::Registry::load("ethereum", args.registry.as_deref())?;
+    let mut decoder = decoder::Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
@@ -211,7 +225,8 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
     let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let mut decoder = decoder::Decoder::new(provider, decoder::Registry::ethereum());
+    let registry = decoder::Registry::load("ethereum", args.registry.as_deref())?;
+    let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();

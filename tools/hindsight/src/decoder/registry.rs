@@ -1,9 +1,55 @@
-use std::collections::{HashMap, HashSet};
+//! The decoder's address book: which contracts are aggregators, clients, batch settlers, and
+//! venue infrastructure on one chain.
+//!
+//! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
+//! from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain book without
+//! recompiling. This module only holds the lookups the decode strategies ask
+//! ([`Registry::is_aggregator`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
-use alloy::primitives::{address, Address};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
+
+use alloy::primitives::Address;
+use anyhow::Context;
+use serde::Deserialize;
+
+/// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
+/// cannot fail to parse at runtime).
+const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
+
+/// On-disk shape of a chain's address book. Field meanings are documented in
+/// `registry/ethereum.toml`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressBook {
+    wrapped_native: Address,
+    batch_settlers: HashSet<Address>,
+    aggregators: HashMap<Address, String>,
+    clients: HashMap<Address, String>,
+    labels: HashMap<Address, String>,
+    relay: RelayBook,
+    metamask: MetamaskBook,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayBook {
+    fee_collectors: HashSet<Address>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetamaskBook {
+    router: Address,
+    fee_collectors: HashSet<Address>,
+}
 
 /// Relay's addresses on one chain: the routers users enter through and the
 /// collectors its fee skims land on.
+#[derive(Debug)]
 pub(crate) struct RelayAddresses {
     pub routers: HashSet<Address>,
     pub fee_collectors: HashSet<Address>,
@@ -11,22 +57,19 @@ pub(crate) struct RelayAddresses {
 
 /// MetaMask's addresses on one chain: the swap router users enter through and
 /// the wallets its fee skims land on.
+#[derive(Debug)]
 pub(crate) struct MetamaskAddresses {
     pub router: Address,
     pub fee_collectors: HashSet<Address>,
 }
 
-/// Per-chain address book for trade decoding: which contracts are aggregators,
-/// clients, batch settlers, and venue infrastructure.
-///
-/// Built once per run via [`Registry::for_chain`]. Only Ethereum is populated
-/// today; supporting another chain means adding a constructor with that
-/// chain's addresses, not touching decode logic.
+/// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
+#[derive(Debug)]
 pub(crate) struct Registry {
     /// Aggregator routers — the venue that actually settles a swap.
-    aggregators: HashMap<Address, &'static str>,
+    aggregators: HashMap<Address, String>,
     /// Every known address (aggregators and clients), for name resolution.
-    names: HashMap<Address, &'static str>,
+    names: HashMap<Address, String>,
     /// Batch-settlement venues where `tx.to` is the settlement contract and
     /// the transaction sender is a solver, not the trader.
     batch_settlers: HashSet<Address>,
@@ -34,7 +77,7 @@ pub(crate) struct Registry {
     /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
     /// because `is_known` drives strategy selection and filler-entered transactions have to
     /// keep matching via their aggregator logs (Maker), not sender netting.
-    labels: HashMap<Address, &'static str>,
+    labels: HashMap<Address, String>,
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
@@ -43,122 +86,55 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    pub(crate) fn for_chain(chain: &str) -> anyhow::Result<Self> {
+    /// Load the address book for a chain, or from an explicit TOML file when given (which wins
+    /// over the chain name — the file says what it describes).
+    pub(crate) fn load(chain: &str, override_path: Option<&Path>) -> anyhow::Result<Self> {
+        if let Some(path) = override_path {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("failed to read registry file {}", path.display()))?;
+            return Self::from_toml(&text)
+                .with_context(|| format!("invalid registry file {}", path.display()));
+        }
         match chain.to_lowercase().as_str() {
             "ethereum" => Ok(Self::ethereum()),
             other => anyhow::bail!(
-                "no decoder address registry for chain '{other}' (only ethereum is supported)"
+                "no built-in decoder address registry for chain '{other}' (only ethereum); \
+                 pass --registry with that chain's address book"
             ),
         }
     }
 
+    /// The built-in Ethereum address book.
     pub(crate) fn ethereum() -> Self {
-        let aggregators = HashMap::from([
-            // 1inch v6 and v5 Aggregation Routers
-            (address!("0x111111125421ca6dc452d289314280a0f8842a65"), "1inch"),
-            (address!("0x1111111254eeb25477b68fb85ed929f73a960582"), "1inch"),
-            // 0x Exchange Proxy (legacy) and AllowanceHolder (Settler)
-            (address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff"), "0x"),
-            (address!("0x0000000000001ff3684f28c67538d4d072c22734"), "0x"),
-            // CoW Protocol Settlement
-            (address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41"), "cow"),
-            // ParaSwap Augustus v6.2
-            (address!("0x6a000f20005980200259b80c5102003040001068"), "paraswap"),
-            // Uniswap Universal Router
-            (address!("0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad"), "uniswap"),
-            // UniswapX Dutch order reactor (filler-initiated; found via its log)
-            (address!("0x00000011f84b9aa48e5f8aa8b9897600006289be"), "uniswapx"),
-            // OKX DEX Router
-            (address!("0xf3de3c0d654fda23dad170f0f320a92172509127"), "okx"),
-            // KyberSwap MetaAggregationRouter v2
-            (address!("0x6131b5fae19ea4f9d964eac0408e4408b66337b5"), "kyberswap"),
-            // OKX DEX Router 6 (per OKX docs; the prior entry is an older deployment)
-            (address!("0x28b1dc1a5e3699a428bc51d234dfab7c9cb2a183"), "okx"),
-            // LiFi Diamond
-            (address!("0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"), "lifi"),
-            // Tycho (PropellerHeads) router — current, v2, and prior deployment
-            (address!("0x1f8db310f32d48b6180ff902ec60c586128cef47"), "tycho"),
-            (address!("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35"), "tycho"),
-            (address!("0xda892c989d07a18b5dd3f392d949f00df15c5736"), "tycho"),
-        ]);
+        Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
+    }
 
-        // Client contracts — the platform that initiates a trade and routes it
-        // through an aggregator found in the trace.
-        let clients: HashMap<Address, &'static str> = HashMap::from([
-            // Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies
-            (address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222"), "relay"),
-            (address!("0x3ec130b627944cad9b2750300ecb0a695da522b6"), "relay"),
-            (address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"), "relay"),
-            (address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be"), "relay"),
-            (address!("0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7"), "relay"),
-            // MetaMask Swap Router
-            (address!("0x881d40237659c251811cec9c364ef91dc08d300c"), "metamask"),
-        ]);
+    fn from_toml(text: &str) -> anyhow::Result<Self> {
+        let book: AddressBook =
+            toml::from_str(text).context("failed to parse address book TOML")?;
 
-        let relay = RelayAddresses {
-            routers: clients
-                .iter()
-                .filter(|(_, name)| **name == "relay")
-                .map(|(address, _)| *address)
-                .collect(),
-            // Relay fee collector (input-side skim by the Relay router). Sole collector across a
-            // 25-tx on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
-            fee_collectors: HashSet::from([address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef")]),
-        };
+        let routers = book
+            .clients
+            .iter()
+            .filter(|(_, name)| name.as_str() == "relay")
+            .map(|(address, _)| *address)
+            .collect();
 
-        let metamask = MetamaskAddresses {
-            router: address!("0x881d40237659c251811cec9c364ef91dc08d300c"),
-            // MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the
-            // two, the rest were genuinely fee-free pairs); the skim is ~87.5 bps plus a gas
-            // recoup on gasless "smart swaps", taken from whichever swap side is native ETH,
-            // else from a swap token directly.
-            fee_collectors: HashSet::from([
-                address!("0xe3478b0bb1a5084567c319096437924948be1964"),
-                address!("0xf326e4de8f66a0bdc0970b79e0924e33c79f1915"),
-            ]),
-        };
+        let mut names = book.aggregators.clone();
+        names.extend(book.clients);
 
-        // Entry points identified from public labels (Etherscan tags, Dune spellbook solver
-        // lists, project sites), ranked by observed volume in monitor runs. Display-only: most
-        // are solver/filler/MEV flow — not clients routing user orders — and their transactions
-        // must keep matching via aggregator logs, so they stay out of `names`.
-        let labels = HashMap::from([
-            // Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan
-            // "Market Maker"; the 0xbee… vanity family is Kipseli across CoW/1inch listings).
-            (address!("0xbee162fa5ae892be74f3f3e01c23da89adbccccc"), "kipseli"),
-            (address!("0xbee3211ab312a8d065c4fef0247448e17a8da000"), "kipseli"),
-            // Average Solutions: intent solver for UniswapX / 1inch Fusion
-            // (average-solutions.xyz; operated by average-solutions.eth).
-            (address!("0xdeadc0de0000e54725ad1bf220324717043e02bf"), "average-solutions"),
-            // Rizzolver (Wintermute): UniswapX filler, CoW solver, 1inch Fusion resolver.
-            (address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17"), "rizzolver"),
-            (address!("0x8f5835e9d756c9bd934bce527157a4b0ef3c5cb7"), "rizzolver"),
-            (address!("0xa8c1c98aaf99a5dfc907d61b892b2ad624901185"), "rizzolver"),
-            // CoW solvers (spellbook cow_protocol_ethereum_solvers).
-            (address!("0x1921e0ff550c09066edd4df05d304151c45e77de"), "barter"),
-            (address!("0xa9d635ef85bc37eb9ff9d6165481ea230ed32392"), "quasi"),
-            // MEV bots (Etherscan public tags); c0ffeebabe.eth's is the only named operator.
-            (address!("0xe08d97e151473a848c3d9ca3f323cb720472d015"), "c0ffeebabe"),
-            (address!("0x06cff7088619c7178f5e14f0b119458d08d2f5ef"), "mev-bot"),
-            (address!("0x81463b0f960f247f704377661ec81c1fd65b5128"), "mev-bot"),
-            // Pendle Router V4 (Etherscan name tag) — a protocol router, not an aggregator.
-            (address!("0x888888888889758f76e7103c6cbf23abbf58f946"), "pendle"),
-        ]);
-
-        let mut names = aggregators.clone();
-        names.extend(clients);
-
-        Self {
-            aggregators,
+        Ok(Self {
+            aggregators: book.aggregators,
             names,
-            // CoW Protocol Settlement.
-            batch_settlers: HashSet::from([address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41")]),
-            labels,
-            // WETH
-            wrapped_native: address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
-            relay,
-            metamask,
-        }
+            batch_settlers: book.batch_settlers,
+            labels: book.labels,
+            wrapped_native: book.wrapped_native,
+            relay: RelayAddresses { routers, fee_collectors: book.relay.fee_collectors },
+            metamask: MetamaskAddresses {
+                router: book.metamask.router,
+                fee_collectors: book.metamask.fee_collectors,
+            },
+        })
     }
 
     /// Whether the address is a known client or aggregator.
@@ -195,20 +171,56 @@ impl Registry {
         self.names
             .get(&address)
             .or_else(|| self.labels.get(&address))
-            .map_or_else(|| address.to_string(), |name| (*name).to_string())
+            .map_or_else(|| address.to_string(), Clone::clone)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::address;
+
     use super::*;
     use crate::decoder::test_utils::addr;
 
     #[test]
-    fn for_chain_selects_ethereum() {
-        assert!(Registry::for_chain("ethereum").is_ok());
-        assert!(Registry::for_chain("Ethereum").is_ok());
-        assert!(Registry::for_chain("base").is_err());
+    fn embedded_ethereum_book_parses() {
+        // `ethereum()` expects; this test is what makes that expectation safe.
+        let registry = Registry::ethereum();
+        assert!(!registry.aggregators.is_empty());
+        assert!(!registry.relay().routers.is_empty());
+    }
+
+    #[test]
+    fn load_selects_ethereum() {
+        assert!(Registry::load("ethereum", None).is_ok());
+        assert!(Registry::load("Ethereum", None).is_ok());
+        assert!(Registry::load("base", None).is_err());
+    }
+
+    #[test]
+    fn load_reports_unreadable_and_invalid_files() {
+        let missing = Registry::load("ethereum", Some(Path::new("/nonexistent/book.toml")));
+        assert!(missing
+            .unwrap_err()
+            .to_string()
+            .contains("failed to read registry file"));
+
+        let dir = std::env::temp_dir().join("hindsight_registry_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.toml");
+        std::fs::write(&path, "wrapped_native = \"not an address\"").unwrap();
+        let invalid = Registry::load("ethereum", Some(&path));
+        assert!(invalid
+            .unwrap_err()
+            .to_string()
+            .contains("invalid registry file"));
+    }
+
+    #[test]
+    fn unknown_toml_key_is_rejected() {
+        // A typo'd section must fail loudly, not silently drop addresses.
+        let text = format!("{ETHEREUM_TOML}\n[aggregatorz]\n");
+        assert!(Registry::from_toml(&text).is_err());
     }
 
     #[test]
