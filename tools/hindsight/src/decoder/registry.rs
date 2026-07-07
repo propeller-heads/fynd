@@ -1,10 +1,10 @@
-//! The decoder's address book: which contracts are aggregators, clients, batch settlers, and
+//! The decoder's address book: which contracts are solvers, clients, batch settlers, and
 //! venue infrastructure on one chain.
 //!
 //! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
 //! from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain book without
 //! recompiling. This module only holds the lookups the decode strategies ask
-//! ([`Registry::is_aggregator`], [`Registry::is_batch_settler`], [`Registry::label`], …).
+//! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -27,7 +27,7 @@ const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
 struct AddressBook {
     wrapped_native: Address,
     batch_settlers: HashSet<Address>,
-    aggregators: HashMap<Address, String>,
+    solvers: HashMap<Address, String>,
     clients: HashMap<String, ClientAddresses>,
     labels: HashMap<Address, String>,
 }
@@ -45,9 +45,9 @@ pub(crate) struct ClientAddresses {
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
 #[derive(Debug)]
 pub(crate) struct Registry {
-    /// Aggregator routers — the venue that actually settles a swap.
-    aggregators: HashMap<Address, String>,
-    /// Every known address (aggregators and clients), for name resolution.
+    /// Solver routers — the venue that actually settles a swap.
+    solvers: HashMap<Address, String>,
+    /// Every known address (solvers and clients), for name resolution.
     names: HashMap<Address, String>,
     /// Batch-settlement venues where `tx.to` is the settlement contract and
     /// the transaction sender is a solver, not the trader.
@@ -55,7 +55,7 @@ pub(crate) struct Registry {
     /// Display names for entry points that are neither clients nor venues — market-maker
     /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
     /// because `is_known` drives strategy selection and filler-entered transactions have to
-    /// keep matching via their aggregator logs (Maker), not sender netting.
+    /// keep matching via their solver logs (Maker), not sender netting.
     labels: HashMap<Address, String>,
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
@@ -104,7 +104,7 @@ impl Registry {
             }
         }
 
-        let mut names = book.aggregators.clone();
+        let mut names = book.solvers.clone();
         for (name, client) in &book.clients {
             for &entry_point in &client.entry_points {
                 names.insert(entry_point, name.clone());
@@ -112,7 +112,7 @@ impl Registry {
         }
 
         Ok(Self {
-            aggregators: book.aggregators,
+            solvers: book.solvers,
             names,
             batch_settlers: book.batch_settlers,
             labels: book.labels,
@@ -121,13 +121,13 @@ impl Registry {
         })
     }
 
-    /// Whether the address is a known client or aggregator.
+    /// Whether the address is a known client or solver.
     pub(crate) fn is_known(&self, address: Address) -> bool {
         self.names.contains_key(&address)
     }
 
-    pub(crate) fn is_aggregator(&self, address: Address) -> bool {
-        self.aggregators.contains_key(&address)
+    pub(crate) fn is_solver(&self, address: Address) -> bool {
+        self.solvers.contains_key(&address)
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. CoW). Such trades
@@ -177,7 +177,7 @@ mod tests {
     fn embedded_ethereum_book_parses() {
         // `ethereum()` expects; this test is what makes that expectation safe.
         let registry = Registry::ethereum();
-        assert!(!registry.aggregators.is_empty());
+        assert!(!registry.solvers.is_empty());
         assert!(!registry
             .client("relay")
             .unwrap()
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn unknown_toml_key_is_rejected() {
         // A typo'd section must fail loudly, not silently drop addresses.
-        let text = format!("{ETHEREUM_TOML}\n[aggregatorz]\n");
+        let text = format!("{ETHEREUM_TOML}\n[solverz]\n");
         assert!(Registry::from_toml(&text).is_err());
     }
 
@@ -223,9 +223,9 @@ mod tests {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
-        assert!(registry.is_aggregator(oneinch));
+        assert!(registry.is_solver(oneinch));
         assert!(registry.is_known(relay));
-        assert!(!registry.is_aggregator(relay));
+        assert!(!registry.is_solver(relay));
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
             registry.client_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
             Some("metamask")
         );
-        // A fee collector is not an entry point; an aggregator is not a client.
+        // A fee collector is not an entry point; a solver is not a client.
         assert_eq!(registry.client_name(collector), None);
         assert!(registry.client("kyberswap").is_none());
     }
@@ -285,12 +285,12 @@ mod tests {
     #[test]
     fn display_labels_resolve_without_becoming_known() {
         // Solver/filler labels are display-only: is_known drives strategy selection, and a
-        // filler-entered tx must keep matching via its aggregator logs (Maker), not as a
+        // filler-entered tx must keep matching via its solver logs (Maker), not as a
         // known-client Sender flow.
         let registry = Registry::ethereum();
         let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");
         assert_eq!(registry.label(rizzolver), "rizzolver");
         assert!(!registry.is_known(rizzolver));
-        assert!(!registry.is_aggregator(rizzolver));
+        assert!(!registry.is_solver(rizzolver));
     }
 }

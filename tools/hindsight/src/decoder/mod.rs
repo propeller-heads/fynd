@@ -23,12 +23,12 @@ use tracing::{debug, warn};
 use crate::decoder::{
     guards::{received_nft, wrap_pair_mispaired},
     ledger::TransferLedger,
-    trace::{attribute_aggregator, collect_native_transfers, fetch_trace, route_gas},
+    trace::{attribute_solver, collect_native_transfers, fetch_trace, route_gas},
     venues::{DecodeContext, Matched},
 };
 pub(crate) use crate::decoder::{registry::Registry, venues::SolverQuote};
 
-/// A decoded aggregator trade: what token went in, what came out.
+/// A decoded solver trade: what token went in, what came out.
 ///
 /// Native ETH is represented as [`Address::ZERO`].
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,7 +36,7 @@ pub(crate) struct DecodedTrade {
     pub tx_hash: TxHash,
     pub block_number: u64,
     pub client: String,
-    pub aggregator: String,
+    pub solver: String,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -72,7 +72,7 @@ pub(crate) struct DecodedTrade {
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
-/// with many aggregator trades still completes within the block time
+/// with many solver trades still completes within the block time
 /// without tripping provider rate limits.
 const TRACE_CONCURRENCY: usize = 10;
 
@@ -99,15 +99,15 @@ impl<P: Provider> Decoder<P> {
         &self.provider
     }
 
-    /// Decode aggregator trades from a block.
+    /// Decode solver trades from a block.
     ///
     /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a
     /// transaction two ways: its entry point (`tx.to`) is a known client or
-    /// aggregator, or one of its logs was emitted by a known aggregator. The
+    /// solver, or one of its logs was emitted by a known solver. The
     /// second case catches filler-initiated intent fills (UniswapX, 1inch
     /// limit orders) where `tx.to` is a rotating filler. Matched transactions are
     /// traced concurrently; the trace recovers native ETH flows and attributes
-    /// the settling aggregator.
+    /// the settling solver.
     pub(crate) async fn decode_block(
         &mut self,
         block_number: u64,
@@ -197,12 +197,12 @@ impl<P: Provider> Decoder<P> {
 
             // A strategy that knows its venue asserts it on the flow (e.g. MetaMask declares it
             // in calldata); otherwise attribute from the trace.
-            let aggregator = flow
-                .aggregator_override
+            let solver = flow
+                .solver_override
                 .take()
                 .unwrap_or_else(|| {
                     registry.label(
-                        attribute_aggregator(&root, entry_point, sender, registry)
+                        attribute_solver(&root, entry_point, sender, registry)
                             .unwrap_or(entry_point),
                     )
                 });
@@ -226,14 +226,14 @@ impl<P: Provider> Decoder<P> {
             // The solver's off-chain quote, when its calldata declares one. Dispatched on the
             // attributed solver so a lookalike blob from another router cannot masquerade as a
             // quote, and unit-checked against the settled amount (quotes are self-reported).
-            let quote = venues::embedded_quote(&aggregator, &root.input, flow.swap.amount_in)
+            let quote = venues::embedded_quote(&solver, &root.input, flow.swap.amount_in)
                 .filter(|quote| venues::plausible_quote(quote, flow.swap.amount_out));
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
                 client: registry.label(entry_point),
-                aggregator,
+                solver,
                 sender: flow.tracked,
                 token_in: flow.swap.token_in,
                 token_out: flow.swap.token_out,

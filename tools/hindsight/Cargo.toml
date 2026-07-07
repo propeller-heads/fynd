@@ -2,7 +2,7 @@
 name = "hindsight"
 version.workspace = true
 edition = "2021"
-description = "Decode aggregator swaps from on-chain data"
+description = "Decode solver swaps from on-chain data"
 license = "MIT"
 
 [[bin]]

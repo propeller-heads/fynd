@@ -1,6 +1,6 @@
 //! KyberSwap-specific calldata extraction.
 //!
-//! Kyber's aggregator API asks integrators to pass a `clientData` blob, which the router embeds
+//! Kyber's solver API asks integrators to pass a `clientData` blob, which the router embeds
 //! verbatim in the swap calldata: a flat JSON object carrying the integrator's name and — the
 //! valuable part — the off-chain quoted output (`AmountOut`) the route was chosen on. The settled
 //! amount tells us what the user got; the quote tells us what the solver promised at decision

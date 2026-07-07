@@ -1,6 +1,6 @@
 //! LiFi-specific matching rules.
 //!
-//! LiFi's Diamond settles both same-chain swaps (decoded like any aggregator) and cross-chain
+//! LiFi's Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
 //! bridge orders, which must never decode as swaps.
 
 use alloy::{rpc::types::Log, sol, sol_types::SolEvent};

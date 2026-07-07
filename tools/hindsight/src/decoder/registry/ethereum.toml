@@ -1,4 +1,4 @@
-# Ethereum address book for trade decoding: which contracts are aggregators, clients, batch
+# Ethereum address book for trade decoding: which contracts are solvers, clients, batch
 # settlers, and venue infrastructure. Loaded by `Registry` (see registry.rs for what each section
 # drives); pass a modified copy via `--registry` to extend it without recompiling.
 
@@ -10,8 +10,8 @@ wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 # a solver, not the trader (CoW Protocol Settlement).
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 
-# Aggregator routers — the venue that actually settles a swap.
-[aggregators]
+# Solver routers — the venue that actually settles a swap.
+[solvers]
 # 1inch v6 and v5 Aggregation Routers
 "0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
 "0x1111111254eeb25477b68fb85ed929f73a960582" = "1inch"
@@ -38,14 +38,14 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xfd0b31d2e955fa55e3fa641fe90e08b677188d35" = "tycho"
 "0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
 
-# Clients — platforms that initiate a trade and route it through an aggregator found in the
+# Clients — platforms that initiate a trade and route it through a solver found in the
 # trace. Each section name must have a decode strategy in code (venues::client_strategy);
 # `entry_points` are the contracts users enter through, `fee_collectors` where its skims land.
 
 # Display names for entry points that are neither clients nor venues — market-maker fillers,
-# solver contracts, bot routers. Label-only: these must NOT be clients or aggregators, because
+# solver contracts, bot routers. Label-only: these must NOT be clients or solvers, because
 # known-ness drives strategy selection and filler-entered transactions have to keep matching via
-# their aggregator logs (Maker), not sender netting. Identified from public labels (Etherscan
+# their solver logs (Maker), not sender netting. Identified from public labels (Etherscan
 # tags, Dune spellbook solver lists, project sites), ranked by observed volume in monitor runs.
 [labels]
 # Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Maker";
@@ -66,7 +66,7 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xe08d97e151473a848c3d9ca3f323cb720472d015" = "c0ffeebabe"
 "0x06cff7088619c7178f5e14f0b119458d08d2f5ef" = "mev-bot"
 "0x81463b0f960f247f704377661ec81c1fd65b5128" = "mev-bot"
-# Pendle Router V4 (Etherscan name tag) — a protocol router, not an aggregator.
+# Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
 "0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
 
 [clients.relay]

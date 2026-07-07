@@ -1,6 +1,6 @@
 //! Per-venue decode strategies.
 //!
-//! Matching ([`select`]) decides *which* transactions are aggregator trades and which
+//! Matching ([`select`]) decides *which* transactions are solver trades and which
 //! [`Strategy`] recovers the user's swap from each; [`Strategy::decode`] is the single seam the
 //! orchestrator calls, so venue-specific behavior (Relay's fee skim and rebalancing fills,
 //! MetaMask's calldata venue declaration, intent-fill maker-finding) lives entirely in this
@@ -10,8 +10,8 @@
 //! - **client**: the contract the user entered through (`tx.to`) — Relay, MetaMask, a solver's own
 //!   router. Order-flow owners; they pick a solver and may skim a fee.
 //! - **solver**: the router that computed and settled the route — KyberSwap, 1inch, 0x. These are
-//!   Fynd's competitors, and what [`SolverQuote`] quotes. Code symbols and the record schema
-//!   historically call this tier `aggregator`; the two words mean the same thing here.
+//!   Fynd's competitors, and what [`SolverQuote`] quotes. Datasets recorded before run6 call this
+//!   tier `aggregator` in their column names; the two words mean the same thing.
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
@@ -44,7 +44,7 @@ use crate::decoder::{
 ///
 /// This is the number the client compared against at decision time — what the solver's API
 /// promised — as opposed to the settled amount, which is what execution delivered. The fields
-/// carry no solver name (the record's `aggregator` column already says who); see
+/// carry no solver name (the record's `solver` column already says who); see
 /// [`embedded_quote`] for which solvers declare one and how.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SolverQuote {
@@ -61,12 +61,8 @@ pub(crate) struct SolverQuote {
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
 /// solver is known to embed one. Adding a solver is one match arm.
-pub(crate) fn embedded_quote(
-    aggregator: &str,
-    input: &[u8],
-    amount_in: U256,
-) -> Option<SolverQuote> {
-    match aggregator {
+pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
+    match solver {
         "kyberswap" => kyberswap::embedded_quote(input),
         "paraswap" => paraswap::embedded_quote(input, amount_in),
         _ => None,
@@ -105,10 +101,10 @@ pub(crate) struct DecodeContext<'a, P> {
 
 /// How to recover the swap from a matched transaction.
 pub(crate) enum Strategy {
-    /// The sender is the trader: net its flow (direct aggregator swaps).
+    /// The sender is the trader: net its flow (direct solver swaps).
     Sender,
     /// The trader is an order maker, not the sender: either the tx was
-    /// discovered via a known aggregator log (`tx.to` is a rotating filler) or
+    /// discovered via a known solver log (`tx.to` is a rotating filler) or
     /// `tx.to` is a batch settler entered by a solver.
     Maker,
     /// Relay client entry: sender netting with client-fee back-out, falling
@@ -172,7 +168,7 @@ pub(crate) struct Flow {
     pub client_fee_out: Option<U256>,
     /// Venue label asserted by the strategy itself (e.g. MetaMask declares its
     /// venue in calldata), overriding trace-based attribution.
-    pub aggregator_override: Option<String>,
+    pub solver_override: Option<String>,
     /// Whether the tracked trader sent the transaction and therefore paid its gas. Decides if the
     /// settled route's gas may be charged against the settled output — a maker or a
     /// solver-rebalance trader had its gas paid by someone else, so nothing is deducted there.
@@ -186,7 +182,7 @@ impl Flow {
             swap,
             client_fee: None,
             client_fee_out: None,
-            aggregator_override: None,
+            solver_override: None,
             trader_paid_gas: false,
         }
     }
@@ -195,7 +191,7 @@ impl Flow {
 /// Match a receipt and choose its decode strategy.
 ///
 /// A transaction qualifies two ways: its entry point (`tx.to`) is a known
-/// client or aggregator, or one of its logs was emitted by a known aggregator
+/// client or solver, or one of its logs was emitted by a known solver
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
 /// Matched transactions that start a cross-chain bridge order are vetoed here
 /// (see [`lifi::started_bridge_order`]), before they cost a trace.
@@ -250,7 +246,7 @@ fn match_entry<'a>(receipt: &'a TransactionReceipt, registry: &Registry) -> Opti
     let via_log = receipt
         .logs()
         .iter()
-        .any(|log| registry.is_aggregator(log.address()));
+        .any(|log| registry.is_solver(log.address()));
     via_log.then_some(Matched { receipt, entry_point, strategy: Strategy::Maker })
 }
 
@@ -323,7 +319,7 @@ fn back_out_client_fees(
         swap: NetSwap { amount_in, amount_out, ..flow.swap },
         client_fee,
         client_fee_out,
-        aggregator_override: flow.aggregator_override,
+        solver_override: flow.solver_override,
         trader_paid_gas: flow.trader_paid_gas,
     }
 }

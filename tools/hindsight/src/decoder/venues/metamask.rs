@@ -17,19 +17,19 @@ use crate::decoder::{
 
 sol! {
     /// The MetaMask Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
-    /// aggregator API that produced the route.
+    /// solver API that produced the route.
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
 
 /// The venue label declared in the router calldata's `aggregatorId`, normalized to the
 /// registry's venue names.
 ///
-/// MetaMask states which aggregator API it routed through (e.g. "oneInchV6FeeDynamic",
+/// MetaMask states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
 /// route moves no native value and enters through Permit2 — so the calldata declaration is the
 /// authoritative source. Unrecognized ids pass through as-is: "airswapV4" is still more
 /// informative than a raw executor address.
-fn aggregator_from_calldata(input: &[u8]) -> Option<String> {
+fn solver_from_calldata(input: &[u8]) -> Option<String> {
     let call = swapCall::abi_decode(input).ok()?;
     Some(normalize(&call.aggregatorId))
 }
@@ -66,7 +66,7 @@ pub(crate) fn decode(
 ) -> Option<Flow> {
     let metamask = registry.client("metamask")?;
     let mut flow = client_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
-    flow.aggregator_override = aggregator_from_calldata(input);
+    flow.solver_override = solver_from_calldata(input);
     Some(flow)
 }
 
@@ -106,12 +106,12 @@ mod tests {
     }
 
     #[test]
-    fn aggregator_from_calldata_normalizes_known_ids() {
+    fn solver_from_calldata_normalizes_known_ids() {
         for (id, want) in [
             ("oneInchV6FeeDynamic", "1inch"),
             ("uniswapPermit2FeeDynamic", "uniswap"),
             ("okx6", "okx"),
-            ("someFutureAggregator", "someFutureAggregator"),
+            ("someFutureSolver", "someFutureSolver"),
         ] {
             let call = swapCall {
                 aggregatorId: id.to_string(),
@@ -119,14 +119,14 @@ mod tests {
                 amount: U256::from(1000),
                 data: Default::default(),
             };
-            assert_eq!(aggregator_from_calldata(&call.abi_encode()).as_deref(), Some(want));
+            assert_eq!(solver_from_calldata(&call.abi_encode()).as_deref(), Some(want));
         }
     }
 
     #[test]
-    fn aggregator_from_calldata_declines_other_selectors() {
-        assert_eq!(aggregator_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
-        assert_eq!(aggregator_from_calldata(&[]), None);
+    fn solver_from_calldata_declines_other_selectors() {
+        assert_eq!(solver_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
+        assert_eq!(solver_from_calldata(&[]), None);
     }
 
     #[test]
@@ -201,7 +201,7 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
         let flow = decode(&ledger, user, router(&registry), &call.abi_encode(), &registry).unwrap();
-        assert_eq!(flow.aggregator_override.as_deref(), Some("1inch"));
+        assert_eq!(flow.solver_override.as_deref(), Some("1inch"));
     }
 
     #[test]

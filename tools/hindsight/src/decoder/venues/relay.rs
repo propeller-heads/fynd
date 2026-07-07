@@ -1,6 +1,6 @@
 //! Relay-specific decoding.
 //!
-//! Relay differs from direct aggregator swaps in two ways: its router skims a
+//! Relay differs from direct solver swaps in two ways: its router skims a
 //! client fee to a collector address on either side of the swap, and its
 //! solvers submit rebalancing fills whose transaction sender has no net flow.
 

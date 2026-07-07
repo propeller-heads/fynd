@@ -58,7 +58,7 @@ pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by client / aggregator / chain / outcome / state (top|back). \
+        "Re-solved trades, labeled by client / solver / chain / outcome / state (top|back). \
          Per-pair detail lives in the JSONL comparison output; a token-pair label here is unbounded \
          on mainnet and would explode Prometheus series cardinality over a long run."
     );
@@ -78,7 +78,7 @@ pub(crate) fn describe() {
     );
     describe_histogram!(
         VOLUME_USD,
-        "Observed settled trade volume in USD, labeled by client / aggregator (Fynd-priced trades)"
+        "Observed settled trade volume in USD, labeled by client / solver (Fynd-priced trades)"
     );
     describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
@@ -109,7 +109,7 @@ pub(crate) fn record_range(
         histogram!(
             VOLUME_USD,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
         )
         .record(volume);
@@ -132,7 +132,7 @@ fn record_state(
     counter!(
         TRADES_TOTAL,
         "client" => range.client.clone(),
-        "aggregator" => range.aggregator.clone(),
+        "solver" => range.solver.clone(),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
@@ -143,7 +143,7 @@ fn record_state(
         histogram!(
             SAVINGS_BPS,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -162,7 +162,7 @@ fn record_state(
                 block = range.block_number,
                 state = state_label,
                 client = %range.client,
-                aggregator = %range.aggregator,
+                solver = %range.solver,
                 token_in = %range.token_in,
                 token_out = %range.token_out,
                 amount_in = %range.amount_in,
@@ -176,7 +176,7 @@ fn record_state(
         histogram!(
             SAVINGS_USD,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -193,7 +193,7 @@ fn record_state(
             histogram!(
                 IMPROVEMENT_USD,
                 "client" => range.client.clone(),
-                "aggregator" => range.aggregator.clone(),
+                "solver" => range.solver.clone(),
                 "chain" => chain.to_string(),
                 "state" => state_label,
             )
@@ -275,7 +275,7 @@ mod tests {
             tx_hash: Default::default(),
             block_number: 21_000_000,
             client: "relay".into(),
-            aggregator: "tycho".into(),
+            solver: "tycho".into(),
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,

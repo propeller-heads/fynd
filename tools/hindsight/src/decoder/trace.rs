@@ -14,7 +14,7 @@ const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
 /// Fetch the callTracer root frame for a transaction.
 ///
 /// The trace is the only place native ETH transfers and the internal
-/// aggregator call appear — neither emits a log.
+/// solver call appear — neither emits a log.
 pub(crate) async fn fetch_trace<P: Provider>(
     provider: &P,
     tx_hash: TxHash,
@@ -67,11 +67,11 @@ fn transfers_value(call_type: &str) -> bool {
 /// The wrapper's own gas — fee skim, forwarding, the base transaction cost — is charged whichever
 /// router the client picks, so like the client fee it is excluded from the comparison. Each trace
 /// frame's `gas_used` includes its whole subtree, so the call into the venue carries the full
-/// routing cost. Prefers the first call into a known aggregator; falls back to the most
+/// routing cost. Prefers the first call into a known solver; falls back to the most
 /// gas-consuming direct child (in a wrapper transaction the routing work dwarfs the bookkeeping
 /// calls). `None` when no usable frame exists — the caller skips the deduction rather than guess.
 pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
-    if let Some(gas) = known_aggregator_call_gas(root, registry) {
+    if let Some(gas) = known_solver_call_gas(root, registry) {
         return Some(gas);
     }
     root.calls
@@ -82,57 +82,57 @@ pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
         .filter(|gas| !gas.is_zero())
 }
 
-/// Depth-first search for the first call into a known aggregator, returning that frame's
-/// `gas_used`. Mirrors [`find_known_aggregator`], skipping reverted frames.
-fn known_aggregator_call_gas(frame: &CallFrame, registry: &Registry) -> Option<U256> {
+/// Depth-first search for the first call into a known solver, returning that frame's
+/// `gas_used`. Mirrors [`find_known_solver`], skipping reverted frames.
+fn known_solver_call_gas(frame: &CallFrame, registry: &Registry) -> Option<U256> {
     if frame.error.is_some() {
         return None;
     }
     if let Some(to) = frame.to {
-        if registry.is_aggregator(to) {
+        if registry.is_solver(to) {
             return Some(frame.gas_used);
         }
     }
     frame
         .calls
         .iter()
-        .find_map(|child| known_aggregator_call_gas(child, registry))
+        .find_map(|child| known_solver_call_gas(child, registry))
 }
 
-/// Attribute the aggregator that settled the swap.
+/// Attribute the solver that settled the swap.
 ///
-/// A direct swap (the entry point is itself an aggregator) settles there.
+/// A direct swap (the entry point is itself a solver) settles there.
 /// Otherwise the entry point is a client (e.g. Relay) that routes through an
-/// aggregator found in the trace: a known router if recognized, else the
+/// solver found in the trace: a known router if recognized, else the
 /// external contract the client called that moved the most value.
-pub(crate) fn attribute_aggregator(
+pub(crate) fn attribute_solver(
     root: &CallFrame,
     entry_point: Address,
     sender: Address,
     registry: &Registry,
 ) -> Option<Address> {
-    if registry.is_aggregator(entry_point) {
+    if registry.is_solver(entry_point) {
         return Some(entry_point);
     }
-    if let Some(found) = find_known_aggregator(root, registry) {
+    if let Some(found) = find_known_solver(root, registry) {
         return Some(found);
     }
     largest_external_call(root, entry_point, sender)
 }
 
-/// Depth-first search for the first call into a known aggregator, skipping
+/// Depth-first search for the first call into a known solver, skipping
 /// reverted frames (and their subtrees), which settle nothing.
-fn find_known_aggregator(frame: &CallFrame, registry: &Registry) -> Option<Address> {
+fn find_known_solver(frame: &CallFrame, registry: &Registry) -> Option<Address> {
     if frame.error.is_some() {
         return None;
     }
     if let Some(to) = frame.to {
-        if registry.is_aggregator(to) {
+        if registry.is_solver(to) {
             return Some(to);
         }
     }
     for child in &frame.calls {
-        if let Some(found) = find_known_aggregator(child, registry) {
+        if let Some(found) = find_known_solver(child, registry) {
             return Some(found);
         }
     }
@@ -213,13 +213,13 @@ mod tests {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let root = frame("CALL", addr(1), oneinch, 0);
-        assert_eq!(attribute_aggregator(&root, oneinch, addr(1), &registry), Some(oneinch));
+        assert_eq!(attribute_solver(&root, oneinch, addr(1), &registry), Some(oneinch));
     }
 
     #[test]
-    fn relay_attributes_internal_aggregator() {
+    fn relay_attributes_internal_solver() {
         // Mirrors the real Relay tx: the client router calls 0x's AllowanceHolder.
-        // root(relay) -> [ relay (self-call), 0x AllowanceHolder (the aggregator) ]
+        // root(relay) -> [ relay (self-call), 0x AllowanceHolder (the solver) ]
         let registry = Registry::ethereum();
         let sender = addr(1);
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
@@ -228,7 +228,7 @@ mod tests {
         let mut root = frame("CALL", sender, relay, 0);
         root.calls = vec![frame("CALL", relay, relay, 0), frame("CALL", relay, zerox, 1000)];
 
-        let found = attribute_aggregator(&root, relay, sender, &registry).unwrap();
+        let found = attribute_solver(&root, relay, sender, &registry).unwrap();
         assert_eq!(found, zerox);
         assert_eq!(registry.label(found), "0x");
     }
@@ -248,14 +248,14 @@ mod tests {
         let mut root = frame("CALL", sender, relay_proxy, 0);
         root.calls = vec![router_call];
 
-        let found = attribute_aggregator(&root, relay_proxy, sender, &registry).unwrap();
+        let found = attribute_solver(&root, relay_proxy, sender, &registry).unwrap();
         assert_eq!(found, tycho);
         assert_eq!(registry.label(found), "tycho");
     }
 
     #[test]
-    fn unknown_aggregator_falls_back_to_largest_external_call() {
-        // No known aggregator in the trace: pick the largest external call,
+    fn unknown_solver_falls_back_to_largest_external_call() {
+        // No known solver in the trace: pick the largest external call,
         // skipping the client self-call and the refund back to the sender.
         let registry = Registry::ethereum();
         let sender = addr(1);
@@ -270,7 +270,7 @@ mod tests {
             frame("CALL", client, unknown_router, 5000), // largest external call
         ];
 
-        let found = attribute_aggregator(&root, client, sender, &registry).unwrap();
+        let found = attribute_solver(&root, client, sender, &registry).unwrap();
         assert_eq!(found, unknown_router);
         assert_eq!(registry.label(found), unknown_router.to_string());
     }
@@ -290,7 +290,7 @@ mod tests {
             frame("CALL", client, addr(50), 0), // unknown venue, zero value
         ];
 
-        assert_eq!(attribute_aggregator(&root, client, sender, &registry), None);
+        assert_eq!(attribute_solver(&root, client, sender, &registry), None);
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
         let mut root = frame("CALL", sender, client, 0);
         root.calls = vec![frame("CALL", client, PERMIT2, 9000), frame("CALL", client, venue, 100)];
 
-        assert_eq!(attribute_aggregator(&root, client, sender, &registry), Some(venue));
+        assert_eq!(attribute_solver(&root, client, sender, &registry), Some(venue));
     }
 
     fn with_gas(mut call: CallFrame, gas_used: u64) -> CallFrame {
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn find_known_aggregator_skips_reverted() {
+    fn find_known_solver_skips_reverted() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 
@@ -407,6 +407,6 @@ mod tests {
         let mut root = frame("CALL", addr(1), addr(2), 0);
         root.calls = vec![reverted];
 
-        assert_eq!(find_known_aggregator(&root, &registry), None);
+        assert_eq!(find_known_solver(&root, &registry), None);
     }
 }

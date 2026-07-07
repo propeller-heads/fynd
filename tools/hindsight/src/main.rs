@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "hindsight", about = "Decode aggregator swaps from on-chain data")]
+#[command(name = "hindsight", about = "Decode solver swaps from on-chain data")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Decode aggregator trades from a block or range.
+    /// Decode solver trades from a block or range.
     Decode(DecodeArgs),
     /// Decode and compare against Allium's aggregator_trades ground truth.
     Verify(VerifyArgs),
@@ -191,7 +191,7 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
-        info!(block = block_number, "decoding aggregator trades");
+        info!(block = block_number, "decoding solver trades");
         let start = Instant::now();
         let trades = match decoder
             .decode_block(*block_number)
@@ -206,7 +206,7 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
         let elapsed_ms = start.elapsed().as_millis();
 
         if trades.is_empty() {
-            info!(block = block_number, elapsed_ms, "no aggregator trades found");
+            info!(block = block_number, elapsed_ms, "no solver trades found");
         } else {
             info!(block = block_number, count = trades.len(), elapsed_ms, "decoded trades");
         }
@@ -269,16 +269,16 @@ pub(crate) async fn resolve_blocks<P: Provider>(
 
 fn print_trades(trades: &[decoder::DecodedTrade]) {
     if trades.is_empty() {
-        println!("No aggregator trades found.");
+        println!("No solver trades found.");
         return;
     }
 
-    println!("\n{} aggregator trade(s) found:\n", trades.len());
+    println!("\n{} solver trade(s) found:\n", trades.len());
     for trade in trades {
         println!("  tx:         {}", trade.tx_hash);
         println!("  block:      {}", trade.block_number);
         println!("  client:     {}", trade.client);
-        println!("  aggregator: {}", trade.aggregator);
+        println!("  solver: {}", trade.solver);
         println!("  sender:     {}", trade.sender);
         println!("  token_in:   {}", trade.token_in);
         println!("  amount_in:  {}", trade.amount_in);
