@@ -52,6 +52,7 @@ fn comparison_record(
         "settled_tx": range.tx_hash,
         "client": range.client,
         "solver": range.solver,
+        "solver_source": range.solver_source,
         "token_in": format!("{:#x}", range.token_in),
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
@@ -159,7 +160,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{DecodedTrade, SolverQuote},
+        decoder::{AttributionSource, DecodedTrade, SolverQuote},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -170,6 +171,7 @@ mod tests {
             block_number: 25_480_207,
             client: "relay".into(),
             solver: "kyberswap".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::ZERO,
             token_out: Address::repeat_byte(0x22),
@@ -240,6 +242,7 @@ mod tests {
             block_number: 25_000_000,
             client: "relay".into(),
             solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,
@@ -318,6 +321,7 @@ mod tests {
             block_number: 25_000_000,
             client: "relay".into(),
             solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),

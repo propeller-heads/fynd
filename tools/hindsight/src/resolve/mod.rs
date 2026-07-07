@@ -16,7 +16,7 @@ pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
 
 use crate::{
-    decoder::{DecodedTrade, SolverQuote},
+    decoder::{AttributionSource, DecodedTrade, SolverQuote},
     usd,
 };
 
@@ -70,6 +70,8 @@ pub(crate) struct RangeComparison {
     pub block_number: u64,
     pub client: String,
     pub solver: String,
+    /// The evidence tier the solver label came from (from the decoder).
+    pub solver_source: AttributionSource,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -125,6 +127,7 @@ pub(crate) fn build_range(
         block_number: trade.block_number,
         client: trade.client.clone(),
         solver: trade.solver.clone(),
+        solver_source: trade.solver_source,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
@@ -177,6 +180,7 @@ mod tests {
             block_number: 21_000_000,
             client: "relay".into(),
             solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),

@@ -266,7 +266,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::DecodedTrade,
+        decoder::{AttributionSource, DecodedTrade},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -276,6 +276,7 @@ mod tests {
             block_number: 21_000_000,
             client: "relay".into(),
             solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,

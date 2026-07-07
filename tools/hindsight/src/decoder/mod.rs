@@ -42,9 +42,12 @@ use crate::decoder::{
     guards::{received_nft, wrap_pair_mispaired},
     ledger::TransferLedger,
     strategy::{DecodeContext, Matched},
-    trace::{attribute_solver, collect_native_transfers, fetch_trace, route_gas},
+    trace::{collect_native_transfers, fetch_trace, route_gas},
 };
-pub(crate) use crate::decoder::{registry::Registry, solvers::SolverQuote};
+pub(crate) use crate::decoder::{
+    registry::Registry,
+    solvers::{attribution::AttributionSource, SolverQuote},
+};
 
 /// A decoded solver trade: what token went in, what came out.
 ///
@@ -55,6 +58,10 @@ pub(crate) struct DecodedTrade {
     pub block_number: u64,
     pub client: String,
     pub solver: String,
+    /// The evidence tier the solver label came from (see [`solvers::attribution`]). Downstream
+    /// analysis weighs low-trust tiers (largest_call, fallback) differently — e.g. when judging
+    /// an embedded quote.
+    pub solver_source: AttributionSource,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -213,17 +220,13 @@ impl<P: Provider> Decoder<P> {
                 continue;
             }
 
-            // A strategy that knows its venue asserts it on the flow (e.g. MetaMask declares it
-            // in calldata); otherwise attribute from the trace.
-            let solver = flow
-                .solver_override
-                .take()
-                .unwrap_or_else(|| {
-                    registry.label(
-                        attribute_solver(&root, entry_point, sender, registry)
-                            .unwrap_or(entry_point),
-                    )
-                });
+            let attribution = solvers::attribution::attribute(
+                flow.solver_override.take(),
+                &root,
+                entry_point,
+                sender,
+                registry,
+            );
 
             // Gas the trader paid for the settled route, as a wei cost. Only charged when the
             // tracked trader sent the transaction; for client-wrapped entries the route's gas is
@@ -244,14 +247,16 @@ impl<P: Provider> Decoder<P> {
             // The solver's off-chain quote, when its calldata declares one. Dispatched on the
             // attributed solver so a lookalike blob from another router cannot masquerade as a
             // quote, and unit-checked against the settled amount (quotes are self-reported).
-            let quote = solvers::embedded_quote(&solver, &root.input, flow.swap.amount_in)
-                .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
+            let quote =
+                solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
+                    .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
                 client: registry.label(entry_point),
-                solver,
+                solver: attribution.solver,
+                solver_source: attribution.source,
                 sender: flow.tracked,
                 token_in: flow.swap.token_in,
                 token_out: flow.swap.token_out,

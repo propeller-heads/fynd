@@ -4,6 +4,7 @@
 //! (kyberswap, paraswap) or a matching veto for order shapes that are not same-chain swaps
 //! (lifi's bridge orders). Solver addresses live in the address book's `[solvers]` section.
 
+pub(crate) mod attribution;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;

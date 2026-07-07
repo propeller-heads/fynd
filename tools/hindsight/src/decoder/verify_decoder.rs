@@ -399,7 +399,7 @@ fn names_match(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::test_utils::addr;
+    use crate::decoder::{test_utils::addr, AttributionSource};
 
     fn trade(token_in: Address, token_out: Address, solver: &str) -> DecodedTrade {
         DecodedTrade {
@@ -407,6 +407,7 @@ mod tests {
             block_number: 1,
             client: "relay".to_string(),
             solver: solver.to_string(),
+            solver_source: AttributionSource::TraceMatch,
             sender: addr(1),
             token_in,
             token_out,
