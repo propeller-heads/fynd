@@ -15,7 +15,10 @@ use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
 
-use crate::{decoder::DecodedTrade, usd};
+use crate::{
+    decoder::{DecodedTrade, SolverQuote},
+    usd,
+};
 
 /// A Fynd quote for the re-solved order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,6 +80,8 @@ pub(crate) struct RangeComparison {
     pub settled_amount_out_net_gas: U256,
     /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
     pub settled_gas: Option<U256>,
+    /// The solver's own off-chain quote from its calldata, when declared (from the decoder).
+    pub quote: Option<SolverQuote>,
     /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
     pub top: StateResult,
     /// Pessimistic: solved at state N, after the block's swaps moved the pools.
@@ -126,6 +131,7 @@ pub(crate) fn build_range(
         settled_amount_out: trade.amount_out,
         settled_amount_out_net_gas: settled_net_gas,
         settled_gas: trade.settled_gas,
+        quote: trade.quote.clone(),
         top,
         back,
         verdict,
@@ -179,6 +185,7 @@ mod tests {
             client_fee: None,
             client_fee_out: None,
             settled_gas: None,
+            quote: None,
         }
     }
 

@@ -19,12 +19,12 @@ use anyhow::Context;
 use futures::stream::{StreamExt, TryStreamExt};
 use tracing::{debug, warn};
 
-pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
     net::{received_nft, wrap_pair_mispaired},
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace, route_gas},
     venues::{started_bridge_order, Matched, Strategy},
 };
+pub(crate) use crate::decoder::{registry::Registry, venues::SolverQuote};
 
 /// A decoded aggregator trade: what token went in, what came out.
 ///
@@ -61,6 +61,12 @@ pub(crate) struct DecodedTrade {
     /// rebalances) or the route's gas could not be isolated from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
+    /// The solver's own off-chain quote for this swap, recovered from calldata (see
+    /// [`venues::embedded_quote`] for the solvers that declare one). Informational — it is what
+    /// the client compared against at decision time, as opposed to `amount_out`, which is what
+    /// execution delivered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<SolverQuote>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -238,6 +244,12 @@ impl<P: Provider> Decoder<P> {
                 .flatten()
                 .map(|units| units * U256::from(receipt.effective_gas_price));
 
+            // The solver's off-chain quote, when its calldata declares one. Dispatched on the
+            // attributed solver so a lookalike blob from another router cannot masquerade as a
+            // quote, and unit-checked against the settled amount (quotes are self-reported).
+            let quote = venues::embedded_quote(&aggregator, &root.input, flow.swap.amount_in)
+                .filter(|quote| venues::plausible_quote(quote, flow.swap.amount_out));
+
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
@@ -251,6 +263,7 @@ impl<P: Provider> Decoder<P> {
                 client_fee: flow.client_fee,
                 client_fee_out: flow.client_fee_out,
                 settled_gas,
+                quote,
             });
         }
 

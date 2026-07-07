@@ -58,6 +58,9 @@ fn comparison_record(
         "settled_amount_out": range.settled_amount_out.to_string(),
         "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
         "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
+        "quoted_amount_out": range.quote.as_ref().map(|q| q.amount_out.to_string()),
+        "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
+        "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
     })
@@ -156,9 +159,51 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::DecodedTrade,
+        decoder::{DecodedTrade, SolverQuote},
         resolve::{build_range, SolvedAmount},
     };
+
+    #[test]
+    fn comparison_record_carries_solver_quote() {
+        let trade = DecodedTrade {
+            tx_hash: Default::default(),
+            block_number: 25_480_207,
+            client: "relay".into(),
+            aggregator: "kyberswap".into(),
+            sender: Address::ZERO,
+            token_in: Address::ZERO,
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(69_996_280_564u64),
+            client_fee: None,
+            client_fee_out: None,
+            settled_gas: None,
+            quote: Some(SolverQuote {
+                amount_out: U256::from(70_400_409_935u64),
+                source: Some("relay".to_string()),
+                timestamp: Some(1_783_421_726),
+            }),
+        };
+        let range = build_range(
+            &trade,
+            &usd::PriceMap::new(),
+            Outcome::Unsolvable("x".into()),
+            Outcome::Unsolvable("x".into()),
+        );
+        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        assert_eq!(
+            rec.pointer("/quoted_amount_out")
+                .unwrap(),
+            "70400409935"
+        );
+        assert_eq!(rec.pointer("/quote_source").unwrap(), "relay");
+        assert_eq!(
+            rec.pointer("/quote_timestamp")
+                .unwrap()
+                .as_u64(),
+            Some(1_783_421_726)
+        );
+    }
 
     #[test]
     fn slim_transaction_emits_hex_calldata_and_address() {
@@ -203,6 +248,7 @@ mod tests {
             client_fee: None,
             client_fee_out: None,
             settled_gas: None,
+            quote: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
         let quote = Some(
@@ -280,6 +326,7 @@ mod tests {
             client_fee: None,
             client_fee_out: None,
             settled_gas: None,
+            quote: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(

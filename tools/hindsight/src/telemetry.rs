@@ -284,6 +284,7 @@ mod tests {
             client_fee: None,
             client_fee_out: None,
             settled_gas: None,
+            quote: None,
         }
     }
 
