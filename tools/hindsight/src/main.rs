@@ -26,26 +26,40 @@ enum Command {
     Verify(VerifyArgs),
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
-    Monitor(MonitorArgs),
+    Monitor(resolve::monitor::MonitorArgs),
+}
+
+/// Chain access shared by every subcommand: the RPC endpoint and the decoder's address book.
+#[derive(Args)]
+pub(crate) struct RpcArgs {
+    /// Ethereum RPC URL
+    #[arg(long, env = "RPC_URL")]
+    pub rpc_url: String,
+
+    /// Decoder address-book TOML (defaults to the chain's built-in book)
+    #[arg(long, env = "HINDSIGHT_REGISTRY")]
+    pub registry: Option<std::path::PathBuf>,
+}
+
+/// Block selection shared by the decode and verify subcommands.
+#[derive(Args)]
+struct BlockArgs {
+    /// Block number to process (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to process (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
 }
 
 #[derive(Args)]
 struct DecodeArgs {
-    /// Ethereum RPC URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
+    #[command(flatten)]
+    rpc: RpcArgs,
 
-    /// Block number to decode (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to decode (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
-
-    /// Decoder address-book TOML (defaults to the built-in Ethereum book)
-    #[arg(long, env = "HINDSIGHT_REGISTRY")]
-    registry: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    blocks: BlockArgs,
 
     /// Output as JSON instead of human-readable
     #[arg(long)]
@@ -54,17 +68,11 @@ struct DecodeArgs {
 
 #[derive(Args)]
 struct VerifyArgs {
-    /// Ethereum RPC URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
+    #[command(flatten)]
+    rpc: RpcArgs,
 
-    /// Block number to verify (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to verify (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
+    #[command(flatten)]
+    blocks: BlockArgs,
 
     /// Allium API key
     #[arg(long, env = "ALLIUM_API_KEY")]
@@ -84,10 +92,6 @@ struct VerifyArgs {
     #[arg(long, env = "ALLIUM_QUERY_ID")]
     allium_query_id: String,
 
-    /// Decoder address-book TOML (defaults to the built-in Ethereum book)
-    #[arg(long, env = "HINDSIGHT_REGISTRY")]
-    registry: Option<std::path::PathBuf>,
-
     /// Max allowed amount difference vs Allium, in basis points
     #[arg(long, default_value_t = 50.0)]
     tolerance_bps: f64,
@@ -95,60 +99,6 @@ struct VerifyArgs {
     /// Output as JSON instead of human-readable
     #[arg(long)]
     json: bool,
-}
-
-#[derive(Args)]
-struct MonitorArgs {
-    /// Ethereum RPC URL (used to decode each block's settled trades and feed the solver)
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
-
-    /// Tycho WebSocket URL feeding the in-process solver
-    #[arg(long, env = "TYCHO_URL")]
-    tycho_url: String,
-
-    /// Chain to monitor (the decoder is Ethereum-only for now)
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
-
-    /// Decoder address-book TOML (defaults to the chain's built-in book)
-    #[arg(long, env = "HINDSIGHT_REGISTRY")]
-    registry: Option<std::path::PathBuf>,
-
-    /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
-    /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
-    #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
-    protocols: Vec<String>,
-
-    /// Minimum pool TVL filter for the solver
-    #[arg(long, default_value_t = 100.0)]
-    min_tvl: f64,
-
-    /// Tycho API key (if the endpoint requires one)
-    #[arg(long, env = "TYCHO_API_KEY")]
-    tycho_api_key: Option<String>,
-
-    /// Worker-pools TOML config (algorithm/hops/workers); falls back to Fynd's built-in default
-    /// pools when the default path is absent, like `fynd serve`
-    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
-    worker_pools_config: std::path::PathBuf,
-
-    /// Per-quote timeout in milliseconds
-    #[arg(long, default_value_t = 10_000)]
-    timeout_ms: u64,
-
-    /// Serve Prometheus metrics on this port
-    #[arg(long)]
-    metrics_port: Option<u16>,
-
-    /// Stop after this many blocks (runs until interrupted if omitted)
-    #[arg(long)]
-    max_blocks: Option<u64>,
-
-    /// Append one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
-    /// coverage gaps) to this file, for the improvement and coverage worklists
-    #[arg(long)]
-    comparisons_jsonl: Option<String>,
 }
 
 #[tokio::main]
@@ -163,30 +113,14 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
-        Command::Monitor(args) => {
-            resolve::monitor::run(resolve::monitor::MonitorConfig {
-                rpc_url: &args.rpc_url,
-                tycho_url: &args.tycho_url,
-                chain: &args.chain,
-                registry: args.registry.as_deref(),
-                protocols: args.protocols,
-                min_tvl: args.min_tvl,
-                tycho_api_key: args.tycho_api_key.as_deref(),
-                worker_pools_config: &args.worker_pools_config,
-                timeout_ms: args.timeout_ms,
-                metrics_port: args.metrics_port,
-                max_blocks: args.max_blocks,
-                comparisons_jsonl: args.comparisons_jsonl.as_deref(),
-            })
-            .await
-        }
+        Command::Monitor(args) => resolve::monitor::run(args).await,
     }
 }
 
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc_url)?;
-    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
-    let registry = decoder::Registry::load("ethereum", args.registry.as_deref())?;
+    let provider = provider_from(&args.rpc.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
+    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
@@ -222,10 +156,10 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 }
 
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc_url)?;
-    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
+    let provider = provider_from(&args.rpc.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = decoder::Registry::load("ethereum", args.registry.as_deref())?;
+    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");

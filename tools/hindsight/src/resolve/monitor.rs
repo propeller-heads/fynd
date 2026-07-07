@@ -51,28 +51,58 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DECODE_RPC_LAG_RETRIES: usize = 5;
 const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
 
-/// Inputs for the live monitor.
-pub(crate) struct MonitorConfig<'a> {
-    pub rpc_url: &'a str,
-    pub tycho_url: &'a str,
-    pub chain: &'a str,
-    /// Decoder address-book TOML; `None` uses the chain's built-in book.
-    pub registry: Option<&'a std::path::Path>,
+/// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
+/// configuration.
+#[derive(clap::Args)]
+pub(crate) struct MonitorArgs {
+    #[command(flatten)]
+    pub rpc: crate::RpcArgs,
+
+    /// Tycho WebSocket URL feeding the in-process solver
+    #[arg(long, env = "TYCHO_URL")]
+    pub tycho_url: String,
+
+    /// Chain to monitor (the decoder is Ethereum-only for now)
+    #[arg(long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
+    /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
+    #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
     pub protocols: Vec<String>,
+
+    /// Minimum pool TVL filter for the solver
+    #[arg(long, default_value_t = 100.0)]
     pub min_tvl: f64,
-    pub tycho_api_key: Option<&'a str>,
-    /// Worker-pools TOML config path; the default path falls back to Fynd's built-in default
-    /// pools when absent, like `fynd serve`. Custom paths that don't exist fail fast.
-    pub worker_pools_config: &'a std::path::Path,
+
+    /// Tycho API key (if the endpoint requires one)
+    #[arg(long, env = "TYCHO_API_KEY")]
+    pub tycho_api_key: Option<String>,
+
+    /// Worker-pools TOML config (algorithm/hops/workers); the default path falls back to Fynd's
+    /// built-in default pools when absent, like `fynd serve`. Custom paths that don't exist fail
+    /// fast
+    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
+    pub worker_pools_config: std::path::PathBuf,
+
+    /// Per-quote timeout in milliseconds
+    #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
+
+    /// Serve Prometheus metrics on this port
+    #[arg(long)]
     pub metrics_port: Option<u16>,
-    /// Stop after this many blocks (`None` runs until interrupted).
+
+    /// Stop after this many blocks (runs until interrupted if omitted)
+    #[arg(long)]
     pub max_blocks: Option<u64>,
+
     /// Append one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
     /// coverage gaps), each carrying both block states with verdict, net bps, USD delta, and a
     /// slim route/calldata or unsolvable reason. Filter downstream for the improvement or
-    /// coverage view. Disabled when `None`.
-    pub comparisons_jsonl: Option<&'a str>,
+    /// coverage view
+    #[arg(long)]
+    pub comparisons_jsonl: Option<String>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per [`SteppingSolver::advance`].
@@ -239,7 +269,7 @@ struct Totals {
 
 /// Build the in-process solver and its block-step controller.
 async fn build_solver(
-    cfg: &MonitorConfig<'_>,
+    cfg: &MonitorArgs,
     chain: Chain,
     protocols: &[String],
     pools_config: &fynd_rpc::config::WorkerPoolsConfig,
@@ -250,8 +280,8 @@ async fn build_solver(
         "building in-process solver (loading tokens may take minutes)…"
     );
     let mut builder =
-        FyndBuilder::new(chain, cfg.tycho_url, cfg.rpc_url, protocols.to_vec(), cfg.min_tvl);
-    if let Some(key) = cfg.tycho_api_key {
+        FyndBuilder::new(chain, &cfg.tycho_url, &cfg.rpc.rpc_url, protocols.to_vec(), cfg.min_tvl);
+    if let Some(key) = cfg.tycho_api_key.as_deref() {
         builder = builder.tycho_api_key(key);
     }
     for (name, pool) in pools_config.pools() {
@@ -269,14 +299,14 @@ async fn build_solver(
 /// range. When the tycho feed dies (its stream ends, or no block arrives within
 /// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
-pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
-    let chain = parse_chain(cfg.chain)
+pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
+    let chain = parse_chain(&cfg.chain)
         .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain))?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
-        cfg.tycho_url,
-        cfg.tycho_api_key,
+        &cfg.tycho_url,
+        cfg.tycho_api_key.as_deref(),
         true,
         chain,
         &cfg.protocols,
@@ -287,29 +317,32 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
     // Load worker pools like `fynd serve`: the default path falls back to the built-in default
     // pools when absent; custom paths that don't exist fail fast.
     let default_path = std::path::Path::new("worker_pools.toml");
-    let pools_config = if cfg.worker_pools_config == default_path && !default_path.exists() {
-        info!("worker_pools.toml not found; using Fynd's built-in default pools");
-        fynd_rpc::config::WorkerPoolsConfig::builtin_default()
-    } else {
-        fynd_rpc::config::WorkerPoolsConfig::load_from_file(cfg.worker_pools_config).map_err(
-            |e| {
-                anyhow::anyhow!(
-                    "failed to load worker pools config {}: {e}",
-                    cfg.worker_pools_config.display()
-                )
-            },
-        )?
-    };
+    let pools_config =
+        if cfg.worker_pools_config.as_path() == default_path && !default_path.exists() {
+            info!("worker_pools.toml not found; using Fynd's built-in default pools");
+            fynd_rpc::config::WorkerPoolsConfig::builtin_default()
+        } else {
+            fynd_rpc::config::WorkerPoolsConfig::load_from_file(&cfg.worker_pools_config).map_err(
+                |e| {
+                    anyhow::anyhow!(
+                        "failed to load worker pools config {}: {e}",
+                        cfg.worker_pools_config.display()
+                    )
+                },
+            )?
+        };
 
-    let mut decoder =
-        Decoder::new(provider_from(cfg.rpc_url)?, Registry::load(cfg.chain, cfg.registry)?);
+    let mut decoder = Decoder::new(
+        provider_from(&cfg.rpc.rpc_url)?,
+        Registry::load(&cfg.chain, cfg.rpc.registry.as_deref())?,
+    );
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
-    let mut comparisons = match cfg.comparisons_jsonl {
+    let mut comparisons = match cfg.comparisons_jsonl.as_deref() {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
                 .create(true)
@@ -350,7 +383,7 @@ pub(crate) async fn run(cfg: MonitorConfig<'_>) -> anyhow::Result<()> {
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
 /// completes or the feed dies.
 async fn run_session<P: Provider>(
-    cfg: &MonitorConfig<'_>,
+    cfg: &MonitorArgs,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<std::io::BufWriter<std::fs::File>>,
@@ -423,7 +456,7 @@ async fn run_session<P: Provider>(
             );
         }
         for range in &ranges {
-            telemetry::record_range(range, cfg.chain, &prices_top, &prices_back);
+            telemetry::record_range(range, &cfg.chain, &prices_top, &prices_back);
         }
         if let Some(writer) = comparisons.as_mut() {
             super::jsonl::write_comparisons(writer, &ranges, &prices_top, &prices_back);
@@ -509,16 +542,15 @@ mod tests {
         };
 
         let api_key = std::env::var("TYCHO_API_KEY").ok();
-        run(MonitorConfig {
-            rpc_url: &rpc_url,
-            tycho_url: &tycho_url,
-            chain: "ethereum",
-            registry: None,
+        run(MonitorArgs {
+            rpc: crate::RpcArgs { rpc_url, registry: None },
+            tycho_url,
+            chain: "ethereum".to_string(),
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
             min_tvl: 10_000.0,
-            tycho_api_key: api_key.as_deref(),
-            worker_pools_config: std::path::Path::new("worker_pools.toml"),
+            tycho_api_key: api_key,
+            worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
