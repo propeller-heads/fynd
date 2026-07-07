@@ -4,18 +4,13 @@
 //! intent fills (UniswapX, 1inch limit orders) and batch settlements (CoW),
 //! where the real swap is an order maker's net flow.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
-use alloy::{
-    primitives::{Address, U256},
-    providers::Provider,
-    rpc::types::Log,
-    sol_types::SolEvent,
-};
+use alloy::{primitives::Address, providers::Provider};
 use tracing::warn;
 
 use crate::decoder::{
-    net::{decode_trade, to_primitive_log, NetSwap, Transfer},
+    ledger::{NetSwap, TransferLedger},
     registry::Registry,
     venues::Flow,
 };
@@ -42,13 +37,12 @@ use crate::decoder::{
 ///   EIP-7702 delegation) is indistinguishable from a pool here, so its fills are dropped.
 pub(crate) async fn find_maker_trade<P: Provider>(
     provider: &P,
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
 ) -> Option<Flow> {
-    for (candidate, trade) in maker_candidates(logs, native, exclude, registry) {
+    for (candidate, trade) in maker_candidates(ledger, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
             return Some(Flow::without_fees(candidate, trade));
         }
@@ -60,28 +54,17 @@ pub(crate) async fn find_maker_trade<P: Provider>(
 /// excluded addresses, and known registry contracts. Ordered by address for
 /// deterministic selection.
 fn maker_candidates(
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
 ) -> Vec<(Address, NetSwap)> {
-    let mut candidates: BTreeSet<Address> = BTreeSet::new();
-    for log in logs {
-        if let Ok(transfer) = Transfer::decode_log(&to_primitive_log(log)) {
-            candidates.insert(transfer.from);
-            candidates.insert(transfer.to);
-        }
-    }
-    for &(from, to, _) in native {
-        candidates.insert(from);
-        candidates.insert(to);
-    }
+    let mut candidates = ledger.participants();
     candidates.remove(&Address::ZERO);
     candidates.retain(|address| !exclude.contains(address) && !registry.is_known(*address));
 
     let mut swaps = Vec::new();
     for candidate in candidates {
-        if let Some(trade) = decode_trade(logs, native, candidate) {
+        if let Some(trade) = ledger.net_swap(candidate) {
             swaps.push((candidate, trade));
         }
     }
@@ -116,7 +99,9 @@ async fn is_contract<P: Provider>(
 #[cfg(test)]
 mod tests {
     use alloy::{
-        primitives::Bytes, providers::RootProvider, rpc::client::RpcClient,
+        primitives::{Bytes, U256},
+        providers::RootProvider,
+        rpc::client::RpcClient,
         transports::mock::Asserter,
     };
 
@@ -129,11 +114,12 @@ mod tests {
 
     /// The maker/pool inverse-swap fixture: maker sells token_a for token_b, pool nets the
     /// inverse.
-    fn inverse_swap_logs() -> Vec<Log> {
-        vec![
+    fn inverse_swap_ledger() -> TransferLedger {
+        let logs = vec![
             make_transfer_log(addr(10), addr(100), addr(101), U256::from(1000)),
             make_transfer_log(addr(11), addr(101), addr(100), U256::from(2000)),
-        ]
+        ];
+        TransferLedger::from_transaction(&logs, &[])
     }
 
     #[tokio::test]
@@ -145,10 +131,9 @@ mod tests {
 
         let registry = Registry::ethereum();
         let mut cache = HashMap::new();
-        let flow =
-            find_maker_trade(&provider, &inverse_swap_logs(), &[], &[], &registry, &mut cache)
-                .await
-                .unwrap();
+        let flow = find_maker_trade(&provider, &inverse_swap_ledger(), &[], &registry, &mut cache)
+            .await
+            .unwrap();
         assert_eq!(flow.tracked, addr(100));
         assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
     }
@@ -165,8 +150,7 @@ mod tests {
         let registry = Registry::ethereum();
         let mut cache = HashMap::new();
         let flow =
-            find_maker_trade(&provider, &inverse_swap_logs(), &[], &[], &registry, &mut cache)
-                .await;
+            find_maker_trade(&provider, &inverse_swap_ledger(), &[], &registry, &mut cache).await;
         assert!(flow.is_none());
     }
 
@@ -185,8 +169,9 @@ mod tests {
             make_transfer_log(token_a, maker, pool, U256::from(1000)),
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let found: HashMap<Address, _> = maker_candidates(&logs, &[], &[filler], &registry)
+        let found: HashMap<Address, _> = maker_candidates(&ledger, &[filler], &registry)
             .into_iter()
             .collect();
         assert_eq!(found.len(), 2);
@@ -207,9 +192,10 @@ mod tests {
             make_transfer_log(token_a, maker, pool, U256::from(1000)),
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
 
         // Excluding the maker leaves only the pool.
-        let candidates = maker_candidates(&logs, &[], &[maker], &registry);
+        let candidates = maker_candidates(&ledger, &[maker], &registry);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, pool);
     }

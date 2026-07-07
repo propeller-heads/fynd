@@ -1,4 +1,5 @@
-mod net;
+mod guards;
+mod ledger;
 mod registry;
 mod trace;
 mod venues;
@@ -20,9 +21,10 @@ use futures::stream::{StreamExt, TryStreamExt};
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    net::{received_nft, wrap_pair_mispaired},
+    guards::{received_nft, wrap_pair_mispaired},
+    ledger::TransferLedger,
     trace::{attribute_aggregator, collect_native_transfers, fetch_trace, route_gas},
-    venues::{started_bridge_order, Matched, Strategy},
+    venues::{DecodeContext, Matched},
 };
 pub(crate) use crate::decoder::{registry::Registry, venues::SolverQuote};
 
@@ -121,20 +123,6 @@ impl<P: Provider> Decoder<P> {
         let matched: Vec<Matched> = receipts
             .iter()
             .filter_map(|receipt| venues::select(receipt, registry))
-            .filter(|matched| {
-                // A cross-chain bridge order's real output lands on the destination chain; the
-                // same-chain flow (deposit in, leftover refund out) is not a swap. Filtered
-                // before tracing, so bridge orders cost no trace call.
-                if started_bridge_order(matched.receipt.logs()) {
-                    debug!(
-                        tx = %matched.receipt.transaction_hash,
-                        client = %registry.label(matched.entry_point),
-                        "cross-chain bridge order; skipping"
-                    );
-                    return false;
-                }
-                true
-            })
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -158,28 +146,19 @@ impl<P: Provider> Decoder<P> {
 
             let mut native = Vec::new();
             collect_native_transfers(&root, &mut native);
+            let ledger = TransferLedger::from_transaction(logs, &native);
 
-            let wrapped_client = matches!(strategy, Strategy::Relay | Strategy::Metamask);
-            let flow = match strategy {
-                Strategy::Sender => venues::sender_flow(logs, &native, sender, entry_point),
-                Strategy::Maker => {
-                    venues::intent::find_maker_trade(
-                        provider,
-                        logs,
-                        &native,
-                        &[entry_point, sender],
-                        registry,
-                        code_cache,
-                    )
-                    .await
-                }
-                Strategy::Relay => {
-                    venues::relay::decode(logs, &native, sender, entry_point, registry)
-                }
-                Strategy::Metamask => {
-                    venues::metamask::decode(logs, &native, sender, &root.input, registry)
-                }
-            };
+            let flow = strategy
+                .decode(DecodeContext {
+                    provider,
+                    registry,
+                    code_cache,
+                    ledger: &ledger,
+                    input: &root.input,
+                    sender,
+                    entry_point,
+                })
+                .await;
 
             let Some(mut flow) = flow else {
                 warn!(
@@ -235,7 +214,7 @@ impl<P: Provider> Decoder<P> {
             let settled_gas = flow
                 .trader_paid_gas
                 .then(|| {
-                    if wrapped_client {
+                    if strategy.routes_via_wrapper() {
                         route_gas(&root, registry)
                     } else {
                         Some(U256::from(receipt.gas_used))

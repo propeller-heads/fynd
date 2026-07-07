@@ -7,14 +7,10 @@
 //! value better routing can recover. On dust trades the skim dominates and fabricated
 //! extreme "wins".
 
-use alloy::{
-    primitives::{Address, U256},
-    rpc::types::Log,
-    sol,
-    sol_types::SolCall,
-};
+use alloy::{primitives::Address, sol, sol_types::SolCall};
 
 use crate::decoder::{
+    ledger::TransferLedger,
     registry::Registry,
     venues::{client_fee_flow, Flow},
 };
@@ -62,21 +58,21 @@ fn normalize(id: &str) -> String {
 /// Decode a MetaMask-entered transaction: net the sender's flow, back the client fee out of it,
 /// and attribute the venue from the router calldata (`input`).
 pub(crate) fn decode(
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     sender: Address,
     input: &[u8],
     registry: &Registry,
 ) -> Option<Flow> {
     let metamask = registry.metamask();
-    let mut flow =
-        client_fee_flow(logs, native, sender, metamask.router, &metamask.fee_collectors)?;
+    let mut flow = client_fee_flow(ledger, sender, metamask.router, &metamask.fee_collectors)?;
     flow.aggregator_override = aggregator_from_calldata(input);
     Some(flow)
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
+
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
@@ -137,8 +133,9 @@ mod tests {
             (router, collector, U256::from(883)),
             (router, user, U256::from(7_525)),
         ];
+        let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&logs, &native, user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, &[], &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.client_fee, None);
@@ -163,8 +160,9 @@ mod tests {
             (router, pool, U256::from(991)),
         ];
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
+        let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&logs, &native, user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.client_fee, Some(U256::from(9)));
         assert_eq!(flow.client_fee_out, None);
@@ -187,8 +185,9 @@ mod tests {
             amount: U256::from(1_000),
             data: Default::default(),
         };
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&logs, &[], user, &call.abi_encode(), &registry).unwrap();
+        let flow = decode(&ledger, user, &call.abi_encode(), &registry).unwrap();
         assert_eq!(flow.aggregator_override.as_deref(), Some("1inch"));
     }
 
@@ -205,8 +204,9 @@ mod tests {
             make_transfer_log(token_in, user, pool, U256::from(1_000)),
             make_transfer_log(token_out, pool, user, U256::from(2_000)),
         ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&logs, &[], user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, None);

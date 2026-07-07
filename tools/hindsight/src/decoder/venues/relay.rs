@@ -4,16 +4,12 @@
 //! client fee to a collector address on either side of the swap, and its
 //! solvers submit rebalancing fills whose transaction sender has no net flow.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use alloy::{
-    primitives::{Address, U256},
-    rpc::types::Log,
-    sol_types::SolEvent,
-};
+use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
-    net::{to_primitive_log, NetSwap, Transfer},
+    ledger::{NetSwap, TransferLedger},
     registry::Registry,
     venues::{client_fee_flow, Flow},
 };
@@ -26,20 +22,18 @@ use crate::decoder::{
 /// collector instead (Relay funds the swap from it); the collector is the
 /// funding source there, not a skim, so no fee is backed out.
 pub(crate) fn decode(
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
     registry: &Registry,
 ) -> Option<Flow> {
     if let Some(flow) =
-        client_fee_flow(logs, native, sender, entry_point, &registry.relay().fee_collectors)
+        client_fee_flow(ledger, sender, entry_point, &registry.relay().fee_collectors)
     {
         return Some(flow);
     }
     decode_rebalance(
-        logs,
-        native,
+        ledger,
         &registry.relay().fee_collectors,
         &registry.relay().routers,
         registry.wrapped_native(),
@@ -52,70 +46,22 @@ pub(crate) fn decode(
 ///
 /// Anchors on the fee collector, which always funds the input: `token_in` is the single token it
 /// net-sends. The output is either the token that returns to the collector (an **internal**
-/// inventory rebalance) or the asset received by the single external **pure-sink** recipient — an
-/// address that receives but never sends — for a cross-chain order fill.
+/// inventory rebalance) or the asset received by the single external **pure-sink** recipient —
+/// see [`TransferLedger::sink_receipts`] — for a cross-chain order fill.
 ///
 /// Returns `None` (declines) when the shape is ambiguous: not exactly one input token, a same-token
 /// "swap", more than one token back to the collector, or more than one external recipient/output
 /// (a batched multi-order fill, like the multi-leg netting guard).
 fn decode_rebalance(
-    logs: &[Log],
-    native_transfers: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
     relay_routers: &HashSet<Address>,
     wrapped_native: Address,
 ) -> Option<NetSwap> {
-    let mut sent: HashMap<(Address, Address), U256> = HashMap::new();
-    let mut received: HashMap<(Address, Address), U256> = HashMap::new();
-    let mut senders: HashSet<Address> = HashSet::new();
-
-    for &(from, to, value) in native_transfers {
-        senders.insert(from);
-        *sent
-            .entry((from, Address::ZERO))
-            .or_default() += value;
-        *received
-            .entry((to, Address::ZERO))
-            .or_default() += value;
-    }
-    for log in logs {
-        let Ok(transfer) = Transfer::decode_log(&to_primitive_log(log)) else {
-            continue;
-        };
-        let token = log.address();
-        senders.insert(transfer.from);
-        *sent
-            .entry((transfer.from, token))
-            .or_default() += transfer.value;
-        *received
-            .entry((transfer.to, token))
-            .or_default() += transfer.value;
-    }
-
-    // Aggregate the fee collector(s)' flow per token.
-    let mut fc_sent: HashMap<Address, U256> = HashMap::new();
-    let mut fc_recv: HashMap<Address, U256> = HashMap::new();
-    for (&(addr, token), &v) in &sent {
-        if fee_collectors.contains(&addr) {
-            *fc_sent.entry(token).or_default() += v;
-        }
-    }
-    for (&(addr, token), &v) in &received {
-        if fee_collectors.contains(&addr) {
-            *fc_recv.entry(token).or_default() += v;
-        }
-    }
-
-    // token_in: the single token the collector net-sends.
-    let net_in: Vec<(Address, U256)> = fc_sent
-        .iter()
-        .filter_map(|(&token, &s)| {
-            let r = fc_recv
-                .get(&token)
-                .copied()
-                .unwrap_or_default();
-            (s > r).then_some((token, s - r))
-        })
+    // token_in: the single token the collector(s) net-send.
+    let net_in: Vec<(Address, U256)> = ledger
+        .group_net_sent(fee_collectors)
+        .into_iter()
         .collect();
     if net_in.len() != 1 {
         return None;
@@ -123,15 +69,9 @@ fn decode_rebalance(
     let (token_in, amount_in) = net_in[0];
 
     // C2 internal rebalance: the collector net-receives exactly one (different) token.
-    let net_recv: Vec<(Address, U256)> = fc_recv
-        .iter()
-        .filter_map(|(&token, &r)| {
-            let s = fc_sent
-                .get(&token)
-                .copied()
-                .unwrap_or_default();
-            (r > s).then_some((token, r - s))
-        })
+    let net_recv: Vec<(Address, U256)> = ledger
+        .group_net_received(fee_collectors)
+        .into_iter()
         .collect();
     if !net_recv.is_empty() {
         if net_recv.len() != 1 || net_recv[0].0 == token_in {
@@ -141,18 +81,14 @@ fn decode_rebalance(
         return Some(NetSwap { token_in, amount_in, token_out, amount_out });
     }
 
-    // C1 external fill: the single pure-sink recipient (receives but never sends), excluding
-    // infrastructure (routers, collector, the wrapped-native token, the zero address) and the
-    // input token.
-    let mut outputs: Vec<(Address, Address, U256)> = Vec::new(); // (recipient, token_out, amount)
-    for (&(addr, token), &v) in &received {
-        if v.is_zero() || senders.contains(&addr) {
-            continue;
-        }
-        if relay_routers.contains(&addr) ||
-            fee_collectors.contains(&addr) ||
-            addr == Address::ZERO ||
-            addr == wrapped_native
+    // C1 external fill: the single pure-sink recipient, excluding infrastructure (routers,
+    // collector, the wrapped-native token, the zero address) and the input token.
+    let mut outputs: Vec<(Address, U256)> = Vec::new(); // (token_out, amount)
+    for (recipient, token, amount) in ledger.sink_receipts() {
+        if relay_routers.contains(&recipient) ||
+            fee_collectors.contains(&recipient) ||
+            recipient == Address::ZERO ||
+            recipient == wrapped_native
         {
             continue;
         }
@@ -164,19 +100,25 @@ fn decode_rebalance(
         if token == token_in {
             return None;
         }
-        outputs.push((addr, token, v));
+        outputs.push((token, amount));
     }
     if outputs.len() != 1 {
         return None;
     }
-    let (_, token_out, amount_out) = outputs[0];
+    let (token_out, amount_out) = outputs[0];
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy::rpc::types::Log;
+
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+
+    fn ledger(logs: &[Log], native: &[(Address, Address, U256)]) -> TransferLedger {
+        TransferLedger::from_transaction(logs, native)
+    }
 
     #[test]
     fn rebalance_external_token_fill() {
@@ -192,7 +134,7 @@ mod tests {
             make_transfer_log(token_in, fee, pool, U256::from(1000)),
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
-        let got = decode_rebalance(&logs, &[], &collectors, &routers, addr(200)).unwrap();
+        let got = decode_rebalance(&ledger(&logs, &[]), &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, token_out, 2000));
     }
 
@@ -209,7 +151,8 @@ mod tests {
         let routers = HashSet::from([addr(2)]);
         let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
         let native = vec![(pool, recipient, U256::from(2000))];
-        let got = decode_rebalance(&logs, &native, &collectors, &routers, addr(200)).unwrap();
+        let got =
+            decode_rebalance(&ledger(&logs, &native), &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
     }
 
@@ -226,7 +169,7 @@ mod tests {
             make_transfer_log(token_in, fee, pool, U256::from(1000)),
             make_transfer_log(token_out, pool, fee, U256::from(1001)),
         ];
-        let got = decode_rebalance(&logs, &[], &collectors, &routers, addr(200)).unwrap();
+        let got = decode_rebalance(&ledger(&logs, &[]), &collectors, &routers, addr(200)).unwrap();
         assert_eq!(got, swap(token_in, 1000, token_out, 1001));
     }
 
@@ -244,7 +187,7 @@ mod tests {
             make_transfer_log(token_out, pool, addr(7), U256::from(1000)),
             make_transfer_log(token_out, pool, addr(8), U256::from(1000)),
         ];
-        assert!(decode_rebalance(&logs, &[], &collectors, &routers, addr(200)).is_none());
+        assert!(decode_rebalance(&ledger(&logs, &[]), &collectors, &routers, addr(200)).is_none());
     }
 
     #[test]
@@ -265,7 +208,9 @@ mod tests {
             make_transfer_log(token_in, router, recipient, U256::from(2_002_781_016u64)),
         ];
         let native = vec![(router, gas_recipient, U256::from(1_139_527_584_556_489u64))];
-        assert!(decode_rebalance(&logs, &native, &collectors, &routers, addr(200)).is_none());
+        assert!(
+            decode_rebalance(&ledger(&logs, &native), &collectors, &routers, addr(200)).is_none()
+        );
     }
 
     #[test]
@@ -274,7 +219,7 @@ mod tests {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000))];
         let collectors = HashSet::from([addr(99)]);
         let routers = HashSet::from([addr(2)]);
-        assert!(decode_rebalance(&logs, &[], &collectors, &routers, addr(200)).is_none());
+        assert!(decode_rebalance(&ledger(&logs, &[]), &collectors, &routers, addr(200)).is_none());
     }
 
     #[test]
@@ -301,7 +246,7 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
 
-        let flow = decode(&logs, &[], user, router, &registry).unwrap();
+        let flow = decode(&ledger(&logs, &[]), user, router, &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.client_fee, Some(U256::from(40)));
@@ -328,7 +273,7 @@ mod tests {
         let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
         let native = vec![(router, collector, U256::from(1000))];
 
-        let flow = decode(&logs, &native, collector, router, &registry).unwrap();
+        let flow = decode(&ledger(&logs, &native), collector, router, &registry).unwrap();
         assert_eq!(flow.tracked, collector);
         assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
         assert_eq!(flow.client_fee, None);
@@ -357,7 +302,7 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
 
-        let flow = decode(&logs, &[], solver, router, &registry).unwrap();
+        let flow = decode(&ledger(&logs, &[]), solver, router, &registry).unwrap();
         assert_eq!(flow.tracked, solver);
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.client_fee, None);

@@ -1,9 +1,10 @@
 //! Per-venue decode strategies.
 //!
-//! Matching decides *which* transactions are aggregator trades; the strategy
-//! decides *how* to recover the user's swap from one. Venue-specific behavior
-//! (Relay's fee skim and rebalancing fills, intent-fill maker-finding) lives
-//! in its own module so venues evolve independently.
+//! Matching ([`select`]) decides *which* transactions are aggregator trades and which
+//! [`Strategy`] recovers the user's swap from each; [`Strategy::decode`] is the single seam the
+//! orchestrator calls, so venue-specific behavior (Relay's fee skim and rebalancing fills,
+//! MetaMask's calldata venue declaration, intent-fill maker-finding) lives entirely in this
+//! directory and venues evolve independently.
 //!
 //! Terminology — three tiers, two of which appear in every record:
 //! - **client**: the contract the user entered through (`tx.to`) — Relay, MetaMask, a solver's own
@@ -16,10 +17,11 @@
 //!
 //! A module in this directory is named for the counterparty whose behavior it decodes, which can
 //! sit in either of the first two tiers (relay/metamask are clients; kyberswap/paraswap are
-//! solvers).
+//! solvers; lifi's bridge detection guards matching).
 
 pub(crate) mod intent;
 pub(crate) mod kyberswap;
+pub(crate) mod lifi;
 pub(crate) mod metamask;
 pub(crate) mod paraswap;
 pub(crate) mod relay;
@@ -28,35 +30,15 @@ use std::collections::{HashMap, HashSet};
 
 use alloy::{
     primitives::{Address, U256},
-    rpc::types::{Log, TransactionReceipt},
-    sol,
-    sol_types::SolEvent,
+    providers::Provider,
+    rpc::types::TransactionReceipt,
 };
+use tracing::debug;
 
 use crate::decoder::{
-    net::{decode_trade, to_primitive_log, NetSwap, Transfer},
+    ledger::{NetSwap, TransferLedger},
     registry::Registry,
 };
-
-sol! {
-    /// Emitted by the LiFi Diamond only when an order bridges to another chain (the tuple is
-    /// LiFi's `BridgeData`); same-chain LiFi swaps emit `LiFiGenericSwapCompleted` instead.
-    event LiFiTransferStarted(
-        (bytes32, string, string, address, address, address, uint256, uint256, bool, bool)
-            bridgeData
-    );
-}
-
-/// Whether the transaction started a cross-chain bridge order.
-///
-/// A bridge deposit is not a same-chain swap: the real output lands on the destination chain,
-/// and the trader's only same-chain receipt is a leftover refund. Netting that as a swap pairs
-/// the full input with the refund — a phantom trade with an absurd rate. A matching-time
-/// concern, like [`select`]: rejected transactions never cost a trace.
-pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
-    logs.iter()
-        .any(|log| log.topics().first() == Some(&LiFiTransferStarted::SIGNATURE_HASH))
-}
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
@@ -105,6 +87,22 @@ pub(crate) fn plausible_quote(quote: &SolverQuote, settled_amount_out: U256) -> 
                 .saturating_mul(U256::from(2))
 }
 
+/// Everything a decode strategy may need from one matched transaction, so every strategy is
+/// called through the same seam ([`Strategy::decode`]) regardless of which inputs it uses.
+pub(crate) struct DecodeContext<'a, P> {
+    /// RPC access, for strategies that must look beyond the transaction (maker EOA checks).
+    pub provider: &'a P,
+    pub registry: &'a Registry,
+    /// Cross-block contract-code cache, owned by the decoder.
+    pub code_cache: &'a mut HashMap<Address, bool>,
+    /// The transaction's flattened value movements.
+    pub ledger: &'a TransferLedger,
+    /// Root calldata of the transaction (venue declarations, embedded quotes).
+    pub input: &'a [u8],
+    pub sender: Address,
+    pub entry_point: Address,
+}
+
 /// How to recover the swap from a matched transaction.
 pub(crate) enum Strategy {
     /// The sender is the trader: net its flow (direct aggregator swaps).
@@ -118,6 +116,38 @@ pub(crate) enum Strategy {
     Relay,
     /// MetaMask Swap Router entry: sender netting with client-fee back-out.
     Metamask,
+}
+
+impl Strategy {
+    /// Recover the user flow from a matched transaction. Each variant owns its venue's quirks;
+    /// the orchestrator only sequences.
+    pub(crate) async fn decode<P: Provider>(&self, ctx: DecodeContext<'_, P>) -> Option<Flow> {
+        match self {
+            Self::Sender => sender_flow(ctx.ledger, ctx.sender, ctx.entry_point),
+            Self::Maker => {
+                intent::find_maker_trade(
+                    ctx.provider,
+                    ctx.ledger,
+                    &[ctx.entry_point, ctx.sender],
+                    ctx.registry,
+                    ctx.code_cache,
+                )
+                .await
+            }
+            Self::Relay => relay::decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.registry),
+            Self::Metamask => metamask::decode(ctx.ledger, ctx.sender, ctx.input, ctx.registry),
+        }
+    }
+
+    /// Whether the entry point is a client wrapper around the settling solver (Relay, MetaMask).
+    /// The wrapper's own gas is charged whichever solver the client picks, so gas accounting
+    /// reads the route's trace frame instead of the whole receipt.
+    pub(crate) fn routes_via_wrapper(&self) -> bool {
+        match self {
+            Self::Relay | Self::Metamask => true,
+            Self::Sender | Self::Maker => false,
+        }
+    }
 }
 
 /// A matched transaction and the strategy to decode it.
@@ -165,10 +195,26 @@ impl Flow {
 /// A transaction qualifies two ways: its entry point (`tx.to`) is a known
 /// client or aggregator, or one of its logs was emitted by a known aggregator
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
+/// Matched transactions that start a cross-chain bridge order are vetoed here
+/// (see [`lifi::started_bridge_order`]), before they cost a trace.
 pub(crate) fn select<'a>(
     receipt: &'a TransactionReceipt,
     registry: &Registry,
 ) -> Option<Matched<'a>> {
+    let matched = match_entry(receipt, registry)?;
+    if lifi::started_bridge_order(matched.receipt.logs()) {
+        debug!(
+            tx = %matched.receipt.transaction_hash,
+            client = %registry.label(matched.entry_point),
+            "cross-chain bridge order; skipping"
+        );
+        return None;
+    }
+    Some(matched)
+}
+
+/// The strategy for a receipt's entry point, before any veto.
+fn match_entry<'a>(receipt: &'a TransactionReceipt, registry: &Registry) -> Option<Matched<'a>> {
     if !receipt.status() {
         return None;
     }
@@ -203,15 +249,16 @@ pub(crate) fn select<'a>(
 /// A sender-tracked flow marks the trader as the gas payer; the entry-point fallback does not
 /// (the tracked address and the gas-paying sender differ, so charging the gas is not clear-cut).
 pub(crate) fn sender_flow(
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
 ) -> Option<Flow> {
-    decode_trade(logs, native, sender)
+    ledger
+        .net_swap(sender)
         .map(|swap| Flow { trader_paid_gas: true, ..Flow::without_fees(sender, swap) })
         .or_else(|| {
-            decode_trade(logs, native, entry_point)
+            ledger
+                .net_swap(entry_point)
                 .map(|swap| Flow::without_fees(entry_point, swap))
         })
 }
@@ -223,17 +270,16 @@ pub(crate) fn sender_flow(
 /// operation — the collector's receipts are its own output, not a skim, and backing them "out"
 /// would add the output to itself and double it.
 pub(super) fn client_fee_flow(
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
 ) -> Option<Flow> {
-    let flow = sender_flow(logs, native, sender, entry_point)?;
+    let flow = sender_flow(ledger, sender, entry_point)?;
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
-    Some(back_out_client_fees(flow, logs, native, fee_collectors))
+    Some(back_out_client_fees(flow, ledger, fee_collectors))
 }
 
 /// Back a client-fee skim out of a decoded user flow.
@@ -245,11 +291,10 @@ pub(super) fn client_fee_flow(
 /// actually swapped — the like-for-like basis vs Fynd.
 fn back_out_client_fees(
     flow: Flow,
-    logs: &[Log],
-    native: &[(Address, Address, U256)],
+    ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
 ) -> Flow {
-    let fees = fee_to_collectors(logs, native, fee_collectors);
+    let fees = ledger.received_by(fee_collectors);
     let client_fee = fees
         .get(&flow.swap.token_in)
         .copied()
@@ -272,105 +317,53 @@ fn back_out_client_fees(
     }
 }
 
-/// Total of each token transferred to a known client fee-collector within the transaction, keyed
-/// by token (native ETH is [`Address::ZERO`]).
-///
-/// Clients skim their fee by sending part of the input token to a fee collector before swapping
-/// (so the user's netted `amount_in` includes money that never entered the swap) or part of the
-/// output after. Backing the fee out lets the re-solve compare Fynd against the client on the
-/// amount actually routed, rather than crediting Fynd with the client's fee. Matches by recipient
-/// regardless of sender, so it catches both a direct user skim and a router skim.
-fn fee_to_collectors(
-    logs: &[Log],
-    native_transfers: &[(Address, Address, U256)],
-    fee_collectors: &HashSet<Address>,
-) -> HashMap<Address, U256> {
-    let mut fees: HashMap<Address, U256> = HashMap::new();
-    if fee_collectors.is_empty() {
-        return fees;
-    }
-    for &(_, to, value) in native_transfers {
-        if fee_collectors.contains(&to) {
-            *fees.entry(Address::ZERO).or_default() += value;
-        }
-    }
-    for log in logs {
-        let primitive = to_primitive_log(log);
-        let Ok(transfer) = Transfer::decode_log(&primitive) else {
-            continue;
-        };
-        if fee_collectors.contains(&transfer.to) {
-            *fees.entry(log.address()).or_default() += transfer.value;
-        }
-    }
-    fees
-}
-
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::Log as PrimitiveLog;
-
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log};
+    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
-    fn bridge_order_detected() {
-        // The LiFi bridge shape (tx 0x72b71802…): 7.2 ETH in, swapped to USDT, 99.5% bridged out,
-        // and only the leftover refunded to the trader — flagged by LiFiTransferStarted.
-        let diamond = addr(70);
-        let primitive = PrimitiveLog::new_unchecked(
-            diamond,
-            vec![LiFiTransferStarted::SIGNATURE_HASH],
-            Default::default(),
-        );
-        let logs = vec![Log { inner: primitive, ..Default::default() }];
-        assert!(started_bridge_order(&logs));
-
-        let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
-        assert!(!started_bridge_order(&swap_logs));
-    }
-
-    #[test]
-    fn fee_to_collectors_totals_input_skim() {
+    fn client_fee_flow_backs_out_input_skim() {
+        // Router skims part of the input token to the collector; the rest goes to the pool.
         let user = addr(1);
         let router = addr(2);
         let collector = addr(99);
         let token_in = addr(10);
+        let token_out = addr(11);
         let pool = addr(50);
         let collectors = HashSet::from([collector]);
 
-        // Router skims part of the input token to the collector; the rest goes to the pool.
         let logs = vec![
             make_transfer_log(token_in, user, router, U256::from(1000)),
             make_transfer_log(token_in, router, collector, U256::from(40)),
             make_transfer_log(token_in, router, pool, U256::from(960)),
+            make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
-        let fees = fee_to_collectors(&logs, &[], &collectors);
-        assert_eq!(fees.get(&token_in).copied(), Some(U256::from(40)));
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+
+        let flow = client_fee_flow(&ledger, user, router, &collectors).unwrap();
+        assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
+        assert_eq!(flow.client_fee, Some(U256::from(40)));
+        assert_eq!(flow.client_fee_out, None);
     }
 
     #[test]
-    fn fee_to_collectors_totals_output_skim() {
+    fn client_fee_flow_keeps_fee_free_trade_unchanged() {
+        // Nothing reached a fee wallet, nothing is backed out.
         let user = addr(1);
         let pool = addr(50);
-        let collector = addr(99);
-        let token_out = addr(11);
-        let collectors = HashSet::from([collector]);
+        let collectors = HashSet::from([addr(99)]);
 
-        // Pool sends the output; part is skimmed to the collector, the rest to the user. The fee
-        // map keys this by token_out so the decoder can add it back to the gross swap output.
         let logs = vec![
-            make_transfer_log(token_out, pool, collector, U256::from(30)),
-            make_transfer_log(token_out, pool, user, U256::from(970)),
+            make_transfer_log(addr(10), user, pool, U256::from(1000)),
+            make_transfer_log(addr(11), pool, user, U256::from(2000)),
         ];
-        let fees = fee_to_collectors(&logs, &[], &collectors);
-        assert_eq!(fees.get(&token_out).copied(), Some(U256::from(30)));
-    }
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-    #[test]
-    fn fee_to_collectors_empty_set_is_noop() {
-        let logs = vec![make_transfer_log(addr(10), addr(1), addr(99), U256::from(40))];
-        assert!(fee_to_collectors(&logs, &[], &HashSet::new()).is_empty());
+        let flow = client_fee_flow(&ledger, user, pool, &collectors).unwrap();
+        assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
+        assert_eq!(flow.client_fee, None);
+        assert_eq!(flow.client_fee_out, None);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 
-use crate::decoder::net::{NetSwap, Transfer};
+use crate::decoder::ledger::{NetSwap, Transfer};
 
 /// An address with `n` in its last byte, for readable test fixtures.
 pub(crate) fn addr(n: u8) -> Address {
