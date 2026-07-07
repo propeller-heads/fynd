@@ -50,7 +50,7 @@ jobs:
         id: toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-06-28
           components: rustfmt, clippy
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2

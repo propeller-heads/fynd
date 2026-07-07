@@ -116,9 +116,9 @@ async fn build_dry_run_overrides(
         erc20::find_balance_slot(provider, sell_token, sender),
         erc20::find_allowance_slot(provider, sell_token, sender, spender),
     );
-    let balance_pos = balance_res?;
-    let allowance_pos = allowance_res?;
-    info!("Found balance slot {balance_pos} and allowance slot {allowance_pos}");
+    let balance_slot = balance_res?;
+    let allowance_slot = allowance_res?;
+    info!("Found balance slot {balance_slot} and allowance slot {allowance_slot}");
 
     // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
     // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
@@ -126,16 +126,8 @@ async fn build_dry_run_overrides(
     let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
     let token_key = Bytes::copy_from_slice(sell_token.as_slice());
     let mut overrides = StorageOverrides::default();
-    overrides.insert(
-        token_key.clone(),
-        Bytes::copy_from_slice(&erc20::balance_slot_at(sender, balance_pos).0),
-        max_val.clone(),
-    );
-    overrides.insert(
-        token_key,
-        Bytes::copy_from_slice(&erc20::allowance_slot_at(sender, spender, allowance_pos).0),
-        max_val,
-    );
+    overrides.insert(token_key.clone(), Bytes::copy_from_slice(&balance_slot.0), max_val.clone());
+    overrides.insert(token_key, Bytes::copy_from_slice(&allowance_slot.0), max_val);
     Ok(overrides)
 }
 

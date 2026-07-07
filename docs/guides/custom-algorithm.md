@@ -11,7 +11,7 @@ Fynd exposes an `Algorithm` trait that lets you plug in custom routing logic wit
 The trait has four methods:
 
 * `name()` — a string identifier used in config and logs
-* `find_best_route()` — given a routing graph and an order, return the best route
+* `find_best_route()` — given a routing graph and an order, return the best route. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
 * `computation_requirements()` — declares which derived data the algorithm needs (spot prices, depths, etc.)
 * `timeout()` — per-order solve deadline
 
@@ -119,6 +119,18 @@ impl Algorithm for DirectPoolAlgorithm {
             );
 
             let route = Route::new(vec![swap], HashMap::new())?;
+
+            // Validate every candidate route before returning it. The solver worker rejects
+            // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that
+            // failure drops the whole solution for this worker pool. Skipping invalid candidates
+            // here lets a later pool be chosen instead. Any custom algorithm should validate the
+            // routes it might return, and — when it ranks multiple candidates — fall through to
+            // the next-best valid one rather than returning the invalid route.
+            if let Err(e) = route.validate() {
+                eprintln!("skipping invalid route: {e}");
+                continue;
+            }
+
             let net_amount_out = BigInt::from(result.amount);
 
             return Ok(RouteResult::new(route, net_amount_out, gas_price));

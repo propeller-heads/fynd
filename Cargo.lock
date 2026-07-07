@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "erc20-overrides"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3337,7 +3337,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3384,6 +3384,7 @@ dependencies = [
  "futures 0.3.32",
  "fynd-client",
  "fynd-rpc",
+ "fynd-tools-common",
  "num-bigint",
  "reqwest 0.12.28",
  "serde",
@@ -3396,7 +3397,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "bytes",
@@ -3414,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3451,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3476,7 +3477,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3505,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3521,7 +3522,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3538,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3552,6 +3553,26 @@ dependencies = [
  "tracing",
  "tycho-simulation",
  "zstd",
+]
+
+[[package]]
+name = "fynd-tools-common"
+version = "0.82.3"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "erc20-overrides",
+ "fastrand",
+ "fynd-client",
+ "num-bigint",
+ "num-traits",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3792,6 +3813,32 @@ dependencies = [
  "libc",
  "pkg-config",
  "rusb",
+]
+
+[[package]]
+name = "hindsight"
+version = "0.82.3"
+dependencies = [
+ "actix-web",
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures 0.3.32",
+ "fynd-client",
+ "fynd-core",
+ "fynd-rpc",
+ "fynd-tools-common",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "num-bigint",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "tycho-simulation",
 ]
 
 [[package]]
@@ -5693,7 +5740,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.82.1"
+version = "0.82.3"
 dependencies = [
  "anyhow",
  "clap",

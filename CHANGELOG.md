@@ -1,3 +1,18 @@
+## [0.82.3](https://github.com/propeller-heads/fynd/compare/0.82.2...0.82.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* **algo:** Call Route.validate() in the algorithms ([1614731](https://github.com/propeller-heads/fynd/commit/1614731587fc8a4d55b63b7bfad7ddaef01cafeb))
+* **worker:** Call Route.validate() in the SolverWorker ([1e3e3ac](https://github.com/propeller-heads/fynd/commit/1e3e3ac4f0a00734a16fb195d4237cbc30b3349a))
+
+## [0.82.2](https://github.com/propeller-heads/fynd/compare/0.82.1...0.82.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* pin nightly version to work around rustc ICE ([faa03a7](https://github.com/propeller-heads/fynd/commit/faa03a7dd6306dcce1cc1a67d858f72a42981589))
+
 ## [0.82.1](https://github.com/propeller-heads/fynd/compare/0.82.0...0.82.1) (2026-06-29)
 
 

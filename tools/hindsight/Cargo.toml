@@ -1,0 +1,54 @@
+[package]
+name = "hindsight"
+version.workspace = true
+edition = "2021"
+description = "Decode aggregator swaps from on-chain data"
+license = "MIT"
+
+[[bin]]
+name = "hindsight"
+path = "src/main.rs"
+
+[dependencies]
+# Fynd integration: re-solve via a running solver (HTTP) or an in-process stepped solver
+fynd-client = { workspace = true }
+fynd-core = { workspace = true }
+fynd-rpc = { workspace = true }
+tycho-simulation = { workspace = true }
+# Shared tooling (BPS comparison math, FyndAggregator wrapper)
+fynd-tools-common = { workspace = true }
+num-bigint = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# RPC & Ethereum
+alloy = { workspace = true, features = [
+    "providers",
+    "provider-http",
+    "provider-debug-api",
+    "rpc-types-eth",
+    "rpc-types-trace",
+] }
+
+# HTTP (for RPC URL parsing) + metrics server
+reqwest = { workspace = true }
+actix-web = { workspace = true }
+
+# Prometheus metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+# Error handling & logging
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
