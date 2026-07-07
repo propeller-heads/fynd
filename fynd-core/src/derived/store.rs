@@ -1,12 +1,13 @@
 //! Typed storage for derived data.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{any::Any, collections::HashMap, str::FromStr, sync::Arc};
 
 use tokio::sync::RwLock;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    computation::{FailedItem, FailedItemError},
+    computation::{ComputationId, DerivedComputation, FailedItem, FailedItemError},
+    computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     types::{
         PoolDepthKey, PoolDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
         TokenPricesWithDeps,
@@ -21,21 +22,35 @@ struct ComputedValue<T> {
     block: u64,
 }
 
+/// A type-erased computation output paired with the block it was computed for.
+struct ComputedSlot {
+    data: Box<dyn Any + Send + Sync>,
+    block: u64,
+}
+
+impl std::fmt::Debug for ComputedSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputedSlot")
+            .field("block", &self.block)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Typed storage for derived data computations.
 ///
-/// Provides typed access to previously computed derived data.
-/// Each field is `Option` to indicate whether the computation has run.
+/// Computation outputs live in a type-keyed slot map written erased and read back
+/// typed by the per-computation getters below. The persistent failure maps stay
+/// typed because their merge logic is specific to each keyed output.
 #[derive(Debug, Default)]
 pub struct DerivedData {
-    token_prices: Option<ComputedValue<TokenGasPrices>>,
+    /// Computation outputs keyed by [`ComputationId`], stored type-erased.
+    slots: HashMap<ComputationId, ComputedSlot>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     token_prices_failed: HashMap<TokenGasPriceKey, (u64, FailedItemError)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
-    pool_depths: Option<ComputedValue<PoolDepths>>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     pool_depths_failed: HashMap<PoolDepthKey, (u64, FailedItemError)>,
-    spot_prices: Option<ComputedValue<SpotPrices>>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
     spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError)>,
 }
@@ -63,6 +78,39 @@ impl DerivedData {
         Arc::new(RwLock::new(Self::new()))
     }
 
+    /// Stores a computation's output under its id, type-erased, replacing any prior value.
+    pub(crate) fn set_output<T: Any + Send + Sync>(
+        &mut self,
+        id: ComputationId,
+        data: T,
+        block: u64,
+    ) {
+        self.slots
+            .insert(id, ComputedSlot { data: Box::new(data), block });
+    }
+
+    /// Returns the output stored under `id` downcast to `T`, or `None` if absent.
+    ///
+    /// Each id maps to a single output type, so reading an existing slot as the wrong `T`
+    /// is a programmer error: it trips a debug assertion and otherwise returns `None`.
+    pub(crate) fn output<T: Any>(&self, id: ComputationId) -> Option<&T> {
+        let slot = self.slots.get(id)?;
+        debug_assert!(slot.data.is::<T>(), "derived output {id} read as the wrong type");
+        slot.data.downcast_ref::<T>()
+    }
+
+    /// Returns the block at which the output under `id` was last computed.
+    pub(crate) fn output_block(&self, id: ComputationId) -> Option<u64> {
+        self.slots
+            .get(id)
+            .map(|slot| slot.block)
+    }
+
+    /// Removes the output stored under `id`.
+    fn clear_output(&mut self, id: ComputationId) {
+        self.slots.remove(id);
+    }
+
     /// Returns `true` if all derived data types has been computed at least once.
     pub fn derived_data_ready(&self) -> bool {
         self.token_prices_block().is_some() &&
@@ -77,16 +125,12 @@ impl DerivedData {
 
     /// Returns token prices if computed.
     pub fn token_prices(&self) -> Option<&TokenGasPrices> {
-        self.token_prices
-            .as_ref()
-            .map(|v| &v.data)
+        self.output(TokenGasPriceComputation::ID)
     }
 
     /// Returns the block at which token prices were last computed.
     pub fn token_prices_block(&self) -> Option<u64> {
-        self.token_prices
-            .as_ref()
-            .map(|v| v.block)
+        self.output_block(TokenGasPriceComputation::ID)
     }
 
     /// Sets token prices, merging failures for incremental runs.
@@ -119,7 +163,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.token_prices = Some(ComputedValue { data: prices, block });
+        self.set_output(TokenGasPriceComputation::ID, prices, block);
     }
 
     /// Returns `(block, error)` for this token address if it failed in a past
@@ -132,7 +176,7 @@ impl DerivedData {
 
     /// Clears token prices and their failure map.
     pub fn clear_token_prices(&mut self) {
-        self.token_prices = None;
+        self.clear_output(TokenGasPriceComputation::ID);
         self.token_prices_failed.clear();
     }
 
@@ -170,16 +214,12 @@ impl DerivedData {
 
     /// Returns pool depths if computed.
     pub fn pool_depths(&self) -> Option<&PoolDepths> {
-        self.pool_depths
-            .as_ref()
-            .map(|v| &v.data)
+        self.output(PoolDepthComputation::ID)
     }
 
     /// Returns the block at which pool depths were last computed.
     pub fn pool_depths_block(&self) -> Option<u64> {
-        self.pool_depths
-            .as_ref()
-            .map(|v| v.block)
+        self.output_block(PoolDepthComputation::ID)
     }
 
     /// Sets pool depths, merging failures for incremental runs.
@@ -208,7 +248,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.pool_depths = Some(ComputedValue { data: depths, block });
+        self.set_output(PoolDepthComputation::ID, depths, block);
     }
 
     /// Returns `(block, error)` for this key if it failed in a past pool depth
@@ -223,7 +263,7 @@ impl DerivedData {
 
     /// Clears pool depths and their failure map.
     pub fn clear_pool_depths(&mut self) {
-        self.pool_depths = None;
+        self.clear_output(PoolDepthComputation::ID);
         self.pool_depths_failed.clear();
     }
 
@@ -233,16 +273,12 @@ impl DerivedData {
 
     /// Returns spot prices if computed.
     pub fn spot_prices(&self) -> Option<&SpotPrices> {
-        self.spot_prices
-            .as_ref()
-            .map(|v| &v.data)
+        self.output(SpotPriceComputation::ID)
     }
 
     /// Returns the block at which spot prices were last computed.
     pub fn spot_prices_block(&self) -> Option<u64> {
-        self.spot_prices
-            .as_ref()
-            .map(|v| v.block)
+        self.output_block(SpotPriceComputation::ID)
     }
 
     /// Sets spot prices, merging failures for incremental runs.
@@ -271,7 +307,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.spot_prices = Some(ComputedValue { data: prices, block });
+        self.set_output(SpotPriceComputation::ID, prices, block);
     }
 
     /// Returns `(block, error)` for this key if it failed in a past spot price
@@ -286,7 +322,7 @@ impl DerivedData {
 
     /// Clears spot prices and their failure map.
     pub fn clear_spot_prices(&mut self) {
-        self.spot_prices = None;
+        self.clear_output(SpotPriceComputation::ID);
         self.spot_prices_failed.clear();
     }
 
@@ -296,12 +332,10 @@ impl DerivedData {
 
     /// Clears all stored data, including all failure maps.
     pub fn clear_all(&mut self) {
-        self.token_prices = None;
+        self.slots.clear();
         self.token_prices_failed.clear();
         self.token_prices_deps = None;
-        self.pool_depths = None;
         self.pool_depths_failed.clear();
-        self.spot_prices = None;
         self.spot_prices_failed.clear();
     }
 }
