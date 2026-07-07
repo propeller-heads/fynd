@@ -414,6 +414,7 @@ mod tests {
             amount_out: U256::from(2000),
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
         }
     }
 

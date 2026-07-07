@@ -79,11 +79,22 @@ pub(crate) struct Flow {
     /// Venue label asserted by the strategy itself (e.g. MetaMask declares its
     /// venue in calldata), overriding trace-based attribution.
     pub aggregator_override: Option<String>,
+    /// Whether the tracked trader sent the transaction and therefore paid its gas. Decides if the
+    /// settled route's gas may be charged against the settled output — a maker or a
+    /// solver-rebalance trader had its gas paid by someone else, so nothing is deducted there.
+    pub trader_paid_gas: bool,
 }
 
 impl Flow {
     fn without_fees(tracked: Address, swap: NetSwap) -> Self {
-        Self { tracked, swap, client_fee: None, client_fee_out: None, aggregator_override: None }
+        Self {
+            tracked,
+            swap,
+            client_fee: None,
+            client_fee_out: None,
+            aggregator_override: None,
+            trader_paid_gas: false,
+        }
     }
 }
 
@@ -126,6 +137,9 @@ pub(crate) fn select<'a>(
 
 /// Net the sender's flow, falling back to the entry point for the rare case
 /// where output is delivered there.
+///
+/// A sender-tracked flow marks the trader as the gas payer; the entry-point fallback does not
+/// (the tracked address and the gas-paying sender differ, so charging the gas is not clear-cut).
 pub(crate) fn sender_flow(
     logs: &[Log],
     native: &[(Address, Address, U256)],
@@ -133,7 +147,7 @@ pub(crate) fn sender_flow(
     entry_point: Address,
 ) -> Option<Flow> {
     decode_trade(logs, native, sender)
-        .map(|swap| Flow::without_fees(sender, swap))
+        .map(|swap| Flow { trader_paid_gas: true, ..Flow::without_fees(sender, swap) })
         .or_else(|| {
             decode_trade(logs, native, entry_point)
                 .map(|swap| Flow::without_fees(entry_point, swap))
@@ -192,6 +206,7 @@ fn back_out_client_fees(
         client_fee,
         client_fee_out,
         aggregator_override: flow.aggregator_override,
+        trader_paid_gas: flow.trader_paid_gas,
     }
 }
 

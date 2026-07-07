@@ -143,6 +143,7 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, Some(U256::from(883)));
+        assert!(flow.trader_paid_gas);
     }
 
     #[test]

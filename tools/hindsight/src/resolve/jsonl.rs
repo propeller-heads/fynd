@@ -5,7 +5,6 @@
 //! to a slim route + calldata that omits each hop's bulky, sometimes-unserializable
 //! `protocol_state`.
 
-use alloy::primitives::{Address, U256};
 use fynd_core::types::{OrderQuote, Swap, Transaction};
 use tracing::warn;
 
@@ -57,19 +56,22 @@ fn comparison_record(
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
         "settled_amount_out": range.settled_amount_out.to_string(),
-        "top": state_record(&range.top, range.token_out, range.settled_amount_out, prices_top),
-        "back": state_record(&range.back, range.token_out, range.settled_amount_out, prices_back),
+        "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
+        "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
+        "top": state_record(&range.top, range, prices_top),
+        "back": state_record(&range.back, range, prices_back),
     })
 }
 
 /// JSON for one block-state of an improvement: verdict, bps, Fynd amounts, the USD improvement
-/// (net-of-gas Fynd output minus the settled output, valued at `prices`), and the slim quote.
+/// (net-of-gas Fynd output minus the gas-adjusted settled output, valued at `prices`), and the
+/// slim quote. `settled_value_usd` stays gross — it is the trade's notional, not a comparison.
 fn state_record(
     state: &StateResult,
-    token_out: Address,
-    settled_amount_out: U256,
+    range: &RangeComparison,
     prices: &usd::PriceMap,
 ) -> serde_json::Value {
+    let token_out = range.token_out;
     let solved = match &state.outcome {
         Outcome::Solved(solved) => Some(solved),
         Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
@@ -81,7 +83,7 @@ fn state_record(
         Outcome::Solved(_) => None,
     };
     let improvement_usd = solved.and_then(|s| {
-        usd::savings_usd(token_out, s.amount_out_net_gas, settled_amount_out, prices)
+        usd::savings_usd(token_out, s.amount_out_net_gas, range.settled_amount_out_net_gas, prices)
     });
     let fynd_value_usd = solved.and_then(|s| usd::value_usd(token_out, s.amount_out, prices));
     serde_json::json!({
@@ -93,7 +95,7 @@ fn state_record(
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
-        "settled_value_usd": usd::value_usd(token_out, settled_amount_out, prices),
+        "settled_value_usd": usd::value_usd(token_out, range.settled_amount_out, prices),
         "unsolvable_reason": unsolvable_reason,
         "quote": solved
             .and_then(|s| s.quote_json.as_deref())
@@ -149,6 +151,7 @@ fn slim_transaction(transaction: &Transaction) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{Address, U256};
     use num_bigint::BigUint;
 
     use super::*;
@@ -199,6 +202,7 @@ mod tests {
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
         let quote = Some(
@@ -221,7 +225,7 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             quote_json: quote,
         });
-        let range = build_range(&trade, top, back);
+        let range = build_range(&trade, &prices, top, back);
 
         let rec = comparison_record(&range, &prices, &prices);
         let top_usd = rec
@@ -275,10 +279,12 @@ mod tests {
             amount_out: U256::from(1_000u64),
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(
             &trade,
+            &usd::PriceMap::new(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
         );

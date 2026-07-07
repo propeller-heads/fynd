@@ -306,6 +306,8 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.client_fee, Some(U256::from(40)));
         assert_eq!(flow.client_fee_out, None);
+        // The user sent the transaction, so the settled route's gas is chargeable.
+        assert!(flow.trader_paid_gas);
     }
 
     #[test]
@@ -360,5 +362,7 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, None);
+        // A solver paid this fill's gas, not the order's trader — no gas deduction.
+        assert!(!flow.trader_paid_gas);
     }
 }

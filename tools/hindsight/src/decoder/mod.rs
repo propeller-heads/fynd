@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 pub(crate) use crate::decoder::registry::Registry;
 use crate::decoder::{
     net::{received_nft, wrap_pair_mispaired},
-    trace::{attribute_aggregator, collect_native_transfers, fetch_trace},
+    trace::{attribute_aggregator, collect_native_transfers, fetch_trace, route_gas},
     venues::{started_bridge_order, Matched, Strategy},
 };
 
@@ -54,6 +54,13 @@ pub(crate) struct DecodedTrade {
     /// `amount_out`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_fee_out: Option<U256>,
+    /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
+    /// effective_gas_price`). For client-wrapped entries (Relay, MetaMask) the client's own
+    /// overhead is excluded — it is charged whichever router the client picks, like the client
+    /// fee. `None` when the trader did not pay the transaction's gas (maker fills, solver
+    /// rebalances) or the route's gas could not be isolated from the trace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_gas: Option<U256>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -146,6 +153,7 @@ impl<P: Provider> Decoder<P> {
             let mut native = Vec::new();
             collect_native_transfers(&root, &mut native);
 
+            let wrapped_client = matches!(strategy, Strategy::Relay | Strategy::Metamask);
             let flow = match strategy {
                 Strategy::Sender => venues::sender_flow(logs, &native, sender, entry_point),
                 Strategy::Maker => {
@@ -214,6 +222,22 @@ impl<P: Provider> Decoder<P> {
                     )
                 });
 
+            // Gas the trader paid for the settled route, as a wei cost. Only charged when the
+            // tracked trader sent the transaction; for client-wrapped entries the route's gas is
+            // read from the venue call's trace frame so the wrapper's overhead stays out of the
+            // comparison on both sides.
+            let settled_gas = flow
+                .trader_paid_gas
+                .then(|| {
+                    if wrapped_client {
+                        route_gas(&root, registry)
+                    } else {
+                        Some(U256::from(receipt.gas_used))
+                    }
+                })
+                .flatten()
+                .map(|units| units * U256::from(receipt.effective_gas_price));
+
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,
                 block_number,
@@ -226,6 +250,7 @@ impl<P: Provider> Decoder<P> {
                 amount_out: flow.swap.amount_out,
                 client_fee: flow.client_fee,
                 client_fee_out: flow.client_fee_out,
+                settled_gas,
             });
         }
 

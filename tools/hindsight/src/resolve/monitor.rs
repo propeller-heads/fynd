@@ -400,7 +400,7 @@ async fn run_session<P: Provider>(
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
         let prices_top = snapshot_prices(adapter.solver).await;
-        let ranges = match resolve_block_range(adapter, &trades).await {
+        let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
             Ok(ranges) => ranges,
             Err(e) => return SessionEnd::FeedDead(e.to_string()),
         };

@@ -283,6 +283,7 @@ mod tests {
             amount_out: U256::from(settled),
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
         }
     }
 
@@ -325,6 +326,7 @@ mod tests {
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
             &trade(usdc, 1_000_000_000),
+            &usd::PriceMap::new(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
         );
@@ -355,6 +357,7 @@ mod tests {
     fn record_range_skips_savings_when_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
+            &usd::PriceMap::new(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
         );
