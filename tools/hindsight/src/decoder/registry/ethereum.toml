@@ -39,7 +39,7 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
 
 # Clients — platforms that initiate a trade and route it through a solver found in the
-# trace. Each section name must have a decode strategy in code (clients::client_strategy);
+# trace. Each section name must have a decode strategy in code (clients::Client);
 # `entry_points` are the contracts users enter through, `fee_collectors` where its skims land.
 
 # Display names for entry points that are neither clients nor venues — market-maker fillers,

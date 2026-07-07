@@ -4,7 +4,7 @@
 //! sender netting plus the client's own quirks: backing the fee skim out
 //! ([`client_fee_flow`]), Relay's solver-rebalance fills, MetaMask's calldata solver
 //! declaration. A module here is one client; its addresses come from the address book's
-//! `[clients.<name>]` section, bound to behavior by [`client_strategy`].
+//! `[clients.<name>]` section, bound to behavior by [`Client::from_name`].
 
 pub(crate) mod metamask;
 pub(crate) mod relay;
@@ -15,19 +15,43 @@ use alloy::primitives::Address;
 
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
-    strategy::{sender_flow, Flow, Strategy},
+    registry::Registry,
+    strategy::{sender_flow, Flow},
 };
 
-/// The decode strategy bound to a client name from the address book.
-///
-/// A client section in the book only carries addresses; this is where its name gets behavior.
-/// The registry validates every configured client name against this binding at load time, so a
-/// typo'd section fails fast instead of silently never matching.
-pub(crate) fn client_strategy(name: &str) -> Option<Strategy> {
-    match name {
-        "relay" => Some(Strategy::Relay),
-        "metamask" => Some(Strategy::Metamask),
-        _ => None,
+/// A client platform with a decode module in this directory.
+pub(crate) enum Client {
+    Relay,
+    Metamask,
+}
+
+impl Client {
+    /// The client bound to a name from the address book.
+    ///
+    /// A `[clients.<name>]` section in the book only carries addresses; this is where its name
+    /// gets behavior. The registry validates every configured client name against this binding
+    /// at load time, so a typo'd section fails fast instead of silently never matching.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "relay" => Some(Self::Relay),
+            "metamask" => Some(Self::Metamask),
+            _ => None,
+        }
+    }
+
+    /// Decode a transaction entered through this client's contract.
+    pub(crate) fn decode(
+        &self,
+        ledger: &TransferLedger,
+        sender: Address,
+        entry_point: Address,
+        input: &[u8],
+        registry: &Registry,
+    ) -> Option<Flow> {
+        match self {
+            Self::Relay => relay::decode(ledger, sender, entry_point, registry),
+            Self::Metamask => metamask::decode(ledger, sender, entry_point, input, registry),
+        }
     }
 }
 
