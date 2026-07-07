@@ -71,8 +71,8 @@ fn transfers_value(call_type: &str) -> bool {
 /// gas-consuming direct child (in a wrapper transaction the routing work dwarfs the bookkeeping
 /// calls). `None` when no usable frame exists — the caller skips the deduction rather than guess.
 pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
-    if let Some(gas) = known_solver_call_gas(root, registry) {
-        return Some(gas);
+    if let Some(frame) = find_solver_frame(root, registry) {
+        return Some(frame.gas_used);
     }
     root.calls
         .iter()
@@ -82,27 +82,35 @@ pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
         .filter(|gas| !gas.is_zero())
 }
 
-/// Depth-first search for the first call into a known solver, returning that frame's
-/// `gas_used`. Mirrors [`find_known_solver`], skipping reverted frames.
-fn known_solver_call_gas(frame: &CallFrame, registry: &Registry) -> Option<U256> {
+/// Depth-first search for the first call frame into a known solver, skipping reverted frames
+/// (and their subtrees), which settle nothing.
+///
+/// The one walk serves both questions asked of a trace: *who* settled the swap (the frame's
+/// `to`, for attribution) and *what the route cost* (the frame's `gas_used`, for gas
+/// accounting) — so the gas charged is always the gas of the exact frame the solver label came
+/// from.
+pub(crate) fn find_solver_frame<'a>(
+    frame: &'a CallFrame,
+    registry: &Registry,
+) -> Option<&'a CallFrame> {
     if frame.error.is_some() {
         return None;
     }
     if let Some(to) = frame.to {
         if registry.is_solver(to) {
-            return Some(frame.gas_used);
+            return Some(frame);
         }
     }
     frame
         .calls
         .iter()
-        .find_map(|child| known_solver_call_gas(child, registry))
+        .find_map(|child| find_solver_frame(child, registry))
 }
 
 /// Attribute the solver that settled the swap.
 ///
 /// A direct swap (the entry point is itself a solver) settles there.
-/// Otherwise the entry point is a client (e.g. Relay) that routes through an
+/// Otherwise the entry point is a client (e.g. Relay) that routes through a
 /// solver found in the trace: a known router if recognized, else the
 /// external contract the client called that moved the most value.
 pub(crate) fn attribute_solver(
@@ -114,29 +122,10 @@ pub(crate) fn attribute_solver(
     if registry.is_solver(entry_point) {
         return Some(entry_point);
     }
-    if let Some(found) = find_known_solver(root, registry) {
+    if let Some(found) = find_solver_frame(root, registry).and_then(|frame| frame.to) {
         return Some(found);
     }
     largest_external_call(root, entry_point, sender)
-}
-
-/// Depth-first search for the first call into a known solver, skipping
-/// reverted frames (and their subtrees), which settle nothing.
-fn find_known_solver(frame: &CallFrame, registry: &Registry) -> Option<Address> {
-    if frame.error.is_some() {
-        return None;
-    }
-    if let Some(to) = frame.to {
-        if registry.is_solver(to) {
-            return Some(to);
-        }
-    }
-    for child in &frame.calls {
-        if let Some(found) = find_known_solver(child, registry) {
-            return Some(found);
-        }
-    }
-    None
 }
 
 /// The client's direct child call that moved the most native value, excluding
@@ -398,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn find_known_solver_skips_reverted() {
+    fn find_solver_frame_skips_reverted() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 
@@ -407,6 +396,6 @@ mod tests {
         let mut root = frame("CALL", addr(1), addr(2), 0);
         root.calls = vec![reverted];
 
-        assert_eq!(find_known_solver(&root, &registry), None);
+        assert!(find_solver_frame(&root, &registry).is_none());
     }
 }
