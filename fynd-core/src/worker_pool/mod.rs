@@ -1,4 +1,5 @@
 pub mod pool;
+mod price_impact;
 pub mod registry;
 pub(crate) mod task_queue;
 pub(crate) mod worker;
