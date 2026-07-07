@@ -45,7 +45,6 @@ pub(crate) fn price_impact_from_spot_product(
 /// `None` for split/parallel routes, missing tokens, or spot-price failures — the caller then
 /// leaves `price_impact_bps` unset. Split routes are produced only by `path_frank_wolfe`, which
 /// reports its own price impact, so this fallback never needs to handle them.
-#[allow(dead_code)]
 pub(crate) fn spot_price_impact(
     route: &Route,
     amount_in: &BigUint,

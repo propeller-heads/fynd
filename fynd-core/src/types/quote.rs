@@ -807,7 +807,6 @@ impl OrderQuote {
     }
 
     /// Sets the price impact in basis points.
-    #[allow(dead_code)]
     pub(crate) fn with_price_impact_bps(mut self, bps: i32) -> Self {
         self.price_impact_bps = Some(bps);
         self
@@ -1074,7 +1073,6 @@ impl RouteResult {
     }
 
     /// Returns the algorithm-computed price impact (signed fraction), if any.
-    #[allow(dead_code)]
     pub(crate) fn price_impact(&self) -> Option<f64> {
         self.price_impact
     }
