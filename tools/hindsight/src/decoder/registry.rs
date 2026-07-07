@@ -28,38 +28,17 @@ struct AddressBook {
     wrapped_native: Address,
     batch_settlers: HashSet<Address>,
     aggregators: HashMap<Address, String>,
-    clients: HashMap<Address, String>,
+    clients: HashMap<String, ClientAddresses>,
     labels: HashMap<Address, String>,
-    relay: RelayBook,
-    metamask: MetamaskBook,
 }
 
-#[derive(Deserialize)]
+/// A client's addresses on one chain: the contracts users enter through and the collectors its
+/// fee skims land on. Keyed by client name in the book; the name binds to a decode strategy at
+/// load time (see [`crate::decoder::venues::client_strategy`]).
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RelayBook {
-    fee_collectors: HashSet<Address>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MetamaskBook {
-    router: Address,
-    fee_collectors: HashSet<Address>,
-}
-
-/// Relay's addresses on one chain: the routers users enter through and the
-/// collectors its fee skims land on.
-#[derive(Debug)]
-pub(crate) struct RelayAddresses {
-    pub routers: HashSet<Address>,
-    pub fee_collectors: HashSet<Address>,
-}
-
-/// MetaMask's addresses on one chain: the swap router users enter through and
-/// the wallets its fee skims land on.
-#[derive(Debug)]
-pub(crate) struct MetamaskAddresses {
-    pub router: Address,
+pub(crate) struct ClientAddresses {
+    pub entry_points: HashSet<Address>,
     pub fee_collectors: HashSet<Address>,
 }
 
@@ -81,8 +60,8 @@ pub(crate) struct Registry {
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
-    relay: RelayAddresses,
-    metamask: MetamaskAddresses,
+    /// Client address sets, keyed by the client name from the book.
+    clients: HashMap<String, ClientAddresses>,
 }
 
 impl Registry {
@@ -113,15 +92,24 @@ impl Registry {
         let book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
-        let routers = book
-            .clients
-            .iter()
-            .filter(|(_, name)| name.as_str() == "relay")
-            .map(|(address, _)| *address)
-            .collect();
+        // A client section only carries addresses; its behavior is bound by name in code. An
+        // unbound name (a typo, or a client with no strategy yet) must fail here — silently
+        // never matching would just drop that client's trades.
+        for name in book.clients.keys() {
+            if crate::decoder::venues::client_strategy(name).is_none() {
+                anyhow::bail!(
+                    "address book client '{name}' has no decode strategy \
+                     (see venues::client_strategy for the recognized names)"
+                );
+            }
+        }
 
         let mut names = book.aggregators.clone();
-        names.extend(book.clients);
+        for (name, client) in &book.clients {
+            for &entry_point in &client.entry_points {
+                names.insert(entry_point, name.clone());
+            }
+        }
 
         Ok(Self {
             aggregators: book.aggregators,
@@ -129,11 +117,7 @@ impl Registry {
             batch_settlers: book.batch_settlers,
             labels: book.labels,
             wrapped_native: book.wrapped_native,
-            relay: RelayAddresses { routers, fee_collectors: book.relay.fee_collectors },
-            metamask: MetamaskAddresses {
-                router: book.metamask.router,
-                fee_collectors: book.metamask.fee_collectors,
-            },
+            clients: book.clients,
         })
     }
 
@@ -158,12 +142,19 @@ impl Registry {
         self.wrapped_native
     }
 
-    pub(crate) fn relay(&self) -> &RelayAddresses {
-        &self.relay
+    /// The named client's address book section, when the book has one.
+    pub(crate) fn client(&self, name: &str) -> Option<&ClientAddresses> {
+        self.clients.get(name)
     }
 
-    pub(crate) fn metamask(&self) -> &MetamaskAddresses {
-        &self.metamask
+    /// The client whose entry point this address is, if any.
+    pub(crate) fn client_name(&self, address: Address) -> Option<&str> {
+        for (name, client) in &self.clients {
+            if client.entry_points.contains(&address) {
+                return Some(name.as_str());
+            }
+        }
+        None
     }
 
     /// Resolve an address to its known name, or its hex address if unknown.
@@ -187,7 +178,11 @@ mod tests {
         // `ethereum()` expects; this test is what makes that expectation safe.
         let registry = Registry::ethereum();
         assert!(!registry.aggregators.is_empty());
-        assert!(!registry.relay().routers.is_empty());
+        assert!(!registry
+            .client("relay")
+            .unwrap()
+            .entry_points
+            .is_empty());
     }
 
     #[test]
@@ -244,22 +239,38 @@ mod tests {
     }
 
     #[test]
-    fn relay_fee_collector_is_known() {
+    fn client_sections_resolve_by_name_and_entry_point() {
         let registry = Registry::ethereum();
+        let relay = registry.client("relay").unwrap();
         let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
-        assert!(registry
-            .relay()
+        let router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
+        assert!(relay
             .fee_collectors
             .contains(&collector));
-        // The router that performs the skim is a known Relay client, not the collector itself.
-        assert!(!registry
-            .relay()
-            .fee_collectors
-            .contains(&address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f")));
-        assert!(registry
-            .relay()
-            .routers
-            .contains(&address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f")));
+        // The router that performs the skim is a Relay entry point, not the collector itself.
+        assert!(!relay.fee_collectors.contains(&router));
+        assert!(relay.entry_points.contains(&router));
+
+        assert_eq!(registry.client_name(router), Some("relay"));
+        assert_eq!(
+            registry.client_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
+            Some("metamask")
+        );
+        // A fee collector is not an entry point; an aggregator is not a client.
+        assert_eq!(registry.client_name(collector), None);
+        assert!(registry.client("kyberswap").is_none());
+    }
+
+    #[test]
+    fn client_without_strategy_is_rejected() {
+        // A client section whose name has no decode strategy would silently never match, so the
+        // book must fail to load.
+        let text =
+            format!("{ETHEREUM_TOML}\n[clients.reiay]\nentry_points = []\nfee_collectors = []\n");
+        let err = Registry::from_toml(&text)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no decode strategy"), "unexpected error: {err}");
     }
 
     #[test]

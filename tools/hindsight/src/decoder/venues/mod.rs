@@ -135,7 +135,9 @@ impl Strategy {
                 .await
             }
             Self::Relay => relay::decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.registry),
-            Self::Metamask => metamask::decode(ctx.ledger, ctx.sender, ctx.input, ctx.registry),
+            Self::Metamask => {
+                metamask::decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.input, ctx.registry)
+            }
         }
     }
 
@@ -213,21 +215,30 @@ pub(crate) fn select<'a>(
     Some(matched)
 }
 
+/// The decode strategy bound to a client name from the address book.
+///
+/// A client section in the book only carries addresses; this is where its name gets behavior.
+/// The registry validates every configured client name against this binding at load time, so a
+/// typo'd section fails fast instead of silently never matching.
+pub(crate) fn client_strategy(name: &str) -> Option<Strategy> {
+    match name {
+        "relay" => Some(Strategy::Relay),
+        "metamask" => Some(Strategy::Metamask),
+        _ => None,
+    }
+}
+
 /// The strategy for a receipt's entry point, before any veto.
 fn match_entry<'a>(receipt: &'a TransactionReceipt, registry: &Registry) -> Option<Matched<'a>> {
     if !receipt.status() {
         return None;
     }
     let entry_point = receipt.to?;
-    if registry
-        .relay()
-        .routers
-        .contains(&entry_point)
+    if let Some(strategy) = registry
+        .client_name(entry_point)
+        .and_then(client_strategy)
     {
-        return Some(Matched { receipt, entry_point, strategy: Strategy::Relay });
-    }
-    if entry_point == registry.metamask().router {
-        return Some(Matched { receipt, entry_point, strategy: Strategy::Metamask });
+        return Some(Matched { receipt, entry_point, strategy });
     }
     if registry.is_known(entry_point) {
         // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is

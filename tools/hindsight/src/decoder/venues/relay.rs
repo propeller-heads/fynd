@@ -27,18 +27,12 @@ pub(crate) fn decode(
     entry_point: Address,
     registry: &Registry,
 ) -> Option<Flow> {
-    if let Some(flow) =
-        client_fee_flow(ledger, sender, entry_point, &registry.relay().fee_collectors)
-    {
+    let relay = registry.client("relay")?;
+    if let Some(flow) = client_fee_flow(ledger, sender, entry_point, &relay.fee_collectors) {
         return Some(flow);
     }
-    decode_rebalance(
-        ledger,
-        &registry.relay().fee_collectors,
-        &registry.relay().routers,
-        registry.wrapped_native(),
-    )
-    .map(|swap| Flow::without_fees(sender, swap))
+    decode_rebalance(ledger, &relay.fee_collectors, &relay.entry_points, registry.wrapped_native())
+        .map(|swap| Flow::without_fees(sender, swap))
 }
 
 /// Decode a Relay solver-initiated rebalancing fill, where `tx.from` is a rotating solver EOA with
@@ -55,7 +49,7 @@ pub(crate) fn decode(
 fn decode_rebalance(
     ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
-    relay_routers: &HashSet<Address>,
+    relay_entry_points: &HashSet<Address>,
     wrapped_native: Address,
 ) -> Option<NetSwap> {
     // token_in: the single token the collector(s) net-send.
@@ -85,7 +79,7 @@ fn decode_rebalance(
     // collector, the wrapped-native token, the zero address) and the input token.
     let mut outputs: Vec<(Address, U256)> = Vec::new(); // (token_out, amount)
     for (recipient, token, amount) in ledger.sink_receipts() {
-        if relay_routers.contains(&recipient) ||
+        if relay_entry_points.contains(&recipient) ||
             fee_collectors.contains(&recipient) ||
             recipient == Address::ZERO ||
             recipient == wrapped_native
@@ -228,7 +222,8 @@ mod tests {
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
         let collector = *registry
-            .relay()
+            .client("relay")
+            .unwrap()
             .fee_collectors
             .iter()
             .next()
@@ -262,7 +257,8 @@ mod tests {
         // output.
         let registry = Registry::ethereum();
         let collector = *registry
-            .relay()
+            .client("relay")
+            .unwrap()
             .fee_collectors
             .iter()
             .next()
@@ -285,7 +281,8 @@ mod tests {
         // Solver fill: the sender has no net flow; the collector funds the swap. No fee back-out.
         let registry = Registry::ethereum();
         let collector = *registry
-            .relay()
+            .client("relay")
+            .unwrap()
             .fee_collectors
             .iter()
             .next()

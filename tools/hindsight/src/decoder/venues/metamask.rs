@@ -60,11 +60,12 @@ fn normalize(id: &str) -> String {
 pub(crate) fn decode(
     ledger: &TransferLedger,
     sender: Address,
+    entry_point: Address,
     input: &[u8],
     registry: &Registry,
 ) -> Option<Flow> {
-    let metamask = registry.metamask();
-    let mut flow = client_fee_flow(ledger, sender, metamask.router, &metamask.fee_collectors)?;
+    let metamask = registry.client("metamask")?;
+    let mut flow = client_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
     flow.aggregator_override = aggregator_from_calldata(input);
     Some(flow)
 }
@@ -79,8 +80,20 @@ mod tests {
     /// One of the real MetaMask fee wallets, so tests exercise the registry entries.
     fn fee_wallet(registry: &Registry) -> Address {
         *registry
-            .metamask()
+            .client("metamask")
+            .unwrap()
             .fee_collectors
+            .iter()
+            .next()
+            .unwrap()
+    }
+
+    /// The real MetaMask Swap Router entry point.
+    fn router(registry: &Registry) -> Address {
+        *registry
+            .client("metamask")
+            .unwrap()
+            .entry_points
             .iter()
             .next()
             .unwrap()
@@ -123,7 +136,7 @@ mod tests {
         let registry = Registry::ethereum();
         let collector = fee_wallet(&registry);
         let user = addr(1);
-        let router = registry.metamask().router;
+        let router = router(&registry);
         let pool = addr(50);
         let token_in = addr(10);
 
@@ -135,7 +148,7 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ledger, user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, router, &[], &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.client_fee, None);
@@ -150,7 +163,7 @@ mod tests {
         let registry = Registry::ethereum();
         let collector = fee_wallet(&registry);
         let user = addr(1);
-        let router = registry.metamask().router;
+        let router = router(&registry);
         let pool = addr(50);
         let token_out = addr(11);
 
@@ -162,7 +175,7 @@ mod tests {
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ledger, user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, router, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.client_fee, Some(U256::from(9)));
         assert_eq!(flow.client_fee_out, None);
@@ -187,7 +200,7 @@ mod tests {
         };
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ledger, user, &call.abi_encode(), &registry).unwrap();
+        let flow = decode(&ledger, user, router(&registry), &call.abi_encode(), &registry).unwrap();
         assert_eq!(flow.aggregator_override.as_deref(), Some("1inch"));
     }
 
@@ -206,7 +219,7 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ledger, user, &[], &registry).unwrap();
+        let flow = decode(&ledger, user, router(&registry), &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.client_fee, None);
         assert_eq!(flow.client_fee_out, None);
