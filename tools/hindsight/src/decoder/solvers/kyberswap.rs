@@ -8,7 +8,7 @@
 
 use alloy::primitives::U256;
 
-use crate::decoder::venues::SolverQuote;
+use crate::decoder::solvers::SolverQuote;
 
 /// Extract KyberSwap's `clientData` quote from transaction calldata.
 ///

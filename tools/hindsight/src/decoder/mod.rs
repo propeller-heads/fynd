@@ -1,8 +1,26 @@
+//! Decode solver trades from on-chain data.
+//!
+//! Terminology — three tiers, two of which appear in every record:
+//! - **client** (`clients/`): the contract the user entered through (`tx.to`) — Relay, MetaMask.
+//!   Order-flow owners; they pick a solver and may skim a fee.
+//! - **solver** (`solvers/`): the router that computed and settled the route — KyberSwap, 1inch,
+//!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
+//!   their column names; the two words mean the same thing.
+//! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
+//!   prop-AMMs). Not modeled here; they only appear inside traces.
+//!
+//! The pipeline is match → trace → decode → guard → record: `strategy` picks how a matched
+//! transaction is decoded, `ledger` answers all value-flow questions, `guards` vetoes netted
+//! shapes that are not comparable trades, and `registry` is the address book behind matching.
+
+mod clients;
 mod guards;
+mod intent;
 mod ledger;
 mod registry;
+mod solvers;
+mod strategy;
 mod trace;
-mod venues;
 
 pub(crate) mod allium;
 pub(crate) mod verify_decoder;
@@ -23,10 +41,10 @@ use tracing::{debug, warn};
 use crate::decoder::{
     guards::{received_nft, wrap_pair_mispaired},
     ledger::TransferLedger,
+    strategy::{DecodeContext, Matched},
     trace::{attribute_solver, collect_native_transfers, fetch_trace, route_gas},
-    venues::{DecodeContext, Matched},
 };
-pub(crate) use crate::decoder::{registry::Registry, venues::SolverQuote};
+pub(crate) use crate::decoder::{registry::Registry, solvers::SolverQuote};
 
 /// A decoded solver trade: what token went in, what came out.
 ///
@@ -64,7 +82,7 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
     /// The solver's own off-chain quote for this swap, recovered from calldata (see
-    /// [`venues::embedded_quote`] for the solvers that declare one). Informational — it is what
+    /// [`solvers::embedded_quote`] for the solvers that declare one). Informational — it is what
     /// the client compared against at decision time, as opposed to `amount_out`, which is what
     /// execution delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +140,7 @@ impl<P: Provider> Decoder<P> {
 
         let matched: Vec<Matched> = receipts
             .iter()
-            .filter_map(|receipt| venues::select(receipt, registry))
+            .filter_map(|receipt| strategy::select(receipt, registry))
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -226,8 +244,8 @@ impl<P: Provider> Decoder<P> {
             // The solver's off-chain quote, when its calldata declares one. Dispatched on the
             // attributed solver so a lookalike blob from another router cannot masquerade as a
             // quote, and unit-checked against the settled amount (quotes are self-reported).
-            let quote = venues::embedded_quote(&solver, &root.input, flow.swap.amount_in)
-                .filter(|quote| venues::plausible_quote(quote, flow.swap.amount_out));
+            let quote = solvers::embedded_quote(&solver, &root.input, flow.swap.amount_in)
+                .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
 
             trades.push(DecodedTrade {
                 tx_hash: receipt.transaction_hash,

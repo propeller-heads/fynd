@@ -19,7 +19,7 @@ sol! {
 /// A bridge deposit is not a same-chain swap: the real output lands on the destination chain,
 /// and the trader's only same-chain receipt is a leftover refund. Netting that as a swap pairs
 /// the full input with the refund — a phantom trade with an absurd rate. A matching-time
-/// veto (see [`super::select`]): rejected transactions never cost a trace.
+/// veto (see [`crate::decoder::strategy::select`]): rejected transactions never cost a trace.
 pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
     logs.iter()
         .any(|log| log.topics().first() == Some(&LiFiTransferStarted::SIGNATURE_HASH))

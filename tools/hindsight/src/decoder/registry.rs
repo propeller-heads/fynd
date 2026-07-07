@@ -34,7 +34,7 @@ struct AddressBook {
 
 /// A client's addresses on one chain: the contracts users enter through and the collectors its
 /// fee skims land on. Keyed by client name in the book; the name binds to a decode strategy at
-/// load time (see [`crate::decoder::venues::client_strategy`]).
+/// load time (see [`crate::decoder::clients::client_strategy`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientAddresses {
@@ -96,10 +96,10 @@ impl Registry {
         // unbound name (a typo, or a client with no strategy yet) must fail here — silently
         // never matching would just drop that client's trades.
         for name in book.clients.keys() {
-            if crate::decoder::venues::client_strategy(name).is_none() {
+            if crate::decoder::clients::client_strategy(name).is_none() {
                 anyhow::bail!(
                     "address book client '{name}' has no decode strategy \
-                     (see venues::client_strategy for the recognized names)"
+                     (see clients::client_strategy for the recognized names)"
                 );
             }
         }

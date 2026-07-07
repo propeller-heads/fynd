@@ -10,9 +10,7 @@
 use alloy::{primitives::Address, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    ledger::TransferLedger,
-    registry::Registry,
-    venues::{client_fee_flow, Flow},
+    clients::client_fee_flow, ledger::TransferLedger, registry::Registry, strategy::Flow,
 };
 
 sol! {

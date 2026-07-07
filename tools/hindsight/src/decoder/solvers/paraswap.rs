@@ -9,7 +9,7 @@
 
 use alloy::primitives::U256;
 
-use crate::decoder::venues::SolverQuote;
+use crate::decoder::solvers::SolverQuote;
 
 /// Extract ParaSwap's `quotedAmount` from Augustus calldata.
 ///

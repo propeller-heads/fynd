@@ -9,9 +9,10 @@ use std::collections::HashSet;
 use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
+    clients::client_fee_flow,
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
-    venues::{client_fee_flow, Flow},
+    strategy::Flow,
 };
 
 /// Decode a Relay-entered transaction.

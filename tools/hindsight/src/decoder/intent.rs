@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
-    venues::Flow,
+    strategy::Flow,
 };
 
 /// Find the order maker's trade in a filler-initiated intent fill.
