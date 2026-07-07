@@ -33,13 +33,13 @@ use std::collections::HashMap;
 use alloy::{
     primitives::{Address, TxHash, U256},
     providers::Provider,
+    rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
 use futures::stream::{StreamExt, TryStreamExt};
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    guards::{received_nft, wrap_pair_mispaired},
     ledger::TransferLedger,
     strategy::{DecodeContext, Matched},
     trace::{collect_native_transfers, fetch_trace, route_gas},
@@ -137,9 +137,8 @@ impl<P: Provider> Decoder<P> {
         &mut self,
         block_number: u64,
     ) -> anyhow::Result<Vec<DecodedTrade>> {
-        let Self { provider, registry, code_cache } = self;
-
-        let receipts = provider
+        let receipts = self
+            .provider
             .get_block_receipts(block_number.into())
             .await
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
@@ -147,7 +146,7 @@ impl<P: Provider> Decoder<P> {
 
         let matched: Vec<Matched> = receipts
             .iter()
-            .filter_map(|receipt| strategy::select(receipt, registry))
+            .filter_map(|receipt| strategy::select(receipt, &self.registry))
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -157,7 +156,7 @@ impl<P: Provider> Decoder<P> {
         let traces = futures::stream::iter(
             matched
                 .iter()
-                .map(|m| fetch_trace(provider, m.receipt.transaction_hash)),
+                .map(|m| fetch_trace(&self.provider, m.receipt.transaction_hash)),
         )
         .buffered(TRACE_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -165,110 +164,109 @@ impl<P: Provider> Decoder<P> {
 
         let mut trades = Vec::with_capacity(matched.len());
         for (matched, root) in matched.into_iter().zip(traces) {
-            let Matched { receipt, entry_point, strategy } = matched;
-            let logs = receipt.logs();
-            let sender = receipt.from;
-
-            let mut native = Vec::new();
-            collect_native_transfers(&root, &mut native);
-            let ledger = TransferLedger::from_transaction(logs, &native);
-
-            let flow = strategy
-                .decode(DecodeContext {
-                    provider,
-                    registry,
-                    code_cache,
-                    ledger: &ledger,
-                    input: &root.input,
-                    sender,
-                    entry_point,
-                })
-                .await;
-
-            let Some(mut flow) = flow else {
-                warn!(
-                    tx = %receipt.transaction_hash,
-                    client = %registry.label(entry_point),
-                    "no token or native ETH flow found"
-                );
-                continue;
-            };
-
-            // A trader who received an NFT in the same transaction was buying, not swapping: the
-            // netted token flow is the payment side of a purchase (e.g. an NFT sweep through
-            // Relay + Seaport), and the real consideration is invisible to ERC-20 netting.
-            // Recording it would pair the payment with the change as a phantom swap.
-            if received_nft(logs, flow.tracked) {
-                debug!(
-                    tx = %receipt.transaction_hash,
-                    client = %registry.label(entry_point),
-                    "tracked address received an NFT; skipping purchase"
-                );
-                continue;
+            if let Some(trade) = self
+                .decode_transaction(matched, &root, block_number)
+                .await
+            {
+                trades.push(trade);
             }
+        }
+        Ok(trades)
+    }
 
-            // A native <-> wrapped-native "swap" is a wrap or unwrap, which is 1:1 by
-            // construction. Far off parity it is a mis-paired record: a cross-chain deposit
-            // whose only same-chain receipt is a dust remainder refund (seen via Relay: WETH
-            // in, a billionth of it back as ETH).
-            if wrap_pair_mispaired(&flow.swap, registry.wrapped_native()) {
-                debug!(
-                    tx = %receipt.transaction_hash,
-                    client = %registry.label(entry_point),
-                    "wrap pair far off 1:1; skipping mis-paired trade"
-                );
-                continue;
-            }
+    /// Decode one matched transaction from its trace: build the ledger, run the trader
+    /// strategy, guard the result, attribute the solver, and account gas and quote.
+    async fn decode_transaction(
+        &mut self,
+        matched: Matched<'_>,
+        root: &CallFrame,
+        block_number: u64,
+    ) -> Option<DecodedTrade> {
+        let Self { provider, registry, code_cache } = self;
+        let Matched { receipt, entry_point, strategy } = matched;
+        let logs = receipt.logs();
+        let sender = receipt.from;
 
-            let attribution = solvers::attribution::attribute(
-                flow.solver_override.take(),
-                &root,
-                entry_point,
-                sender,
+        let mut native = Vec::new();
+        collect_native_transfers(root, &mut native);
+        let ledger = TransferLedger::from_transaction(logs, &native);
+
+        let flow = strategy
+            .decode(DecodeContext {
+                provider,
                 registry,
+                code_cache,
+                ledger: &ledger,
+                input: &root.input,
+                sender,
+                entry_point,
+            })
+            .await;
+
+        let Some(mut flow) = flow else {
+            warn!(
+                tx = %receipt.transaction_hash,
+                client = %registry.label(entry_point),
+                "no token or native ETH flow found"
             );
+            return None;
+        };
 
-            // Gas the trader paid for the settled route, as a wei cost. Only charged when the
-            // tracked trader sent the transaction; for client-wrapped entries the route's gas is
-            // read from the venue call's trace frame so the wrapper's overhead stays out of the
-            // comparison on both sides.
-            let settled_gas = flow
-                .trader_paid_gas
-                .then(|| {
-                    if strategy.routes_via_wrapper() {
-                        route_gas(&root, registry)
-                    } else {
-                        Some(U256::from(receipt.gas_used))
-                    }
-                })
-                .flatten()
-                .map(|units| units * U256::from(receipt.effective_gas_price));
-
-            // The solver's off-chain quote, when its calldata declares one. Dispatched on the
-            // attributed solver so a lookalike blob from another router cannot masquerade as a
-            // quote, and unit-checked against the settled amount (quotes are self-reported).
-            let quote =
-                solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
-                    .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
-
-            trades.push(DecodedTrade {
-                tx_hash: receipt.transaction_hash,
-                block_number,
-                client: registry.label(entry_point),
-                solver: attribution.solver,
-                solver_source: attribution.source,
-                sender: flow.tracked,
-                token_in: flow.swap.token_in,
-                token_out: flow.swap.token_out,
-                amount_in: flow.swap.amount_in,
-                amount_out: flow.swap.amount_out,
-                client_fee: flow.client_fee,
-                client_fee_out: flow.client_fee_out,
-                settled_gas,
-                quote,
-            });
+        if let Some(veto) = guards::veto(&flow, logs, registry) {
+            debug!(
+                tx = %receipt.transaction_hash,
+                client = %registry.label(entry_point),
+                ?veto,
+                "decoded flow is not a comparable trade; skipping"
+            );
+            return None;
         }
 
-        Ok(trades)
+        let attribution = solvers::attribution::attribute(
+            flow.solver_override.take(),
+            root,
+            entry_point,
+            sender,
+            registry,
+        );
+
+        // Gas the trader paid for the settled route, as a wei cost. Only charged when the
+        // tracked trader sent the transaction; for client-wrapped entries the route's gas is
+        // read from the solver call's trace frame so the wrapper's overhead stays out of the
+        // comparison on both sides.
+        let settled_gas = flow
+            .trader_paid_gas
+            .then(|| {
+                if strategy.routes_via_wrapper() {
+                    route_gas(root, registry)
+                } else {
+                    Some(U256::from(receipt.gas_used))
+                }
+            })
+            .flatten()
+            .map(|units| units * U256::from(receipt.effective_gas_price));
+
+        // The solver's off-chain quote, when its calldata declares one. Dispatched on the
+        // attributed solver so a lookalike blob from another router cannot masquerade as a
+        // quote, and unit-checked against the settled amount (quotes are self-reported).
+        let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
+            .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
+
+        Some(DecodedTrade {
+            tx_hash: receipt.transaction_hash,
+            block_number,
+            client: registry.label(entry_point),
+            solver: attribution.solver,
+            solver_source: attribution.source,
+            sender: flow.tracked,
+            token_in: flow.swap.token_in,
+            token_out: flow.swap.token_out,
+            amount_in: flow.swap.amount_in,
+            amount_out: flow.swap.amount_out,
+            client_fee: flow.client_fee,
+            client_fee_out: flow.client_fee_out,
+            settled_gas,
+            quote,
+        })
     }
 }
