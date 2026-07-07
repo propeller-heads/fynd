@@ -5,12 +5,14 @@
 
 use num_bigint::BigUint;
 
+use crate::feed::market_data::MarketData;
+use crate::types::Route;
+
 /// Computes signed price impact from the product of per-hop spot prices.
 ///
 /// `product` is Π of per-hop spot prices (human token_out per human token_in). `d_in`/`d_out`
 /// are the decimals of the route's first input token and last output token. Returns `None` for
 /// non-finite / non-positive references.
-#[allow(dead_code)]
 pub(crate) fn price_impact_from_spot_product(
     product: f64,
     amount_in: &BigUint,
@@ -35,6 +37,52 @@ pub(crate) fn price_impact_from_spot_product(
     } else {
         None
     }
+}
+
+/// Computes a fallback price impact for a route from each swap's live spot price.
+///
+/// Only handles simple linear routes (each hop's output feeds the next hop's input). Returns
+/// `None` for split/parallel routes, missing tokens, or spot-price failures — the caller then
+/// leaves `price_impact_bps` unset. Split routes are produced only by `path_frank_wolfe`, which
+/// reports its own price impact, so this fallback never needs to handle them.
+#[allow(dead_code)]
+pub(crate) fn spot_price_impact(
+    route: &Route,
+    amount_in: &BigUint,
+    amount_out: &BigUint,
+    market: &MarketData,
+) -> Option<f64> {
+    let swaps = route.swaps();
+    if swaps.is_empty() {
+        return None;
+    }
+    // Reject anything that is not a simple linear chain.
+    for pair in swaps.windows(2) {
+        if pair[0].token_out() != pair[1].token_in() {
+            return None;
+        }
+    }
+
+    // We only read token decimals from the view; the per-hop spot price comes from each swap's
+    // own `protocol_state`, so the overlay-skipping behaviour of `try_read_blocking` is
+    // irrelevant here. If a writer holds the lock we get `None` and simply omit price impact
+    // (fail-safe) rather than blocking the quote.
+    let view = market.try_read_blocking()?;
+
+    let mut product = 1.0_f64;
+    for swap in swaps {
+        let base = view.get_token(swap.token_in())?;
+        let quote = view.get_token(swap.token_out())?;
+        let sp = swap.protocol_state().spot_price(base, quote).ok()?;
+        product *= sp;
+    }
+
+    let first = swaps.first()?;
+    let last = swaps.last()?;
+    let d_in = view.get_token(first.token_in())?.decimals;
+    let d_out = view.get_token(last.token_out())?.decimals;
+
+    price_impact_from_spot_product(product, amount_in, amount_out, d_in, d_out)
 }
 
 #[cfg(test)]
