@@ -26,6 +26,7 @@
 * [Bellman-Ford](algorithms/bellman-ford.md)
 * [Path Frank-Wolfe](algorithms/path-frank-wolfe.md)
 * [Split](algorithms/split.md)
+* [Split Probe](algorithms/split-probe.md)
 
 ## Reference
 

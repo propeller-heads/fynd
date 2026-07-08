@@ -4,8 +4,9 @@ icon: compass
 
 # Overview
 
-Fynd ships four built-in routing algorithms. This section explains the problem they solve and how
-each one works.
+Fynd ships five built-in routing algorithms. This section explains the problem they solve and how
+each one works. [Split Probe](split-probe.md) is a variant of [Split](split.md) that ranks
+first-hop exits with live pool probes instead of derived data.
 
 ## The routing problem
 

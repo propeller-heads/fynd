@@ -51,11 +51,14 @@ Split starts with the same path enumeration machinery as Most Liquid:
 
 This gives Split a broad set of plausible paths without simulating every path in the graph.
 
-The truncation round-robins across first-hop pools: the best path of every way of exiting the sell
-token is kept before any pool gets a second slot. Without this, one heuristically overrated pool
+The truncation round-robins across first-hop exits: the best path of every way of exiting the sell
+token is kept before any exit gets a second slot. Without this, one heuristically overrated pool
 can claim every candidate slot, leaving the allocator nothing to spill into when that pool
 saturates. The spot-depth score also undervalues concentrated liquidity (Uniswap v3-style pools),
 so keeping every exit represented lets the full-amount ranking pass correct the heuristic.
+
+The [`split_probe` variant](split-probe.md) replaces the heuristic exit ordering with live
+two-point probes at the order size, making exit selection independent of derived data.
 
 The default candidate cap is intentionally modest because Split runs as one worker pool in a larger
 algorithm portfolio. It does not try to preserve every path that might win as a standalone route.

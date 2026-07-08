@@ -4,13 +4,18 @@
 //! large orders, price impact makes it better to split the order across several routes so the
 //! marginal price stays low. This algorithm is intentionally split-focused:
 //!
-//! 1. Enumerates candidate paths (BFS, reusing `MostLiquidAlgorithm::find_paths`), keeping
-//!    first-hop pool diversity when truncating to the candidate cap.
+//! 1. Enumerates candidate paths (BFS, reusing `MostLiquidAlgorithm::find_paths`) and truncates to
+//!    the candidate cap while keeping first-hop exit diversity.
 //! 2. Uses cheap full-amount probes to rank candidate paths.
 //! 3. Builds a pool-disjoint split candidate.
 //! 4. Builds a shared-pool fill-and-spill candidate that commits chunks through shared pool state.
 //! 5. Returns the better split candidate if it beats the best single-path probe, or no route if no
 //!    split route is worth assembling.
+//!
+//! Two registered variants share this implementation and differ only in how first-hop exits are
+//! ordered during truncation: `split` uses the derived spot-depth score, `split_probe` probes
+//! every exit with live pool math at the order size (see [`ExitRanking`] and
+//! `docs/algorithms/split-probe.md` for benchmark results).
 
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
@@ -59,9 +64,24 @@ const SHARED_MAX_CANDIDATES: usize = 12;
 const SHARED_MAX_ACTIVE_PATHS: usize = 4;
 /// Number of chunks for shared-pool fill-and-spill.
 const SHARED_NUM_CHUNKS: usize = 24;
+/// Divisor for the near-marginal amount in first-hop exit probes.
+const PROBE_MARGINAL_DIVISOR: u32 = 1024;
+/// Maximum distinct first-hop exits probed per order (two simulations each).
+const PROBE_MAX_EXITS: usize = 64;
 
 type PoolStateUpdates = Vec<(ComponentId, Box<dyn ProtocolSim>)>;
 type SharedProbe = (BigUint, BigUint, PoolStateUpdates);
+
+/// How candidate truncation orders first-hop exits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExitRanking {
+    /// Exits keep the derived spot-depth score order (the `split` algorithm).
+    SpotDepthHeuristic,
+    /// Exits are ordered by live two-point probe efficiency (the `split_probe` algorithm).
+    /// Immune to missing or skewed derived data, at the cost of up to
+    /// [`PROBE_MAX_EXITS`] * 2 extra simulations per order.
+    LiveProbe,
+}
 
 struct SplitEvalContext<'a> {
     market: &'a MarketState,
@@ -92,6 +112,8 @@ pub struct SplitAlgorithm {
     /// Number of water-fill chunks.
     num_chunks: usize,
     connector_tokens: Option<HashSet<Address>>,
+    /// How first-hop exits are ordered during candidate truncation.
+    exit_ranking: ExitRanking,
 }
 
 impl SplitAlgorithm {
@@ -108,17 +130,29 @@ impl SplitAlgorithm {
             max_paths: DEFAULT_MAX_PATHS,
             num_chunks: DEFAULT_NUM_CHUNKS,
             connector_tokens: config.connector_tokens().cloned(),
+            exit_ranking: ExitRanking::SpotDepthHeuristic,
         })
     }
 
-    fn ranked_paths<'a>(
+    /// Creates the `split_probe` variant: first-hop exits are ranked by live probe efficiency
+    /// instead of the derived spot-depth heuristic.
+    pub(crate) fn with_probe_ranking(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
+        let mut algorithm = Self::with_config(config)?;
+        algorithm.exit_ranking = ExitRanking::LiveProbe;
+        Ok(algorithm)
+    }
+
+    /// Enumerates candidate paths and sorts them by the cheap spot-depth heuristic, best first.
+    ///
+    /// No truncation happens here: the caller probes first-hop exits with live pool math and
+    /// truncates via [`Self::truncate_with_first_hop_diversity`].
+    fn scored_paths<'a>(
         graph: &'a StableDiGraph<DepthAndPrice>,
         order: &Order,
         min_hops: usize,
         max_hops: usize,
-        max_candidates: usize,
         connector_tokens: Option<&HashSet<Address>>,
-    ) -> Result<Vec<Path<'a, DepthAndPrice>>, AlgorithmError> {
+    ) -> Result<Vec<(Path<'a, DepthAndPrice>, f64)>, AlgorithmError> {
         let all_paths = MostLiquidAlgorithm::find_paths(
             graph,
             order.token_in(),
@@ -147,35 +181,123 @@ impl SplitAlgorithm {
             })
             .collect();
         scored.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-        Ok(Self::truncate_with_first_hop_diversity(scored, max_candidates))
+        Ok(scored)
     }
 
-    /// Truncates score-ranked paths to `max_candidates`, round-robining across first-hop pools.
+    /// Identifies how a path exits the sell token: the first hop's pool and receive token.
+    fn first_hop_key(path: &Path<DepthAndPrice>) -> Option<(ComponentId, Address)> {
+        path.iter()
+            .next()
+            .map(|(_, edge, token_out)| (edge.component_id.clone(), token_out.clone()))
+    }
+
+    /// Measures each first-hop exit's execution efficiency at the full order size.
+    ///
+    /// Two live simulations per exit: one at a near-marginal amount and one at the full amount.
+    /// Efficiency is the full-size average price relative to the near-marginal price — a
+    /// dimensionless value in `(0, 1]` that is comparable across exits into different tokens.
+    /// Because it uses pool math directly, exits stay ranked correctly even when the derived
+    /// spot/depth edge weights are missing or wrong, which is what previously buried deep exits
+    /// behind shallow ones. Exits are probed in heuristic score order, capped at
+    /// [`PROBE_MAX_EXITS`]; unprobed or failing exits get efficiency `0.0` and sink to the back
+    /// (they are still kept as diversity candidates).
+    fn probe_first_hop_efficiencies(
+        scored: &[(Path<'_, DepthAndPrice>, f64)],
+        market: &MarketState,
+        amount_in: &BigUint,
+    ) -> HashMap<(ComponentId, Address), f64> {
+        let marginal = amount_in / PROBE_MARGINAL_DIVISOR;
+        let mut efficiencies = HashMap::new();
+        for (path, _) in scored {
+            if efficiencies.len() >= PROBE_MAX_EXITS {
+                break;
+            }
+            let Some((token_in, edge, token_out)) = path.iter().next() else {
+                continue;
+            };
+            let key = (edge.component_id.clone(), token_out.clone());
+            if efficiencies.contains_key(&key) {
+                continue;
+            }
+            let efficiency =
+                Self::exit_efficiency(market, token_in, token_out, &key.0, amount_in, &marginal);
+            efficiencies.insert(key, efficiency);
+        }
+        efficiencies
+    }
+
+    /// Computes `(out_full / in_full) / (out_marginal / in_marginal)` for one pool hop.
+    fn exit_efficiency(
+        market: &MarketState,
+        token_in: &Address,
+        token_out: &Address,
+        component_id: &ComponentId,
+        full: &BigUint,
+        marginal: &BigUint,
+    ) -> f64 {
+        use num_traits::ToPrimitive;
+
+        let Some(token_in) = market.get_token(token_in) else {
+            return 0.0;
+        };
+        let Some(token_out) = market.get_token(token_out) else {
+            return 0.0;
+        };
+        let Some(state) = market.get_simulation_state(component_id) else {
+            return 0.0;
+        };
+        let Ok(full_result) = state.get_amount_out(full.clone(), token_in, token_out) else {
+            return 0.0;
+        };
+        if marginal.is_zero() {
+            // The order is too small to measure impact; every absorbing exit is equally fine.
+            return 1.0;
+        }
+        let Ok(marginal_result) = state.get_amount_out(marginal.clone(), token_in, token_out)
+        else {
+            return 1.0;
+        };
+
+        let out_full = full_result
+            .amount
+            .to_f64()
+            .unwrap_or(0.0);
+        let out_marginal = marginal_result
+            .amount
+            .to_f64()
+            .unwrap_or(0.0);
+        let in_full = full.to_f64().unwrap_or(0.0);
+        let in_marginal = marginal.to_f64().unwrap_or(0.0);
+        if out_marginal <= 0.0 || in_full <= 0.0 || in_marginal <= 0.0 {
+            return 0.0;
+        }
+        let efficiency = (out_full / in_full) / (out_marginal / in_marginal);
+        if efficiency.is_finite() {
+            efficiency
+        } else {
+            0.0
+        }
+    }
+
+    /// Truncates paths to `max_candidates`, round-robining across first-hop exits in probed
+    /// efficiency order.
     ///
     /// A plain top-N cut lets one heuristically overrated pool claim every slot: all surviving
     /// paths then exit the sell token through the same pool, and the allocator has nothing to
-    /// spill into when that pool saturates. Taking the best path of every first-hop pool first
-    /// (then every second-best, and so on) keeps each exit pool represented, so the full-amount
-    /// ranking pass can still discover deep pools the cheap spot-depth score undervalues.
+    /// spill into when that pool saturates. Taking the best path of every exit first (then every
+    /// second-best, and so on) keeps each exit represented, and visiting exits in probed
+    /// efficiency order gives the exits that actually absorb the order size the most slots and
+    /// the earliest shared-margin probes.
     fn truncate_with_first_hop_diversity<'a>(
         scored: Vec<(Path<'a, DepthAndPrice>, f64)>,
         max_candidates: usize,
+        efficiencies: &HashMap<(ComponentId, Address), f64>,
     ) -> Vec<Path<'a, DepthAndPrice>> {
-        if scored.len() <= max_candidates {
-            return scored
-                .into_iter()
-                .map(|(path, _)| path)
-                .collect();
-        }
-
-        let mut buckets: HashMap<ComponentId, VecDeque<Path<'a, DepthAndPrice>>> = HashMap::new();
-        let mut bucket_order: Vec<ComponentId> = Vec::new();
+        let mut buckets: HashMap<(ComponentId, Address), VecDeque<Path<'a, DepthAndPrice>>> =
+            HashMap::new();
+        let mut bucket_order: Vec<(ComponentId, Address)> = Vec::new();
         for (path, _) in scored {
-            let Some(first_hop) = path
-                .edge_iter()
-                .first()
-                .map(|edge| edge.component_id.clone())
-            else {
+            let Some(first_hop) = Self::first_hop_key(&path) else {
                 continue;
             };
             match buckets.entry(first_hop) {
@@ -186,6 +308,18 @@ impl SplitAlgorithm {
                 }
             }
         }
+        // Stable sort: exits with equal efficiency keep their heuristic score order.
+        bucket_order.sort_by(|a, b| {
+            let eff_a = efficiencies
+                .get(a)
+                .copied()
+                .unwrap_or(0.0);
+            let eff_b = efficiencies
+                .get(b)
+                .copied()
+                .unwrap_or(0.0);
+            eff_b.total_cmp(&eff_a)
+        });
 
         let mut selected = Vec::with_capacity(max_candidates);
         while selected.len() < max_candidates {
@@ -813,7 +947,10 @@ impl Algorithm for SplitAlgorithm {
     type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
-        "split"
+        match self.exit_ranking {
+            ExitRanking::SpotDepthHeuristic => "split",
+            ExitRanking::LiveProbe => "split_probe",
+        }
     }
 
     async fn find_best_route(
@@ -831,14 +968,35 @@ impl Algorithm for SplitAlgorithm {
 
         let token_prices = Self::token_prices_from(derived.as_ref()).await;
         let amount_in = order.amount().clone();
-        let paths = Self::ranked_paths(
+        let scored = Self::scored_paths(
             graph,
             order,
             self.min_hops,
             self.max_hops,
-            self.max_candidates,
             self.connector_tokens.as_ref(),
         )?;
+
+        // For `split_probe`: probe how well each way of exiting the sell token absorbs the full
+        // order, using live pool math on a small market subset. The first hop carries the whole
+        // order, so exit selection dominates large-trade quality and must not depend on derived
+        // heuristics. For `split`: leave the map empty, so exits keep the heuristic score order.
+        let efficiencies = match self.exit_ranking {
+            ExitRanking::SpotDepthHeuristic => HashMap::new(),
+            ExitRanking::LiveProbe => {
+                let first_hop_ids: HashSet<ComponentId> = scored
+                    .iter()
+                    .filter_map(|(path, _)| {
+                        Self::first_hop_key(path).map(|(component_id, _)| component_id)
+                    })
+                    .collect();
+                let probe_market =
+                    Self::market_subset(&market, label.as_ref(), &first_hop_ids).await?;
+                Self::probe_first_hop_efficiencies(&scored, &probe_market, &amount_in)
+            }
+        };
+
+        let paths =
+            Self::truncate_with_first_hop_diversity(scored, self.max_candidates, &efficiencies);
         let component_ids = Self::component_ids_for_paths(&paths);
         let market = Self::market_subset(&market, label.as_ref(), &component_ids).await?;
         let gas_price = market
@@ -948,6 +1106,23 @@ mod tests {
     fn setup_weighted_market(
         pools: Vec<(&str, Token, Token, Box<dyn ProtocolSim>)>,
     ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+        setup_market_with_weight_flags(
+            pools
+                .into_iter()
+                .map(|(id, a, b, state)| (id, a, b, state, true))
+                .collect(),
+        )
+    }
+
+    /// Pool spec for [`setup_market_with_weight_flags`]: the flag says whether the pool's graph
+    /// edges receive weight data.
+    type FlaggedPool<'a> = (&'a str, Token, Token, Box<dyn ProtocolSim>, bool);
+
+    /// Like [`setup_weighted_market`], but pools with `weighted == false` keep their graph edges
+    /// without weight data — mirroring production pools whose derived spot/depth data is missing.
+    fn setup_market_with_weight_flags(
+        pools: Vec<FlaggedPool<'_>>,
+    ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
         let mut market = MarketState::new();
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -958,20 +1133,22 @@ mod tests {
         market.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 0));
 
         let mut weights = Vec::new();
-        for (pool_id, token_a, token_b, state) in pools {
-            let weight_ab = edge_weight(state.as_ref(), &token_a, &token_b);
-            let weight_ba = edge_weight(state.as_ref(), &token_b, &token_a);
+        for (pool_id, token_a, token_b, state, weighted) in pools {
             let tokens = vec![token_a.clone(), token_b.clone()];
+            if weighted {
+                let weight_ab = edge_weight(state.as_ref(), &token_a, &token_b);
+                let weight_ba = edge_weight(state.as_ref(), &token_b, &token_a);
+                weights.push((
+                    pool_id.to_string(),
+                    token_a.address.clone(),
+                    token_b.address.clone(),
+                    weight_ab,
+                    weight_ba,
+                ));
+            }
             market.upsert_components(std::iter::once(component(pool_id, &tokens)));
             market.upsert_tokens(tokens);
             market.update_states([(pool_id.to_string(), state)]);
-            weights.push((
-                pool_id.to_string(),
-                token_a.address,
-                token_b.address,
-                weight_ab,
-                weight_ba,
-            ));
         }
 
         let mut graph_manager = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
@@ -1308,8 +1485,10 @@ mod tests {
 
         // Five paths exist (four via pool_a, one via pool_b); the four pool_a paths outscore
         // pool_b on spot-depth, so a plain top-4 cut would drop the only alternative SRC exit.
-        let paths =
-            SplitAlgorithm::ranked_paths(graph_manager.graph(), &order, 1, 3, 4, None).unwrap();
+        // With no probe data (empty efficiency map) the round-robin alone must preserve it.
+        let scored =
+            SplitAlgorithm::scored_paths(graph_manager.graph(), &order, 1, 3, None).unwrap();
+        let paths = SplitAlgorithm::truncate_with_first_hop_diversity(scored, 4, &HashMap::new());
         assert_eq!(paths.len(), 4);
         let first_hops: Vec<&str> = paths
             .iter()
@@ -1327,6 +1506,74 @@ mod tests {
         assert!(
             first_hops.contains(&"pool_a"),
             "truncation must keep the top-ranked SRC exit, got first hops: {first_hops:?}"
+        );
+    }
+
+    /// Reproduces the production failure that produced routes up to 95% below single-path
+    /// solvers: the deep exits have no derived edge weights (score `f64::MIN`), many shallow
+    /// weighted exits outrank them, and the candidate cap cuts the deep exits away. The live
+    /// first-hop probes must rank the deep exits first anyway.
+    #[tokio::test]
+    async fn probe_ranking_rescues_unweighted_deep_exits() {
+        let src = token_with_decimals(0x01, "SRC", 18);
+        let dst = token_with_decimals(0x02, "DST", 18);
+        let mut pools: Vec<FlaggedPool<'_>> = vec![
+            (
+                "deep_a",
+                src.clone(),
+                dst.clone(),
+                Box::new(v2_pool(1_000_000, 18, 1_000_000, 18)) as Box<dyn ProtocolSim>,
+                false, // no edge weights: invisible to the spot-depth heuristic
+            ),
+            (
+                "deep_b",
+                src.clone(),
+                dst.clone(),
+                Box::new(v2_pool(1_000_000, 18, 1_000_000, 18)) as Box<dyn ProtocolSim>,
+                false,
+            ),
+        ];
+        for shallow in ["shallow_1", "shallow_2", "shallow_3", "shallow_4"] {
+            pools.push((
+                shallow,
+                src.clone(),
+                dst.clone(),
+                Box::new(v2_pool(5_000, 18, 5_000, 18)) as Box<dyn ProtocolSim>,
+                true,
+            ));
+        }
+        let (market, graph_manager) = setup_market_with_weight_flags(pools);
+
+        // 100k SRC: shallow pools saturate completely, the deep pools absorb it easily.
+        let order = Order::new(
+            src.address.clone(),
+            dst.address.clone(),
+            BigUint::from(100_000u64) * BigUint::from(10u64).pow(18),
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+        let config = AlgorithmConfig::new(
+            1,
+            3,
+            std::time::Duration::from_millis(2000),
+            Some(4), // cap below the six exits: the two deep ones must win slots via probes
+        )
+        .unwrap();
+
+        let route_result = SplitAlgorithm::with_probe_ranking(config)
+            .unwrap()
+            .find_best_route(graph_manager.graph(), market, None, None, &order)
+            .await
+            .expect("split_probe solves");
+        let component_ids: Vec<&str> = route_result
+            .route()
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        assert!(
+            component_ids.contains(&"deep_a") && component_ids.contains(&"deep_b"),
+            "split_probe must route through the deep unweighted pools, got: {component_ids:?}"
         );
     }
 }
