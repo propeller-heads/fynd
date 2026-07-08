@@ -205,7 +205,7 @@ impl WorkerPoolBuilder {
     /// Sets the algorithm by name (built-in registry lookup).
     ///
     /// Available built-in algorithms: `"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`,
-    /// `"split"`, `"split_probe"`, and `"split_bounded"`.
+    /// and `"split_bounded"`.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
         self.config.spawner = AlgorithmSpawner::Registry { algorithm: algorithm.into() };
         self

@@ -4,90 +4,64 @@ icon: scale-balanced
 
 # Split variant comparison
 
-Three split variants coexist on this branch so a controlled benchmark can pick the production
-default. This page records the comparison plan and known results so far; it will be replaced by
-the outcome once the head-to-head runs.
+Three split variants briefly coexisted on this branch so a controlled benchmark could pick the
+production default. The benchmark ran on 2026-07-08; **`split_bounded` won** and the other two
+variants (`split`, `split_probe`) were deleted. This page records the comparison and its results.
 
 ## Contenders
 
-| | `split` | [`split_probe`](split-probe.md) | [`split_bounded`](split-bounded.md) |
+| | `split` | `split_probe` | `split_bounded` |
 | --- | --- | --- | --- |
 | Candidate discovery | Exhaustive BFS enumeration | Exhaustive BFS enumeration | Bounded amount-aware expansion (direct / connector / anchor) |
 | Exit selection | Derived spot-depth score, first-hop diversity | Live two-point probes per exit | Implicit via live frontier simulation |
 | Graph type | `DepthAndPrice` weights (derived) | `DepthAndPrice` weights (derived) | Weightless `()` |
-| Derived data | Spot/depth for ranking, token gas prices for net | Token gas prices for net only | None |
-| Net ranking | Gross minus gas in output-token terms | Gross minus gas in output-token terms | Gross only (gas-blind) |
+| Derived data | Spot/depth for ranking, token gas prices for net | Token gas prices for net only | Token gas prices for net only (optional) |
 | Single-path floor | Yes | Yes | Yes |
-| Observed solve time (blue-chip, all\_onchain) | ~1.2–1.9 s | ~1.1–1.8 s | ~70–100 ms |
 
-Known results, separate sessions on 2026-07-07 (different blocks — directional only):
+## Protocol
 
-* `split_probe` beat Bellman-Ford on all six blue-chip showcase trades, +7.9% to +161%
-  ([details](split-probe.md#benchmark-results)).
-* `split_bounded` beat PFW/BF on the same trade set, +8.8% to +165.6%, at ~86 ms mean solve
-  ([details](split-bounded.md#benchmark-notes-from-the-source-branch-2026-07-07)).
-* Per-trade quality of the two looks similar; latency differs by ~15x in `split_bounded`'s favor.
+Two evidence sources, both with all variants against identical market state:
 
-## Comparison protocol
+1. **Live same-block run**: one server with five pools (`split`, `split_probe`, `split_bounded`,
+   `bellman_ford`, `path_frank_wolfe`), `min_responses: 0` so every pool answered every order.
+   26 orders x 3 passes: six blue-chip showcase trades (100k AAVE→USDC, 1M UNI→USDC,
+   2M LINK→USDC, 10k WETH→AAVE/UNI/LINK), 5x and 10x XXL versions, and a small-order band
+   (0.1–10 WETH-equivalent). Block consistency verified per order across all pools.
+2. **Offline 1k-request samples** (seeds 42 and 4242) on the frozen-snapshot harness, max_hops 4.
 
-Same-session, same-server, per-order interleaving is not possible with one solver pool per
-algorithm, so run all three pools in **one** server so every quote request fans out to all
-variants against the same block:
+## Results (2026-07-08)
 
-```toml
-[pools.split]
-algorithm = "split"
-num_workers = 1
-min_hops = 1
-max_hops = 4
-timeout_ms = 60000
-max_routes = 1024
+Latency, same-block (five pools sharing one machine, so relative numbers are the signal):
 
-[pools.split_probe]
-algorithm = "split_probe"
-num_workers = 1
-min_hops = 1
-max_hops = 4
-timeout_ms = 60000
-max_routes = 1024
+| pool | p50 | p95 |
+| --- | ---: | ---: |
+| `split` | ~2.0 s | ~2.7 s |
+| `split_probe` | ~2.0 s | ~2.7 s |
+| `split_bounded` | 134 ms | 149 ms |
+| `bellman_ford` (reference) | 137 ms | 230 ms |
 
-[pools.split_bounded]
-algorithm = "split_bounded"
-num_workers = 1
-min_hops = 1
-max_hops = 4
-timeout_ms = 60000
-max_routes = 1024
-```
+Quality:
 
-The worker router picks the best pool per order; per-pool results appear in worker logs. For
-attribution, also run each pool in isolation against the frozen-snapshot offline harness
-(`feat/split-routing-benchmark`).
+* All three variants beat Bellman-Ford on every blue-chip and XXL order, by +3,200 to
+  +16,200 bps. XXL sizes saturate the books; `split_bounded` stayed ahead there, winning the XXL
+  head-to-head against both exhaustive variants (24/36 orders, mean +85–89 bps).
+* `split_probe` never lost to `split` (live or offline) but shared its ~2 s latency and lost the
+  overall head-to-head to `split_bounded`.
+* Offline, `split_bounded` (gas-aware) vs `split` on the common-success set: 15W/6L (seed 42) and
+  28W/9L (seed 4242). Against Bellman-Ford on its solved set: 66W/2L (+96 bps mean, seed 42) and
+  81W/2L (+110 bps mean, seed 4242).
+* Coverage: all variants floor out orders where splitting does not pay (by design — a single-path
+  pool must always run alongside). Gas-aware netting makes `split_bounded` decline more small
+  orders than the gas-blind port did; the declined orders were worth ≤ ~1 bps over Bellman-Ford,
+  while the gas-blind version had been *winning* some of them only because it ignored gas
+  (17W/4L at ~0.2 gwei flipping to 0W/21L at 10 gwei in a fair-net sensitivity check).
 
-Measure, per variant:
+Decision per the pre-registered rule (best net-output win rate inside the latency budget; the
+gas-aware ranking of the exhaustive variants composed with bounded discovery): keep
+`split_bounded` with gas-aware netting ported from `split`, delete the rest.
 
-1. **Quality**: exact integer net output per trade; win/loss/tie counts against each other and
-   against Bellman-Ford and Path Frank-Wolfe as single-path references; mean bps delta.
-2. **Latency**: p50/p95 solve time per order (matters for quote SLAs; `split_bounded`'s ~86 ms vs
-   ~1.5 s is the headline difference to confirm).
-3. **Coverage**: solved-order fraction, including small orders, dust, exotic pairs, and orders
-   where splitting does not pay (all three floor to `InsufficientLiquidity` by design — a
-   single-path pool must run alongside).
-4. **Gas realism**: `split_bounded` ranks gas-blind; compare net-of-gas outcomes specifically on
-   small orders and many-path routes where gas dominates, where it should be weakest.
-5. **Robustness**: repeat the 1k-request offline sample (seeds 42 and 4242) for statistical
-   backing, not just the six showcase trades.
+Known follow-up: bounded discovery can miss long-tail routes the exhaustive search found
+(worst offline case: one USDS→USDC trade at +3,010 bps for `split` that `split_bounded` never
+solved, in either the gas-blind or gas-aware version). Anchor-set tuning is the candidate fix.
 
-Trade set: the six blue-chip showcase orders (100k AAVE→USDC, 1M UNI→USDC, 2M LINK→USDC,
-10k WETH→AAVE/UNI/LINK), plus the offline 1k-request samples, plus a small-order band
-(0.1–10 WETH-equivalent) to exercise the gas-accounting difference.
-
-## Decision criteria
-
-Prefer the variant with the best net-output win rate that stays inside the production latency
-budget. If quality is tied within noise, prefer `split_bounded` for latency; if `split_bounded`
-loses measurably on gas-heavy or long-tail-exit orders, consider porting its bounded discovery
-into the gas-aware ranking of `split_probe` — the approaches compose.
-
-Once decided: keep the winner, delete the losers (replace, don't deprecate), and fold the
-result into this page.
+Raw artifacts: `~/Documents/llm-output/2026-07-08-fynd-split-comparison/` (local).

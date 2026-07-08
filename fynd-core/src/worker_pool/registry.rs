@@ -22,7 +22,7 @@ use tracing::info;
 use crate::{
     algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, AlgorithmConfig, BellmanFordAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitBoundedAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitBoundedAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
@@ -32,7 +32,7 @@ use crate::{
 
 /// List of available built-in algorithm names (for registry-based dispatch).
 pub(crate) const AVAILABLE_ALGORITHMS: &[&str] =
-    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split", "split_probe", "split_bounded"];
+    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split_bounded"];
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
@@ -114,8 +114,6 @@ impl AlgorithmSpawner {
                 "most_liquid" => Ok(spawn_most_liquid_workers(params)),
                 "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 "path_frank_wolfe" => Ok(spawn_path_frank_wolfe_workers(params)),
-                "split" => Ok(spawn_split_workers(params)),
-                "split_probe" => Ok(spawn_split_probe_workers(params)),
                 "split_bounded" => Ok(spawn_split_bounded_workers(params)),
                 _ => Err(UnknownAlgorithmError { name: algorithm }),
             },
@@ -217,24 +215,6 @@ fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>>
 fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
     let factory = |config: AlgorithmConfig| {
         PathFrankWolfeAlgorithm::new(config, PathFrankWolfeConfig::default())
-    };
-    spawn_workers_generic(params, &factory)
-}
-
-/// Spawns workers for the Split algorithm.
-fn spawn_split_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
-    let factory = |config: AlgorithmConfig| {
-        SplitAlgorithm::with_config(config)
-            .expect("invalid worker configuration for SplitAlgorithm")
-    };
-    spawn_workers_generic(params, &factory)
-}
-
-/// Spawns workers for the Split algorithm variant with live-probed exit ranking.
-fn spawn_split_probe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
-    let factory = |config: AlgorithmConfig| {
-        SplitAlgorithm::with_probe_ranking(config)
-            .expect("invalid worker configuration for SplitAlgorithm (probe ranking)")
     };
     spawn_workers_generic(params, &factory)
 }
@@ -406,65 +386,6 @@ mod tests {
 
         let workers =
             AlgorithmSpawner::Registry { algorithm: "path_frank_wolfe".to_string() }.spawn(params);
-        assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
-
-        let _ = shutdown_tx.send(());
-        drop(event_tx);
-    }
-
-    #[test]
-    fn test_registry_spawns_split() {
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-
-        let params = SpawnWorkersParams {
-            algorithm: "split".to_string(),
-            num_workers: 1,
-            algorithm_config: AlgorithmConfig::default(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx: shutdown_tx.clone(),
-        };
-
-        let workers = AlgorithmSpawner::Registry { algorithm: "split".to_string() }.spawn(params);
-        assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
-
-        let _ = shutdown_tx.send(());
-        drop(event_tx);
-    }
-
-    #[test]
-    fn test_registry_spawns_split_probe() {
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-
-        let params = SpawnWorkersParams {
-            algorithm: "split_probe".to_string(),
-            num_workers: 1,
-            algorithm_config: AlgorithmConfig::default(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx: shutdown_tx.clone(),
-        };
-
-        let workers =
-            AlgorithmSpawner::Registry { algorithm: "split_probe".to_string() }.spawn(params);
         assert!(workers.is_ok());
         assert_eq!(workers.unwrap().len(), 1);
 

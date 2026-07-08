@@ -121,7 +121,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 | Field | Default | <div style="width:40%">Description</div> |
 | ----- | ------- | ---------------------------------------- |
-| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`, `"split"`, `"split_probe"`, or `"split_bounded"`) |
+| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`, or `"split_bounded"`) |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |

@@ -57,8 +57,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
-   `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, `SplitAlgorithm`
-   (with the `split_probe` variant), and `SplitBoundedAlgorithm`
+   `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
+   `SplitBoundedAlgorithm`
 5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices

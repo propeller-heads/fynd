@@ -4,20 +4,16 @@ icon: route
 
 # Split Bounded
 
-`split_bounded` is the fast split-routing variant. It uses the same allocation approach and
-executable route assembly as [Split](split.md), but it replaces exhaustive path enumeration with a
-bounded candidate search inspired by Penumbra's candidate-set routing.
+`split_bounded` is Fynd's split-routing algorithm: it splits one order across multiple parallel
+paths to reduce price impact on large trades. Candidate discovery is a bounded, amount-aware
+search inspired by Penumbra's candidate-set routing, which keeps solve times close to the
+single-path algorithms; the [variant comparison](split-comparison.md) records how it beat two
+exhaustive-enumeration variants (`split`, `split_probe`) on the same allocation machinery.
 
-Ported from the `feat/split-shared-routing-quality-light` line of work (there named
-`bounded_split`) and renamed so all split variants can be benchmarked side by side:
-
-* `split`: exhaustive enumeration, derived spot-depth exit ordering with first-hop diversity.
-* [`split_probe`](split-probe.md): exhaustive enumeration, live-probed exit ordering.
-* `split_bounded`: bounded direct, connector, and anchor-token expansion; no derived data at all.
-
-Unlike `split` and `split_probe`, `split_bounded` runs on a weightless graph, declares no derived
-data requirements, and ranks purely by gross output (gas is not converted into output-token terms
-when comparing candidates).
+It runs on a weightless graph and declares no derived data requirements: candidate discovery and
+ranking use live simulation only. When derived token gas prices are available, net ranking is
+gas-aware — path activation costs and the final route net subtract gas in output-token terms — and
+without them it falls back to gross output rather than waiting.
 
 ## Candidate discovery
 
@@ -44,14 +40,15 @@ to build executable routes.
 
 ## Allocation
 
-After candidate discovery, `split_bounded` runs the same two split route families as `split`:
+After candidate discovery, `split_bounded` builds two split route families:
 
 1. **Pool-disjoint split**: allocate chunks across paths that do not reuse pools.
 2. **Shared-pool split**: allocate chunks while committing shared pool state between probes.
 
-The final route must use at least two paths and beat the best full-order simulated single path from
-the candidate set. If it does not, the algorithm returns `InsufficientLiquidity` and lets another
-worker pool handle the order.
+The final route must use at least two paths and beat the net output (gas-aware when token gas
+prices are available) of the best full-order simulated single path from the candidate set. If it
+does not, the algorithm returns `InsufficientLiquidity` and lets another worker pool handle the
+order — a split that nets less than an unsplit route only adds execution complexity.
 
 ## Configuration
 
@@ -94,8 +91,8 @@ Average solve time:
 | No-derived brute-force split | 19,145.5 ms |
 | `split_bounded` | 85.8 ms |
 
-For the head-to-head plan against `split` and `split_probe`, see
-[Split variant comparison](split-comparison.md).
+For the head-to-head results against `split` and `split_probe` (which this algorithm replaced),
+see [Split variant comparison](split-comparison.md).
 
 ## Source Reference
 

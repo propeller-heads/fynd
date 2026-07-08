@@ -4,11 +4,10 @@ icon: compass
 
 # Overview
 
-Fynd ships six built-in routing algorithms. This section explains the problem they solve and how
-each one works. [Split Probe](split-probe.md) is a variant of [Split](split.md) that ranks
-first-hop exits with live pool probes instead of derived data; [Split Bounded](split-bounded.md)
-replaces exhaustive enumeration with a bounded amount-aware candidate search. The
-[variant comparison](split-comparison.md) tracks which split variant should become the default.
+Fynd ships four built-in routing algorithms. This section explains the problem they solve and
+how each one works. [Split Bounded](split-bounded.md) is the split-routing algorithm; the
+[variant comparison](split-comparison.md) records the benchmark that picked it over two exhaustive
+split variants.
 
 ## The routing problem
 
@@ -34,10 +33,10 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 
 ## Built-in algorithms
 
-|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Split](split.md)                                               |
+|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Split Bounded](split-bounded.md)                               |
 | ---------------------- | ------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Build pool-disjoint and shared-pool split candidates |
-| **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Handles shared-pool splits and merges executable shared hops    |
-| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Split-only; chunk-based allocation can miss fine splits |
+| **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Bounded amount-aware candidate search plus pool-disjoint and shared-pool split allocation |
+| **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Big large-trade gains at single-path-like latency; merges executable shared hops |
+| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Split-only; anchor-set candidate search can miss long-tail routes |
 | **Default config**     | _(not in default `worker_pools.toml`)_                              | 2 hops, 3 workers (see `worker_pools.toml`)        | _(not in default `worker_pools.toml`)_                                      | _(not in default `worker_pools.toml`)_                          |
-| **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode)    | Token gas prices + spot prices (price impact, probe amount, gas cost)       | Graph spot/depth weights for ranking, token gas prices for net split ranking |
+| **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode)    | Token gas prices + spot prices (price impact, probe amount, gas cost)       | Token gas prices (optional, for gas-aware net ranking) |
