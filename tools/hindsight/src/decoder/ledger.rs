@@ -105,11 +105,17 @@ impl TransferLedger {
     /// One exception: a genuine single swap can carry a **residue leg** — an RFQ hop consumes an
     /// exact intermediate amount and the surplus lands on the trader, or rounding leaves dust of
     /// a routing token. An ambiguous side first drops legs that are provably residue: the token
-    /// also moved between parties other than the tracked address (a routing intermediate) *and*
-    /// the leg is under 1% of the token's gross flow in the transaction. Both conditions are
-    /// same-token comparisons, so no prices are needed, and a real batch leg (all of its token's
-    /// flow) is never dropped. Residue on a token that never routed third-party (e.g. a rebasing
-    /// input token) and fixed-token protocol fees still decline, logged at debug level.
+    /// also moved between parties other than the tracked address (a routing intermediate), the
+    /// leg is under 1% of the token's gross flow in the transaction, *and* the tracked address's
+    /// own flow in the token is one-directional. All three are same-token comparisons, so no
+    /// prices are needed, and a real batch leg (all of its token's flow) is never dropped. The
+    /// one-directional condition is what keeps the gross-flow test unspoofable: surplus and dust
+    /// only ever land on the trader, while a token the trader both sent and received is a real
+    /// position change however small its net — and gross flow can be inflated arbitrarily by
+    /// unrelated loops of the same token elsewhere in the transaction (seen live: an MEV bundle
+    /// whose $10k wash loops made a $51 net leg pass the 1% test, tx `0x280b9939…`).
+    /// Residue on a token that never routed third-party (e.g. a rebasing input token) and
+    /// fixed-token protocol fees still decline, logged at debug level.
     pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
         let mut sent: HashMap<Address, U256> = HashMap::new();
         let mut received: HashMap<Address, U256> = HashMap::new();
@@ -263,8 +269,8 @@ fn net_trade(
         }
     }
 
-    drop_residue_legs(&mut net_sent, flows);
-    drop_residue_legs(&mut net_received, flows);
+    drop_residue_legs(&mut net_sent, flows, received);
+    drop_residue_legs(&mut net_received, flows, sent);
 
     if net_sent.len() != 1 || net_received.len() != 1 {
         // Flow on both sides but more than one significant token on one of them: a real batch
@@ -281,15 +287,27 @@ fn net_trade(
 
 /// Drop residue legs from one side of an ambiguous net (see [`TransferLedger::net_swap`]). Only
 /// runs when the side has more than one leg — a lone leg is the swap itself, however small.
-fn drop_residue_legs(net: &mut HashMap<Address, U256>, flows: &HashMap<Address, TokenFlow>) {
+///
+/// `opposite` is the tracked address's gross flow on the other side: a leg only qualifies as
+/// residue when the tracked address's flow in that token is one-directional, since surplus and
+/// dust land on the trader but never also leave it.
+fn drop_residue_legs(
+    net: &mut HashMap<Address, U256>,
+    flows: &HashMap<Address, TokenFlow>,
+    opposite: &HashMap<Address, U256>,
+) {
     if net.len() <= 1 {
         return;
     }
     net.retain(|token, amount| {
+        let bidirectional = opposite
+            .get(token)
+            .is_some_and(|flow| !flow.is_zero());
         let Some(flow) = flows.get(token) else {
             return true;
         };
-        let residue = flow.intermediate &&
+        let residue = !bidirectional &&
+            flow.intermediate &&
             amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < flow.gross;
         !residue
     });
@@ -394,6 +412,32 @@ mod tests {
 
         let result = net_swap(&logs, &[], user).unwrap();
         assert_eq!(result, swap(token_a, 1000, token_b, 2000));
+    }
+
+    #[test]
+    fn residue_needs_one_directional_flow() {
+        // Regression: MEV bundle 0x280b9939… (block 25487629). The tracked wallet nets three
+        // tokens: WETH out, native ETH in, and a +51 USDC position from sending 510 and
+        // receiving 561 — while the bundle's own $10k USDC wash loops inflate the token's gross
+        // flow until the net leg passes the 1% test. The USDC flow is bidirectional, so it is a
+        // real position change, not residue: the trade must decline as multi-token.
+        let wallet = addr(1);
+        let bot = addr(2);
+        let pool = addr(50);
+        let weth = addr(10);
+        let usdc = addr(11);
+
+        let logs = vec![
+            make_transfer_log(weth, wallet, bot, U256::from(26_000)),
+            make_transfer_log(usdc, wallet, bot, U256::from(510)),
+            make_transfer_log(usdc, bot, wallet, U256::from(561)),
+            // The bot's wash loops: huge same-token third-party flow in the same transaction.
+            make_transfer_log(usdc, bot, pool, U256::from(10_000)),
+            make_transfer_log(usdc, pool, bot, U256::from(10_000)),
+        ];
+        let native = [(bot, wallet, U256::from(16_000u64))];
+
+        assert!(net_swap(&logs, &native, wallet).is_none());
     }
 
     #[test]
