@@ -171,7 +171,10 @@ fynd-rpc = { path = "fynd-rpc", version = "0.82.3" }
 fynd-rpc-types = { path = "fynd-rpc-types", version = "0.82.3" }
 fynd-client = { path = "clients/rust", version = "0.82.3" }
 erc20-overrides = { path = "tools/erc20-overrides", version = "0.82.3" }
-fynd-tools-common = { path = "tools/common", version = "0.82.3" }
+# Path-only (like fynd-test-fixtures): unpublished internal crate, so it must not carry a
+# version requirement -- release.config.js bumps the workspace version without bumping
+# requirements it does not know about, and a stale requirement sends cargo to crates.io.
+fynd-tools-common = { path = "tools/common" }
 fynd-test-fixtures = { path = "test-fixtures" }
 
 # Dev dependencies
