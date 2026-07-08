@@ -15,7 +15,10 @@ use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
 
-use crate::decoder::DecodedTrade;
+use crate::{
+    decoder::{AttributionSource, DecodedTrade, SolverQuote},
+    usd,
+};
 
 /// A Fynd quote for the re-solved order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,10 +55,10 @@ pub(crate) struct StateResult {
 }
 
 impl StateResult {
-    fn new(outcome: Outcome, settled_amount_out: U256) -> Self {
+    fn new(outcome: Outcome, settled_amount_out: U256, settled_net_gas: U256) -> Self {
         let outcome = compare::served(outcome, settled_amount_out);
-        let deltas = compare::compare(&outcome, settled_amount_out);
-        let verdict = compare::verdict(&outcome, settled_amount_out);
+        let deltas = compare::compare(&outcome, settled_amount_out, settled_net_gas);
+        let verdict = compare::verdict(&outcome, settled_amount_out, settled_net_gas);
         Self { outcome, deltas, verdict }
     }
 }
@@ -66,11 +69,21 @@ pub(crate) struct RangeComparison {
     pub tx_hash: String,
     pub block_number: u64,
     pub client: String,
-    pub aggregator: String,
+    pub solver: String,
+    /// The evidence tier the solver label came from (from the decoder).
+    pub solver_source: AttributionSource,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
     pub settled_amount_out: U256,
+    /// Settled output after the gas the trader paid for the route, in `token_out` units. Equals
+    /// `settled_amount_out` when that gas is unknown, was paid by someone else, or the output
+    /// token is unpriced.
+    pub settled_amount_out_net_gas: U256,
+    /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
+    pub settled_gas: Option<U256>,
+    /// The solver's own off-chain quote from its calldata, when declared (from the decoder).
+    pub quote: Option<SolverQuote>,
     /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
     pub top: StateResult,
     /// Pessimistic: solved at state N, after the block's swaps moved the pools.
@@ -91,19 +104,37 @@ pub(crate) trait SteppingSolver {
 }
 
 /// Build a [`RangeComparison`] from the two per-state outcomes of a trade.
-pub(crate) fn build_range(trade: &DecodedTrade, top: Outcome, back: Outcome) -> RangeComparison {
-    let top = StateResult::new(top, trade.amount_out);
-    let back = StateResult::new(back, trade.amount_out);
+///
+/// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
+/// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
+/// deduction) and subtracted from the settled output, so both sides of the net comparison carry
+/// their own gas.
+pub(crate) fn build_range(
+    trade: &DecodedTrade,
+    prices: &usd::PriceMap,
+    top: Outcome,
+    back: Outcome,
+) -> RangeComparison {
+    let settled_net_gas = trade
+        .settled_gas
+        .and_then(|gas| usd::gas_in_token(gas, trade.token_out, prices))
+        .map_or(trade.amount_out, |gas_out| trade.amount_out.saturating_sub(gas_out));
+    let top = StateResult::new(top, trade.amount_out, settled_net_gas);
+    let back = StateResult::new(back, trade.amount_out, settled_net_gas);
     let verdict = top.verdict;
     RangeComparison {
         tx_hash: trade.tx_hash.to_string(),
         block_number: trade.block_number,
         client: trade.client.clone(),
-        aggregator: trade.aggregator.clone(),
+        solver: trade.solver.clone(),
+        solver_source: trade.solver_source,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
         settled_amount_out: trade.amount_out,
+        settled_amount_out_net_gas: settled_net_gas,
+        settled_gas: trade.settled_gas,
+        quote: trade.quote.clone(),
         top,
         back,
         verdict,
@@ -116,6 +147,7 @@ pub(crate) fn build_range(trade: &DecodedTrade, top: Outcome, back: Outcome) -> 
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
+    prices: &usd::PriceMap,
 ) -> anyhow::Result<Vec<RangeComparison>> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
@@ -133,7 +165,7 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
         let back = solver
             .solve(trade.token_in, trade.token_out, trade.amount_in)
             .await;
-        ranges.push(build_range(trade, top, back));
+        ranges.push(build_range(trade, prices, top, back));
     }
     Ok(ranges)
 }
@@ -147,7 +179,8 @@ mod tests {
             tx_hash: Default::default(),
             block_number: 21_000_000,
             client: "relay".into(),
-            aggregator: "tycho".into(),
+            solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
@@ -155,6 +188,8 @@ mod tests {
             amount_out: U256::from(settled),
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
+            quote: None,
         }
     }
 
@@ -196,7 +231,12 @@ mod tests {
 
     #[test]
     fn build_range_headline_is_top() {
-        let range = build_range(&trade(10_000), solved(10_200, 10_100), solved(10_010, 9_990));
+        let range = build_range(
+            &trade(10_000),
+            &usd::PriceMap::new(),
+            solved(10_200, 10_100),
+            solved(10_010, 9_990),
+        );
         assert_eq!(range.verdict, Verdict::Win); // top is the headline
         assert!(range.top.deltas.raw_bps.unwrap() > range.back.deltas.raw_bps.unwrap());
     }
@@ -204,10 +244,46 @@ mod tests {
     #[test]
     fn build_range_partial_fill_is_coverage_miss() {
         // Fynd fills only 10% of a 10_000 settled trade → reclassified as a coverage miss.
-        let range = build_range(&trade(10_000), solved(1_000, 990), solved(1_000, 990));
+        let range = build_range(
+            &trade(10_000),
+            &usd::PriceMap::new(),
+            solved(1_000, 990),
+            solved(1_000, 990),
+        );
         assert_eq!(range.verdict, Verdict::CoverageMiss);
         assert_eq!(range.top.deltas, Deltas { raw_bps: None, net_bps: None });
         assert!(matches!(range.top.outcome, Outcome::Partial(_)));
+    }
+
+    #[test]
+    fn build_range_deducts_settled_gas_when_priced() {
+        // The settled trader paid 200 token_out units of gas (100 wei at a price of 2 units/wei):
+        // the secondary net column carries the deduction; the verdict stays gross vs gross.
+        let mut with_gas = trade(10_000);
+        with_gas.settled_gas = Some(U256::from(100u64));
+        let prices = usd::PriceMap::from([(with_gas.token_out, 2.0)]);
+
+        let range = build_range(&with_gas, &prices, solved(10_050, 9_990), solved(10_050, 9_990));
+        assert_eq!(range.settled_amount_out_net_gas, U256::from(9_800u64));
+        assert_eq!(range.settled_amount_out, U256::from(10_000u64));
+        assert_eq!(range.verdict, Verdict::Win);
+    }
+
+    #[test]
+    fn build_range_unpriced_gas_keeps_settled_gross() {
+        // token_out is not in the price map → no deduction. The secondary net column stays
+        // gross; the verdict is unaffected either way (gross 10_050 beats gross 10_000).
+        let mut with_gas = trade(10_000);
+        with_gas.settled_gas = Some(U256::from(100u64));
+
+        let range = build_range(
+            &with_gas,
+            &usd::PriceMap::new(),
+            solved(10_050, 9_990),
+            solved(10_050, 9_990),
+        );
+        assert_eq!(range.settled_amount_out_net_gas, U256::from(10_000u64));
+        assert_eq!(range.verdict, Verdict::Win);
     }
 
     #[tokio::test]
@@ -219,7 +295,7 @@ mod tests {
             back: solved(9_900, 9_800),
         };
         let trades = [trade(10_000), trade(10_000)];
-        let ranges = resolve_block_range(&solver, &trades)
+        let ranges = resolve_block_range(&solver, &trades, &usd::PriceMap::new())
             .await
             .unwrap();
 

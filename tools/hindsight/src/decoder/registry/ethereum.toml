@@ -1,0 +1,94 @@
+# Ethereum address book for trade decoding: which contracts are solvers, clients, batch
+# settlers, and venue infrastructure. Loaded by `Registry` (see registry.rs for what each section
+# drives); pass a modified copy via `--registry` to extend it without recompiling.
+
+# The chain's wrapped-native token (WETH), which appears in flows only as a wrap/unwrap
+# intermediary.
+wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+
+# Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
+# a solver, not the trader (CoW Protocol Settlement).
+batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
+
+# Solver routers — the venue that actually settles a swap.
+[solvers]
+# 1inch v6 and v5 Aggregation Routers
+"0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
+"0x1111111254eeb25477b68fb85ed929f73a960582" = "1inch"
+# 0x Exchange Proxy (legacy) and AllowanceHolder (Settler)
+"0xdef1c0ded9bec7f1a1670819833240f027b25eff" = "0x"
+"0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# CoW Protocol Settlement
+"0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
+# ParaSwap Augustus v6.2
+"0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# Uniswap Universal Router
+"0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
+# UniswapX Dutch order reactor (filler-initiated; found via its log)
+"0x00000011f84b9aa48e5f8aa8b9897600006289be" = "uniswapx"
+# OKX DEX Router, and OKX DEX Router 6 (per OKX docs; the former is an older deployment)
+"0xf3de3c0d654fda23dad170f0f320a92172509127" = "okx"
+"0x28b1dc1a5e3699a428bc51d234dfab7c9cb2a183" = "okx"
+# KyberSwap MetaAggregationRouter v2
+"0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
+# LiFi Diamond
+"0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae" = "lifi"
+# Tycho (PropellerHeads) router — current, v2, and prior deployment
+"0x1f8db310f32d48b6180ff902ec60c586128cef47" = "tycho"
+"0xfd0b31d2e955fa55e3fa641fe90e08b677188d35" = "tycho"
+"0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
+
+# Clients — platforms that initiate a trade and route it through a solver found in the
+# trace. Each section name must have a decode strategy in code (clients::Client);
+# `entry_points` are the contracts users enter through, `fee_collectors` where its skims land.
+
+# Display names for entry points that are neither clients nor venues — market-maker fillers,
+# solver contracts, bot routers. Label-only: these must NOT be clients or solvers, because
+# known-ness drives strategy selection and filler-entered transactions have to keep matching via
+# their solver logs (Maker), not sender netting. Identified from public labels (Etherscan
+# tags, Dune spellbook solver lists, project sites), ranked by observed volume in monitor runs.
+[labels]
+# Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Maker";
+# the 0xbee… vanity family is Kipseli across CoW/1inch listings).
+"0xbee162fa5ae892be74f3f3e01c23da89adbccccc" = "kipseli"
+"0xbee3211ab312a8d065c4fef0247448e17a8da000" = "kipseli"
+# Average Solutions: intent solver for UniswapX / 1inch Fusion (average-solutions.xyz; operated
+# by average-solutions.eth).
+"0xdeadc0de0000e54725ad1bf220324717043e02bf" = "average-solutions"
+# Rizzolver (Wintermute): UniswapX filler, CoW solver, 1inch Fusion resolver.
+"0x225a38bc71102999dd13478bfabd7c4d53f2dc17" = "rizzolver"
+"0x8f5835e9d756c9bd934bce527157a4b0ef3c5cb7" = "rizzolver"
+"0xa8c1c98aaf99a5dfc907d61b892b2ad624901185" = "rizzolver"
+# CoW solvers (spellbook cow_protocol_ethereum_solvers).
+"0x1921e0ff550c09066edd4df05d304151c45e77de" = "barter"
+"0xa9d635ef85bc37eb9ff9d6165481ea230ed32392" = "quasi"
+# MEV bots (Etherscan public tags); c0ffeebabe.eth's is the only named operator.
+"0xe08d97e151473a848c3d9ca3f323cb720472d015" = "c0ffeebabe"
+"0x06cff7088619c7178f5e14f0b119458d08d2f5ef" = "mev-bot"
+"0x81463b0f960f247f704377661ec81c1fd65b5128" = "mev-bot"
+# Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
+"0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
+
+[clients.relay]
+# Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies.
+entry_points = [
+    "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
+    "0x3ec130b627944cad9b2750300ecb0a695da522b6",
+    "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+    "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
+    "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
+]
+# Relay fee collector (input-side skim by the Relay router). Sole collector across a 25-tx
+# on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
+fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
+
+[clients.metamask]
+# MetaMask Swap Router.
+entry_points = ["0x881d40237659c251811cec9c364ef91dc08d300c"]
+# MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the two, the
+# rest were genuinely fee-free pairs); the skim is ~87.5 bps plus a gas recoup on gasless "smart
+# swaps", taken from whichever swap side is native ETH, else from a swap token directly.
+fee_collectors = [
+    "0xe3478b0bb1a5084567c319096437924948be1964",
+    "0xf326e4de8f66a0bdc0970b79e0924e33c79f1915",
+]

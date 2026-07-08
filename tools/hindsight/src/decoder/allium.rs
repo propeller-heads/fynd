@@ -13,14 +13,17 @@ const ROW_LIMIT: u64 = 10_000;
 
 /// One row of Allium's `aggregator_trades` table — our ground truth for a
 /// single settled swap leg. Extra columns in the response are ignored.
+///
+/// Every field is optional: Allium rows can carry nulls (e.g. an unresolved
+/// token address), and one patchy row must not abort a whole verify run.
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct AlliumRow {
     pub project: Option<String>,
-    pub token_sold_address: String,
+    pub token_sold_address: Option<String>,
     pub token_sold_amount: Option<f64>,
-    pub token_bought_address: String,
+    pub token_bought_address: Option<String>,
     pub token_bought_amount: Option<f64>,
-    pub transaction_hash: String,
+    pub transaction_hash: Option<String>,
 }
 
 /// Client for Allium's async Explorer API.

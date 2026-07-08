@@ -16,9 +16,13 @@ fn to_biguint(amount: U256) -> BigUint {
 /// Basis-point deltas of a Fynd quote against the settled amount (positive = Fynd better).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct Deltas {
-    /// `fynd amount_out` vs settled, ignoring gas.
+    /// `fynd amount_out` vs the settled amount, both gross of gas — always like-for-like, and
+    /// the basis of the headline [`Verdict`].
     pub raw_bps: Option<f64>,
-    /// `fynd amount_out_net_gas` vs settled — Fynd's output after its own gas cost.
+    /// Secondary, recorded for later gas analysis: `fynd amount_out_net_gas` vs the settled
+    /// amount net of the gas the trader paid for it. Asymmetric when the settled gas is unknown
+    /// (the settled side stays gross while Fynd's is charged) — most Relay settlements are
+    /// operator-submitted so their trader gas is legitimately absent. Not used for verdicts.
     pub net_bps: Option<f64>,
 }
 
@@ -30,8 +34,7 @@ impl Deltas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    /// Fynd delivered strictly more output than settled after subtracting only its own gas (see
-    /// [`verdict`] for why this comparison is intentionally conservative).
+    /// Fynd's gross output strictly beats the gross settled output ([`Deltas::raw_bps`] > 0).
     Win,
     /// Fynd's output was equal to or worse than settled, or it could not be compared.
     Loss,
@@ -75,31 +78,41 @@ pub(crate) fn served(outcome: Outcome, settled_amount_out: U256) -> Outcome {
     outcome
 }
 
-/// Compute raw and net-of-gas bps deltas of `outcome` against `settled_amount_out`.
-pub(crate) fn compare(outcome: &Outcome, settled_amount_out: U256) -> Deltas {
+/// Compute raw and net-of-gas bps deltas of `outcome` against the settled trade.
+///
+/// `raw_bps` compares gross outputs; `net_bps` compares both sides net of their own gas —
+/// `settled_net_gas` is the settled output minus the gas the trader paid for the route, and
+/// equals `settled_amount_out` when that gas is unknown or was paid by someone else.
+pub(crate) fn compare(
+    outcome: &Outcome,
+    settled_amount_out: U256,
+    settled_net_gas: U256,
+) -> Deltas {
     let Outcome::Solved(solved) = outcome else {
         return Deltas::NONE;
     };
-    let settled = to_biguint(settled_amount_out);
     Deltas {
-        raw_bps: raw_bps_diff(&to_biguint(solved.amount_out), &settled),
-        net_bps: raw_bps_diff(&to_biguint(solved.amount_out_net_gas), &settled),
+        raw_bps: raw_bps_diff(&to_biguint(solved.amount_out), &to_biguint(settled_amount_out)),
+        net_bps: raw_bps_diff(&to_biguint(solved.amount_out_net_gas), &to_biguint(settled_net_gas)),
     }
 }
 
-/// Classify a trade by its net-of-gas delta against the settled amount. Fynd wins only when it
-/// delivers strictly more output after subtracting its own estimated gas cost.
+/// Classify a trade by its gross output delta: Fynd wins only when it delivers strictly more
+/// output than the trade settled for, both sides gross of gas.
 ///
-/// The comparison is deliberately conservative and asymmetric: Fynd's output is net of its own
-/// gas, while the settled `amount_out` is gross — the settled swap's gas was paid separately in ETH
-/// and is not subtracted here. Isolating the on-chain trade's true gas cost is hard (it can sit
-/// deep in a larger transaction alongside unrelated activity), so a `Win` under-counts rather than
-/// over-counts Fynd's edge. Symmetric N-1/N gas accounting is a follow-up.
-pub(crate) fn verdict(outcome: &Outcome, settled_amount_out: U256) -> Verdict {
+/// Gross-vs-gross is the one comparison that is always like-for-like: the settled route's gas is
+/// often legitimately unattributable (most Relay settlements are submitted by Relay's own
+/// operators, so the trader paid no gas), and a net-vs-gross fallback would mix comparison bases
+/// across records. The net numbers are still recorded ([`Deltas::net_bps`]) for later analysis.
+pub(crate) fn verdict(
+    outcome: &Outcome,
+    settled_amount_out: U256,
+    settled_net_gas: U256,
+) -> Verdict {
     if let Outcome::Partial(_) = outcome {
         return Verdict::CoverageMiss;
     }
-    match compare(outcome, settled_amount_out).net_bps {
+    match compare(outcome, settled_amount_out, settled_net_gas).raw_bps {
         Some(d) if d > 0.0 => Verdict::Win,
         Some(_) => Verdict::Loss,
         None => Verdict::Unsolvable,
@@ -120,47 +133,79 @@ mod tests {
         })
     }
 
+    /// Settled side without a known gas cost: net compares against the gross settled amount.
+    fn gross(settled: u64) -> (U256, U256) {
+        (U256::from(settled), U256::from(settled))
+    }
+
     #[test]
     fn compare_fynd_better_is_positive() {
-        let d = compare(&solved(10_100, 10_050), U256::from(10_000u64));
+        let (settled, net) = gross(10_000);
+        let d = compare(&solved(10_100, 10_050), settled, net);
         assert!((d.raw_bps.unwrap() - 100.0).abs() < 0.01);
         assert!((d.net_bps.unwrap() - 50.0).abs() < 0.01);
     }
 
     #[test]
     fn compare_fynd_worse_is_negative() {
-        let d = compare(&solved(9_900, 9_800), U256::from(10_000u64));
+        let (settled, net) = gross(10_000);
+        let d = compare(&solved(9_900, 9_800), settled, net);
         assert!(d.raw_bps.unwrap() < 0.0);
         assert!(d.net_bps.unwrap() < 0.0);
     }
 
     #[test]
+    fn compare_settled_gas_is_deducted_from_net_only() {
+        // Settled 10_000 gross but its trader paid 100 in gas: raw still compares gross vs
+        // gross; net compares 10_050 vs 9_900.
+        let d = compare(&solved(10_100, 10_050), U256::from(10_000u64), U256::from(9_900u64));
+        assert!((d.raw_bps.unwrap() - 100.0).abs() < 0.01);
+        assert!((d.net_bps.unwrap() - 151.5).abs() < 0.1);
+    }
+
+    #[test]
     fn compare_unsolvable_is_none() {
-        let d = compare(&Outcome::Unsolvable("no route".into()), U256::from(10_000u64));
+        let (settled, net) = gross(10_000);
+        let d = compare(&Outcome::Unsolvable("no route".into()), settled, net);
         assert_eq!(d, Deltas::NONE);
     }
 
     #[test]
     fn compare_zero_settled_is_none() {
-        let d = compare(&solved(10_000, 10_000), U256::ZERO);
+        let d = compare(&solved(10_000, 10_000), U256::ZERO, U256::ZERO);
         assert_eq!(d.raw_bps, None);
     }
 
     #[test]
     fn verdict_win_only_when_net_positive() {
-        assert_eq!(verdict(&solved(10_100, 10_050), U256::from(10_000u64)), Verdict::Win);
+        let (settled, net) = gross(10_000);
+        assert_eq!(verdict(&solved(10_100, 10_050), settled, net), Verdict::Win);
     }
 
     #[test]
-    fn verdict_loss_when_net_not_better() {
-        // Raw is better but net-of-gas is worse → loss (gas ate the edge).
-        assert_eq!(verdict(&solved(10_100, 9_990), U256::from(10_000u64)), Verdict::Loss);
+    fn verdict_is_gross_even_when_net_is_worse() {
+        // Gross output wins even though Fynd's own gas would eat the edge: the headline verdict
+        // compares gross vs gross, and the net delta stays available as a secondary number.
+        let (settled, net) = gross(10_000);
+        assert_eq!(verdict(&solved(10_100, 9_990), settled, net), Verdict::Win);
+    }
+
+    #[test]
+    fn verdict_ignores_settled_gas() {
+        // The settled trader's gas does not move the verdict in either direction — only the
+        // gross outputs do.
+        let fynd = solved(10_050, 9_990);
+        assert_eq!(verdict(&fynd, U256::from(10_000u64), U256::from(10_000u64)), Verdict::Win);
+        assert_eq!(verdict(&fynd, U256::from(10_000u64), U256::from(9_900u64)), Verdict::Win);
+        let worse = solved(9_900, 9_800);
+        assert_eq!(verdict(&worse, U256::from(10_000u64), U256::from(9_000u64)), Verdict::Loss);
     }
 
     #[test]
     fn verdict_unsolvable_passthrough() {
+        let (settled, net) = gross(10_000);
         assert_eq!(
-            verdict(&Outcome::Unsolvable("missing token".into()), U256::from(10_000u64)),
+            verdict(&Outcome::Unsolvable("missing token".into()), settled, net),
             Verdict::Unsolvable
         );
     }
@@ -170,7 +215,8 @@ mod tests {
         // Fynd covered only 40% of the settled size → coverage miss, not a loss.
         let outcome = served(solved(400, 390), U256::from(1_000u64));
         assert!(matches!(outcome, Outcome::Partial(_)));
-        assert_eq!(verdict(&outcome, U256::from(1_000u64)), Verdict::CoverageMiss);
+        let (settled, net) = gross(1_000);
+        assert_eq!(verdict(&outcome, settled, net), Verdict::CoverageMiss);
     }
 
     #[test]

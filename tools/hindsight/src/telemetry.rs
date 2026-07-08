@@ -23,6 +23,7 @@ const VOLUME_USD: &str = "hindsight_volume_usd";
 const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
+const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -57,27 +58,28 @@ pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by client / aggregator / chain / outcome / state (top|back). \
+        "Re-solved trades, labeled by client / solver / chain / outcome / state (top|back). \
          Per-pair detail lives in the JSONL comparison output; a token-pair label here is unbounded \
          on mainnet and would explode Prometheus series cardinality over a long run."
     );
     describe_histogram!(
         SAVINGS_BPS,
         Unit::Count,
-        "Net-of-gas bps delta of Fynd vs settled (positive = Fynd better)"
+        "Gross bps delta of Fynd vs settled (positive = Fynd better), the headline basis"
     );
     describe_histogram!(
         SAVINGS_USD,
-        "Signed USD savings of Fynd vs settled (positive = Fynd better), for Fynd-priced trades"
+        "Signed gross USD savings of Fynd vs settled (positive = Fynd better), for Fynd-priced \
+         trades"
     );
     describe_histogram!(
         IMPROVEMENT_USD,
-        "Net-of-gas USD uplift on trades Fynd would improve (losses excluded — a client routes \
+        "Gross USD uplift on trades Fynd would improve (losses excluded — a client routes \
          elsewhere when Fynd is worse). Sum = value of adding Fynd; count = improving trades"
     );
     describe_histogram!(
         VOLUME_USD,
-        "Observed settled trade volume in USD, labeled by client / aggregator (Fynd-priced trades)"
+        "Observed settled trade volume in USD, labeled by client / solver (Fynd-priced trades)"
     );
     describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
@@ -85,6 +87,11 @@ pub(crate) fn describe() {
         SKIPPED_BLOCKS,
         "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
          stream past the retry budget, or the block genuinely failed to decode)"
+    );
+    describe_counter!(
+        FEED_REBUILDS,
+        "Times the tycho feed died (stream ended or no block within the dead-feed timeout) and \
+         the monitor rebuilt the solver to resubscribe"
     );
 }
 
@@ -103,7 +110,7 @@ pub(crate) fn record_range(
         histogram!(
             VOLUME_USD,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
         )
         .record(volume);
@@ -114,8 +121,9 @@ pub(crate) fn record_range(
 }
 
 /// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
-/// solved state — the net-of-gas bps delta, the signed USD savings, and the USD uplift (only when
-/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse).
+/// solved state — the gross bps delta, the signed USD savings, and the USD uplift (only when
+/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse). All highlighted
+/// metrics compare gross vs gross, matching the headline verdict.
 fn record_state(
     range: &RangeComparison,
     state: &StateResult,
@@ -126,18 +134,18 @@ fn record_state(
     counter!(
         TRADES_TOTAL,
         "client" => range.client.clone(),
-        "aggregator" => range.aggregator.clone(),
+        "solver" => range.solver.clone(),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
     )
     .increment(1);
 
-    if let Some(bps) = state.deltas.net_bps {
+    if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -156,7 +164,7 @@ fn record_state(
                 block = range.block_number,
                 state = state_label,
                 client = %range.client,
-                aggregator = %range.aggregator,
+                solver = %range.solver,
                 token_in = %range.token_in,
                 token_out = %range.token_out,
                 amount_in = %range.amount_in,
@@ -170,28 +178,21 @@ fn record_state(
         histogram!(
             SAVINGS_USD,
             "client" => range.client.clone(),
-            "aggregator" => range.aggregator.clone(),
+            "solver" => range.solver.clone(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
         .record(usd);
-    }
 
-    if let Some(uplift) = usd::savings_usd(
-        range.token_out,
-        solved.amount_out_net_gas,
-        range.settled_amount_out,
-        prices,
-    ) {
-        if uplift > 0.0 {
+        if usd > 0.0 {
             histogram!(
                 IMPROVEMENT_USD,
                 "client" => range.client.clone(),
-                "aggregator" => range.aggregator.clone(),
+                "solver" => range.solver.clone(),
                 "chain" => chain.to_string(),
                 "state" => state_label,
             )
-            .record(uplift);
+            .record(usd);
         }
     }
 }
@@ -206,6 +207,10 @@ pub(crate) fn record_block_seconds(seconds: f64) {
 
 pub(crate) fn record_skipped_block() {
     counter!(SKIPPED_BLOCKS).increment(1);
+}
+
+pub(crate) fn record_feed_rebuild() {
+    counter!(FEED_REBUILDS).increment(1);
 }
 
 async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
@@ -256,7 +261,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::DecodedTrade,
+        decoder::{AttributionSource, DecodedTrade},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -265,7 +270,8 @@ mod tests {
             tx_hash: Default::default(),
             block_number: 21_000_000,
             client: "relay".into(),
-            aggregator: "tycho".into(),
+            solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,
@@ -273,6 +279,8 @@ mod tests {
             amount_out: U256::from(settled),
             client_fee: None,
             client_fee_out: None,
+            settled_gas: None,
+            quote: None,
         }
     }
 
@@ -315,6 +323,7 @@ mod tests {
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
             &trade(usdc, 1_000_000_000),
+            &usd::PriceMap::new(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
         );
@@ -345,6 +354,7 @@ mod tests {
     fn record_range_skips_savings_when_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
+            &usd::PriceMap::new(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
         );
