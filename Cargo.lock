@@ -7756,9 +7756,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.313.0"
+version = "0.328.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "960a11590aaa09919310e0a8b8b41bb7ea4ba66e766bfcaae97a65f5b476accf"
+checksum = "260bfa6e48e757b65a97ad61c188db43d70a6902fb1be86881b611b64613e23e"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7786,9 +7786,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.313.0"
+version = "0.328.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d0e4c2fe42d65412eff85eff5a4ac39aee0488e33e713caf8c965bc7d71a73"
+checksum = "86cbbcfa5921531b4d559255b6687c1782951379e7c171cded2055885b9b4ea8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7813,9 +7813,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.313.0"
+version = "0.328.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4cffb1455ce9b61f602ce8e543f3f9beeedfdb08778b5fb4b2efa36eeedafa4"
+checksum = "3c365a61880cac3e81837017c5b6a0eb2b8b358841a3a68a7da477636badc789"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7835,9 +7835,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.313.0"
+version = "0.328.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e07caab0180db08d26a2cd074f25dfa032a4dc6dd62e6eb85b8a1c7ed07adde"
+checksum = "4876623450f4cce734e818ed4cfcc786f07402106bf46e3119e4c09f5c0cebbc"
 dependencies = [
  "alloy",
  "chrono",
@@ -7856,12 +7856,13 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.313.0"
+version = "0.328.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7356cb9cd1b7df72a831b7c0c43b0bfd0a61e8668df19897c073843c8c39040"
+checksum = "b0b143b98c8cf0c701ef0e012c294c44a42d550a5fc29457c2cb477f3ec6f2f7"
 dependencies = [
  "alloy",
  "alloy-chains",
+ "alloy-primitives 1.6.0",
  "async-stream",
  "async-trait",
  "chrono",
