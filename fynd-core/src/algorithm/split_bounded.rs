@@ -1,11 +1,11 @@
 //! Bounded split-routing algorithm (`split_bounded`).
 //!
 //! Ported from the `feat/split-shared-routing-quality-light` line of work (there named
-//! `bounded_split`) so it can be benchmarked against `split` and `split_probe` on this branch.
-//! It is intentionally self-contained: it keeps its own weightless graph type
-//! (`StableDiGraph<()>`), its own allocator copies, and a gas-blind net (`combined_net`
-//! returns gross output), exactly as authored. Do not fold it into `split.rs` until the
-//! variant comparison has picked a winner.
+//! `bounded_split`). It is self-contained: it keeps its own weightless graph type
+//! (`StableDiGraph<()>`) and its own allocator copies. Net ranking is gas-aware: when derived
+//! token gas prices are available, `combined_net` and the allocator's activation costs subtract
+//! gas in output-token terms; without them the algorithm falls back to gross output, so it never
+//! waits on derived data.
 //!
 //! The algorithm replaces exhaustive path enumeration with a bounded, amount-aware candidate
 //! search inspired by Penumbra's candidate-set routing: expand from the sell token with the
@@ -33,7 +33,7 @@ use super::{
     Algorithm, AlgorithmConfig, NoPathReason,
 };
 use crate::{
-    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
+    derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketDataView, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, EdgeData, Path, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, RouteResult},
@@ -140,6 +140,7 @@ struct SplitEvalContext<'a> {
     market: &'a MarketState,
     amount_in: &'a BigUint,
     gas_price: &'a BigUint,
+    token_prices: Option<&'a TokenGasPrices>,
     token_out: &'a Address,
     start: &'a Instant,
     timeout_ms: u64,
@@ -751,12 +752,40 @@ impl BoundedSplitEngine {
         chunks
     }
 
+    /// Converts a gas amount to output-token terms. Returns `None` if no price is available.
+    fn gas_cost_in_token(
+        total_gas: &BigUint,
+        gas_price_wei: &BigUint,
+        token_prices: Option<&TokenGasPrices>,
+        token_out: &Address,
+    ) -> Option<BigUint> {
+        let price = token_prices?.get(token_out)?;
+        if price.denominator.is_zero() {
+            return None;
+        }
+        Some(total_gas * gas_price_wei * &price.numerator / &price.denominator)
+    }
+
     fn combined_net(
-        _ctx: &SplitEvalContext<'_>,
+        ctx: &SplitEvalContext<'_>,
         total_gross: BigUint,
-        _total_gas: &BigUint,
+        total_gas: &BigUint,
     ) -> BigInt {
-        BigInt::from(total_gross)
+        match Self::gas_cost_in_token(total_gas, ctx.gas_price, ctx.token_prices, ctx.token_out) {
+            Some(cost) => BigInt::from(total_gross) - BigInt::from(cost),
+            None => BigInt::from(total_gross),
+        }
+    }
+
+    async fn token_prices_from(derived: Option<&SharedDerivedDataRef>) -> Option<TokenGasPrices> {
+        match derived {
+            Some(derived) => derived
+                .read()
+                .await
+                .token_prices()
+                .cloned(),
+            None => None,
+        }
     }
 
     fn simulate_on_overrides(
@@ -881,12 +910,16 @@ impl BoundedSplitEngine {
                 break;
             }
             let path = &paths[*idx];
-            let Some((out, _gas, _)) =
+            let Some((out, gas, _)) =
                 Self::simulate_on_overrides(path, ctx, &empty_overrides, first_chunk.clone())
             else {
                 continue;
             };
-            marginal.push((*idx, BigInt::from(out)));
+            let activation =
+                Self::gas_cost_in_token(&gas, ctx.gas_price, ctx.token_prices, ctx.token_out)
+                    .map(BigInt::from)
+                    .unwrap_or_else(BigInt::zero);
+            marginal.push((*idx, BigInt::from(out) - activation));
         }
         marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
 
@@ -923,6 +956,7 @@ impl BoundedSplitEngine {
 
         let mut alloc = vec![BigUint::zero(); selected.len()];
         let mut cur_out = vec![BigUint::zero(); selected.len()];
+        let mut used = vec![false; selected.len()];
 
         for chunk in chunks {
             if ctx.timed_out() {
@@ -931,14 +965,26 @@ impl BoundedSplitEngine {
             let mut best: Option<(usize, BigInt, BigUint)> = None;
             for (i, &path_idx) in selected.iter().enumerate() {
                 let probe_in = &alloc[i] + &chunk;
-                let Some((probe_out, _probe_gas)) =
+                let Some((probe_out, probe_gas)) =
                     Self::simulate_amount(&paths[path_idx], ctx.market, probe_in)
                 else {
                     continue;
                 };
                 let gross_marginal =
                     BigInt::from(probe_out.clone()) - BigInt::from(cur_out[i].clone());
-                let net_marginal = gross_marginal;
+                let net_marginal = if used[i] {
+                    gross_marginal
+                } else {
+                    let activation = Self::gas_cost_in_token(
+                        &probe_gas,
+                        ctx.gas_price,
+                        ctx.token_prices,
+                        ctx.token_out,
+                    )
+                    .map(BigInt::from)
+                    .unwrap_or_else(BigInt::zero);
+                    gross_marginal - activation
+                };
                 if best
                     .as_ref()
                     .map(|(_, best_net, _)| &net_marginal > best_net)
@@ -953,6 +999,7 @@ impl BoundedSplitEngine {
             };
             alloc[best_i] += &chunk;
             cur_out[best_i] = new_out;
+            used[best_i] = true;
         }
 
         Self::assemble_disjoint_route(paths, selected, &alloc, ctx, order)
@@ -1011,12 +1058,24 @@ impl BoundedSplitEngine {
                 if !active[i] && active_count >= SHARED_MAX_ACTIVE_PATHS {
                     continue;
                 }
-                let Some((out, _gas, updates)) =
+                let Some((out, gas, updates)) =
                     Self::simulate_on_overrides(&paths[path_idx], ctx, &overrides, chunk.clone())
                 else {
                     continue;
                 };
-                let net_marginal = BigInt::from(out);
+                let net_marginal = if active[i] {
+                    BigInt::from(out)
+                } else {
+                    let activation = Self::gas_cost_in_token(
+                        &gas,
+                        ctx.gas_price,
+                        ctx.token_prices,
+                        ctx.token_out,
+                    )
+                    .map(BigInt::from)
+                    .unwrap_or_else(BigInt::zero);
+                    BigInt::from(out) - activation
+                };
                 if best
                     .as_ref()
                     .map(|(_, best_net, _)| &net_marginal > best_net)
@@ -1145,7 +1204,7 @@ impl Algorithm for BoundedSplitEngine {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        let _ = derived;
+        let token_prices = Self::token_prices_from(derived.as_ref()).await;
         let amount_in = order.amount().clone();
         let timeout_ms = self.timeout.as_millis() as u64;
         let (paths, ranked_path_scores, market) = {
@@ -1206,7 +1265,6 @@ impl Algorithm for BoundedSplitEngine {
         if ranked_path_scores.is_empty() {
             return Err(AlgorithmError::InsufficientLiquidity);
         }
-        let single_path_floor = ranked_path_scores[0].1.clone();
         let ranked_path_indices: Vec<usize> = ranked_path_scores
             .iter()
             .map(|(idx, _)| *idx)
@@ -1222,10 +1280,19 @@ impl Algorithm for BoundedSplitEngine {
             market: &market,
             amount_in: &amount_in,
             gas_price: &gas_price,
+            token_prices: token_prices.as_ref(),
             token_out: order.token_out(),
             start: &start,
             timeout_ms,
         };
+
+        // The floor a split must beat is the best single path's NET output. Candidate scores are
+        // gross (discovery stays gas-free), so re-simulate the top path once to net it; if that
+        // simulation fails, fall back to the gross score, which only makes the floor stricter.
+        let single_path_floor =
+            Self::simulate_amount(&paths[ranked_path_indices[0]], ctx.market, amount_in.clone())
+                .map(|(gross, gas)| Self::combined_net(&ctx, gross, &gas))
+                .unwrap_or_else(|| ranked_path_scores[0].1.clone());
 
         let ranked: Vec<(usize, &SplitPath<'_>)> = ranked_path_indices
             .iter()
@@ -1349,12 +1416,19 @@ mod tests {
     fn setup_market(
         pools: Vec<(&str, Token, Token, Box<dyn ProtocolSim>)>,
     ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
+        setup_market_with_gas_price(pools, 1)
+    }
+
+    fn setup_market_with_gas_price(
+        pools: Vec<(&str, Token, Token, Box<dyn ProtocolSim>)>,
+        gas_price: u64,
+    ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
         let mut market = MarketState::new();
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
             block_hash: Default::default(),
             block_timestamp: 0,
-            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(gas_price) },
         });
         market.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 0));
 
@@ -1698,6 +1772,70 @@ mod tests {
             .filter(|swap| swap.token_in() == &weth.address)
             .count();
         assert_eq!(split_paths, 2, "bounded split should use both pools");
+    }
+
+    /// With derived token prices present the net is gas-aware: an order too small to justify a
+    /// second path's activation gas must be rejected (the single-path floor wins). Without
+    /// prices the same order still splits, because netting falls back to gross output.
+    #[tokio::test]
+    async fn gas_aware_net_rejects_dominated_split() {
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        use crate::derived::DerivedData;
+
+        let weth = token_with_decimals(0x01, "WETH", 18);
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let pools = |two: bool| {
+            let mut pools = vec![(
+                "pool_a",
+                weth.clone(),
+                usdc.clone(),
+                Box::new(weth_usdc_pool(1_000, 3_000_000)) as Box<dyn ProtocolSim>,
+            )];
+            if two {
+                pools.push((
+                    "pool_b",
+                    weth.clone(),
+                    usdc.clone(),
+                    Box::new(weth_usdc_pool(1_000, 3_000_000)) as Box<dyn ProtocolSim>,
+                ));
+            }
+            pools
+        };
+        // Gas expensive enough that a second path's activation dwarfs the split gain on 1 WETH.
+        let (market, graph_manager) = setup_market_with_gas_price(pools(true), 1_000_000_000);
+        let order = Order::new(
+            weth.address.clone(),
+            usdc.address.clone(),
+            BigUint::from(10u64).pow(18),
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+        let config =
+            AlgorithmConfig::new(1, 3, std::time::Duration::from_millis(2000), None).unwrap();
+        let engine = BoundedSplitEngine::with_config(config).unwrap();
+
+        let gas_blind = engine
+            .find_best_route(graph_manager.graph(), market.clone(), None, None, &order)
+            .await;
+        assert!(gas_blind.is_ok(), "without token prices the small order should still split");
+
+        let mut prices = TokenGasPrices::new();
+        prices.insert(
+            usdc.address.clone(),
+            Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+        );
+        let mut derived = DerivedData::new();
+        derived.set_token_prices(prices, vec![], 1, true);
+        let derived_ref: SharedDerivedDataRef = Arc::new(RwLock::new(derived));
+
+        let gas_aware = engine
+            .find_best_route(graph_manager.graph(), market, None, Some(derived_ref), &order)
+            .await;
+        assert!(
+            matches!(gas_aware, Err(AlgorithmError::InsufficientLiquidity)),
+            "with token prices the dominated split should be rejected, got {gas_aware:?}"
+        );
     }
 
     #[test]
