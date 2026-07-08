@@ -5,13 +5,113 @@
 //! to a slim route + calldata that omits each hop's bulky, sometimes-unserializable
 //! `protocol_state`.
 
+use std::{
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::Context;
 use fynd_core::types::{OrderQuote, Swap, Transaction};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     resolve::{Outcome, RangeComparison, StateResult},
     usd,
 };
+
+/// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
+/// `comparisons-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
+/// upload CronJob) ships closed daily files instead of re-shipping one ever-growing one.
+pub(crate) struct RotatingWriter {
+    dir: PathBuf,
+    date: String,
+    writer: BufWriter<std::fs::File>,
+}
+
+impl RotatingWriter {
+    /// Open today's file inside `dir` for appending, creating the directory if needed.
+    pub(crate) fn open(dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create comparisons directory {}", dir.display()))?;
+        let date = utc_date();
+        let writer = open_dated(&dir, &date)?;
+        Ok(Self { dir, date, writer })
+    }
+
+    /// The path of the file currently being written.
+    pub(crate) fn current_path(&self) -> PathBuf {
+        dated_path(&self.dir, &self.date)
+    }
+
+    /// The current file's writer, rotated first when the UTC day has changed.
+    pub(crate) fn writer(&mut self) -> &mut BufWriter<std::fs::File> {
+        self.rotate_to(utc_date());
+        &mut self.writer
+    }
+
+    /// Switch to `date`'s file when it differs from the current one. A failed rotation keeps the
+    /// previous day's file: for a long unattended run, appending to yesterday's file beats dying
+    /// on a transient filesystem error.
+    fn rotate_to(&mut self, date: String) {
+        if date == self.date {
+            return;
+        }
+        if let Err(e) = self.writer.flush() {
+            warn!(error = %e, "failed to flush comparisons file before rotation");
+        }
+        match open_dated(&self.dir, &date) {
+            Ok(writer) => {
+                info!(path = %dated_path(&self.dir, &date).display(), "rotated comparisons file");
+                self.writer = writer;
+                self.date = date;
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's")
+            }
+        }
+    }
+}
+
+fn dated_path(dir: &Path, date: &str) -> PathBuf {
+    dir.join(format!("comparisons-{date}.jsonl"))
+}
+
+fn open_dated(dir: &Path, date: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
+    let path = dated_path(dir, date);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open comparisons jsonl {}", path.display()))?;
+    Ok(BufWriter::new(file))
+}
+
+/// Today's UTC date as `YYYY-MM-DD` from the system clock.
+fn utc_date() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    date_from_unix(secs)
+}
+
+/// Civil date for a unix timestamp (UTC), via the days-to-civil-calendar algorithm — exact for
+/// the whole unix era, so no calendar dependency is needed for a filename.
+fn date_from_unix(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
 
 /// Append one JSON line per re-solved trade to `writer` — every comparison, not just wins. Each
 /// record carries both block states with their verdict (win/loss/unsolvable), so downstream can
@@ -163,6 +263,42 @@ mod tests {
         decoder::{AttributionSource, DecodedTrade, SolverQuote},
         resolve::{build_range, SolvedAmount},
     };
+
+    #[test]
+    fn date_from_unix_matches_utc_calendar() {
+        assert_eq!(date_from_unix(0), "1970-01-01");
+        assert_eq!(date_from_unix(86_399), "1970-01-01"); // last second of the first day
+        assert_eq!(date_from_unix(86_400), "1970-01-02"); // day boundary
+        assert_eq!(date_from_unix(1_783_477_604), "2026-07-08");
+        assert_eq!(date_from_unix(1_709_164_800), "2024-02-29"); // leap day
+        assert_eq!(date_from_unix(951_782_400), "2000-02-29"); // 400-year-rule leap day
+    }
+
+    #[test]
+    fn rotating_writer_switches_files_at_a_new_date() {
+        let dir = std::env::temp_dir().join(format!("hindsight-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut rotating = RotatingWriter::open(&dir).unwrap();
+        let today = rotating.current_path();
+        writeln!(rotating.writer(), "{{\"day\":1}}").unwrap();
+
+        // Same date: no rotation, appends to the same file.
+        rotating.rotate_to(rotating.date.clone());
+        writeln!(rotating.writer(), "{{\"day\":1,\"line\":2}}").unwrap();
+
+        // New date: subsequent writes land in the new file. Write through the field, not
+        // `writer()` — the accessor would immediately rotate back to the real system date.
+        rotating.rotate_to("2099-01-01".to_string());
+        writeln!(rotating.writer, "{{\"day\":2}}").unwrap();
+        drop(rotating);
+
+        let first = std::fs::read_to_string(&today).unwrap();
+        assert_eq!(first.lines().count(), 2);
+        let second = std::fs::read_to_string(dir.join("comparisons-2099-01-01.jsonl")).unwrap();
+        assert_eq!(second.trim(), "{\"day\":2}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn comparison_record_carries_solver_quote() {

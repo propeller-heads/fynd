@@ -97,12 +97,13 @@ pub(crate) struct MonitorArgs {
     #[arg(long)]
     pub max_blocks: Option<u64>,
 
-    /// Append one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
-    /// coverage gaps), each carrying both block states with verdict, net bps, USD delta, and a
-    /// slim route/calldata or unsolvable reason. Filter downstream for the improvement or
-    /// coverage view
+    /// Write one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
+    /// coverage gaps) into this directory as `comparisons-YYYY-MM-DD.jsonl`, rotated at each UTC
+    /// day boundary so an external sync job can ship closed daily files. Each record carries
+    /// both block states with verdict, bps, USD delta, and a slim route/calldata or unsolvable
+    /// reason; filter downstream for the improvement or coverage view
     #[arg(long)]
-    pub comparisons_jsonl: Option<String>,
+    pub comparisons_dir: Option<std::path::PathBuf>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per [`SteppingSolver::advance`].
@@ -342,15 +343,11 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
-    let mut comparisons = match cfg.comparisons_jsonl.as_deref() {
-        Some(path) => {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("failed to open comparisons jsonl {path}: {e}"))?;
-            info!(path, "appending comparisons to JSONL");
-            Some(std::io::BufWriter::new(file))
+    let mut comparisons = match cfg.comparisons_dir.as_ref() {
+        Some(dir) => {
+            let writer = super::jsonl::RotatingWriter::open(dir)?;
+            info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
+            Some(writer)
         }
         None => None,
     };
@@ -386,7 +383,7 @@ async fn run_session<P: Provider>(
     cfg: &MonitorArgs,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
-    comparisons: &mut Option<std::io::BufWriter<std::fs::File>>,
+    comparisons: &mut Option<super::jsonl::RotatingWriter>,
     totals: &mut Totals,
 ) -> SessionEnd {
     // Establish a baseline applied state (N-1) before the first comparison.
@@ -458,8 +455,8 @@ async fn run_session<P: Provider>(
         for range in &ranges {
             telemetry::record_range(range, &cfg.chain, &prices_top, &prices_back);
         }
-        if let Some(writer) = comparisons.as_mut() {
-            super::jsonl::write_comparisons(writer, &ranges, &prices_top, &prices_back);
+        if let Some(rotating) = comparisons.as_mut() {
+            super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
@@ -554,7 +551,7 @@ mod tests {
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
-            comparisons_jsonl: None,
+            comparisons_dir: None,
         })
         .await
         .expect("monitor should process one block without error");
