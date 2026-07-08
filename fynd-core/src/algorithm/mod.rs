@@ -22,6 +22,7 @@ pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub mod split;
+pub mod split_bounded;
 #[allow(dead_code)]
 pub(crate) mod split_primitives;
 
@@ -36,6 +37,7 @@ pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 pub use split::SplitAlgorithm;
+pub use split_bounded::SplitBoundedAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{

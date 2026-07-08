@@ -203,6 +203,9 @@ Pluggable interface for route-finding algorithms:
 
 * `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
 * `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
+* `PathFrankWolfeAlgorithm` -- Bellman-Ford path discovery plus Frank-Wolfe split optimization.
+* `SplitAlgorithm` -- exhaustive path enumeration plus pool-disjoint and shared-pool split allocation; the `split_probe` variant ranks first-hop exits with live probes.
+* `SplitBoundedAlgorithm` -- bounded direct, connector, and anchor-token candidate discovery plus the same split allocation.
 
 ***
 

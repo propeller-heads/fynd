@@ -21,8 +21,9 @@
 //! to implement your own routing strategy.
 
 /// Route-finding algorithms. Includes [`MostLiquidAlgorithm`],
-/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`], and the
-/// pluggable [`Algorithm`] trait.
+/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
+/// [`algorithm::SplitAlgorithm`] (with its `split_probe` variant),
+/// [`algorithm::SplitBoundedAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
 /// Derived data computations: spot prices, pool depths, and gas prices.
 pub mod derived;

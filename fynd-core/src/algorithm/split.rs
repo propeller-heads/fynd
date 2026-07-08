@@ -14,7 +14,7 @@
 //!
 //! Two registered variants share this implementation and differ only in how first-hop exits are
 //! ordered during truncation: `split` uses the derived spot-depth score, `split_probe` probes
-//! every exit with live pool math at the order size (see [`ExitRanking`] and
+//! every exit with live pool math at the order size (see `ExitRanking` and
 //! `docs/algorithms/split-probe.md` for benchmark results).
 
 use std::{
