@@ -34,7 +34,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Win rate (Fynd better, net of gas)",
+      "title": "Win rate (Fynd better, gross)",
       "type": "stat",
       "datasource": "${datasource}",
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
@@ -71,7 +71,7 @@
     },
     {
       "id": 4,
-      "title": "Median net-of-gas savings (bps)",
+      "title": "Median gross savings (bps)",
       "type": "timeseries",
       "datasource": "${datasource}",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
