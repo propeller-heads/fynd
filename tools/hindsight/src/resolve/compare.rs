@@ -16,11 +16,13 @@ fn to_biguint(amount: U256) -> BigUint {
 /// Basis-point deltas of a Fynd quote against the settled amount (positive = Fynd better).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct Deltas {
-    /// `fynd amount_out` vs the settled amount, both gross of gas.
+    /// `fynd amount_out` vs the settled amount, both gross of gas — always like-for-like, and
+    /// the basis of the headline [`Verdict`].
     pub raw_bps: Option<f64>,
-    /// `fynd amount_out_net_gas` vs the settled amount net of the gas the trader paid for it —
-    /// both sides after their own gas cost. When the settled gas is unknown the settled side
-    /// stays gross (the conservative pre-existing comparison).
+    /// Secondary, recorded for later gas analysis: `fynd amount_out_net_gas` vs the settled
+    /// amount net of the gas the trader paid for it. Asymmetric when the settled gas is unknown
+    /// (the settled side stays gross while Fynd's is charged) — most Relay settlements are
+    /// operator-submitted so their trader gas is legitimately absent. Not used for verdicts.
     pub net_bps: Option<f64>,
 }
 
@@ -32,8 +34,7 @@ impl Deltas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    /// Fynd delivered strictly more output than settled, both sides net of their own gas where
-    /// the settled gas is known (see [`verdict`] for the fallback when it is not).
+    /// Fynd's gross output strictly beats the gross settled output ([`Deltas::raw_bps`] > 0).
     Win,
     /// Fynd's output was equal to or worse than settled, or it could not be compared.
     Loss,
@@ -96,13 +97,13 @@ pub(crate) fn compare(
     }
 }
 
-/// Classify a trade by its net-of-gas delta: Fynd wins only when it delivers strictly more output
-/// after subtracting its own estimated gas cost, against the settled output after the gas the
-/// trader actually paid for it.
+/// Classify a trade by its gross output delta: Fynd wins only when it delivers strictly more
+/// output than the trade settled for, both sides gross of gas.
 ///
-/// When the settled gas is unknown — a maker fill paid by the filler, or a route whose gas could
-/// not be isolated — the settled side stays gross and the comparison falls back to the old
-/// conservative asymmetry: a `Win` then under-counts rather than over-counts Fynd's edge.
+/// Gross-vs-gross is the one comparison that is always like-for-like: the settled route's gas is
+/// often legitimately unattributable (most Relay settlements are submitted by Relay's own
+/// operators, so the trader paid no gas), and a net-vs-gross fallback would mix comparison bases
+/// across records. The net numbers are still recorded ([`Deltas::net_bps`]) for later analysis.
 pub(crate) fn verdict(
     outcome: &Outcome,
     settled_amount_out: U256,
@@ -111,7 +112,7 @@ pub(crate) fn verdict(
     if let Outcome::Partial(_) = outcome {
         return Verdict::CoverageMiss;
     }
-    match compare(outcome, settled_amount_out, settled_net_gas).net_bps {
+    match compare(outcome, settled_amount_out, settled_net_gas).raw_bps {
         Some(d) if d > 0.0 => Verdict::Win,
         Some(_) => Verdict::Loss,
         None => Verdict::Unsolvable,
@@ -182,19 +183,22 @@ mod tests {
     }
 
     #[test]
-    fn verdict_loss_when_net_not_better() {
-        // Raw is better but net-of-gas is worse → loss (gas ate the edge).
+    fn verdict_is_gross_even_when_net_is_worse() {
+        // Gross output wins even though Fynd's own gas would eat the edge: the headline verdict
+        // compares gross vs gross, and the net delta stays available as a secondary number.
         let (settled, net) = gross(10_000);
-        assert_eq!(verdict(&solved(10_100, 9_990), settled, net), Verdict::Loss);
+        assert_eq!(verdict(&solved(10_100, 9_990), settled, net), Verdict::Win);
     }
 
     #[test]
-    fn verdict_settled_gas_flips_loss_to_win() {
-        // Fynd's net output trails the gross settled amount, but the settled trader burned 100
-        // in gas — symmetric accounting turns the loss into a win.
+    fn verdict_ignores_settled_gas() {
+        // The settled trader's gas does not move the verdict in either direction — only the
+        // gross outputs do.
         let fynd = solved(10_050, 9_990);
-        assert_eq!(verdict(&fynd, U256::from(10_000u64), U256::from(10_000u64)), Verdict::Loss);
+        assert_eq!(verdict(&fynd, U256::from(10_000u64), U256::from(10_000u64)), Verdict::Win);
         assert_eq!(verdict(&fynd, U256::from(10_000u64), U256::from(9_900u64)), Verdict::Win);
+        let worse = solved(9_900, 9_800);
+        assert_eq!(verdict(&worse, U256::from(10_000u64), U256::from(9_000u64)), Verdict::Loss);
     }
 
     #[test]

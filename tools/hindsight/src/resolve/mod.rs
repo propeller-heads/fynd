@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn build_range_deducts_settled_gas_when_priced() {
         // The settled trader paid 200 token_out units of gas (100 wei at a price of 2 units/wei):
-        // Fynd's net 9_990 loses to the gross 10_000 but beats the gas-adjusted 9_800.
+        // the secondary net column carries the deduction; the verdict stays gross vs gross.
         let mut with_gas = trade(10_000);
         with_gas.settled_gas = Some(U256::from(100u64));
         let prices = usd::PriceMap::from([(with_gas.token_out, 2.0)]);
@@ -271,7 +271,8 @@ mod tests {
 
     #[test]
     fn build_range_unpriced_gas_keeps_settled_gross() {
-        // token_out is not in the price map → no deduction, old conservative comparison.
+        // token_out is not in the price map → no deduction. The secondary net column stays
+        // gross; the verdict is unaffected either way (gross 10_050 beats gross 10_000).
         let mut with_gas = trade(10_000);
         with_gas.settled_gas = Some(U256::from(100u64));
 
@@ -282,7 +283,7 @@ mod tests {
             solved(10_050, 9_990),
         );
         assert_eq!(range.settled_amount_out_net_gas, U256::from(10_000u64));
-        assert_eq!(range.verdict, Verdict::Loss);
+        assert_eq!(range.verdict, Verdict::Win);
     }
 
     #[tokio::test]

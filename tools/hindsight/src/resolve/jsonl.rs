@@ -68,8 +68,9 @@ fn comparison_record(
 }
 
 /// JSON for one block-state of an improvement: verdict, bps, Fynd amounts, the USD improvement
-/// (net-of-gas Fynd output minus the gas-adjusted settled output, valued at `prices`), and the
-/// slim quote. `settled_value_usd` stays gross — it is the trade's notional, not a comparison.
+/// (gross Fynd output minus the gross settled output, valued at `prices` — the same basis as the
+/// headline verdict), and the slim quote. `settled_value_usd` stays gross — it is the trade's
+/// notional, not a comparison.
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
@@ -86,9 +87,8 @@ fn state_record(
         Outcome::Unsolvable(reason) | Outcome::Partial(reason) => Some(reason.as_str()),
         Outcome::Solved(_) => None,
     };
-    let improvement_usd = solved.and_then(|s| {
-        usd::savings_usd(token_out, s.amount_out_net_gas, range.settled_amount_out_net_gas, prices)
-    });
+    let improvement_usd = solved
+        .and_then(|s| usd::savings_usd(token_out, s.amount_out, range.settled_amount_out, prices));
     let fynd_value_usd = solved.and_then(|s| usd::value_usd(token_out, s.amount_out, prices));
     serde_json::json!({
         "verdict": state.verdict,
@@ -261,7 +261,7 @@ mod tests {
                 "gas_estimate":"0","split":1.0}]}"#
                 .to_string(),
         );
-        // Top: net 1005 USDC → +$5. Back: net 1001 USDC → +$1. Both win.
+        // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win.
         let top = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_005_000_000u64),
@@ -287,8 +287,8 @@ mod tests {
             .unwrap()
             .as_f64()
             .unwrap();
-        assert!((top_usd - 5.0).abs() < 1e-3, "top_usd={top_usd}");
-        assert!((back_usd - 1.0).abs() < 1e-3, "back_usd={back_usd}");
+        assert!((top_usd - 10.0).abs() < 1e-3, "top_usd={top_usd}");
+        assert!((back_usd - 2.0).abs() < 1e-3, "back_usd={back_usd}");
         assert!(
             rec.pointer("/back/net_bps")
                 .unwrap()

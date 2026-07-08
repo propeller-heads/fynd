@@ -65,15 +65,16 @@ pub(crate) fn describe() {
     describe_histogram!(
         SAVINGS_BPS,
         Unit::Count,
-        "Net-of-gas bps delta of Fynd vs settled (positive = Fynd better)"
+        "Gross bps delta of Fynd vs settled (positive = Fynd better), the headline basis"
     );
     describe_histogram!(
         SAVINGS_USD,
-        "Signed USD savings of Fynd vs settled (positive = Fynd better), for Fynd-priced trades"
+        "Signed gross USD savings of Fynd vs settled (positive = Fynd better), for Fynd-priced \
+         trades"
     );
     describe_histogram!(
         IMPROVEMENT_USD,
-        "Net-of-gas USD uplift on trades Fynd would improve (losses excluded — a client routes \
+        "Gross USD uplift on trades Fynd would improve (losses excluded — a client routes \
          elsewhere when Fynd is worse). Sum = value of adding Fynd; count = improving trades"
     );
     describe_histogram!(
@@ -120,8 +121,9 @@ pub(crate) fn record_range(
 }
 
 /// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
-/// solved state — the net-of-gas bps delta, the signed USD savings, and the USD uplift (only when
-/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse).
+/// solved state — the gross bps delta, the signed USD savings, and the USD uplift (only when
+/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse). All highlighted
+/// metrics compare gross vs gross, matching the headline verdict.
 fn record_state(
     range: &RangeComparison,
     state: &StateResult,
@@ -139,7 +141,7 @@ fn record_state(
     )
     .increment(1);
 
-    if let Some(bps) = state.deltas.net_bps {
+    if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
             "client" => range.client.clone(),
@@ -181,15 +183,8 @@ fn record_state(
             "state" => state_label,
         )
         .record(usd);
-    }
 
-    if let Some(uplift) = usd::savings_usd(
-        range.token_out,
-        solved.amount_out_net_gas,
-        range.settled_amount_out,
-        prices,
-    ) {
-        if uplift > 0.0 {
+        if usd > 0.0 {
             histogram!(
                 IMPROVEMENT_USD,
                 "client" => range.client.clone(),
@@ -197,7 +192,7 @@ fn record_state(
                 "chain" => chain.to_string(),
                 "state" => state_label,
             )
-            .record(uplift);
+            .record(usd);
         }
     }
 }
