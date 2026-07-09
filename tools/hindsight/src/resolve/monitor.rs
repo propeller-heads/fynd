@@ -28,7 +28,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
+    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
     telemetry, usd,
 };
 
@@ -259,12 +259,10 @@ enum SessionEnd {
     FeedDead(String),
 }
 
-/// Counters that survive feed rebuilds, so coverage metrics and `--max-blocks` span the whole run.
+/// Counters that survive feed rebuilds, so `--max-blocks` and skip logging span the whole run.
 #[derive(Default)]
 struct Totals {
     processed: u64,
-    total_trades: usize,
-    comparable_trades: usize,
     skipped_blocks: u64,
 }
 
@@ -460,13 +458,6 @@ async fn run_session<P: Provider>(
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
-
-        totals.total_trades += ranges.len();
-        totals.comparable_trades += ranges
-            .iter()
-            .filter(|r| matches!(r.verdict, Verdict::Win | Verdict::Loss))
-            .count();
-        telemetry::record_coverage(totals.total_trades, totals.comparable_trades);
 
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
