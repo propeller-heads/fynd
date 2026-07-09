@@ -91,8 +91,10 @@ Average solve time:
 | No-derived brute-force split | 19,145.5 ms |
 | `split_bounded` | 85.8 ms |
 
-For the head-to-head results against `split` and `split_probe` (which this algorithm replaced),
-see [Split variant comparison](split-comparison.md).
+For the head-to-head results against `split` and `split_probe` (which this algorithm replaced)
+and against Path Frank-Wolfe (live same-block: 36W/2L, +6,461 bps mean; offline 1k samples:
+65W/3L and 73W/10L on the common sets), see
+[Split variant comparison](split-comparison.md).
 
 ## Source Reference
 

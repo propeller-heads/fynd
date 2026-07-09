@@ -56,6 +56,41 @@ Quality:
   while the gas-blind version had been *winning* some of them only because it ignored gas
   (17W/4L at ~0.2 gwei flipping to 0W/21L at 10 gwei in a fair-net sensitivity check).
 
+### Against Path Frank-Wolfe
+
+`path_frank_wolfe` is the strongest pre-existing algorithm on large trades, so the winner also
+had to beat it. Gas-aware `split_bounded` vs PFW, exact integer nets:
+
+| evidence | W–L (ties) | mean bps | median bps |
+| --- | --- | ---: | ---: |
+| Live same-block, all orders | 36–2 | +6,461 | +5,328 |
+| Live same-block, XXL only | 24–0 | +7,759 | +7,647 |
+| Offline 1k sample, seed 42 (common set) | 65–3 | +95.2 | +1.08 |
+| Offline 1k sample, seed 4242 (common set) | 73–10 | +31.5 | +1.51 |
+
+The only live losses were the two passes of 10k WETH→LINK at −0.3 bps (tie-level noise).
+Coverage is asymmetric by design: `split_bounded` returns `InsufficientLiquidity` when no split
+beats the best single path net-of-gas, so PFW/BF answer those orders — the split pool only
+speaks when splitting pays, and when it speaks it wins.
+
+### What the winner inherited
+
+`split_bounded` consolidates the learnings from every line of work in this comparison:
+
+* Bounded amount-aware candidate discovery with connector/anchor priorities and the native-ETH
+  sentinel anchor (from the `bounded_split` line) — the source of the ~15x latency advantage.
+* Gas-aware net ranking: `combined_net`, per-path activation costs in both allocators, and a
+  net-of-gas single-path floor (ported from `split`/`split_probe` after the gas sensitivity
+  check above).
+* Fill-loop leftover top-up so partial allocations always cover the full order (from the
+  `split` hardening pass).
+
+Deliberately not ported: `split_probe`'s live-probed exit ranking (bounded's frontier
+simulation selects exits with live pool math already; probe's one +33% outlier on 100k
+AAVE→USDC is the composition to revisit if exit choice ever needs sharpening) and the derived
+spot-depth ranking hardening (NaN-safe sort, first-hop diversity), which has no target —
+`split_bounded` uses no derived ranking.
+
 Decision per the pre-registered rule (best net-output win rate inside the latency budget; the
 gas-aware ranking of the exhaustive variants composed with bounded discovery): keep
 `split_bounded` with gas-aware netting ported from `split`, delete the rest.
