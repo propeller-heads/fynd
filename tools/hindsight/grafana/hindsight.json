@@ -1,5 +1,5 @@
 {
-  "title": "Hindsight \u2014 Fynd vs settled solver swaps",
+  "title": "Hindsight — Fynd vs settled solver swaps",
   "uid": "hindsight",
   "schemaVersion": 39,
   "timezone": "browser",
@@ -11,15 +11,32 @@
   "templating": {
     "list": [
       {
-        "name": "datasource",
-        "type": "datasource",
-        "query": "prometheus",
-        "current": {}
+        "name": "Namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(hindsight_trades_total, namespace)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "current": {},
+        "options": [],
+        "includeAll": false,
+        "multi": false,
+        "sort": 1
       },
       {
         "name": "chain",
         "type": "query",
-        "datasource": "${datasource}",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
         "query": "label_values(hindsight_trades_total, chain)",
         "includeAll": true,
         "multi": true
@@ -27,10 +44,50 @@
       {
         "name": "solver",
         "type": "query",
-        "datasource": "${datasource}",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
         "query": "label_values(hindsight_trades_total, solver)",
+        "regex": "/^(?!(?:relay|metamask)$).*$/",
         "includeAll": true,
         "multi": true
+      },
+      {
+        "name": "client",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
+        "query": "label_values(hindsight_trades_total, client)",
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "state",
+        "label": "state (detail panels)",
+        "type": "custom",
+        "query": "top,back",
+        "current": {
+          "text": "top",
+          "value": "top",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "top",
+            "value": "top",
+            "selected": true
+          },
+          {
+            "text": "back",
+            "value": "back",
+            "selected": false
+          }
+        ],
+        "includeAll": false,
+        "multi": false
       }
     ]
   },
@@ -38,246 +95,336 @@
     {
       "id": 101,
       "type": "stat",
-      "title": "Total savings \u2014 Fynd only when it wins ($)",
+      "title": "Total savings — Fynd only when it wins ($, top of block)",
       "description": "Sum of USD improvement over the selected range, counting only trades where Fynd's top-of-block quote beat the settled amount (gross vs gross). Perfect-hindsight upper bound: capturing it requires knowing the winner in advance.",
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "P4169E866C3094E38"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 0
-        }
-      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 0 } },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(hindsight_improvement_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\"}[$__range]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P4169E866C3094E38"
-          }
+          "expr": "sum(increase(hindsight_improvement_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
       "id": 102,
       "type": "stat",
-      "title": "Net savings \u2014 always route via Fynd ($)",
+      "title": "Net savings — always route via Fynd ($, top of block)",
       "description": "Signed USD savings summed over the selected range: every comparable trade, wins minus losses (gross vs gross, top-of-block). What clients would have kept had all flow routed through Fynd.",
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "P4169E866C3094E38"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 0
-        }
-      },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 0 } },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(hindsight_savings_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\"}[$__range]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P4169E866C3094E38"
-          }
+          "expr": "sum(increase(hindsight_savings_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
-      "id": 1,
-      "title": "Win rate (Fynd better, gross)",
+      "id": 103,
       "type": "stat",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 6
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1
-        }
+      "title": "Win rate (gross, top of block)",
+      "description": "Share of comparable trades (win or loss) where Fynd's top-of-block quote beat the settled amount, over the selected range.",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(hindsight_trades_total{outcome=\"win\", chain=~\"$chain\", solver=~\"$solver\"}) / clamp_min(sum(hindsight_trades_total{outcome=~\"win|loss\", chain=~\"$chain\", solver=~\"$solver\"}), 1)"
+          "expr": "sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"top\", outcome=\"win\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])) / clamp_min(sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"top\", outcome=~\"win|loss\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])), 1)",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
-      "id": 2,
-      "title": "Coverage ratio (re-solvable)",
-      "type": "gauge",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 6
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1
-        }
+      "id": 111,
+      "type": "stat",
+      "title": "Total savings — Fynd only when it wins ($, back of block)",
+      "description": "Conservative lower bound: same as the headline panel, but re-solved after the whole block executed — including the settled trade's own price impact, which biases against Fynd. Truth sits between the top and back rows.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 0 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "hindsight_coverage_ratio"
+          "expr": "sum(increase(hindsight_improvement_usd_sum{namespace=\"$Namespace\", state=\"back\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "type": "stat",
+      "title": "Net savings — always route via Fynd ($, back of block)",
+      "description": "Conservative lower bound of the always-route total. Back-of-block prices differ slightly from top on volatile blocks, so small top-vs-back gaps are partly price-snapshot noise, not routing.",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 0 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(hindsight_savings_usd_sum{namespace=\"$Namespace\", state=\"back\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 113,
+      "type": "stat",
+      "title": "Win rate (gross, back of block)",
+      "description": "Conservative win rate, re-solved after the block executed. A small top-vs-back gap means the headline is robust to the settled trade's own price impact.",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"back\", outcome=\"win\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])) / clamp_min(sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"back\", outcome=~\"win|loss\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])), 1)",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
       "id": 3,
-      "title": "Trades by outcome",
       "type": "piechart",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 6
+      "title": "Trades by outcome",
+      "description": "Trade count per headline verdict over the selected range, at the block state chosen by the state variable. Unsolvable is dominated by long-tail tokens outside the solver's indexed liquidity.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "piechart",
+      "title": "Volume by outcome ($)",
+      "description": "Settled trade volume in USD per headline verdict, over the selected range. Valued from the output leg, falling back to the input leg when the output token is unpriced; trades where neither leg is priced (~4%) are not counted. Empty until the release adding the outcome label is deployed.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(hindsight_volume_usd_sum{namespace=\"$Namespace\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\", outcome!=\"\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Coverage (share of trades Fynd can re-solve)",
+      "description": "Comparable trades (win or loss) as a share of all decoded trades, over the selected range, at the block state chosen by the state variable.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (hindsight_trades_total{chain=~\"$chain\", solver=~\"$solver\"})",
-          "legendFormat": "{{outcome}}"
+          "expr": "sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"$state\", outcome=~\"win|loss\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])) / clamp_min(sum(increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range])), 1)",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
       "id": 4,
-      "title": "Median gross savings (bps)",
       "type": "timeseries",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none"
-        }
-      },
+      "title": "Median gross savings (bps)",
+      "description": "Median (p50) per-trade gross bps delta per solver, 1h window. The median is the typical trade — pair it with the dollar totals, which a few large trades can dominate.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "none" } },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, solver) (rate(hindsight_savings_bps_bucket{chain=~\"$chain\", solver=~\"$solver\"}[$__rate_interval])))",
-          "legendFormat": "{{solver}} p50"
+          "expr": "histogram_quantile(0.5, sum by (le, solver) (rate(hindsight_savings_bps_bucket{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[1h])))",
+          "legendFormat": "{{solver}}",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     },
     {
-      "id": 5,
-      "title": "Trades by solver",
-      "type": "timeseries",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 12
+      "id": 21,
+      "type": "bargauge",
+      "title": "Savings distribution ($ per trade)",
+      "description": "Per-trade signed USD savings bucketed over the selected range. Shows whether the dollar totals are broad-based or driven by a fat tail of large trades.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 } },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (solver) (rate(hindsight_trades_total{chain=~\"$chain\"}[$__rate_interval]))",
-          "legendFormat": "{{solver}}"
+          "expr": "sum by (le) (increase(hindsight_savings_usd_bucket{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__range]))",
+          "legendFormat": "{{le}}",
+          "format": "heatmap",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Trades by client",
+      "description": "Decoded trades per client over time (stacked). Unknown = client not in the registry; the raw address is in the JSONL records.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (client) (increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__interval]))",
+          "legendFormat": "{{client}}",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Trades by solver",
+      "description": "Decoded trades per settling solver over time (stacked). Unknown = attribution could not name a solver (unknown router, or only a client-level fallback); detail is in the JSONL records.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (solver) (increase(hindsight_trades_total{namespace=\"$Namespace\", state=\"$state\", chain=~\"$chain\", solver=~\"$solver\", client=~\"$client\"}[$__interval]))",
+          "legendFormat": "{{solver}}",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "table",
+      "title": "Top trades — largest Fynd savings ($, top of block)",
+      "description": "Ten largest per-trade USD savings over the selected range, from hindsight's per-comparison log line in Loki. Floor of $50 keeps the query bounded. Beware token mispricing: a suspiciously large value on an exotic token deserves a JSONL cross-check before quoting it. Empty until the release adding the log line is deployed.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 35 },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max_over_time({namespace=\"$Namespace\", pod=~\"ethereum-hindsight.*\"} |= \"trade comparison\" | regexp `tx=(?P<tx>0x[0-9a-fA-F]+)` | regexp `client=(?P<client>\\S+)` | regexp `solver=(?P<solver>\\S+)` | regexp `verdict=(?P<verdict>\\S+)` | regexp `volume_usd=(?P<volume_usd>-?[0-9.eE+]+)` | regexp `savings_usd=(?P<savings_usd>-?[0-9.eE+]+)` | verdict=\"win\" | savings_usd > 50 | unwrap savings_usd [$__range]) by (tx, client, solver, volume_usd))",
+          "queryType": "instant",
+          "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": { "sort": [{ "field": "Value", "desc": true }] }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": { "Value": "savings ($)", "volume_usd": "volume ($)" }
+          }
         }
       ]
     },
     {
       "id": 6,
-      "title": "Block processing time (p95)",
       "type": "timeseries",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 20
-      },
+      "title": "Block processing",
+      "description": "p95 wall-clock time to re-solve one block, plus completed blocks per minute. Gaps in p95 mean no block finished in the window — a feed stall, a solver rebuild, or one very slow block; blocks/min going to zero shows the same thing explicitly.",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 45 },
+      "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" },
       "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
+        "defaults": { "unit": "s" },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "blocks/min" },
+            "properties": [
+              { "id": "unit", "value": "none" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(hindsight_block_processing_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ]
-    },
-    {
-      "id": 7,
-      "title": "Median USD savings (stablecoin-out)",
-      "type": "timeseries",
-      "datasource": "${datasource}",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 28
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD"
-        }
-      },
-      "targets": [
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(hindsight_block_processing_seconds_bucket{namespace=\"$Namespace\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
+        },
         {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, solver) (rate(hindsight_savings_usd_bucket{chain=~\"$chain\", solver=~\"$solver\"}[$__rate_interval])))",
-          "legendFormat": "{{solver}} p50"
+          "refId": "B",
+          "expr": "60 * sum(rate(hindsight_block_processing_seconds_count{namespace=\"$Namespace\"}[$__rate_interval]))",
+          "legendFormat": "blocks/min",
+          "datasource": { "type": "prometheus", "uid": "P4169E866C3094E38" }
         }
       ]
     }

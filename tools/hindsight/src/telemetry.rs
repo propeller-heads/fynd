@@ -4,13 +4,12 @@
 //! and serve its rendered output on a dedicated port via Actix.
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use metrics::{
-    counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
-};
+use metrics::{counter, describe_counter, describe_histogram, histogram, Unit};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
+    decoder::AttributionSource,
     resolve::{Outcome, RangeComparison, StateResult, Verdict},
     usd,
 };
@@ -20,7 +19,6 @@ const SAVINGS_BPS: &str = "hindsight_savings_bps";
 const SAVINGS_USD: &str = "hindsight_savings_usd";
 const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
-const COVERAGE_RATIO: &str = "hindsight_coverage_ratio";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
@@ -47,6 +45,20 @@ fn bounded_label(value: &str) -> &str {
     }
 }
 
+/// Metric label for a range's settling solver. The `Fallback` attribution tier labels a record
+/// with its entry point — a client name like "relay", not a solver — which would pollute the
+/// dashboard's solver dropdown, so it collapses to "unknown" here. The entry-point label stays in
+/// the JSONL records, where it serves as the registry-expansion worklist.
+fn solver_label(range: &RangeComparison) -> &str {
+    match range.solver_source {
+        AttributionSource::Fallback => "unknown",
+        AttributionSource::Declared |
+        AttributionSource::EntryPoint |
+        AttributionSource::TraceMatch |
+        AttributionSource::LargestCall => bounded_label(&range.solver),
+    }
+}
+
 /// Metric label for a trade's headline verdict.
 pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
     match verdict {
@@ -54,15 +66,6 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
         Verdict::Loss => "loss",
         Verdict::CoverageMiss => "coverage_miss",
         Verdict::Unsolvable => "unsolvable",
-    }
-}
-
-/// Fraction of trades that were comparable (solvable) out of the total seen.
-pub(crate) fn coverage_ratio(total: usize, comparable: usize) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        comparable as f64 / total as f64
     }
 }
 
@@ -91,9 +94,10 @@ pub(crate) fn describe() {
     );
     describe_histogram!(
         VOLUME_USD,
-        "Observed settled trade volume in USD, labeled by client / solver (Fynd-priced trades)"
+        "Observed settled trade volume in USD, labeled by client / solver / outcome (headline \
+         verdict). Valued from the output leg, falling back to the input leg when the output \
+         token is unpriced"
     );
-    describe_gauge!(COVERAGE_RATIO, "Fraction of trades Fynd could re-solve");
     describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
     describe_counter!(
         SKIPPED_BLOCKS,
@@ -102,8 +106,8 @@ pub(crate) fn describe() {
     );
     describe_counter!(
         FEED_REBUILDS,
-        "Times the tycho feed died (stream ended or no block within the dead-feed timeout) and \
-         the monitor rebuilt the solver to resubscribe"
+        "Times the monitor declared its session unhealthy (feed died, or the monitor fell too \
+         far behind chain head) and rebuilt the solver to resubscribe"
     );
 }
 
@@ -117,36 +121,63 @@ pub(crate) fn record_range(
     prices_back: &usd::PriceMap,
 ) {
     // Observed volume is a per-trade quantity (the settled amount), not per-state, so record it
-    // once — valued at the top-of-block snapshot to match the headline.
-    if let Some(volume) = usd::value_usd(range.token_out, range.settled_amount_out, prices_top) {
+    // once — valued at the top-of-block snapshot to match the headline. When the output token is
+    // unpriced, fall back to the input leg: for a swap the two legs are worth roughly the same,
+    // and the output leg is unpriced exactly when the trade is unsolvable (a long-tail token
+    // outside the solver's graph) — without the fallback, unsolvable volume would be
+    // systematically undercounted.
+    let volume = usd::value_usd(range.token_out, range.settled_amount_out, prices_top)
+        .or_else(|| usd::value_usd(range.token_in, range.amount_in, prices_top));
+    if let Some(volume) = volume {
         histogram!(
             VOLUME_USD,
             "client" => bounded_label(&range.client).to_string(),
-            "solver" => bounded_label(&range.solver).to_string(),
+            "solver" => solver_label(range).to_string(),
             "chain" => chain.to_string(),
+            "outcome" => outcome_label(range.verdict).to_string(),
         )
         .record(volume);
     }
 
-    record_state(range, &range.top, "top", chain, prices_top);
+    let savings_top = record_state(range, &range.top, "top", chain, prices_top);
     record_state(range, &range.back, "back", chain, prices_back);
+
+    // One structured line per priced comparison, on the headline basis (top-of-block, gross).
+    // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
+    // message and field names stable — the LogQL query extracts them by regexp.
+    if let Some(savings_usd) = savings_top {
+        info!(
+            tx = %range.tx_hash,
+            block = range.block_number,
+            client = %range.client,
+            solver = %range.solver,
+            token_in = %range.token_in,
+            token_out = %range.token_out,
+            verdict = outcome_label(range.verdict),
+            volume_usd = volume.unwrap_or(0.0),
+            savings_usd,
+            "trade comparison"
+        );
+    }
 }
 
 /// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
 /// solved state — the gross bps delta, the signed USD savings, and the USD uplift (only when
 /// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse). All highlighted
 /// metrics compare gross vs gross, matching the headline verdict.
+///
+/// Returns the signed USD savings it recorded, `None` when the state is unsolved or unpriced.
 fn record_state(
     range: &RangeComparison,
     state: &StateResult,
     state_label: &'static str,
     chain: &str,
     prices: &usd::PriceMap,
-) {
+) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
         "client" => bounded_label(&range.client).to_string(),
-        "solver" => bounded_label(&range.solver).to_string(),
+        "solver" => solver_label(range).to_string(),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
@@ -157,7 +188,7 @@ fn record_state(
         histogram!(
             SAVINGS_BPS,
             "client" => bounded_label(&range.client).to_string(),
-            "solver" => bounded_label(&range.solver).to_string(),
+            "solver" => solver_label(range).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -165,52 +196,47 @@ fn record_state(
     }
 
     let Outcome::Solved(solved) = &state.outcome else {
-        return;
+        return None;
     };
-    if let Some(usd) =
-        usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)
-    {
-        if is_usd_outlier(usd) {
-            warn!(
-                tx = %range.tx_hash,
-                block = range.block_number,
-                state = state_label,
-                client = %range.client,
-                solver = %range.solver,
-                token_in = %range.token_in,
-                token_out = %range.token_out,
-                amount_in = %range.amount_in,
-                settled_out = %range.settled_amount_out,
-                fynd_out = %solved.amount_out,
-                token_out_price = ?prices.get(&range.token_out),
-                usd,
-                "USD outlier — inspect for token mispricing vs genuinely large trade"
-            );
-        }
+    let usd =
+        usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)?;
+    if is_usd_outlier(usd) {
+        warn!(
+            tx = %range.tx_hash,
+            block = range.block_number,
+            state = state_label,
+            client = %range.client,
+            solver = %range.solver,
+            token_in = %range.token_in,
+            token_out = %range.token_out,
+            amount_in = %range.amount_in,
+            settled_out = %range.settled_amount_out,
+            fynd_out = %solved.amount_out,
+            token_out_price = ?prices.get(&range.token_out),
+            usd,
+            "USD outlier — inspect for token mispricing vs genuinely large trade"
+        );
+    }
+    histogram!(
+        SAVINGS_USD,
+        "client" => bounded_label(&range.client).to_string(),
+        "solver" => solver_label(range).to_string(),
+        "chain" => chain.to_string(),
+        "state" => state_label,
+    )
+    .record(usd);
+
+    if usd > 0.0 {
         histogram!(
-            SAVINGS_USD,
+            IMPROVEMENT_USD,
             "client" => bounded_label(&range.client).to_string(),
-            "solver" => bounded_label(&range.solver).to_string(),
+            "solver" => solver_label(range).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
         .record(usd);
-
-        if usd > 0.0 {
-            histogram!(
-                IMPROVEMENT_USD,
-                "client" => bounded_label(&range.client).to_string(),
-                "solver" => bounded_label(&range.solver).to_string(),
-                "chain" => chain.to_string(),
-                "state" => state_label,
-            )
-            .record(usd);
-        }
     }
-}
-
-pub(crate) fn record_coverage(total: usize, comparable: usize) {
-    gauge!(COVERAGE_RATIO).set(coverage_ratio(total, comparable));
+    Some(usd)
 }
 
 pub(crate) fn record_block_seconds(seconds: f64) {
@@ -351,13 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn coverage_ratio_math() {
-        assert_eq!(coverage_ratio(0, 0), 0.0);
-        assert_eq!(coverage_ratio(10, 4), 0.4);
-        assert_eq!(coverage_ratio(5, 5), 1.0);
-    }
-
-    #[test]
     fn record_range_labels_both_states() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
@@ -376,7 +395,6 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             record_range(&range, "ethereum", &prices, &prices);
-            record_coverage(2, 1);
         });
         let rendered = handle.render();
 
@@ -386,10 +404,14 @@ mod tests {
         assert!(rendered.contains("outcome=\"win\""));
         assert!(rendered.contains("outcome=\"loss\""));
         assert!(rendered.contains("client=\"relay\""));
-        // Top beats settled → uplift recorded; volume recorded once.
+        // Top beats settled → uplift recorded; volume recorded once, tagged with the headline
+        // verdict so the dashboard can split volume by outcome.
         assert!(rendered.contains("hindsight_improvement_usd"));
-        assert!(rendered.contains("hindsight_volume_usd"));
-        assert!(rendered.contains("hindsight_coverage_ratio"));
+        let volume_line = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_volume_usd_bucket"))
+            .expect("volume histogram rendered");
+        assert!(volume_line.contains("outcome=\"win\""), "volume line: {volume_line}");
         // Histograms must render as true histograms (le-labeled _bucket series), not summaries:
         // the dashboard reads them with histogram_quantile(..., *_bucket).
         assert!(
@@ -420,6 +442,59 @@ mod tests {
         assert!(rendered.contains("client=\"unknown\""), "rendered: {rendered}");
         assert!(rendered.contains("solver=\"unknown\""));
         assert!(!rendered.contains("0xD720183DdA64a8CDb424B5c13aF73baf713521f8"));
+    }
+
+    #[test]
+    fn fallback_solver_label_collapses_to_unknown() {
+        // The Fallback tier labels the solver with the entry point — a client name like "relay",
+        // not a solver — which would pollute the dashboard's solver dropdown. The metric label
+        // must collapse to "unknown"; the JSONL keeps the entry-point detail.
+        let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
+        t.solver = "relay".to_string();
+        t.solver_source = AttributionSource::Fallback;
+        let range =
+            build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("solver=\"unknown\""), "rendered: {rendered}");
+        assert!(!rendered.contains("solver=\"relay\""));
+    }
+
+    #[test]
+    fn volume_falls_back_to_input_leg_when_output_unpriced() {
+        // Swap into a long-tail token: the output leg is unpriced — which is exactly why the
+        // trade is unsolvable — so volume must be valued from the input leg instead, or
+        // unsolvable volume would be systematically undercounted.
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let mut t = trade(Address::repeat_byte(0x42), 1_000);
+        t.token_in = usdc;
+        t.amount_in = U256::from(1_000_000_000u64); // 1000 USDC
+        let range = build_range(
+            &t,
+            &usd::PriceMap::new(),
+            Outcome::Unsolvable("no route".into()),
+            Outcome::Unsolvable("no route".into()),
+        );
+        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices);
+        });
+        let rendered = handle.render();
+        let volume_line = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_volume_usd_bucket"))
+            .expect("volume recorded from the input leg");
+        assert!(volume_line.contains("outcome=\"unsolvable\""), "volume line: {volume_line}");
     }
 
     #[test]

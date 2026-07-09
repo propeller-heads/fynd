@@ -28,7 +28,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver, Verdict},
+    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
     telemetry, usd,
 };
 
@@ -50,6 +50,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// to reach it, retrying a bounded number of times before treating it as a genuine failure.
 const DECODE_RPC_LAG_RETRIES: usize = 5;
 const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
+
+/// Falling this many blocks (~20 min at 12s) behind chain head means the session is crippled
+/// without being dead — seen live: a worker lost its derived-data channel, every solve crawled,
+/// the feed-dead watchdog never fired (blocks still trickled through), and the monitor slid
+/// hours behind while warn-spamming. The remedy is the same as a dead feed: tear down and
+/// rebuild, which resubscribes at head and keeps the data gap bounded.
+const MAX_LAG_BLOCKS: u64 = 100;
 
 /// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
 /// configuration.
@@ -252,19 +259,18 @@ async fn decode_block_when_available<P: Provider>(
     decoder.decode_block(block).await
 }
 
-/// One session's terminal condition: the run completed (`--max-blocks` reached) or the feed died
-/// and the caller should rebuild the solver.
+/// One session's terminal condition: the run completed (`--max-blocks` reached) or the session
+/// is unhealthy — the feed died, or the monitor fell too far behind head — and the caller should
+/// rebuild the solver.
 enum SessionEnd {
     Complete,
-    FeedDead(String),
+    Unhealthy(String),
 }
 
-/// Counters that survive feed rebuilds, so coverage metrics and `--max-blocks` span the whole run.
+/// Counters that survive feed rebuilds, so `--max-blocks` and skip logging span the whole run.
 #[derive(Default)]
 struct Totals {
     processed: u64,
-    total_trades: usize,
-    comparable_trades: usize,
     skipped_blocks: u64,
 }
 
@@ -361,8 +367,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
         match run_session(&cfg, &adapter, &mut decoder, &mut comparisons, &mut totals).await {
             SessionEnd::Complete => return Ok(()),
-            SessionEnd::FeedDead(reason) => {
-                warn!(reason, "tycho feed died; rebuilding the solver to resubscribe");
+            SessionEnd::Unhealthy(reason) => {
+                warn!(reason, "session unhealthy; rebuilding the solver to resubscribe");
                 telemetry::record_feed_rebuild();
             }
         }
@@ -390,7 +396,7 @@ async fn run_session<P: Provider>(
     if adapter.current_block().await.is_none() {
         info!("waiting for solver to apply its first block…");
         if let Err(e) = adapter.advance().await {
-            return SessionEnd::FeedDead(e.to_string());
+            return SessionEnd::Unhealthy(e.to_string());
         }
     }
 
@@ -401,16 +407,31 @@ async fn run_session<P: Provider>(
             .await
             .is_none()
         {
-            return SessionEnd::FeedDead("block stream ended".to_string());
+            return SessionEnd::Unhealthy("block stream ended".to_string());
         }
         let Some(top_block) = adapter.current_block().await else {
             warn!("no applied block yet; advancing");
             if let Err(e) = adapter.advance().await {
-                return SessionEnd::FeedDead(e.to_string());
+                return SessionEnd::Unhealthy(e.to_string());
             }
             continue;
         };
         let target = top_block + 1;
+
+        // A healthy monitor keeps pace with the chain. Skip the check on a transient RPC error —
+        // rebuilding is expensive (minutes of token loading), so only a confirmed lag triggers it.
+        if let Ok(head) = decoder
+            .provider()
+            .get_block_number()
+            .await
+        {
+            if head.saturating_sub(target) > MAX_LAG_BLOCKS {
+                return SessionEnd::Unhealthy(format!(
+                    "monitor is {} blocks behind head {head}; presuming a crippled session",
+                    head - target
+                ));
+            }
+        }
 
         let trades = match decode_block_when_available(decoder, target).await {
             Ok(trades) => trades,
@@ -423,7 +444,7 @@ async fn run_session<P: Provider>(
                     "decode failed, skipping block: {e}"
                 );
                 if let Err(e) = adapter.advance().await {
-                    return SessionEnd::FeedDead(e.to_string());
+                    return SessionEnd::Unhealthy(e.to_string());
                 }
                 continue;
             }
@@ -435,7 +456,7 @@ async fn run_session<P: Provider>(
         let prices_top = snapshot_prices(adapter.solver).await;
         let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
             Ok(ranges) => ranges,
-            Err(e) => return SessionEnd::FeedDead(e.to_string()),
+            Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
@@ -460,13 +481,6 @@ async fn run_session<P: Provider>(
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
-
-        totals.total_trades += ranges.len();
-        totals.comparable_trades += ranges
-            .iter()
-            .filter(|r| matches!(r.verdict, Verdict::Win | Verdict::Loss))
-            .count();
-        telemetry::record_coverage(totals.total_trades, totals.comparable_trades);
 
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
