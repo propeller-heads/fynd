@@ -43,6 +43,11 @@ const FEED_DEAD_TIMEOUT: Duration = Duration::from_secs(900);
 /// Pause between solver rebuild attempts after a feed death, so a struggling Tycho server is not
 /// hammered in a tight loop.
 const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
+/// Consecutive rebuild failures after which the process gives up and exits so the orchestrator
+/// restarts it. Seen live: after a worker-pool death, in-place rebuilds failed with WebSocket
+/// connection errors for 70 minutes straight — state left behind by the dead solver poisoned
+/// every new connection attempt — while a fresh process connected on its first try.
+const MAX_REBUILD_ATTEMPTS: u32 = 10;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The HTTP RPC used to decode receipts can trail the Tycho stream by a few seconds, so `target`
@@ -360,7 +365,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
     let mut totals = Totals::default();
     // The first build fails fast — an error here is a configuration problem. Rebuilds after a
-    // feed death retry forever, since the config is known good and failures are transient.
+    // feed death retry up to MAX_REBUILD_ATTEMPTS: the config is known good, so failures are
+    // either transient (retry heals) or process-poisoned (only a restart heals).
     let (mut solver, mut controller) = build_solver(&cfg, chain, &protocols, &pools_config).await?;
     loop {
         let adapter =
@@ -373,11 +379,21 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             }
         }
         solver.shutdown();
+        let mut attempts = 0u32;
         (solver, controller) = loop {
             tokio::time::sleep(REBUILD_BACKOFF).await;
             match build_solver(&cfg, chain, &protocols, &pools_config).await {
                 Ok(built) => break built,
-                Err(e) => warn!(error = %e, "solver rebuild failed; retrying"),
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= MAX_REBUILD_ATTEMPTS {
+                        anyhow::bail!(
+                            "solver rebuild failed {attempts} times in a row (last error: {e}); \
+                             exiting so the orchestrator restarts a fresh process"
+                        );
+                    }
+                    warn!(error = %e, attempts, "solver rebuild failed; retrying");
+                }
             }
         };
     }
