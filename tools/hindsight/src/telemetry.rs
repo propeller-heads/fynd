@@ -106,8 +106,8 @@ pub(crate) fn describe() {
     );
     describe_counter!(
         FEED_REBUILDS,
-        "Times the tycho feed died (stream ended or no block within the dead-feed timeout) and \
-         the monitor rebuilt the solver to resubscribe"
+        "Times the monitor declared its session unhealthy (feed died, or the monitor fell too \
+         far behind chain head) and rebuilt the solver to resubscribe"
     );
 }
 
