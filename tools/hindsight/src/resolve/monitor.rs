@@ -474,7 +474,13 @@ async fn run_session<P: Provider>(
             );
         }
         for range in &ranges {
-            telemetry::record_range(range, &cfg.chain, &prices_top, &prices_back);
+            telemetry::record_range(
+                range,
+                &cfg.chain,
+                &prices_top,
+                &prices_back,
+                decoder.registry(),
+            );
         }
         if let Some(rotating) = comparisons.as_mut() {
             super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);

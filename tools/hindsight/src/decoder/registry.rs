@@ -130,6 +130,15 @@ impl Registry {
         self.solvers.contains_key(&address)
     }
 
+    /// Whether `name` is a registered solver's display name. Bounds the metric label
+    /// vocabulary: attribution can also produce raw addresses, client names (fallback tier), and
+    /// calldata-declared names from a client's own vocabulary (MetaMask aggregator ids).
+    pub(crate) fn is_solver_name(&self, name: &str) -> bool {
+        self.solvers
+            .values()
+            .any(|solver| solver == name)
+    }
+
     /// Whether `address` is a batch-settlement venue (e.g. CoW). Such trades
     /// must be decoded by finding the order maker, not by tracking the
     /// sender: a solver settles many orders at once, so its net flow is not a
