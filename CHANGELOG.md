@@ -1,3 +1,16 @@
+## [0.87.0](https://github.com/propeller-heads/fynd/compare/0.86.0...0.87.0) (2026-07-09)
+
+
+### Features
+
+* **hindsight:** bound metric labels to the registry vocabulary ([5ec939e](https://github.com/propeller-heads/fynd/commit/5ec939e0979fed71ed3e434fdd97e4a5a01d2702))
+
+
+### Bug Fixes
+
+* **hindsight:** default dashboard filter variables to All ([7d0f0ac](https://github.com/propeller-heads/fynd/commit/7d0f0acd731a2f4b3c33229f46f35597516261ed))
+* **hindsight:** pass the registry at the record_range call site ([c92265c](https://github.com/propeller-heads/fynd/commit/c92265cebe2403c9dc82bbd585264af2a9f9ceba))
+
 ## [0.86.0](https://github.com/propeller-heads/fynd/compare/0.85.0...0.86.0) (2026-07-09)
 
 
