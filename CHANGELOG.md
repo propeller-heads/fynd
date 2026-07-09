@@ -1,3 +1,16 @@
+## [0.84.0](https://github.com/propeller-heads/fynd/compare/0.83.0...0.84.0) (2026-07-09)
+
+
+### Features
+
+* **hindsight:** total client-savings stat panels on dashboard ([6cb5b50](https://github.com/propeller-heads/fynd/commit/6cb5b507267139f2f7e725440d39fd3bdc6cdb6d))
+
+
+### Bug Fixes
+
+* **hindsight:** collapse raw-address metric labels to unknown ([18a8f62](https://github.com/propeller-heads/fynd/commit/18a8f62f502a8df866c5fdbbe45d799cf6659d99))
+* **hindsight:** export histograms with explicit buckets ([9c24a61](https://github.com/propeller-heads/fynd/commit/9c24a61e5295a64073d10e1b26412973c1b275ac))
+
 ## [0.83.0](https://github.com/propeller-heads/fynd/compare/0.82.3...0.83.0) (2026-07-08)
 
 
