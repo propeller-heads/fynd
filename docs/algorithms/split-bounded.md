@@ -45,10 +45,19 @@ After candidate discovery, `split_bounded` builds two split route families:
 1. **Pool-disjoint split**: allocate chunks across paths that do not reuse pools.
 2. **Shared-pool split**: allocate chunks while committing shared pool state between probes.
 
-The final route must use at least two paths and beat the net output (gas-aware when token gas
-prices are available) of the best full-order simulated single path from the candidate set. If it
-does not, the algorithm returns `InsufficientLiquidity` and lets another worker pool handle the
-order — a split that nets less than an unsplit route only adds execution complexity.
+Both allocators are gas-aware when derived token gas prices are available: the first chunk
+routed to a path pays that path's **activation cost** (its gas converted to output-token terms),
+so a new parallel path is only opened when its marginal output beats the incumbent paths by more
+than its gas. Without token prices the marginals are gross output. If the fill loop stops early,
+the leftover amount tops up the largest path so allocations always cover the full order.
+
+The final route must use at least two paths and beat the net output (gas-aware on the same
+terms) of the best full-order simulated single path from the candidate set. If it does not, the
+algorithm returns `InsufficientLiquidity` and lets another worker pool handle the order — a
+split that nets less than an unsplit route only adds execution complexity. In practice this
+floor declines most small orders, where extra-path gas dominates any split gain; see the
+[gas sensitivity results](split-comparison.md) for how gas-blind netting misprices exactly
+those orders.
 
 ## Configuration
 
@@ -66,10 +75,11 @@ max_routes = 1024
 Use `connector_tokens` when a deployment has domain-specific intermediate tokens that should be
 kept in the search even if they are not part of the default anchor set.
 
-## Benchmark notes (from the source branch, 2026-07-07)
+## Benchmark notes (from the source branch, 2026-07-07, gas-blind port)
 
-These notes compare the bounded candidate search against a no-derived brute-force split on six
-large all-protocol Fynd trades. The brute-force split enumerated many more paths and then simulated
+These notes predate the gas-aware netting and compare the bounded candidate search against a
+no-derived brute-force split on six large all-protocol Fynd trades; on trades this size gas is
+negligible relative to output, so the numbers remain representative. The brute-force split enumerated many more paths and then simulated
 them. `split_bounded` keeps almost all of the route quality on these cases while cutting solve time
 by about 223x on average.
 
