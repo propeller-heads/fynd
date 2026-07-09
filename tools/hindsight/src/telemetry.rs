@@ -168,7 +168,7 @@ pub(crate) fn record_range(
             solver = %range.solver,
             token_in = %range.token_in,
             token_out = %range.token_out,
-            verdict = outcome_label(range.verdict),
+            verdict = %outcome_label(range.verdict),
             volume_usd = volume.unwrap_or(0.0),
             savings_usd,
             "trade comparison"

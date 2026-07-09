@@ -103,11 +103,14 @@ struct VerifyArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ANSI colors only on a real terminal: in a pod they end up as escape sequences inside
+    // Loki, where they break plain name=value field extraction.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_env("RUST_LOG").add_directive("hindsight=info".parse().unwrap()),
         )
         .with_target(false)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     match Cli::parse().command {
