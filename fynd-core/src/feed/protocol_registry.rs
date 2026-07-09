@@ -112,6 +112,20 @@ pub(crate) fn register_exchanges(
                     None,
                 );
             }
+            "vm:bopamm" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:bopamm",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "vm:fermiswap" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:fermiswap",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
             "fluid_v1" => {
                 builder = builder.exchange::<FluidV1>(
                     "fluid_v1",
