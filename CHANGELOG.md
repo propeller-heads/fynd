@@ -1,3 +1,10 @@
+## [0.87.1](https://github.com/propeller-heads/fynd/compare/0.87.0...0.87.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **hindsight:** no ANSI codes off-terminal, unquoted verdict field ([00745a4](https://github.com/propeller-heads/fynd/commit/00745a4ac4157a7693dedb54067ec479c259f8be))
+
 ## [0.87.0](https://github.com/propeller-heads/fynd/compare/0.86.0...0.87.0) (2026-07-09)
 
 
