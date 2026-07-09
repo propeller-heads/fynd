@@ -108,7 +108,12 @@ pub(crate) fn find_solver_frame<'a>(
 }
 
 /// The client's direct child call that moved the most native value, excluding
-/// self-calls, refunds to the sender, and Permit2. Best guess at an unknown router.
+/// self-calls, refunds to the sender, Permit2, and the wrapped-native contract. Best guess at
+/// an unknown router.
+///
+/// The wrapped-native exclusion matters most: on an ETH-input swap through an unknown router,
+/// the highest-value call is typically the `WETH.deposit()` wrapping the input — infrastructure,
+/// not a solver (seen live: 83 run6 records attributed to the WETH contract).
 ///
 /// Returns `None` when no candidate moved any value: on a token→token swap every call carries
 /// zero value, so "largest" would degenerate to the first child — typically the token pull, not
@@ -117,6 +122,7 @@ pub(crate) fn largest_external_call(
     root: &CallFrame,
     entry_point: Address,
     sender: Address,
+    registry: &Registry,
 ) -> Option<Address> {
     let mut best: Option<(Address, U256)> = None;
     for child in &root.calls {
@@ -124,7 +130,7 @@ pub(crate) fn largest_external_call(
             continue;
         }
         let Some(to) = child.to else { continue };
-        if to == entry_point || to == sender || to == PERMIT2 {
+        if to == entry_point || to == sender || to == PERMIT2 || to == registry.wrapped_native() {
             continue;
         }
         let value = child.value.unwrap_or_default();

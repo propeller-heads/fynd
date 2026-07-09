@@ -58,7 +58,7 @@ pub(crate) fn attribute(
     if let Some(found) = trace::find_solver_frame(root, registry).and_then(|frame| frame.to) {
         return Attribution { solver: registry.label(found), source: AttributionSource::TraceMatch };
     }
-    if let Some(guess) = trace::largest_external_call(root, entry_point, sender) {
+    if let Some(guess) = trace::largest_external_call(root, entry_point, sender, registry) {
         return Attribution {
             solver: registry.label(guess),
             source: AttributionSource::LargestCall,
@@ -180,6 +180,27 @@ mod tests {
         let attribution = attribute(None, &root, client, sender, &registry);
         assert_eq!(attribution.solver, client.to_string());
         assert_eq!(attribution.source, AttributionSource::Fallback);
+    }
+
+    #[test]
+    fn attribution_never_picks_wrapped_native() {
+        // ETH-input swap through an unknown router: the highest-value direct call is the
+        // WETH.deposit() wrapping the input. Infrastructure, not a solver — the guess must
+        // fall through to the real router call.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+        let solver = addr(50);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![
+            frame("CALL", client, registry.wrapped_native(), 9000), // wrap, skipped
+            frame("CALL", client, solver, 100),
+        ];
+
+        let attribution = attribute(None, &root, client, sender, &registry);
+        assert_eq!(attribution.solver, solver.to_string());
+        assert_eq!(attribution.source, AttributionSource::LargestCall);
     }
 
     #[test]
