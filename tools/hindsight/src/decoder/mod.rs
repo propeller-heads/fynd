@@ -124,6 +124,11 @@ impl<P: Provider> Decoder<P> {
         &self.provider
     }
 
+    /// The decoder's address registry, for label vocabulary shared with telemetry.
+    pub(crate) fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Decode solver trades from a block.
     ///
     /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a

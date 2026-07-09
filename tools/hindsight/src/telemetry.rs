@@ -9,7 +9,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing::{error, info, warn};
 
 use crate::{
-    decoder::AttributionSource,
+    decoder::Registry,
     resolve::{Outcome, RangeComparison, StateResult, Verdict},
     usd,
 };
@@ -33,30 +33,38 @@ fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
 }
 
-/// Collapse unbounded label values to a fixed sentinel: unknown clients and solvers are labeled
-/// with their raw 0x… address, and every distinct address would mint a fresh series per state
-/// per bucket across five metrics, unbounded over a long run. Metric labels must come from the
-/// bounded registry vocabulary; the per-address detail stays in the JSONL records.
-fn bounded_label(value: &str) -> &str {
-    if value.starts_with("0x") && value.len() == 42 {
-        "unknown"
+/// Metric label for a range's client: registered clients (the registry's `[clients.*]` sections
+/// — the integrator front-ends the comparison is pitched at) keep their name; everything else —
+/// direct router entries, bots, unregistered addresses — collapses to "other". Keeps the
+/// dashboard's client filter to the registered names plus "other"; full client detail stays in
+/// the JSONL records.
+fn client_label<'a>(client: &'a str, registry: &Registry) -> &'a str {
+    if registry.client(client).is_some() {
+        client
     } else {
-        value
+        "other"
     }
 }
 
-/// Metric label for a range's settling solver. The `Fallback` attribution tier labels a record
-/// with its entry point — a client name like "relay", not a solver — which would pollute the
-/// dashboard's solver dropdown, so it collapses to "unknown" here. The entry-point label stays in
-/// the JSONL records, where it serves as the registry-expansion worklist.
-fn solver_label(range: &RangeComparison) -> &str {
-    match range.solver_source {
-        AttributionSource::Fallback => "unknown",
-        AttributionSource::Declared |
-        AttributionSource::EntryPoint |
-        AttributionSource::TraceMatch |
-        AttributionSource::LargestCall => bounded_label(&range.solver),
+/// Metric label for a range's settling solver: registered solver names pass through, everything
+/// else collapses to "unknown". Attribution can also produce raw addresses (largest-call guess),
+/// client names (fallback tier), and calldata-declared names from a client's own vocabulary
+/// (MetaMask aggregator ids like "pancakeSwapRouterFeeDynamic") — none belong in the bounded
+/// metric vocabulary. The original label stays in the JSONL records, where it serves as the
+/// registry-expansion worklist.
+fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
+    if registry.is_solver_name(solver) {
+        solver
+    } else {
+        "unknown"
     }
+}
+
+/// The bounded label set shared by every per-trade metric, computed once per range.
+struct MetricLabels<'a> {
+    client: &'a str,
+    solver: &'a str,
+    chain: &'a str,
 }
 
 /// Metric label for a trade's headline verdict.
@@ -119,7 +127,14 @@ pub(crate) fn record_range(
     chain: &str,
     prices_top: &usd::PriceMap,
     prices_back: &usd::PriceMap,
+    registry: &Registry,
 ) {
+    let labels = MetricLabels {
+        client: client_label(&range.client, registry),
+        solver: solver_label(&range.solver, registry),
+        chain,
+    };
+
     // Observed volume is a per-trade quantity (the settled amount), not per-state, so record it
     // once — valued at the top-of-block snapshot to match the headline. When the output token is
     // unpriced, fall back to the input leg: for a swap the two legs are worth roughly the same,
@@ -131,16 +146,16 @@ pub(crate) fn record_range(
     if let Some(volume) = volume {
         histogram!(
             VOLUME_USD,
-            "client" => bounded_label(&range.client).to_string(),
-            "solver" => solver_label(range).to_string(),
-            "chain" => chain.to_string(),
+            "client" => labels.client.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
             "outcome" => outcome_label(range.verdict).to_string(),
         )
         .record(volume);
     }
 
-    let savings_top = record_state(range, &range.top, "top", chain, prices_top);
-    record_state(range, &range.back, "back", chain, prices_back);
+    let savings_top = record_state(range, &range.top, "top", &labels, prices_top);
+    record_state(range, &range.back, "back", &labels, prices_back);
 
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
@@ -171,14 +186,14 @@ fn record_state(
     range: &RangeComparison,
     state: &StateResult,
     state_label: &'static str,
-    chain: &str,
+    labels: &MetricLabels<'_>,
     prices: &usd::PriceMap,
 ) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
-        "client" => bounded_label(&range.client).to_string(),
-        "solver" => solver_label(range).to_string(),
-        "chain" => chain.to_string(),
+        "client" => labels.client.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
     )
@@ -187,9 +202,9 @@ fn record_state(
     if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
-            "client" => bounded_label(&range.client).to_string(),
-            "solver" => solver_label(range).to_string(),
-            "chain" => chain.to_string(),
+            "client" => labels.client.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
             "state" => state_label,
         )
         .record(bps);
@@ -219,9 +234,9 @@ fn record_state(
     }
     histogram!(
         SAVINGS_USD,
-        "client" => bounded_label(&range.client).to_string(),
-        "solver" => solver_label(range).to_string(),
-        "chain" => chain.to_string(),
+        "client" => labels.client.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
         "state" => state_label,
     )
     .record(usd);
@@ -229,9 +244,9 @@ fn record_state(
     if usd > 0.0 {
         histogram!(
             IMPROVEMENT_USD,
-            "client" => bounded_label(&range.client).to_string(),
-            "solver" => solver_label(range).to_string(),
-            "chain" => chain.to_string(),
+            "client" => labels.client.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
             "state" => state_label,
         )
         .record(usd);
@@ -394,7 +409,7 @@ mod tests {
             .build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_range(&range, "ethereum", &prices, &prices);
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
         });
         let rendered = handle.render();
 
@@ -423,10 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn raw_address_labels_collapse_to_unknown() {
+    fn label_vocabulary_is_registry_bounded() {
+        // Every metric label value must come from the registry vocabulary: registered client and
+        // solver names pass through; raw addresses, unregistered names, and calldata-declared
+        // aggregator ids collapse — clients to "other", solvers to "unknown".
+        let registry = Registry::ethereum();
+        assert_eq!(client_label("relay", &registry), "relay");
+        assert_eq!(client_label("metamask", &registry), "metamask");
+        assert_eq!(client_label("okx", &registry), "other");
+        assert_eq!(client_label("0xD720183DdA64a8CDb424B5c13aF73baf713521f8", &registry), "other");
+        assert_eq!(solver_label("kyberswap", &registry), "kyberswap");
+        assert_eq!(solver_label("relay", &registry), "unknown");
+        assert_eq!(solver_label("pancakeSwapRouterFeeDynamic", &registry), "unknown");
+        assert_eq!(
+            solver_label("0xB6F54cAed61C318027c022c47B94BAF139a99Dab", &registry),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn raw_address_labels_collapse() {
         // Unknown clients/solvers carry raw 0x… addresses; every distinct address would mint a
-        // fresh series set, unbounded over a long run. The label must collapse to "unknown"
-        // while known registry names pass through.
+        // fresh series set, unbounded over a long run. Clients outside the registry's
+        // [clients.*] sections collapse to "other", solvers outside [solvers] to "unknown".
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.client = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
@@ -436,10 +470,16 @@ mod tests {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+            record_range(
+                &range,
+                "ethereum",
+                &usd::PriceMap::new(),
+                &usd::PriceMap::new(),
+                &Registry::ethereum(),
+            );
         });
         let rendered = handle.render();
-        assert!(rendered.contains("client=\"unknown\""), "rendered: {rendered}");
+        assert!(rendered.contains("client=\"other\""), "rendered: {rendered}");
         assert!(rendered.contains("solver=\"unknown\""));
         assert!(!rendered.contains("0xD720183DdA64a8CDb424B5c13aF73baf713521f8"));
     }
@@ -458,7 +498,13 @@ mod tests {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+            record_range(
+                &range,
+                "ethereum",
+                &usd::PriceMap::new(),
+                &usd::PriceMap::new(),
+                &Registry::ethereum(),
+            );
         });
         let rendered = handle.render();
         assert!(rendered.contains("solver=\"unknown\""), "rendered: {rendered}");
@@ -487,7 +533,7 @@ mod tests {
             .build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_range(&range, "ethereum", &prices, &prices);
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
         });
         let rendered = handle.render();
         let volume_line = rendered
@@ -508,7 +554,13 @@ mod tests {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+            record_range(
+                &range,
+                "ethereum",
+                &usd::PriceMap::new(),
+                &usd::PriceMap::new(),
+                &Registry::ethereum(),
+            );
         });
         let rendered = handle.render();
         assert!(rendered.contains("outcome=\"unsolvable\""));
