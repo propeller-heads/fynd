@@ -1,3 +1,10 @@
+## [0.85.0](https://github.com/propeller-heads/fynd/compare/0.84.0...0.85.0) (2026-07-09)
+
+
+### Features
+
+* use native CurveState decoder and add vm:bopamm/vm:fermiswap ([fba3c22](https://github.com/propeller-heads/fynd/commit/fba3c2234164722acf1d1164de2c249de513cefd))
+
 ## [0.84.0](https://github.com/propeller-heads/fynd/compare/0.83.0...0.84.0) (2026-07-09)
 
 

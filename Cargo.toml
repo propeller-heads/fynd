@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.84.0"
+version = "0.85.0"
 
 [package]
 name = "fynd"
@@ -166,11 +166,11 @@ hex = "0.4"
 sha2 = "0.10"
 
 # Internal crates
-fynd-core = { path = "fynd-core", version = "0.84.0" }
-fynd-rpc = { path = "fynd-rpc", version = "0.84.0" }
-fynd-rpc-types = { path = "fynd-rpc-types", version = "0.84.0" }
-fynd-client = { path = "clients/rust", version = "0.84.0" }
-erc20-overrides = { path = "tools/erc20-overrides", version = "0.84.0" }
+fynd-core = { path = "fynd-core", version = "0.85.0" }
+fynd-rpc = { path = "fynd-rpc", version = "0.85.0" }
+fynd-rpc-types = { path = "fynd-rpc-types", version = "0.85.0" }
+fynd-client = { path = "clients/rust", version = "0.85.0" }
+erc20-overrides = { path = "tools/erc20-overrides", version = "0.85.0" }
 # Path-only (like fynd-test-fixtures): unpublished internal crate, so it must not carry a
 # version requirement -- release.config.js bumps the workspace version without bumping
 # requirements it does not know about, and a stale requirement sends cargo to crates.io.
