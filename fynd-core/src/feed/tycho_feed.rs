@@ -53,6 +53,11 @@ pub(crate) struct TychoFeed {
     event_tx: broadcast::Sender<MarketEvent>,
 }
 
+/// Client-metadata entries Fynd reports to Tycho via the `X-Tycho-Client-Metadata` header.
+fn fynd_client_metadata() -> [(&'static str, &'static str); 1] {
+    [("fynd_version", env!("CARGO_PKG_VERSION"))]
+}
+
 impl TychoFeed {
     /// Creates a new TychoFeed.
     ///
@@ -132,7 +137,8 @@ impl TychoFeed {
             .auth_key(self.config.tycho_api_key.clone())
             .no_tls(!self.config.use_tls)
             .skip_state_decode_failures(true)
-            .min_token_quality(self.config.min_token_quality as u32);
+            .min_token_quality(self.config.min_token_quality as u32)
+            .add_client_metadata(fynd_client_metadata());
 
             if self.config.partial_blocks {
                 stream_builder = stream_builder.enable_partial_blocks();
@@ -323,6 +329,7 @@ impl TychoFeed {
         .auth_key(self.config.tycho_api_key.clone())
         .skip_state_decode_failures(true)
         .min_token_quality(self.config.min_token_quality as u32)
+        .add_client_metadata(fynd_client_metadata())
         .set_tokens(all_tokens.clone())
         .await;
 
@@ -522,7 +529,8 @@ impl TychoFeed {
         }
         .auth_key(self.config.tycho_api_key.clone())
         .skip_state_decode_failures(true)
-        .min_token_quality(self.config.min_token_quality as u32);
+        .min_token_quality(self.config.min_token_quality as u32)
+        .add_client_metadata(fynd_client_metadata());
 
         if self.config.partial_blocks {
             stream_builder = stream_builder.enable_partial_blocks();
@@ -1354,6 +1362,14 @@ mod tests {
             Ok(_) => panic!("Should not broadcast event for empty update"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    #[test]
+    fn fynd_client_metadata_reports_version() {
+        // Pins the wire key the server telemetry keys off and guarantees a non-empty version.
+        let [(key, value)] = fynd_client_metadata();
+        assert_eq!(key, "fynd_version");
+        assert!(!value.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations
