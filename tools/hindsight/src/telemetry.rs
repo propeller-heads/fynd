@@ -35,6 +35,18 @@ fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
 }
 
+/// Collapse unbounded label values to a fixed sentinel: unknown clients and solvers are labeled
+/// with their raw 0x… address, and every distinct address would mint a fresh series per state
+/// per bucket across five metrics, unbounded over a long run. Metric labels must come from the
+/// bounded registry vocabulary; the per-address detail stays in the JSONL records.
+fn bounded_label(value: &str) -> &str {
+    if value.starts_with("0x") && value.len() == 42 {
+        "unknown"
+    } else {
+        value
+    }
+}
+
 /// Metric label for a trade's headline verdict.
 pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
     match verdict {
@@ -109,8 +121,8 @@ pub(crate) fn record_range(
     if let Some(volume) = usd::value_usd(range.token_out, range.settled_amount_out, prices_top) {
         histogram!(
             VOLUME_USD,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
         )
         .record(volume);
@@ -133,8 +145,8 @@ fn record_state(
 ) {
     counter!(
         TRADES_TOTAL,
-        "client" => range.client.clone(),
-        "solver" => range.solver.clone(),
+        "client" => bounded_label(&range.client).to_string(),
+        "solver" => bounded_label(&range.solver).to_string(),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
@@ -144,8 +156,8 @@ fn record_state(
     if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -177,8 +189,8 @@ fn record_state(
         }
         histogram!(
             SAVINGS_USD,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -187,8 +199,8 @@ fn record_state(
         if usd > 0.0 {
             histogram!(
                 IMPROVEMENT_USD,
-                "client" => range.client.clone(),
-                "solver" => range.solver.clone(),
+                "client" => bounded_label(&range.client).to_string(),
+                "solver" => bounded_label(&range.solver).to_string(),
                 "chain" => chain.to_string(),
                 "state" => state_label,
             )
@@ -386,6 +398,28 @@ mod tests {
         );
         assert!(rendered.contains("hindsight_savings_usd_bucket"));
         assert!(rendered.contains("le=\"3\""));
+    }
+
+    #[test]
+    fn raw_address_labels_collapse_to_unknown() {
+        // Unknown clients/solvers carry raw 0x… addresses; every distinct address would mint a
+        // fresh series set, unbounded over a long run. The label must collapse to "unknown"
+        // while known registry names pass through.
+        let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
+        t.client = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
+        t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
+        let range =
+            build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("client=\"unknown\""), "rendered: {rendered}");
+        assert!(rendered.contains("solver=\"unknown\""));
+        assert!(!rendered.contains("0xD720183DdA64a8CDb424B5c13aF73baf713521f8"));
     }
 
     #[test]
