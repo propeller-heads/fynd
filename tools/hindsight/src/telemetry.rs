@@ -219,12 +219,26 @@ async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
         .body(handle.render())
 }
 
+/// Histogram bucket upper bounds per metric. Without explicit buckets the exporter renders
+/// `histogram!` metrics as Prometheus summaries (quantile-labeled series), which
+/// `histogram_quantile(..., *_bucket)` dashboard queries cannot read and which cannot be
+/// re-aggregated across labels — the same trap documented for
+/// `worker_router_solve_duration_seconds` in the fynd deploy values.
+///
+/// Savings are signed (negative = Fynd worse), so their edges are symmetric around zero.
+const SAVINGS_BPS_BUCKETS: &[f64] =
+    &[-1000.0, -300.0, -100.0, -30.0, -10.0, -3.0, 0.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0];
+const SAVINGS_USD_BUCKETS: &[f64] = &[-3000.0, -300.0, -30.0, -3.0, 0.0, 3.0, 30.0, 300.0, 3000.0];
+const VOLUME_USD_BUCKETS: &[f64] = &[10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0];
+const BLOCK_SECONDS_BUCKETS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+
 /// Install the global Prometheus recorder and serve `/metrics` on `port`.
 ///
 /// The Actix server runs on its own thread with a dedicated Actix runtime; its server future is
 /// `!Send`, so it can't be `tokio::spawn`ed onto the main multi-threaded runtime.
 pub(crate) fn install_exporter(port: u16) -> anyhow::Result<()> {
-    let handle = PrometheusBuilder::new()
+    let handle = configure_buckets(PrometheusBuilder::new())
+        .map_err(|e| anyhow::anyhow!("failed to configure histogram buckets: {e}"))?
         .install_recorder()
         .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))?;
     describe();
@@ -252,6 +266,20 @@ pub(crate) fn install_exporter(port: u16) -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn metrics thread: {e}"))?;
     Ok(())
+}
+
+/// Register explicit buckets for every histogram metric, so the exporter renders true
+/// Prometheus histograms (`*_bucket` series) instead of summaries.
+fn configure_buckets(
+    builder: PrometheusBuilder,
+) -> Result<PrometheusBuilder, metrics_exporter_prometheus::BuildError> {
+    use metrics_exporter_prometheus::Matcher;
+    builder
+        .set_buckets_for_metric(Matcher::Full(SAVINGS_BPS.into()), SAVINGS_BPS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(SAVINGS_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(VOLUME_USD.into()), VOLUME_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(BLOCK_SECONDS.into()), BLOCK_SECONDS_BUCKETS)
 }
 
 #[cfg(test)]
@@ -330,7 +358,9 @@ mod tests {
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let prices = usd::PriceMap::from([(usdc, 2e-9)]);
 
-        let recorder = PrometheusBuilder::new().build_recorder();
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             record_range(&range, "ethereum", &prices, &prices);
@@ -348,6 +378,14 @@ mod tests {
         assert!(rendered.contains("hindsight_improvement_usd"));
         assert!(rendered.contains("hindsight_volume_usd"));
         assert!(rendered.contains("hindsight_coverage_ratio"));
+        // Histograms must render as true histograms (le-labeled _bucket series), not summaries:
+        // the dashboard reads them with histogram_quantile(..., *_bucket).
+        assert!(
+            rendered.contains("hindsight_savings_bps_bucket"),
+            "savings_bps rendered as a summary, not a histogram: {rendered}"
+        );
+        assert!(rendered.contains("hindsight_savings_usd_bucket"));
+        assert!(rendered.contains("le=\"3\""));
     }
 
     #[test]
