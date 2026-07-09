@@ -1,3 +1,16 @@
+## [0.86.0](https://github.com/propeller-heads/fynd/compare/0.85.0...0.86.0) (2026-07-09)
+
+
+### Features
+
+* **hindsight:** rebuild the solver when the monitor falls behind head ([4e19851](https://github.com/propeller-heads/fynd/commit/4e1985167baba938888bf66788d0da905925023b))
+* **hindsight:** volume by outcome, per-trade log, solver label fix ([dc4efe3](https://github.com/propeller-heads/fynd/commit/dc4efe331585eb5dbc13b7cb85195f394b4c8849))
+
+
+### Bug Fixes
+
+* **hindsight:** attribution never picks the wrapped-native contract ([e9cb274](https://github.com/propeller-heads/fynd/commit/e9cb2744c27ef0a8481a89e7ea0e440bb34c178f))
+
 ## [0.85.0](https://github.com/propeller-heads/fynd/compare/0.84.0...0.85.0) (2026-07-09)
 
 
