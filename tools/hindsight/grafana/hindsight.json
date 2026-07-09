@@ -1,10 +1,13 @@
 {
-  "title": "Hindsight — Fynd vs settled solver swaps",
+  "title": "Hindsight \u2014 Fynd vs settled solver swaps",
   "uid": "hindsight",
   "schemaVersion": 39,
   "timezone": "browser",
   "refresh": "30s",
-  "tags": ["hindsight", "fynd"],
+  "tags": [
+    "hindsight",
+    "fynd"
+  ],
   "templating": {
     "list": [
       {
@@ -33,12 +36,109 @@
   },
   "panels": [
     {
+      "id": 101,
+      "type": "stat",
+      "title": "Total savings \u2014 Fynd only when it wins ($)",
+      "description": "Sum of USD improvement over the selected range, counting only trades where Fynd's top-of-block quote beat the settled amount (gross vs gross). Perfect-hindsight upper bound: capturing it requires knowing the winner in advance.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(hindsight_improvement_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\"}[$__range]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          }
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "type": "stat",
+      "title": "Net savings \u2014 always route via Fynd ($)",
+      "description": "Signed USD savings summed over the selected range: every comparable trade, wins minus losses (gross vs gross, top-of-block). What clients would have kept had all flow routed through Fynd.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(hindsight_savings_usd_sum{namespace=\"$Namespace\", state=\"top\", chain=~\"$chain\", solver=~\"$solver\"}[$__range]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          }
+        }
+      ]
+    },
+    {
       "id": 1,
       "title": "Win rate (Fynd better, gross)",
       "type": "stat",
       "datasource": "${datasource}",
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -51,16 +151,37 @@
       "title": "Coverage ratio (re-solvable)",
       "type": "gauge",
       "datasource": "${datasource}",
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
-      "targets": [{ "refId": "A", "expr": "hindsight_coverage_ratio" }]
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hindsight_coverage_ratio"
+        }
+      ]
     },
     {
       "id": 3,
       "title": "Trades by outcome",
       "type": "piechart",
       "datasource": "${datasource}",
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
       "targets": [
         {
           "refId": "A",
@@ -74,8 +195,17 @@
       "title": "Median gross savings (bps)",
       "type": "timeseries",
       "datasource": "${datasource}",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-      "fieldConfig": { "defaults": { "unit": "none" } },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -89,7 +219,12 @@
       "title": "Trades by solver",
       "type": "timeseries",
       "datasource": "${datasource}",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
       "targets": [
         {
           "refId": "A",
@@ -103,8 +238,17 @@
       "title": "Block processing time (p95)",
       "type": "timeseries",
       "datasource": "${datasource}",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
-      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -118,8 +262,17 @@
       "title": "Median USD savings (stablecoin-out)",
       "type": "timeseries",
       "datasource": "${datasource}",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
-      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
       "targets": [
         {
           "refId": "A",

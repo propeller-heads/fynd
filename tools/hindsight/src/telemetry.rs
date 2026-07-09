@@ -35,6 +35,18 @@ fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
 }
 
+/// Collapse unbounded label values to a fixed sentinel: unknown clients and solvers are labeled
+/// with their raw 0x… address, and every distinct address would mint a fresh series per state
+/// per bucket across five metrics, unbounded over a long run. Metric labels must come from the
+/// bounded registry vocabulary; the per-address detail stays in the JSONL records.
+fn bounded_label(value: &str) -> &str {
+    if value.starts_with("0x") && value.len() == 42 {
+        "unknown"
+    } else {
+        value
+    }
+}
+
 /// Metric label for a trade's headline verdict.
 pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
     match verdict {
@@ -109,8 +121,8 @@ pub(crate) fn record_range(
     if let Some(volume) = usd::value_usd(range.token_out, range.settled_amount_out, prices_top) {
         histogram!(
             VOLUME_USD,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
         )
         .record(volume);
@@ -133,8 +145,8 @@ fn record_state(
 ) {
     counter!(
         TRADES_TOTAL,
-        "client" => range.client.clone(),
-        "solver" => range.solver.clone(),
+        "client" => bounded_label(&range.client).to_string(),
+        "solver" => bounded_label(&range.solver).to_string(),
         "chain" => chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
         "state" => state_label,
@@ -144,8 +156,8 @@ fn record_state(
     if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -177,8 +189,8 @@ fn record_state(
         }
         histogram!(
             SAVINGS_USD,
-            "client" => range.client.clone(),
-            "solver" => range.solver.clone(),
+            "client" => bounded_label(&range.client).to_string(),
+            "solver" => bounded_label(&range.solver).to_string(),
             "chain" => chain.to_string(),
             "state" => state_label,
         )
@@ -187,8 +199,8 @@ fn record_state(
         if usd > 0.0 {
             histogram!(
                 IMPROVEMENT_USD,
-                "client" => range.client.clone(),
-                "solver" => range.solver.clone(),
+                "client" => bounded_label(&range.client).to_string(),
+                "solver" => bounded_label(&range.solver).to_string(),
                 "chain" => chain.to_string(),
                 "state" => state_label,
             )
@@ -219,12 +231,26 @@ async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
         .body(handle.render())
 }
 
+/// Histogram bucket upper bounds per metric. Without explicit buckets the exporter renders
+/// `histogram!` metrics as Prometheus summaries (quantile-labeled series), which
+/// `histogram_quantile(..., *_bucket)` dashboard queries cannot read and which cannot be
+/// re-aggregated across labels — the same trap documented for
+/// `worker_router_solve_duration_seconds` in the fynd deploy values.
+///
+/// Savings are signed (negative = Fynd worse), so their edges are symmetric around zero.
+const SAVINGS_BPS_BUCKETS: &[f64] =
+    &[-1000.0, -300.0, -100.0, -30.0, -10.0, -3.0, 0.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0];
+const SAVINGS_USD_BUCKETS: &[f64] = &[-3000.0, -300.0, -30.0, -3.0, 0.0, 3.0, 30.0, 300.0, 3000.0];
+const VOLUME_USD_BUCKETS: &[f64] = &[10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0];
+const BLOCK_SECONDS_BUCKETS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+
 /// Install the global Prometheus recorder and serve `/metrics` on `port`.
 ///
 /// The Actix server runs on its own thread with a dedicated Actix runtime; its server future is
 /// `!Send`, so it can't be `tokio::spawn`ed onto the main multi-threaded runtime.
 pub(crate) fn install_exporter(port: u16) -> anyhow::Result<()> {
-    let handle = PrometheusBuilder::new()
+    let handle = configure_buckets(PrometheusBuilder::new())
+        .map_err(|e| anyhow::anyhow!("failed to configure histogram buckets: {e}"))?
         .install_recorder()
         .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))?;
     describe();
@@ -252,6 +278,20 @@ pub(crate) fn install_exporter(port: u16) -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn metrics thread: {e}"))?;
     Ok(())
+}
+
+/// Register explicit buckets for every histogram metric, so the exporter renders true
+/// Prometheus histograms (`*_bucket` series) instead of summaries.
+fn configure_buckets(
+    builder: PrometheusBuilder,
+) -> Result<PrometheusBuilder, metrics_exporter_prometheus::BuildError> {
+    use metrics_exporter_prometheus::Matcher;
+    builder
+        .set_buckets_for_metric(Matcher::Full(SAVINGS_BPS.into()), SAVINGS_BPS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(SAVINGS_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(VOLUME_USD.into()), VOLUME_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(BLOCK_SECONDS.into()), BLOCK_SECONDS_BUCKETS)
 }
 
 #[cfg(test)]
@@ -330,7 +370,9 @@ mod tests {
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let prices = usd::PriceMap::from([(usdc, 2e-9)]);
 
-        let recorder = PrometheusBuilder::new().build_recorder();
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             record_range(&range, "ethereum", &prices, &prices);
@@ -348,6 +390,36 @@ mod tests {
         assert!(rendered.contains("hindsight_improvement_usd"));
         assert!(rendered.contains("hindsight_volume_usd"));
         assert!(rendered.contains("hindsight_coverage_ratio"));
+        // Histograms must render as true histograms (le-labeled _bucket series), not summaries:
+        // the dashboard reads them with histogram_quantile(..., *_bucket).
+        assert!(
+            rendered.contains("hindsight_savings_bps_bucket"),
+            "savings_bps rendered as a summary, not a histogram: {rendered}"
+        );
+        assert!(rendered.contains("hindsight_savings_usd_bucket"));
+        assert!(rendered.contains("le=\"3\""));
+    }
+
+    #[test]
+    fn raw_address_labels_collapse_to_unknown() {
+        // Unknown clients/solvers carry raw 0x… addresses; every distinct address would mint a
+        // fresh series set, unbounded over a long run. The label must collapse to "unknown"
+        // while known registry names pass through.
+        let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
+        t.client = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
+        t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
+        let range =
+            build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &usd::PriceMap::new(), &usd::PriceMap::new());
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("client=\"unknown\""), "rendered: {rendered}");
+        assert!(rendered.contains("solver=\"unknown\""));
+        assert!(!rendered.contains("0xD720183DdA64a8CDb424B5c13aF73baf713521f8"));
     }
 
     #[test]
