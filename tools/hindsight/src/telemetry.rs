@@ -159,8 +159,10 @@ pub(crate) fn record_range(
 
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
-    // message and field names stable — the LogQL query extracts them by regexp.
-    if let Some(savings_usd) = savings_top {
+    // message and field names stable — the LogQL query extracts them by regexp. Zero means
+    // "unpriced" (or, for quoted_usd, "the solver declared no quote").
+    if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &range.top.outcome) {
+        let priced = |amount| usd::value_usd(range.token_out, amount, prices_top).unwrap_or(0.0);
         info!(
             tx = %range.tx_hash,
             block = range.block_number,
@@ -170,6 +172,9 @@ pub(crate) fn record_range(
             token_out = %range.token_out,
             verdict = %outcome_label(range.verdict),
             volume_usd = volume.unwrap_or(0.0),
+            settled_usd = priced(range.settled_amount_out),
+            fynd_usd = priced(solved.amount_out),
+            quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
             savings_usd,
             "trade comparison"
         );
