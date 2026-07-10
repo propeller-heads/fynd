@@ -22,16 +22,14 @@
 
 ### Run the assembly pipeline
 
-```bash
-COINGECKO_API_KEY="..." cargo run -p slippage-features --release --bin assemble -- \
-  --quote-log-dir ./slippage-data \
-  --hop-decay-dir ./slippage-data/hop_decay \
-  --tycho-route-decay-dir ./slippage-data/tycho_route_decay \
-  --route-decay-dir ./slippage-data/route_decay \
-  --output-dir ./slippage-data/unified
-```
+See [HANDOVER.md](HANDOVER.md) for the current re-run steps
+(consolidate → assemble → EDA). The Python `assemble_polars.py` replaces the
+old Rust `assemble` binary, which OOMs at >1M files.
 
-### Build the analysis notebook
+### Analysis notebook
+
+An initial EDA is built (`notebooks/04_213h_eda.py` / `.html`) and covers the
+questions below; several remain open for a follow-up modelling pass.
 
 Key questions to answer:
 
@@ -129,7 +127,5 @@ research validates specific improvements:
   (saves HTTP overhead, more reliable)
 - **Old quote log files**: the data directory accumulates files forever. Add
   rotation/retention policy
-- **CoinGecko rate limiting**: the assembly binary makes API calls per-token
-  without rate limiting. Add backoff for large datasets
 - **Base chain support**: need to run a separate Fynd instance for Base and
   merge the datasets in assembly
