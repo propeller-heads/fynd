@@ -404,9 +404,8 @@ impl TokenGasPriceComputation {
             .collect();
 
         // Sort each token's paths: lowest spread last (for popping). A NaN score (degenerate
-        // pool math in the spread computation) is meaningless as a candidate and, worse, makes
-        // partial_cmp-based sorting panic — which killed the ComputationManager task in
-        // production. Drop those candidates and sort with the float total order.
+        // pool math in the spread computation) cannot rank a path and would panic a
+        // partial_cmp-based sort, so drop those candidates and sort with the float total order.
         for paths in paths_by_token.values_mut() {
             paths.retain(|path| !path.score.is_nan());
             paths.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -780,10 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn nan_scored_paths_are_dropped_not_panicked_on() {
-        // Degenerate pool math can yield a NaN spot-price spread; sorting candidates with
-        // partial_cmp().unwrap() panicked on it and silently killed the ComputationManager task
-        // in production (dev + prod, 2026-07-09). NaN-scored candidates must be dropped, and
-        // the affected token simply gets no price.
+        // Degenerate pool math can yield a NaN spot-price spread. A NaN-scored candidate must
+        // be dropped — never panicked on — and the affected token simply gets no price.
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
