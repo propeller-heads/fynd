@@ -215,6 +215,7 @@ where
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
+                let algo_price_impact = result.price_impact();
                 let route = result.into_route();
 
                 if let Err(err) = route.validate() {
@@ -266,7 +267,18 @@ where
                     order.amount().clone()
                 };
 
-                OrderQuote::new(
+                let price_impact_bps = algo_price_impact
+                    .or_else(|| {
+                        super::price_impact::spot_price_impact(
+                            &route,
+                            &amount_in,
+                            &amount_out,
+                            &self.market_data,
+                        )
+                    })
+                    .map(|f| (f * 10_000.0).round() as i32);
+
+                let mut quote = OrderQuote::new(
                     order.id().to_string(),
                     QuoteStatus::Success,
                     amount_in,
@@ -280,7 +292,11 @@ where
                     solved_against,
                 )
                 .with_route(route)
-                .with_gas_price(gas_price)
+                .with_gas_price(gas_price);
+                if let Some(bps) = price_impact_bps {
+                    quote = quote.with_price_impact_bps(bps);
+                }
+                quote
             }
             Err(err) => {
                 let solve_error = match err {
