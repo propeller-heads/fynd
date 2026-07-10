@@ -1,3 +1,10 @@
+## [0.89.0](https://github.com/propeller-heads/fynd/compare/0.88.1...0.89.0) (2026-07-10)
+
+
+### Features
+
+* **feed:** report fynd_version to Tycho via client metadata ([0f088a3](https://github.com/propeller-heads/fynd/commit/0f088a393d15950a5aa1f845900a885172acbe2d))
+
 ## [0.88.1](https://github.com/propeller-heads/fynd/compare/0.88.0...0.88.1) (2026-07-10)
 
 
