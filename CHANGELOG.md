@@ -1,3 +1,10 @@
+## [0.88.1](https://github.com/propeller-heads/fynd/compare/0.88.0...0.88.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **core:** drop NaN-scored gas-price paths instead of panicking ([df1d7e0](https://github.com/propeller-heads/fynd/commit/df1d7e09645bf8214785b6bf705237db9f835699))
+
 ## [0.88.0](https://github.com/propeller-heads/fynd/compare/0.87.1...0.88.0) (2026-07-10)
 
 
