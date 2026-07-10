@@ -1,3 +1,22 @@
+## [0.88.1](https://github.com/propeller-heads/fynd/compare/0.88.0...0.88.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **core:** drop NaN-scored gas-price paths instead of panicking ([df1d7e0](https://github.com/propeller-heads/fynd/commit/df1d7e09645bf8214785b6bf705237db9f835699))
+
+## [0.88.0](https://github.com/propeller-heads/fynd/compare/0.87.1...0.88.0) (2026-07-10)
+
+
+### Features
+
+* **hindsight:** settled, fynd, and quoted USD on the trade log line ([c762612](https://github.com/propeller-heads/fynd/commit/c762612bfe28ea8b6be31e71814b918c325f6575))
+* **pfw:** report computed price impact on RouteResult ([b0f8b69](https://github.com/propeller-heads/fynd/commit/b0f8b6913adcf7e3099b54d785cd649a6f679d84))
+* **quote:** add optional price_impact to RouteResult ([c9a3ea8](https://github.com/propeller-heads/fynd/commit/c9a3ea82a4d6f3e0a20bb56bd0a765b5d6b65af3))
+* **quote:** populate price_impact_bps (algorithm value or spot-price fallback) ([1a47edb](https://github.com/propeller-heads/fynd/commit/1a47edba0ca48bdd7243297fcbf2c72bfeedab1b))
+* **quote:** pure spot-product price-impact math + tests ([bea82a7](https://github.com/propeller-heads/fynd/commit/bea82a795da066e2b5779bd5a4c7b1367b707a13))
+* **quote:** route-level spot-price fallback ([393558d](https://github.com/propeller-heads/fynd/commit/393558dc718a2ae04c9f0e7026807f5b44617f12))
+
 ## [0.87.1](https://github.com/propeller-heads/fynd/compare/0.87.0...0.87.1) (2026-07-09)
 
 
