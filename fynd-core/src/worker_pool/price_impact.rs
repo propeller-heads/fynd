@@ -5,8 +5,7 @@
 
 use num_bigint::BigUint;
 
-use crate::feed::market_data::MarketData;
-use crate::types::Route;
+use crate::{feed::market_data::MarketData, types::Route};
 
 /// Computes signed price impact from the product of per-hop spot prices.
 ///
@@ -23,8 +22,14 @@ pub(crate) fn price_impact_from_spot_product(
     if !product.is_finite() || product <= 0.0 {
         return None;
     }
-    let amount_in_f = amount_in.to_string().parse::<f64>().ok()?;
-    let amount_out_f = amount_out.to_string().parse::<f64>().ok()?;
+    let amount_in_f = amount_in
+        .to_string()
+        .parse::<f64>()
+        .ok()?;
+    let amount_out_f = amount_out
+        .to_string()
+        .parse::<f64>()
+        .ok()?;
 
     let ideal_out = (amount_in_f / 10f64.powi(d_in as i32)) * product;
     if !ideal_out.is_finite() || ideal_out <= 0.0 {
@@ -72,14 +77,21 @@ pub(crate) fn spot_price_impact(
     for swap in swaps {
         let base = view.get_token(swap.token_in())?;
         let quote = view.get_token(swap.token_out())?;
-        let sp = swap.protocol_state().spot_price(base, quote).ok()?;
+        let sp = swap
+            .protocol_state()
+            .spot_price(base, quote)
+            .ok()?;
         product *= sp;
     }
 
     let first = swaps.first()?;
     let last = swaps.last()?;
-    let d_in = view.get_token(first.token_in())?.decimals;
-    let d_out = view.get_token(last.token_out())?.decimals;
+    let d_in = view
+        .get_token(first.token_in())?
+        .decimals;
+    let d_out = view
+        .get_token(last.token_out())?
+        .decimals;
 
     price_impact_from_spot_product(product, amount_in, amount_out, d_in, d_out)
 }
@@ -135,10 +147,7 @@ mod tests {
 
     #[test]
     fn zero_product_returns_none() {
-        assert_eq!(
-            price_impact_from_spot_product(0.0, &bu("1"), &bu("1"), 18, 18),
-            None
-        );
+        assert_eq!(price_impact_from_spot_product(0.0, &bu("1"), &bu("1"), 18, 18), None);
     }
 
     #[test]

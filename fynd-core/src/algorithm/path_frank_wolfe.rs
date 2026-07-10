@@ -1550,10 +1550,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.route().swaps().len(), 2, "expected a split route");
-        assert!(
-            result.price_impact().is_some(),
-            "split route should report price impact"
-        );
+        assert!(result.price_impact().is_some(), "split route should report price impact");
     }
 
     #[tokio::test]
