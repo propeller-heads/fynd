@@ -46,6 +46,8 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 | `fynd-benchmark` | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | `fynd-swap-cli` | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
 | `record-market` | `tools/record-market/` | Record live Tycho market state and generate expected outputs for the integration tests |
+| `pairs-data-collector` | `tools/pairs-data-collector/` | Block-consistent executable pair curves with WAL and Parquet output |
+| `pairs-cointegration` | `tools/pairs-cointegration/` | Statistical screening and offline reports for pair histories |
 
 ## Architecture Overview
 

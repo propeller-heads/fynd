@@ -1,0 +1,55 @@
+run_name = "ethereum-pairs-pilot"
+
+[fynd]
+tycho_url = "tycho-beta.propellerheads.xyz"
+tycho_api_key_env = "TYCHO_API_KEY_BETA"
+rpc_http_url_env = "RPC_URL"
+rpc_ws_url_env = "RPC_WS_URL"
+protocols = [
+  "uniswap_v2",
+  "uniswap_v3",
+  "uniswap_v4",
+  "pancakeswap_v3",
+  "sushiswap_v2",
+]
+min_tvl = 10.0
+algorithm = "bellman_ford"
+num_workers = 4
+task_queue_capacity = 1000
+max_hops = 3
+algorithm_timeout_ms = 1000
+
+[collection]
+sender = "0x0000000000000000000000000000000000000001"
+request_chunk_size = 32
+state_wait_timeout_ms = 3000
+quote_timeout_ms = 5000
+collection_budget_ms = 9000
+confirmation_depth = 12
+
+[[tokens]]
+id = "weth"
+address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+symbol = "WETH"
+decimals = 18
+
+[[tokens]]
+id = "usdc"
+address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+symbol = "USDC"
+decimals = 6
+
+[[pairs]]
+id = "weth-usdc"
+token_a = "weth"
+token_b = "usdc"
+amounts_a = [
+  "100000000000000000",
+  "1000000000000000000",
+  "10000000000000000000",
+]
+amounts_b = [
+  "300000000",
+  "3000000000",
+  "30000000000",
+]

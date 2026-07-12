@@ -1,0 +1,28 @@
+[Unit]
+Description=Fynd block-consistent pairs data collector
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/etc/fynd-pairs-collector.env
+ExecStart=/opt/fynd-pairs/run-with-secrets.sh \
+    /opt/fynd-pairs/pairs-data-collector collect \
+    --config ${COLLECTOR_CONFIG} --output-dir ${OUTPUT_DIR}
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=180
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fynd-pairs
+
+[Install]
+WantedBy=multi-user.target

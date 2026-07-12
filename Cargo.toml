@@ -86,6 +86,7 @@ members = [
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
     "tools/hindsight",
+    "tools/pairs-data-collector",
     "tools/record-market",
     "test-fixtures",
 ]
@@ -164,6 +165,9 @@ chrono = "0.4"
 itertools = "0.14.0"
 hex = "0.4"
 sha2 = "0.10"
+arrow-array = "59.1.0"
+arrow-schema = "59.1.0"
+parquet = { version = "59.1.0", default-features = false, features = ["arrow", "zstd"] }
 
 # Internal crates
 fynd-core = { path = "fynd-core", version = "0.89.0" }
