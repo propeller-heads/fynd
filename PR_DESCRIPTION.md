@@ -34,6 +34,41 @@ Never-lose guarantee is enforced by `portfolio_never_loses_to_incumbent_split` a
 
 Details and reproduction in `docs/routing-quality-bench.md`.
 
+## Large-trade routing: Path Frank-Wolfe vs Split vs Split Hardened
+
+Offline routes for the same order on the frozen snapshot, rendered as Classic Sankeys (token bars
+sized by flow, ribbon width = each leg's share of the order). "Split" is the previous exhaustive
+split (20-chunk allocation); "Split Hardened" is the portfolio (256-chunk). Single-path Path
+Frank-Wolfe is shown for reference.
+
+| trade | Path Frank-Wolfe | Split | Split Hardened |
+|---|---:|---:|---:|
+| 2,000 WBTC → USDC | 18,362,236 (2 lanes) | 26,371,679 (4) | **26,379,472** (4) — +4,362 bps vs PFW |
+| 5,000 WETH → USDC | 6,687,183 (1) | 7,269,534 (4) | **7,274,393** (4) — +877 bps vs PFW, +6.7 vs Split |
+| 51,300 sUSDe → WETH | 23.87 (1) | 31.18 (3) | **31.58** (3) — +129.0 bps vs Split |
+| 64,993 sUSDe → USDC | 36,900 (1) | 53,743 (3) | **54,332** (3) — +109.5 bps vs Split |
+
+On XXL trades the single-path algorithms take severe price impact (2,000 WBTC → USDC through one
+pool yields ~11.2M; PFW's 2-leg split reaches 18.4M; the portfolio's 4-leg split reaches 26.4M). On
+mid-size trades the hardening delta shows as a finer allocation over the same pools — e.g. Split's
+round 70/20/10 grid vs Split Hardened's 72/16/11 for 51,300 sUSDe → WETH (+129 bps).
+
+**2,000 WBTC → USDC**
+
+![2,000 WBTC to USDC](docs/assets/route-charts/chart_idx4.png)
+
+**5,000 WETH → USDC**
+
+![5,000 WETH to USDC](docs/assets/route-charts/chart_idx3.png)
+
+**51,300 sUSDe → WETH**
+
+![51,300 sUSDe to WETH](docs/assets/route-charts/chart_idx2827.png)
+
+**64,993 sUSDe → USDC**
+
+![64,993 sUSDe to USDC](docs/assets/route-charts/chart_idx2478.png)
+
 ## Note on scope
 
 Bringing `path_frank_wolfe` in also replaced this branch's `bellman_ford` with `main`'s version (PFW

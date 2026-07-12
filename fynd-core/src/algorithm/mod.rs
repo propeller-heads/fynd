@@ -23,6 +23,7 @@ pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub mod split;
 pub mod split_exp;
+pub mod split_legacy;
 #[allow(dead_code)]
 pub(crate) mod split_primitives;
 
@@ -38,6 +39,7 @@ pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 pub use split::SplitAlgorithm;
 pub use split_exp::ExpSplitAlgorithm;
+pub use split_legacy::SplitLegacyAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{

@@ -155,8 +155,15 @@ where
 }
 
 /// Algorithm names runnable by [`run_algorithm`].
-pub const AVAILABLE_ALGORITHMS: &[&str] =
-    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split", "split_incr", "split_ff"];
+pub const AVAILABLE_ALGORITHMS: &[&str] = &[
+    "most_liquid",
+    "bellman_ford",
+    "path_frank_wolfe",
+    "split",
+    "split_legacy",
+    "split_incr",
+    "split_ff",
+];
 
 /// Solves every order with a named algorithm against a frozen market.
 ///
@@ -172,7 +179,7 @@ pub async fn run_algorithm(
 ) -> Result<Vec<Option<OfflineSolution>>, OfflineError> {
     use crate::algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitLegacyAlgorithm,
     };
 
     match algo_name {
@@ -191,6 +198,11 @@ pub async fn run_algorithm(
         }
         "split" => {
             let algo = SplitAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "split_legacy" => {
+            let algo = SplitLegacyAlgorithm::with_config(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all(market, derived, algo, orders).await)
         }
@@ -292,7 +304,7 @@ pub async fn run_algorithm_routes(
 ) -> Result<Vec<Option<NormalizedRoute>>, OfflineError> {
     use crate::algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitLegacyAlgorithm,
     };
 
     match algo_name {
@@ -311,6 +323,11 @@ pub async fn run_algorithm_routes(
         }
         "split" => {
             let algo = SplitAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "split_legacy" => {
+            let algo = SplitLegacyAlgorithm::with_config(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
         }
