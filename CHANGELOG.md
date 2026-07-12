@@ -1,3 +1,10 @@
+## [0.89.1](https://github.com/propeller-heads/fynd/compare/0.89.0...0.89.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **core:** stop worker busy-spin when derived-data channel closes ([bba8809](https://github.com/propeller-heads/fynd/commit/bba8809d939782d529ccca6777da0bd5e55f997d))
+
 ## [0.89.0](https://github.com/propeller-heads/fynd/compare/0.88.1...0.89.0) (2026-07-10)
 
 
