@@ -2,6 +2,15 @@
 
 Successor to `docs/routing-quality-handover.md`. Read that first for how the offline benchmark works.
 
+> **RESOLVED (2026-07-12).** The discovery hypothesis below was tested and refuted: the portfolio's
+> exhaustive BFS already contained every bounded-discovery candidate (union added `new=0` paths on
+> every order; results bit-identical). The real gap was `split_bounded`'s shared-pool fill-and-spill
+> producing tree routes that split at an intermediate token, which pool-disjoint allocation cannot
+> express. Fill-and-spill with marginal-probe candidate selection was added to the portfolio, which
+> now wins the head-to-head 568W/233L (was 346W/442L), net delta +5.88e25, coverage 5,891 kept,
+> p50 12.2 ms. Remaining losses are grid noise (median 0.03 bps, max 3.8 bps). See
+> `docs/routing-quality-bench.md` § "Beating `split_bounded`" for full results.
+
 ## Task
 
 The hardened portfolio split (`split`, in `fynd-core/src/algorithm/split_exp.rs`) has a **better

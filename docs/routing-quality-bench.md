@@ -273,10 +273,47 @@ passes only add a small fixed cost on trades that actually split. Run all varian
 `--algorithms split,split_incr,split_ff,split_max`; the report truncates `total_net`, so use
 `analyze_nets.py RESULT.json split` for exact per-trade deltas.
 
-Tried and dropped from the portfolio: **fill-and-spill** (shared-pool splitting, the biggest
-documented gap) net-regressed alone and added ~0 to the portfolio max here — the top candidate paths
-are almost always pool-disjoint, so shared-pool splitting rarely applies. **Wider path cap (8 vs 4)**
-added only sub-bps wins for ~2× the allocation cost. Both remain reachable for research (`split_ff`,
-and the wider cap in git history).
+Tried and dropped from the portfolio at the time: **fill-and-spill** (shared-pool splitting) with
+naive top-4 candidate selection net-regressed alone and added ~0 to the portfolio max — the top
+full-amount candidate paths are almost always pool-disjoint. It was later re-added with marginal-probe
+candidate selection after the `split_bounded` head-to-head (next section) showed why the naive version
+missed: the winning extra path ranks poorly at full size but wins on the margin. **Wider path cap
+(8 vs 4)** added only sub-bps wins for ~2× the allocation cost and stays out.
 
 Primary comparison metric is `net_amount_out` (== production `amount_out_net_gas`).
+
+## Beating `split_bounded`: the gap was tree routes, not discovery
+
+`docs/beat-split-bounded-handoff.md` hypothesized that `split_bounded`'s 442-trade edge over the
+portfolio came from its bounded connector/anchor candidate discovery (incl. the native-ETH sentinel).
+Tested and **refuted** on this snapshot:
+
+1. The bounded discovery was made generic over the graph edge weight (`split_bounded.rs`,
+   `find_candidate_paths`) and unioned into the portfolio's candidate set in
+   `ExpSplitAlgorithm::setup()`. Instrumentation showed `new=0` candidates on every order: the
+   portfolio's exhaustive BFS (connector filter off) already contains every path the bounded
+   discovery finds, and its 5,000-candidate truncation never bit (observed pre-ranked sets ≤ ~1,024).
+   Benchmark results were bit-identical. The union is kept — it costs nothing measurable and protects
+   markets where BFS truncation would bite — but it closed zero losses.
+2. Route dumps of the top losing trades showed the real gap: every structural loss was a **tree
+   route** from `split_bounded`'s shared-pool fill-and-spill — a split at an *intermediate* token
+   (e.g. PENDLE→WETH at full size, then WETH split 75/25 across two FET pools), where the parallel
+   paths share a pool. No pool-disjoint allocation can express that shape.
+
+Fix: fill-and-spill re-enabled in the portfolio with `split_bounded`'s candidate selection scheme
+(top-8 full-amount paths + first-chunk marginal probe of the top-32, up to 12 candidates, active-path
+cap 4), keeping the portfolio's two-phase coarse-set → 256-chunk fine allocation and the never-lose
+floor.
+
+Full 10k, frozen snapshot, `--max-hops 3 --timeout-ms 5000`, baseline `split_bounded`, common set 810
+(exact deltas via `analyze_nets.py`):
+
+| portfolio version    | wins | losses | ties | net delta vs bounded | loss mass | p50     | p95     |
+|----------------------|-----:|-------:|-----:|---------------------:|----------:|--------:|--------:|
+| before (disjoint-only) | 346 |    442 |   22 |            +3.49e25 |   2.43e25 | 10.3 ms | 30.7 ms |
+| after (+ fill-and-spill) | **568** | **233** | 9 |        **+5.88e25** | 3.55e23 | 12.2 ms | 40.8 ms |
+
+Coverage stays 5,891 (vs `split_bounded`'s 810 — it declines when no split beats the single path).
+The remaining 233 losses are allocation-grid noise: median 0.03 bps, max 3.8 bps. Latency cost of the
+extra allocator: +1.9 ms p50, +10 ms p95; the per-solve timeout still guards the tail and the floor
+holds under starvation (`portfolio_no_loss_under_tight_timeout`).

@@ -35,7 +35,9 @@ use tycho_simulation::{
 };
 
 use super::{
-    most_liquid::DepthAndPrice, Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
+    most_liquid::DepthAndPrice,
+    split_bounded::{find_candidate_paths, CandidateSearchConfig},
+    Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
 };
 use crate::{
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
@@ -47,12 +49,23 @@ use crate::{
 
 /// Maximum candidate paths simulated per order after heuristic ranking.
 const DEFAULT_MAX_CANDIDATES: usize = 5000;
+/// Cap on candidates from the bounded amount-aware discovery unioned into the candidate set
+/// (matches `split_bounded`'s own candidate cap).
+const BOUNDED_DISCOVERY_CANDIDATES: usize = 128;
 /// Maximum number of parallel paths in a split (matches the incumbent).
 const DEFAULT_MAX_PATHS: usize = 4;
 /// Chunk grid for the coarse set-selection pass (matches the incumbent's granularity).
 const COARSE_CHUNKS: usize = 20;
 /// Chunk grid for the fine allocation pass over the fixed active set.
 const FINE_CHUNKS: usize = 256;
+/// Number of top full-amount paths always considered for shared-pool fill-and-spill.
+const SHARED_FULL_PATHS: usize = 8;
+/// Number of full-amount-ranked paths probed with the first chunk for fill-and-spill.
+const SHARED_MARGIN_PROBE_PATHS: usize = 32;
+/// Number of marginal-probe winners added to the fill-and-spill candidate set.
+const SHARED_MARGIN_PATHS: usize = 8;
+/// Upper bound on fill-and-spill candidate paths.
+const SHARED_MAX_CANDIDATES: usize = 12;
 
 /// Which experimental allocation strategy an [`ExpSplitAlgorithm`] runs.
 #[derive(Clone, Copy, Debug)]
@@ -284,15 +297,12 @@ impl ExpSplitAlgorithm {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         scored.truncate(self.max_candidates);
-
-        let component_ids: HashSet<ComponentId> = scored
-            .iter()
-            .flat_map(|(p, _)| {
-                p.edge_iter()
-                    .iter()
-                    .map(|e| e.component_id.clone())
-            })
+        let mut paths: Vec<Path<DepthAndPrice>> = scored
+            .into_iter()
+            .map(|(p, _)| p)
             .collect();
+
+        let timeout_ms = self.timeout.as_millis() as u64;
         let market = {
             let view = match label.as_ref() {
                 Some(l) => market
@@ -304,6 +314,43 @@ impl ExpSplitAlgorithm {
             if view.gas_price().is_none() {
                 return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
             }
+            // Bounded amount-aware discovery (lifted from `split_bounded`): union its candidates,
+            // ahead of the pre-ranked set, so connector/anchor routes (incl. the native-ETH
+            // sentinel) survive the spot×depth truncation. Discovery failure is not fatal — the
+            // pre-ranked set already guarantees a route.
+            let bounded = find_candidate_paths(
+                graph,
+                &view,
+                order,
+                CandidateSearchConfig {
+                    min_hops: self.min_hops,
+                    max_hops: self.max_hops,
+                    max_candidates: BOUNDED_DISCOVERY_CANDIDATES,
+                    connector_tokens: self.connector_tokens.as_ref(),
+                    source_token: order.token_in(),
+                    start: &start,
+                    timeout_ms,
+                },
+            );
+            if let Ok((bounded_paths, _)) = bounded {
+                let mut keys: HashSet<Vec<ComponentId>> = paths.iter().map(path_key).collect();
+                let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
+                for path in bounded_paths {
+                    if keys.insert(path_key(&path)) {
+                        union.push(path);
+                    }
+                }
+                union.append(&mut paths);
+                paths = union;
+            }
+            let component_ids: HashSet<ComponentId> = paths
+                .iter()
+                .flat_map(|p| {
+                    p.edge_iter()
+                        .iter()
+                        .map(|e| e.component_id.clone())
+                })
+                .collect();
             let subset = view.extract_subset_with_overlay(&component_ids);
             drop(view);
             subset
@@ -315,13 +362,8 @@ impl ExpSplitAlgorithm {
             .clone();
 
         let amount_in = order.amount().clone();
-        let paths: Vec<Path<DepthAndPrice>> = scored
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
         let mut best_single: Option<RouteResult> = None;
         let mut full_outputs: Vec<(usize, BigUint)> = Vec::new();
-        let timeout_ms = self.timeout.as_millis() as u64;
 
         for (idx, path) in paths.iter().enumerate() {
             if start.elapsed().as_millis() as u64 > timeout_ms {
@@ -448,10 +490,21 @@ impl Algorithm for ExpSplitAlgorithm {
                 ) {
                     candidates.push(c);
                 }
-                // A wider path cap and fill-and-spill were both tried and excluded: on this market
-                // top paths are almost always pool-disjoint and rarely worth splitting more than
-                // four ways, so neither strictly beat the refined disjoint split net-of-gas while
-                // both added compute and route verbosity.
+                // Shared-pool fill-and-spill with marginal-probe candidate selection. The
+                // head-to-head vs `split_bounded` showed its remaining wins are tree routes that
+                // split at an intermediate token (paths sharing a pool), which no pool-disjoint
+                // allocation can express.
+                if let Some(c) = self.fillspill_alloc(
+                    &ordered,
+                    &market,
+                    &gas_price,
+                    tp,
+                    order,
+                    start,
+                    FINE_CHUNKS,
+                ) {
+                    candidates.push(c);
+                }
             }
         }
 
@@ -705,6 +758,62 @@ impl ExpSplitAlgorithm {
         Some(cum_in)
     }
 
+    /// Selects fill-and-spill candidates: the top full-amount paths plus the best first-chunk
+    /// marginal probes, mirroring `split_bounded`'s shared-candidate selection. The probe is what
+    /// makes intermediate-token splits (tree routes) reachable: the extra path often ranks poorly
+    /// at full size but wins on the margin.
+    fn select_shared_candidates(
+        &self,
+        ordered: &[Path<DepthAndPrice>],
+        market: &MarketState,
+        gas_price: &BigUint,
+        token_prices: Option<&TokenGasPrices>,
+        order: &Order,
+        start: Instant,
+    ) -> Vec<usize> {
+        let mut candidates: Vec<usize> = (0..ordered.len().min(SHARED_FULL_PATHS)).collect();
+        let first_chunk = order.amount() / COARSE_CHUNKS;
+        if first_chunk.is_zero() {
+            return candidates;
+        }
+        let timeout_ms = self.timeout.as_millis() as u64;
+        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut marginal: Vec<(usize, BigInt)> = Vec::new();
+        for (idx, path) in ordered
+            .iter()
+            .enumerate()
+            .take(SHARED_MARGIN_PROBE_PATHS)
+        {
+            if start.elapsed().as_millis() as u64 > timeout_ms {
+                break;
+            }
+            let Some(step) = Self::simulate_step(path, market, &empty, first_chunk.clone()) else {
+                continue;
+            };
+            let activation =
+                Self::gas_cost_in_token(&step.gas, gas_price, token_prices, order.token_out())
+                    .map(BigInt::from)
+                    .unwrap_or_else(BigInt::zero);
+            marginal.push((idx, BigInt::from(step.amount_out) - activation));
+        }
+        marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
+        for (idx, net) in marginal
+            .into_iter()
+            .take(SHARED_MARGIN_PATHS)
+        {
+            if net <= BigInt::zero() {
+                continue;
+            }
+            if !candidates.contains(&idx) {
+                candidates.push(idx);
+            }
+            if candidates.len() >= SHARED_MAX_CANDIDATES {
+                break;
+            }
+        }
+        candidates
+    }
+
     /// Coarse set-selection then fine allocation with shared-pool fill-and-spill.
     #[allow(clippy::too_many_arguments)]
     fn fillspill_alloc(
@@ -717,7 +826,8 @@ impl ExpSplitAlgorithm {
         start: Instant,
         fine_chunks: usize,
     ) -> Option<SplitCandidate> {
-        let cand: Vec<usize> = (0..ordered.len().min(self.max_paths)).collect();
+        let cand =
+            self.select_shared_candidates(ordered, market, gas_price, token_prices, order, start);
         if cand.len() < 2 {
             return None;
         }
@@ -791,6 +901,7 @@ impl ExpSplitAlgorithm {
 
         let mut overlay: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut activated: Vec<bool> = vec![!gate; subset.len()];
+        let mut active_count = if gate { 0 } else { subset.len() };
         let mut counts: Vec<usize> = vec![0; subset.len()];
         let mut schedule: Vec<(usize, BigUint)> = Vec::with_capacity(num_chunks);
 
@@ -802,6 +913,9 @@ impl ExpSplitAlgorithm {
 
             let mut best: Option<(usize, BigInt, StepResult)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
+                if !activated[i] && active_count >= self.max_paths {
+                    continue;
+                }
                 let Some(step) =
                     Self::simulate_step(&ordered[path_idx], market, &overlay, chunk.clone())
                 else {
@@ -836,7 +950,10 @@ impl ExpSplitAlgorithm {
             for (id, state) in step.new_states {
                 overlay.insert(id, state);
             }
-            activated[best_i] = true;
+            if !activated[best_i] {
+                activated[best_i] = true;
+                active_count += 1;
+            }
             counts[best_i] += 1;
             schedule.push((best_i, chunk));
         }
@@ -931,6 +1048,14 @@ impl ExpSplitAlgorithm {
         }
         Some(SplitCandidate { swaps, gross, gas })
     }
+}
+
+/// A path's identity for dedup: its ordered component-id sequence.
+fn path_key(path: &Path<DepthAndPrice>) -> Vec<ComponentId> {
+    path.edge_iter()
+        .iter()
+        .map(|e| e.component_id.clone())
+        .collect()
 }
 
 /// Computes `numerator / denominator` as an `f64` fraction in `[0, 1]`.
