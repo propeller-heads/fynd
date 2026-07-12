@@ -1035,9 +1035,8 @@ impl Route {
         self.swaps
     }
 
-    /// Returns the token map attached to this route. Empty unless populated via
-    /// [`Route::with_tokens`].
-    pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
+    /// Returns the token metadata attached when the algorithm constructed this route.
+    pub fn tokens(&self) -> &HashMap<Bytes, Token> {
         &self.tokens
     }
 }
