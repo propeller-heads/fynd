@@ -47,6 +47,10 @@ pub struct Args {
     /// Write full results (config + all timings) to this JSON file
     #[arg(long, env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
+
+    /// Attach standard encoding options (0.5% slippage, TransferFrom) to every request
+    #[arg(long, env = "ENCODING")]
+    pub encoding: bool,
 }
 
 /// Execute the load-test: health-check, send requests, print stats.
@@ -79,7 +83,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         orders_solved,
         orders_unsolved,
     } = parallelization_mode
-        .run(Arc::clone(&client), &requests, args.num_requests)
+        .run(Arc::clone(&client), &requests, args.num_requests, args.encoding)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
