@@ -51,3 +51,4 @@ tempfile.workspace = true
 toml.workspace = true
 fynd-test-fixtures.workspace = true
 tracing-subscriber.workspace = true
+metrics-util = "0.20"
