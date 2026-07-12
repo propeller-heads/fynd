@@ -426,6 +426,11 @@ where
     {
         info!(self.worker_id, "worker started");
 
+        // Once the derived-data channel closes, its recv() returns Closed instantly on every
+        // call; keeping the arm in the select would turn this loop into a busy spin. The guard
+        // disables the arm so the worker keeps solving with the last derived data it saw.
+        let mut derived_closed = false;
+
         loop {
             tokio::select! {
                 biased; // prioritize events in this order: shutdown, market update, derived data, solve task
@@ -460,7 +465,7 @@ where
                 }
 
                 // Process derived data events (pool depths, token prices)
-                derived_result = derived_event_rx.recv() => {
+                derived_result = derived_event_rx.recv(), if !derived_closed => {
                     match derived_result {
                         Ok(event) => {
                             // Always update tracker with every event
@@ -486,8 +491,8 @@ where
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            warn!(self.worker_id, "derived event receiver closed");
-                            // Continue running - derived data won't update but we can still solve
+                            warn!(self.worker_id, "derived event receiver closed; continuing with last derived data");
+                            derived_closed = true;
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(
@@ -1026,5 +1031,79 @@ mod tests {
             .await
             .expect("worker should shutdown")
             .expect("worker task should not panic");
+    }
+
+    /// Captures log output for assertions, shared between the subscriber and the test.
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_handles_derived_channel_close_once_without_spinning() {
+        // recv() on a closed broadcast channel returns Closed instantly on every call: if the
+        // worker keeps polling that arm, its select loop degenerates into a busy spin that pegs
+        // a core and floods the log (seen live: millions of identical warns per minute, starved
+        // solves, poisoned WebSocket reconnects). The closed channel must be handled exactly
+        // once, and the worker must stay responsive afterwards.
+        let logs = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(market, derived, MockAlgorithm::new(), 0);
+
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+
+        // Close the derived-data channel, then give a spinning loop ample time to spam.
+        drop(derived_tx);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The worker must still be responsive.
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("worker should shutdown")
+            .expect("worker task should not panic");
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let closed_warns = output
+            .matches("derived event receiver closed")
+            .count();
+        assert_eq!(
+            closed_warns, 1,
+            "closed channel must be handled once, not spun on ({closed_warns} warns)"
+        );
     }
 }
