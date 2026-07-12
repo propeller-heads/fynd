@@ -80,7 +80,12 @@ not free); 5-hop is BF's sweet spot; verify wins aren't pool-oscillation artifac
 - [DONE] Implemented `SplitAlgorithm` (`fynd-core/src/algorithm/split.rs`), registered in the
   worker registry and the offline runner. Beats ML and BF on the sample (below).
 - [TODO] Fill in full-10k 3-way numbers (`quality_3way_full.json`).
-- [TODO] (optional) fill-and-spill for shared-pool routes; convex oracle.
+- [DONE] Hardened split into `split_max` (`fynd-core/src/algorithm/split_exp.rs`): finer,
+  incremental allocation with a never-lose portfolio. Beats `split` 704–0 on the full 10k
+  (see "Hardening: `split_max`" below).
+- [DONE] Fill-and-spill for shared-pool routes: implemented and benchmarked, does not help on this
+  market (top paths are almost always pool-disjoint). Kept as the `split_ff` research strategy,
+  excluded from `split_max`. Convex oracle still open.
 
 ## How to run
 
@@ -214,5 +219,55 @@ shared-pool splitting (fill-and-spill) and/or more chunks.
 ≈1.5% of the common set. Likely BF reaching a path the BFS enumeration doesn't (hop-counting
 semantics) or mega-hub timeouts. Net effect is still strongly positive (711 wins). Candidate for a
 follow-up: align hop semantics with BF and add fill-and-spill for shared-pool routes.
+
+## Hardening: `split_max`
+
+`split_max` (`fynd-core/src/algorithm/split_exp.rs`, `SplitStrategy::Portfolio`) sharpens `split` on
+its two documented weaknesses (coarse allocation, pool-disjoint restriction) while never regressing.
+
+What changed:
+
+1. **Incremental water-fill.** AMMs are path-independent in cumulative input (one swap of `x` ==
+   two sequential swaps summing to `x`), so the marginal of the next chunk is probed against a
+   committed pool overlay instead of re-simulating the whole path at the cumulative amount. Cost
+   drops from O(chunks²) to O(chunks), which funds a 256-chunk grid vs the incumbent's 20.
+2. **Two-phase allocation.** Naive fine-graining regresses on large trades: a smaller first chunk
+   can fail the per-chunk gas-activation gate, so a profitable second path never turns on. Fix: pick
+   the active path set at coarse (20-chunk) granularity where activation is correct, then refine the
+   allocation over that fixed set with no gate.
+3. **Never-lose portfolio.** `split_max` returns the best net of {best single path, an
+   incumbent-equivalent coarse split, the refined split}. The coarse floor does exactly the
+   incumbent's single 20-chunk pass, so a tight timeout can't starve it into a single-path fallback
+   while `split` still splits. Enforced by `portfolio_never_loses_to_incumbent_split` and
+   `portfolio_no_loss_under_tight_timeout`.
+
+Full 10k (max_hops 3, timeout 5000 ms, baseline `split`, common-solved set 5,891):
+
+| algorithm  | coverage | wins vs split | losses vs split | net delta vs split | win magnitude               |
+|------------|---------:|--------------:|----------------:|-------------------:|-----------------------------|
+| `split`    |    5,891 |             0 |               0 |                  0 | —                           |
+| `split_max`|    5,891 |           704 |           **0** |          +2.81e24  | mean +1.6 bps, max +129 bps |
+
+Identical coverage, never worse, better on ~12% of solved trades, up to +1.29% on a single trade.
+
+Per-quote solve latency (in-process, single-threaded, `quality` now reports `p50/p95/max_ms`):
+
+| algorithm      | p50     | p95      | max      |
+|----------------|--------:|---------:|---------:|
+| `bellman_ford` | 4.62 ms | 8.05 ms  | 26.81 ms |
+| `split`        | 8.94 ms | 26.49 ms | 77.29 ms |
+| `split_max`    | 9.37 ms | 26.86 ms | 78.37 ms |
+
+`split_max` costs +0.43 ms at p50 (~5%) and ~+1–2% at p95/max over `split`. The tail is dominated by
+candidate enumeration and full-amount simulation, which are shared with `split`; the extra allocation
+passes only add a small fixed cost on trades that actually split. Run all variants with
+`--algorithms split,split_incr,split_ff,split_max`; the report truncates `total_net`, so use
+`analyze_nets.py RESULT.json split` for exact per-trade deltas.
+
+Tried and dropped from the portfolio: **fill-and-spill** (shared-pool splitting, the biggest
+documented gap) net-regressed alone and added ~0 to the portfolio max here — the top candidate paths
+are almost always pool-disjoint, so shared-pool splitting rarely applies. **Wider path cap (8 vs 4)**
+added only sub-bps wins for ~2× the allocation cost. Both remain reachable for research (`split_ff`,
+and the wider cap in git history).
 
 Primary comparison metric is `net_amount_out` (== production `amount_out_net_gas`).

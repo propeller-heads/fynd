@@ -101,6 +101,12 @@ struct AlgorithmReport {
     mean_improvement_bps: f64,
     /// Median improvement over the baseline in basis points.
     median_improvement_bps: f64,
+    /// Median per-solve latency over solved orders, milliseconds.
+    p50_solve_ms: f64,
+    /// 95th-percentile per-solve latency over solved orders, milliseconds.
+    p95_solve_ms: f64,
+    /// Maximum per-solve latency over solved orders, milliseconds.
+    max_solve_ms: f64,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -259,6 +265,22 @@ fn aggregate(
         };
         let median = median(&mut improvements_bps.clone());
 
+        // Per-solve latency over solved orders (microseconds → ms).
+        let mut latencies: Vec<u64> = results
+            .iter()
+            .filter_map(|r| r.as_ref().map(|s| s.solve_micros))
+            .collect();
+        latencies.sort_unstable();
+        let pct = |p: f64| -> f64 {
+            if latencies.is_empty() {
+                return 0.0;
+            }
+            let idx = ((latencies.len() as f64 * p).ceil() as usize)
+                .saturating_sub(1)
+                .min(latencies.len() - 1);
+            latencies[idx] as f64 / 1000.0
+        };
+
         reports.push(AlgorithmReport {
             algorithm: name.clone(),
             coverage,
@@ -267,6 +289,12 @@ fn aggregate(
             losses_vs_baseline: losses,
             mean_improvement_bps: mean,
             median_improvement_bps: median,
+            p50_solve_ms: pct(0.50),
+            p95_solve_ms: pct(0.95),
+            max_solve_ms: latencies
+                .last()
+                .map(|m| *m as f64 / 1000.0)
+                .unwrap_or(0.0),
         });
     }
     reports
@@ -300,12 +328,21 @@ fn print_summary(orders: &[Order], algorithms: &[String], reports: &[AlgorithmRe
     println!("Trades: {num_trades}");
     println!("Algorithms: {}", algorithms.join(", "));
     println!(
-        "\n{:<16} {:>9} {:>14} {:>10} {:>10} {:>14} {:>14}",
-        "algorithm", "coverage", "total_net", "wins", "losses", "mean_bps", "median_bps"
+        "\n{:<16} {:>9} {:>14} {:>8} {:>8} {:>11} {:>11} {:>9} {:>9} {:>9}",
+        "algorithm",
+        "coverage",
+        "total_net",
+        "wins",
+        "losses",
+        "mean_bps",
+        "median_bps",
+        "p50_ms",
+        "p95_ms",
+        "max_ms",
     );
     for r in reports {
         println!(
-            "{:<16} {:>9} {:>14} {:>10} {:>10} {:>14.2} {:>14.2}",
+            "{:<16} {:>9} {:>14} {:>8} {:>8} {:>11.2} {:>11.2} {:>9.2} {:>9.2} {:>9.2}",
             r.algorithm,
             r.coverage,
             truncate_net(&r.total_net_common),
@@ -313,6 +350,9 @@ fn print_summary(orders: &[Order], algorithms: &[String], reports: &[AlgorithmRe
             r.losses_vs_baseline,
             r.mean_improvement_bps,
             r.median_improvement_bps,
+            r.p50_solve_ms,
+            r.p95_solve_ms,
+            r.max_solve_ms,
         );
     }
     println!("\n(wins/losses/bps measured against the baseline on the common-success set; min coverage ~{common})");

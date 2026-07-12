@@ -139,7 +139,8 @@ where
 }
 
 /// Algorithm names runnable by [`run_algorithm`].
-pub const AVAILABLE_ALGORITHMS: &[&str] = &["most_liquid", "bellman_ford", "split"];
+pub const AVAILABLE_ALGORITHMS: &[&str] =
+    &["most_liquid", "bellman_ford", "split", "split_incr", "split_ff", "split_max"];
 
 /// Solves every order with a named algorithm against a frozen market.
 ///
@@ -153,7 +154,9 @@ pub async fn run_algorithm(
     config: crate::AlgorithmConfig,
     orders: &[Order],
 ) -> Result<Vec<Option<OfflineSolution>>, OfflineError> {
-    use crate::algorithm::{BellmanFordAlgorithm, MostLiquidAlgorithm, SplitAlgorithm};
+    use crate::algorithm::{
+        BellmanFordAlgorithm, ExpSplitAlgorithm, MostLiquidAlgorithm, SplitAlgorithm,
+    };
 
     match algo_name {
         "most_liquid" => {
@@ -168,6 +171,21 @@ pub async fn run_algorithm(
         }
         "split" => {
             let algo = SplitAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "split_incr" => {
+            let algo = ExpSplitAlgorithm::refined_disjoint(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "split_ff" => {
+            let algo = ExpSplitAlgorithm::fill_and_spill(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "split_max" => {
+            let algo = ExpSplitAlgorithm::portfolio(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all(market, derived, algo, orders).await)
         }
@@ -189,7 +207,13 @@ where
     let solver = OfflineSolver::new(market.clone(), derived.clone(), algo).await;
     let mut results = Vec::with_capacity(orders.len());
     for order in orders {
-        results.push(solver.solve(order).await.ok());
+        let start = std::time::Instant::now();
+        let mut solution = solver.solve(order).await.ok();
+        let micros = start.elapsed().as_micros() as u64;
+        if let Some(s) = solution.as_mut() {
+            s.solve_micros = micros;
+        }
+        results.push(solution);
     }
     results
 }
@@ -212,6 +236,8 @@ pub struct OfflineSolution {
     pub num_paths: usize,
     /// Distinct protocols used, in first-seen order.
     pub protocols: Vec<String>,
+    /// Wall-clock time to solve this order, in microseconds. Set by the offline runner.
+    pub solve_micros: u64,
 }
 
 impl OfflineSolution {
@@ -243,6 +269,7 @@ impl OfflineSolution {
             num_swaps: route.swaps().len(),
             num_paths,
             protocols,
+            solve_micros: 0,
         }
     }
 }

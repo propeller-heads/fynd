@@ -20,3 +20,8 @@ baseline_*.log
 
 # fynd-gas-audit output artifacts
 tools/fynd-gas-audit/out/
+
+# routing-quality benchmark result artifacts
+*_full.json
+sample_*.json
+result*.json

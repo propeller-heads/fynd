@@ -21,6 +21,7 @@
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod split;
+pub mod split_exp;
 #[allow(dead_code)]
 pub(crate) mod split_primitives;
 
@@ -34,6 +35,7 @@ use std::{collections::HashSet, time::Duration};
 pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use split::SplitAlgorithm;
+pub use split_exp::ExpSplitAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
