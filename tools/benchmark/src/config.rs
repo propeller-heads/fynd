@@ -158,7 +158,7 @@ pub struct BenchmarkStatistics {
     pub overhead: TimingStats,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimingStats {
     pub min: u64,
     pub max: u64,

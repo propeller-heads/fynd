@@ -6,6 +6,7 @@
 mod aggregator;
 mod audit;
 mod benchmark;
+mod capacity_report;
 mod compare;
 mod config;
 mod exporter;
