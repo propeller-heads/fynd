@@ -6,6 +6,7 @@
 mod aggregator;
 mod audit;
 mod benchmark;
+mod capacity;
 mod capacity_report;
 mod compare;
 mod config;
@@ -42,6 +43,8 @@ enum Command {
     Scale(scale::Args),
     /// Compare Fynd quote performance against external DEX aggregators
     Audit(audit::Args),
+    /// Measure the highest sustainable request rate within the latency SLO
+    Capacity(capacity::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -68,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}")),
         Command::Scale(args) => scale::run(args).await,
         Command::Audit(args) => audit::run(args).await,
+        Command::Capacity(args) => capacity::run(args).await,
     }
 }
 
@@ -167,6 +171,23 @@ mod tests {
         assert_eq!(args.timeout_ms, 5000);
         assert_eq!(args.seed, 99);
         assert_eq!(args.output, "out.json");
+    }
+
+    #[test]
+    fn capacity_defaults() {
+        let cli = Cli::try_parse_from(["bin", "capacity"]).unwrap();
+        let Command::Capacity(args) = cli.command else {
+            panic!("expected Capacity");
+        };
+        assert_eq!(args.solver_url, "http://localhost:3000");
+        assert_eq!(args.ladder, "5:5:200");
+        assert_eq!(args.step_duration_secs, 60);
+        assert_eq!(args.warmup_secs, 5);
+        assert_eq!(args.baseline_requests, 50);
+        assert!((args.slo_multiplier - 1.2).abs() < f64::EPSILON);
+        assert_eq!(args.timeout_ms, 5000);
+        assert!(!args.encoding);
+        assert_eq!(args.seed, 42);
     }
 
     #[test]

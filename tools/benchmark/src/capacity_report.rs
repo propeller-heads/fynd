@@ -3,10 +3,6 @@
 //! A ladder step passes while p95 round-trip stays within the policy multiplier of
 //! the unloaded baseline and error rates stay below the policy thresholds.
 
-// TODO(capacity subcommand): remove once capacity.rs consumes these types (Task 4 of the capacity
-// harness plan).
-#![allow(dead_code)]
-
 use serde::Serialize;
 
 use crate::config::TimingStats;

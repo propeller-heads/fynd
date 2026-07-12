@@ -14,11 +14,12 @@ Developer and operational tooling for the Fynd solver.
 
 See [`tools/benchmark/CLAUDE.md`](benchmark/CLAUDE.md) for the full module overview.
 
-Four subcommands via `cargo run -p fynd-benchmark --release --`:
+Subcommands via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver (latency, throughput, histograms)
 - **`compare`** — Compare output quality between two solver instances (amount out diff in bps)
 - **`scale`** — Measure how solver throughput scales with worker thread count (in-process, no external solver needed)
+- **`capacity`** — Step an RPS ladder against a solver until p95 breaches the latency SLO; reports the highest sustainable rate
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
 
 ---
