@@ -37,14 +37,16 @@ use tycho_simulation::{
     tycho_core::{models::token::Token, simulation::protocol_sim::Price},
 };
 
-use super::{Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason};
+use super::{
+    split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
+};
 use crate::{
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
         SharedDerivedDataRef,
     },
-    feed::market_data::{MarketData, StateLabel},
+    feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
@@ -52,6 +54,52 @@ use crate::{
 /// BFS subgraph: adjacency list, token node set, and component ID set.
 type Subgraph =
     (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
+
+/// Everything needed to call `find_single_route` repeatedly without redoing setup.
+///
+/// Built once by `build_context`, which acquires the market and derived locks and snapshots all
+/// relevant states. `find_single_route` uses this snapshot directly — no lock re-acquisition — so
+/// all route evaluations within one order see a consistent view of the same block's pool states.
+pub(crate) struct BellmanFordContext {
+    pub(crate) token_in_node: NodeIndex,
+    pub(crate) token_out_node: NodeIndex,
+    pub(crate) adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    pub(crate) token_map: HashMap<NodeIndex, Token>,
+    pub(crate) market_data: MarketState,
+    pub(crate) gas_price_wei: Option<BigUint>,
+    pub(crate) token_prices: Option<TokenGasPrices>,
+    pub(crate) spot_prices: Option<SpotPrices>,
+    pub(crate) node_address: HashMap<NodeIndex, Address>,
+    pub(crate) max_idx: usize,
+    pub(crate) scoring: RouteScoringMode,
+}
+
+/// Controls how `find_single_route` ranks candidate routes after simulation.
+pub(crate) enum RouteScoringMode {
+    /// Rank by gross output (ignore gas cost). Used when the caller accounts for gas externally.
+    GrossOutput,
+    /// Rank by net output (gross output minus gas cost in output token units). Default.
+    NetOutput,
+}
+
+/// Per-call overrides for `find_single_route`.
+#[derive(Default)]
+pub(crate) struct FindRouteOptions {
+    /// Pool state overrides: degrade or zero-gas specific pools without modifying market data.
+    pub(crate) overrides: MarketOverrides,
+}
+
+/// Output of the SPFA relaxation pass: per-node best-path arrays.
+struct SPFAResult {
+    /// Best gross output amount reachable at each node index.
+    amount: Vec<BigUint>,
+    /// The (predecessor node, pool) that last improved each node's amount.
+    predecessor: Vec<Option<(NodeIndex, ComponentId)>>,
+    /// Gas consumed by the edge that last improved each node's amount.
+    edge_gas: Vec<BigUint>,
+    /// Cumulative spot-price product from token_in to each node (for gas fallback).
+    spot_product: Vec<f64>,
+}
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
 ///
@@ -65,14 +113,433 @@ pub struct BellmanFordAlgorithm {
     connector_tokens: Option<HashSet<Address>>,
 }
 
+impl Default for BellmanFordAlgorithm {
+    fn default() -> Self {
+        Self::with_config(AlgorithmConfig::default())
+    }
+}
+
 impl BellmanFordAlgorithm {
-    pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
-        Ok(Self {
+    pub(crate) fn with_config(config: AlgorithmConfig) -> Self {
+        Self {
             max_hops: config.max_hops(),
             timeout: config.timeout(),
             gas_aware: config.gas_aware(),
             connector_tokens: config.connector_tokens().cloned(),
+        }
+    }
+
+    /// One-time async setup for repeated `find_single_route` calls.
+    ///
+    /// Validates the order, extracts the subgraph, acquires the market and derived data
+    /// locks exactly once, and snapshots all state into a [`BellmanFordContext`]. All
+    /// subsequent `find_single_route` calls on the returned context use the same block's
+    /// pool states.
+    pub(crate) async fn build_context(
+        &self,
+        graph: &StableDiGraph<()>,
+        market: MarketData,
+        label: Option<StateLabel>,
+        derived: Option<SharedDerivedDataRef>,
+        order: &Order,
+    ) -> Result<BellmanFordContext, AlgorithmError> {
+        if !order.is_sell() {
+            return Err(AlgorithmError::ExactOutNotSupported);
+        }
+
+        let (token_prices, spot_prices) = if let Some(ref d) = derived {
+            let guard = d.read().await;
+            (guard.token_prices().cloned(), guard.spot_prices().cloned())
+        } else {
+            (None, None)
+        };
+
+        let token_in_node = graph
+            .node_indices()
+            .find(|&n| &graph[n] == order.token_in())
+            .ok_or(AlgorithmError::NoPath {
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::SourceTokenNotInGraph,
+            })?;
+        let token_out_node = graph
+            .node_indices()
+            .find(|&n| &graph[n] == order.token_out())
+            .ok_or(AlgorithmError::NoPath {
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::DestinationTokenNotInGraph,
+            })?;
+
+        if token_in_node == token_out_node {
+            return Err(AlgorithmError::NoPath {
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::NoGraphPath,
+            });
+        }
+
+        // BFS from token_in up to max_hops, building adjacency list and component set.
+        let (adj, token_nodes, component_ids) =
+            Self::get_subgraph(graph, token_in_node, self.max_hops, order)?;
+
+        let market_view = match label.as_ref() {
+            Some(l) => market
+                .read_labeled(l)
+                .await
+                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
+            None => market.read().await,
+        };
+        let token_map: HashMap<NodeIndex, Token> = token_nodes
+            .iter()
+            .filter_map(|&node| {
+                market_view
+                    .get_token(&graph[node])
+                    .cloned()
+                    .map(|t| (node, t))
+            })
+            .collect();
+        let market_data = market_view.extract_subset_with_overlay(&component_ids);
+        let gas_price_wei = market_data
+            .gas_price()
+            .map(|gp| gp.effective_gas_price().clone());
+        drop(market_view);
+
+        let node_address: HashMap<NodeIndex, Address> = token_map
+            .iter()
+            .map(|(&node, token)| (node, token.address.clone()))
+            .collect();
+
+        let max_idx = graph
+            .node_indices()
+            .map(|n| n.index())
+            .max()
+            .unwrap_or(0) +
+            1;
+
+        let scoring = if self.gas_aware {
+            RouteScoringMode::NetOutput
+        } else {
+            RouteScoringMode::GrossOutput
+        };
+
+        debug!(
+            edges = adj
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
+            tokens = token_map.len(),
+            "subgraph extracted"
+        );
+
+        Ok(BellmanFordContext {
+            token_in_node,
+            token_out_node,
+            adj,
+            token_map,
+            market_data,
+            gas_price_wei,
+            token_prices,
+            spot_prices,
+            node_address,
+            max_idx,
+            scoring,
         })
+    }
+
+    /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
+    ///
+    /// This is the repeatable, synchronous solve phase. Call it multiple times with different
+    /// `opts.overrides` to evaluate alternative pool states without redoing the setup in `ctx`.
+    /// Overrides shadow the corresponding pool in `ctx.market_data` for both relaxation and route
+    /// construction.
+    pub(crate) fn find_single_route(
+        &self,
+        ctx: &BellmanFordContext,
+        order: &Order,
+        opts: FindRouteOptions,
+    ) -> Result<RouteResult, AlgorithmError> {
+        let start = Instant::now();
+
+        let spfa = self.run_spfa(ctx, order, &opts.overrides, start);
+
+        let out_idx = ctx.token_out_node.index();
+        if spfa.amount[out_idx].is_zero() {
+            return Err(AlgorithmError::NoPath {
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::NoGraphPath,
+            });
+        }
+
+        // Reconstruct path and build route directly from stored distances/gas
+        // (no re-simulation needed since forbid-revisits guarantees relaxation
+        // amounts match sequential execution).
+        let path_edges =
+            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &spfa.predecessor)?;
+
+        let route =
+            Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)?;
+
+        let final_amount_out = spfa.amount[out_idx].clone();
+        let gas_price = ctx
+            .gas_price_wei
+            .clone()
+            .unwrap_or_default();
+
+        let net_amount_out = Self::compute_net_amount_out(
+            &final_amount_out,
+            &route,
+            &gas_price,
+            ctx.token_prices.as_ref(),
+            &spfa.spot_product,
+            &ctx.node_address,
+            ctx.token_in_node,
+        )?;
+
+        let result = RouteResult::new(route, net_amount_out, gas_price);
+
+        let solve_time_ms = start.elapsed().as_millis() as u64;
+        debug!(
+            solve_time_ms,
+            hops = result.route().swaps().len(),
+            amount_in = %order.amount(),
+            amount_out = %final_amount_out,
+            net_amount_out = %result.net_amount_out(),
+            "bellman_ford route found"
+        );
+
+        Ok(result)
+    }
+
+    /// Runs SPFA (Shortest Path Faster Algorithm) relaxation over the subgraph and returns per-node
+    /// best-path arrays.
+    ///
+    /// Simulation failures are silently skipped (the edge is dropped). Returns the arrays
+    /// even if the destination was not reached — callers check `amount[out_idx].is_zero()`.
+    fn run_spfa(
+        &self,
+        ctx: &BellmanFordContext,
+        order: &Order,
+        overrides: &MarketOverrides,
+        start: Instant,
+    ) -> SPFAResult {
+        // amount[node] = best gross output reachable at that node.
+        // edge_gas[node] = gas for the edge that last improved amount[node].
+        // cumul_gas[node] = total gas along the best path to this node.
+        let mut amount: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
+        let mut predecessor: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; ctx.max_idx];
+        let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
+        let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
+
+        amount[ctx.token_in_node.index()] = order.amount().clone();
+
+        // Track cumulative spot price product from token_in for fallback gas estimation.
+        // spot_product[v] = product of spot prices along the path from token_in to v.
+        let mut spot_product: Vec<f64> = vec![0.0; ctx.max_idx];
+        spot_product[ctx.token_in_node.index()] = 1.0;
+
+        let gas_aware = matches!(ctx.scoring, RouteScoringMode::NetOutput) &&
+            ctx.gas_price_wei.is_some() &&
+            ctx.token_prices.is_some();
+        if !gas_aware && matches!(ctx.scoring, RouteScoringMode::NetOutput) {
+            debug!("gas-aware comparison disabled (missing gas_price or token_prices)");
+        } else if matches!(ctx.scoring, RouteScoringMode::GrossOutput) {
+            debug!("gas-aware comparison disabled by config");
+        }
+
+        let mut active_nodes: Vec<NodeIndex> = vec![ctx.token_in_node];
+
+        for round in 0..self.max_hops {
+            if start.elapsed() >= self.timeout {
+                debug!(round, "timeout during relaxation");
+                break;
+            }
+            if active_nodes.is_empty() {
+                debug!(round, "no active nodes, stopping early");
+                break;
+            }
+
+            let mut next_active: HashSet<NodeIndex> = HashSet::new();
+
+            for &u in &active_nodes {
+                let u_idx = u.index();
+                if amount[u_idx].is_zero() {
+                    continue;
+                }
+
+                let Some(token_u) = ctx.token_map.get(&u) else { continue };
+                let Some(edges) = ctx.adj.get(&u) else { continue };
+
+                for (v, component_id) in edges {
+                    let v_idx = v.index();
+
+                    // Single predecessor walk: skip if target token or pool already in path
+                    if Self::path_has_conflict(u, *v, component_id, &predecessor) {
+                        continue;
+                    }
+
+                    // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
+                    // always permitted regardless of the allowlist.
+                    if let (Some(tokens), Some(v_addr)) =
+                        (&self.connector_tokens, ctx.node_address.get(v))
+                    {
+                        if v_addr != order.token_in() &&
+                            v_addr != order.token_out() &&
+                            !tokens.contains(v_addr)
+                        {
+                            continue;
+                        }
+                    }
+
+                    let Some(token_v) = ctx.token_map.get(v) else { continue };
+
+                    // Overrides market data if passed in options
+                    let sim: &dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim =
+                        if let Some(s) = overrides.get(component_id) {
+                            s
+                        } else if let Some(s) = ctx.market_data.get_simulation_state(component_id) {
+                            s
+                        } else {
+                            continue;
+                        };
+
+                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            trace!(
+                                component_id,
+                                error = %e,
+                                "simulation failed, skipping edge"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
+
+                    // Compute spot price product for the candidate path (used for
+                    // gas-aware comparison and for final net amount calculation).
+                    let candidate_spot = Self::compute_edge_spot_product(
+                        spot_product[u_idx],
+                        component_id,
+                        ctx.node_address.get(&u),
+                        ctx.node_address.get(v),
+                        ctx.spot_prices.as_ref(),
+                    );
+
+                    // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
+                    let is_better = if gas_aware {
+                        let v_price = Self::resolve_token_price(
+                            ctx.node_address.get(v),
+                            ctx.token_prices.as_ref(),
+                            candidate_spot,
+                            ctx.node_address.get(&ctx.token_in_node),
+                        );
+                        let net_candidate = Self::gas_adjusted_amount(
+                            &result.amount,
+                            &candidate_cumul_gas,
+                            ctx.gas_price_wei.as_ref().unwrap(),
+                            v_price.as_ref(),
+                        );
+                        let net_existing = Self::gas_adjusted_amount(
+                            &amount[v_idx],
+                            &cumul_gas[v_idx],
+                            ctx.gas_price_wei.as_ref().unwrap(),
+                            v_price.as_ref(),
+                        );
+                        net_candidate > net_existing
+                    } else {
+                        result.amount > amount[v_idx]
+                    };
+
+                    if is_better {
+                        spot_product[v_idx] = candidate_spot;
+                        amount[v_idx] = result.amount;
+                        predecessor[v_idx] = Some((u, component_id.clone()));
+                        edge_gas[v_idx] = result.gas;
+                        cumul_gas[v_idx] = candidate_cumul_gas;
+                        next_active.insert(*v);
+                    }
+                }
+            }
+
+            active_nodes = next_active.into_iter().collect();
+            // Deterministic order: HashSet iteration is random per process.
+            // This pins SPFA to a fixed propagation order. The chosen order
+            // may not yield the optimal route (see module docs), but the
+            // previous random order was statistically no better.
+            active_nodes.sort_unstable();
+        }
+
+        SPFAResult { amount, predecessor, edge_gas, spot_product }
+    }
+
+    /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
+    fn build_route(
+        ctx: &BellmanFordContext,
+        path_edges: &[(NodeIndex, NodeIndex, ComponentId)],
+        amount: &[BigUint],
+        edge_gas: &[BigUint],
+        overrides: &MarketOverrides,
+    ) -> Result<Route, AlgorithmError> {
+        let mut swaps = Vec::with_capacity(path_edges.len());
+        let mut tokens: HashMap<Address, Token> = HashMap::new();
+
+        for (from_node, to_node, component_id) in path_edges {
+            let token_in = ctx
+                .token_map
+                .get(from_node)
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "token",
+                    id: Some(format!("{:?}", from_node)),
+                })?;
+            let token_out = ctx
+                .token_map
+                .get(to_node)
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "token",
+                    id: Some(format!("{:?}", to_node)),
+                })?;
+            let component = ctx
+                .market_data
+                .get_component(component_id)
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "component",
+                    id: Some(component_id.clone()),
+                })?;
+            // Use the override's sim state if available so the route reflects overridden pools.
+            let sim_state = overrides
+                .get(component_id)
+                .or_else(|| {
+                    ctx.market_data
+                        .get_simulation_state(component_id)
+                })
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "simulation state",
+                    id: Some(component_id.clone()),
+                })?;
+
+            swaps.push(Swap::new(
+                component_id.clone(),
+                component.protocol_system.clone(),
+                token_in.address.clone(),
+                token_out.address.clone(),
+                amount[from_node.index()].clone(),
+                amount[to_node.index()].clone(),
+                edge_gas[to_node.index()].clone(),
+                component.clone(),
+                sim_state.clone_box(),
+            ));
+            tokens
+                .entry(token_in.address.clone())
+                .or_insert_with(|| token_in.clone());
+            tokens
+                .entry(token_out.address.clone())
+                .or_insert_with(|| token_out.clone());
+        }
+
+        Ok(Route::new(swaps, tokens))
     }
 
     /// Computes gas-adjusted net amount: gross_amount - gas_cost_in_token.
@@ -159,7 +626,7 @@ impl BellmanFordAlgorithm {
 
     /// Checks whether the target node or pool conflicts with the existing path to `from`.
     /// Walks the predecessor chain once, checking both conditions simultaneously.
-    fn path_has_conflict(
+    pub(crate) fn path_has_conflict(
         from: NodeIndex,
         target_node: NodeIndex,
         target_pool: &ComponentId,
@@ -184,7 +651,7 @@ impl BellmanFordAlgorithm {
 
     /// Reconstructs the path from token_out back to token_in by walking the predecessor
     /// array.
-    fn reconstruct_path(
+    pub(crate) fn reconstruct_path(
         token_out: NodeIndex,
         token_in: NodeIndex,
         predecessor: &[Option<(NodeIndex, ComponentId)>],
@@ -223,7 +690,7 @@ impl BellmanFordAlgorithm {
     ///
     /// Returns `(adjacency_list, token_nodes, component_ids)` or `NoPath` if the
     /// subgraph is empty (no outgoing edges from the source).
-    fn get_subgraph(
+    pub(crate) fn get_subgraph(
         graph: &StableDiGraph<()>,
         token_in_node: NodeIndex,
         max_hops: usize,
@@ -232,14 +699,14 @@ impl BellmanFordAlgorithm {
         let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
         let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
+        let mut visited_nodes = HashSet::new();
+        let mut queued_nodes = VecDeque::new();
 
-        visited.insert(token_in_node);
+        visited_nodes.insert(token_in_node);
         token_nodes.insert(token_in_node);
-        queue.push_back((token_in_node, 0usize));
+        queued_nodes.push_back((token_in_node, 0usize));
 
-        while let Some((node, depth)) = queue.pop_front() {
+        while let Some((node, depth)) = queued_nodes.pop_front() {
             if depth >= max_hops {
                 continue;
             }
@@ -253,8 +720,8 @@ impl BellmanFordAlgorithm {
                 component_ids.insert(cid);
                 token_nodes.insert(target);
 
-                if visited.insert(target) {
-                    queue.push_back((target, depth + 1));
+                if visited_nodes.insert(target) {
+                    queued_nodes.push_back((target, depth + 1));
                 }
             }
         }
@@ -284,16 +751,16 @@ impl BellmanFordAlgorithm {
         spot_product: &[f64],
         node_address: &HashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
-    ) -> BigInt {
-        let Some(last_swap) = route.swaps().last() else {
-            return BigInt::from(amount_out.clone());
-        };
+    ) -> Result<BigInt, AlgorithmError> {
+        let last_swap = route.swaps().last().ok_or_else(|| {
+            AlgorithmError::Other("compute_net_amount_out called with empty route".to_string())
+        })?;
 
         let total_gas = route.total_gas();
 
         if gas_price.is_zero() {
             warn!("missing gas price, returning gross amount_out");
-            return BigInt::from(amount_out.clone());
+            return Ok(BigInt::from(amount_out.clone()));
         }
 
         let gas_cost_wei = &total_gas * gas_price;
@@ -313,7 +780,7 @@ impl BellmanFordAlgorithm {
             node_address.get(&token_in_node),
         );
 
-        match output_price {
+        Ok(match output_price {
             Some(price) if !price.denominator.is_zero() => {
                 let gas_cost = &gas_cost_wei * &price.numerator / &price.denominator;
                 BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
@@ -322,7 +789,7 @@ impl BellmanFordAlgorithm {
                 warn!("no gas price for output token, returning gross amount_out");
                 BigInt::from(amount_out.clone())
             }
-        }
+        })
     }
 }
 
@@ -343,323 +810,10 @@ impl Algorithm for BellmanFordAlgorithm {
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
-        let start = Instant::now();
-
-        if !order.is_sell() {
-            return Err(AlgorithmError::ExactOutNotSupported);
-        }
-
-        let (token_prices, spot_prices) = if let Some(ref derived) = derived {
-            let guard = derived.read().await;
-            (guard.token_prices().cloned(), guard.spot_prices().cloned())
-        } else {
-            (None, None)
-        };
-
-        let token_in_node = graph
-            .node_indices()
-            .find(|&n| &graph[n] == order.token_in())
-            .ok_or(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::SourceTokenNotInGraph,
-            })?;
-        let token_out_node = graph
-            .node_indices()
-            .find(|&n| &graph[n] == order.token_out())
-            .ok_or(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::DestinationTokenNotInGraph,
-            })?;
-
-        // BFS from token_in up to max_hops, building adjacency list and component set.
-        let (adj, token_nodes, component_ids) =
-            Self::get_subgraph(graph, token_in_node, self.max_hops, order)?;
-
-        // Acquire read lock only for market data extraction, then release.
-        let (token_map, market_subset) = {
-            let market = match label.as_ref() {
-                Some(l) => market
-                    .read_labeled(l)
-                    .await
-                    .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-                None => market.read().await,
-            };
-
-            let token_map: HashMap<NodeIndex, Token> = token_nodes
-                .iter()
-                .filter_map(|&node| {
-                    market
-                        .get_token(&graph[node])
-                        .cloned()
-                        .map(|t| (node, t))
-                })
-                .collect();
-
-            let market_subset = market.extract_subset_with_overlay(&component_ids);
-
-            (token_map, market_subset)
-        };
-
-        debug!(
-            edges = adj
-                .values()
-                .map(Vec::len)
-                .sum::<usize>(),
-            tokens = token_map.len(),
-            "subgraph extracted"
-        );
-
-        // SPFA relaxation with forbid-revisits.
-        // amount[node] = best gross output amount reachable at node.
-        // edge_gas[node] = gas estimate for the edge that last improved amount[node].
-        // cumul_gas[node] = total gas units along the best path to this node.
-        let max_idx = graph
-            .node_indices()
-            .map(|n| n.index())
-            .max()
-            .unwrap_or(0) +
-            1;
-
-        let mut amount: Vec<BigUint> = vec![BigUint::ZERO; max_idx];
-        let mut predecessor: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; max_idx];
-        let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; max_idx];
-        let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; max_idx];
-
-        amount[token_in_node.index()] = order.amount().clone();
-
-        // Gas-aware relaxation: pre-compute gas price and build address map for lookups.
-        let gas_price_wei = market_subset
-            .gas_price()
-            .map(|gp| gp.effective_gas_price().clone());
-
-        // Build node->address map for token price lookups during relaxation.
-        let node_address: HashMap<NodeIndex, Address> = token_map
-            .iter()
-            .map(|(&node, token)| (node, token.address.clone()))
-            .collect();
-
-        // Track cumulative spot price product from token_in for fallback gas estimation.
-        // spot_product[v] = product of spot prices along the path from token_in to v.
-        let mut spot_product: Vec<f64> = vec![0.0; max_idx];
-        spot_product[token_in_node.index()] = 1.0;
-
-        let gas_aware = self.gas_aware && gas_price_wei.is_some() && token_prices.is_some();
-        if !gas_aware && self.gas_aware {
-            debug!("gas-aware comparison disabled (missing gas_price or token_prices)");
-        } else if !self.gas_aware {
-            debug!("gas-aware comparison disabled by config");
-        }
-
-        let mut active_nodes: Vec<NodeIndex> = vec![token_in_node];
-
-        for round in 0..self.max_hops {
-            if start.elapsed() >= self.timeout {
-                debug!(round, "timeout during relaxation");
-                break;
-            }
-            if active_nodes.is_empty() {
-                debug!(round, "no active nodes, stopping early");
-                break;
-            }
-
-            let mut next_active: HashSet<NodeIndex> = HashSet::new();
-
-            for &u in &active_nodes {
-                let u_idx = u.index();
-                if amount[u_idx].is_zero() {
-                    continue;
-                }
-
-                let Some(token_u) = token_map.get(&u) else { continue };
-                let Some(edges) = adj.get(&u) else { continue };
-
-                for (v, component_id) in edges {
-                    let v_idx = v.index();
-
-                    // Single predecessor walk: skip if target token or pool already in path
-                    if Self::path_has_conflict(u, *v, component_id, &predecessor) {
-                        continue;
-                    }
-
-                    // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
-                    // always permitted regardless of the allowlist.
-                    if let (Some(tokens), Some(v_addr)) =
-                        (&self.connector_tokens, node_address.get(v))
-                    {
-                        if v_addr != order.token_in() &&
-                            v_addr != order.token_out() &&
-                            !tokens.contains(v_addr)
-                        {
-                            continue;
-                        }
-                    }
-
-                    let Some(token_v) = token_map.get(v) else { continue };
-                    let Some(sim) = market_subset.get_simulation_state(component_id) else {
-                        continue;
-                    };
-
-                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            trace!(
-                                component_id,
-                                error = %e,
-                                "simulation failed, skipping edge"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
-
-                    // Compute spot price product for the candidate path (used for
-                    // gas-aware comparison and for final net amount calculation).
-                    let candidate_spot = Self::compute_edge_spot_product(
-                        spot_product[u_idx],
-                        component_id,
-                        node_address.get(&u),
-                        node_address.get(v),
-                        spot_prices.as_ref(),
-                    );
-
-                    // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
-                    let is_better = if gas_aware {
-                        let v_price = Self::resolve_token_price(
-                            node_address.get(v),
-                            token_prices.as_ref(),
-                            candidate_spot,
-                            node_address.get(&token_in_node),
-                        );
-
-                        let net_candidate = Self::gas_adjusted_amount(
-                            &result.amount,
-                            &candidate_cumul_gas,
-                            gas_price_wei.as_ref().unwrap(),
-                            v_price.as_ref(),
-                        );
-                        let net_existing = Self::gas_adjusted_amount(
-                            &amount[v_idx],
-                            &cumul_gas[v_idx],
-                            gas_price_wei.as_ref().unwrap(),
-                            v_price.as_ref(),
-                        );
-                        net_candidate > net_existing
-                    } else {
-                        result.amount > amount[v_idx]
-                    };
-
-                    if is_better {
-                        spot_product[v_idx] = candidate_spot;
-                        amount[v_idx] = result.amount;
-                        predecessor[v_idx] = Some((u, component_id.clone()));
-                        edge_gas[v_idx] = result.gas;
-                        cumul_gas[v_idx] = candidate_cumul_gas;
-                        next_active.insert(*v);
-                    }
-                }
-            }
-
-            active_nodes = next_active.into_iter().collect();
-            // Deterministic order: HashSet iteration is random per process.
-            // This pins SPFA to a fixed propagation order. The chosen order
-            // may not yield the optimal route (see module docs), but the
-            // previous random order was statistically no better.
-            active_nodes.sort_unstable();
-        }
-
-        // Check if destination was reached
-        let out_idx = token_out_node.index();
-        if amount[out_idx].is_zero() {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
-        }
-
-        // Reconstruct path and build route directly from stored distances/gas
-        // (no re-simulation needed since forbid-revisits guarantees relaxation
-        // amounts match sequential execution).
-        let path_edges = Self::reconstruct_path(token_out_node, token_in_node, &predecessor)?;
-
-        let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
-        for (from_node, to_node, component_id) in &path_edges {
-            let token_in = token_map
-                .get(from_node)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "token",
-                    id: Some(format!("{:?}", from_node)),
-                })?;
-            let token_out = token_map
-                .get(to_node)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "token",
-                    id: Some(format!("{:?}", to_node)),
-                })?;
-            let component = market_subset
-                .get_component(component_id)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "component",
-                    id: Some(component_id.clone()),
-                })?;
-            let sim_state = market_subset
-                .get_simulation_state(component_id)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "simulation state",
-                    id: Some(component_id.clone()),
-                })?;
-
-            swaps.push(Swap::new(
-                component_id.clone(),
-                component.protocol_system.clone(),
-                token_in.address.clone(),
-                token_out.address.clone(),
-                amount[from_node.index()].clone(),
-                amount[to_node.index()].clone(),
-                edge_gas[to_node.index()].clone(),
-                component.clone(),
-                sim_state.clone_box(),
-            ));
-            tokens
-                .entry(token_in.address.clone())
-                .or_insert_with(|| token_in.clone());
-            tokens
-                .entry(token_out.address.clone())
-                .or_insert_with(|| token_out.clone());
-        }
-
-        let route = Route::new(swaps, tokens);
-        let final_amount_out = amount[out_idx].clone();
-
-        let gas_price = gas_price_wei.unwrap_or_default();
-
-        let net_amount_out = Self::compute_net_amount_out(
-            &final_amount_out,
-            &route,
-            &gas_price,
-            token_prices.as_ref(),
-            &spot_product,
-            &node_address,
-            token_in_node,
-        );
-
-        let result = RouteResult::new(route, net_amount_out, gas_price);
-
-        let solve_time_ms = start.elapsed().as_millis() as u64;
-        debug!(
-            solve_time_ms,
-            hops = result.route().swaps().len(),
-            amount_in = %order.amount(),
-            amount_out = %final_amount_out,
-            net_amount_out = %result.net_amount_out(),
-            "bellman_ford route found"
-        );
-
-        Ok(result)
+        let ctx = self
+            .build_context(graph, market, label, derived, order)
+            .await?;
+        self.find_single_route(&ctx, order, FindRouteOptions::default())
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -750,7 +904,6 @@ mod tests {
         BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, max_hops, Duration::from_millis(timeout_ms), None).unwrap(),
         )
-        .unwrap()
     }
 
     // ==================== Unit Tests ====================
@@ -1338,7 +1491,6 @@ mod tests {
                 .unwrap()
                 .with_connector_tokens(connector_tokens),
         )
-        .unwrap()
     }
 
     #[tokio::test]
@@ -1474,5 +1626,74 @@ mod tests {
             &"pool_c".into(),
             &pred
         ));
+    }
+
+    #[tokio::test]
+    async fn test_find_single_route_with_state_overrides() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let ctx = algo
+            .build_context(manager.graph(), market, None, None, &ord)
+            .await
+            .unwrap();
+
+        // Without overrides: 1000 * 2.0 = 2000
+        let normal = algo
+            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .unwrap();
+        assert_eq!(normal.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
+
+        // Override pool_ab with a degraded sim (multiplier 1.0): 1000 * 1.0 = 1000
+        let opts = FindRouteOptions {
+            overrides: MarketOverrides::empty()
+                .with_override("pool_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
+        };
+        let overridden = algo
+            .find_single_route(&ctx, &ord, opts)
+            .unwrap();
+        assert_eq!(overridden.route().swaps()[0].amount_out(), &BigUint::from(1000u64));
+
+        assert!(
+            overridden.route().swaps()[0].amount_out() < normal.route().swaps()[0].amount_out()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_find_route_options_default() {
+        use super::super::split_primitives::MarketOverrides;
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let ctx = algo
+            .build_context(manager.graph(), market, None, None, &ord)
+            .await
+            .unwrap();
+
+        let with_default = algo
+            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .unwrap();
+        let with_empty = algo
+            .find_single_route(&ctx, &ord, FindRouteOptions { overrides: MarketOverrides::empty() })
+            .unwrap();
+
+        assert_eq!(
+            with_default.route().swaps()[0].amount_out(),
+            with_empty.route().swaps()[0].amount_out()
+        );
+        assert_eq!(with_default.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
     }
 }

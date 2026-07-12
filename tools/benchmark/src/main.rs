@@ -9,6 +9,7 @@ mod config;
 mod exporter;
 mod quality;
 mod requests;
+mod routes;
 mod runner;
 mod scale;
 
@@ -39,6 +40,8 @@ enum Command {
     Scale(scale::Args),
     /// Compare routing-algorithm output quality offline on a captured market snapshot
     Quality(quality::Args),
+    /// Dump solved routes for selected trades per algorithm (route-visualization schema)
+    Routes(routes::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -65,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}")),
         Command::Scale(args) => scale::run(args).await,
         Command::Quality(args) => quality::run(args).await,
+        Command::Routes(args) => routes::run(args).await,
     }
 }
 

@@ -25,3 +25,6 @@ tools/fynd-gas-audit/out/
 *_full.json
 sample_*.json
 result*.json
+
+# generated route-viz artifacts
+routes_out/

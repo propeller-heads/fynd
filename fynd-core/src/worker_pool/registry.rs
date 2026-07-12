@@ -202,10 +202,7 @@ fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> 
 
 /// Spawns workers for the BellmanFord algorithm.
 fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
-    let factory = |config: AlgorithmConfig| {
-        BellmanFordAlgorithm::with_config(config)
-            .expect("invalid worker configuration for BellmanFordAlgorithm")
-    };
+    let factory = |config: AlgorithmConfig| BellmanFordAlgorithm::with_config(config);
     spawn_workers_generic(params, &factory)
 }
 

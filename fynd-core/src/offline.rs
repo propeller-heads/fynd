@@ -23,7 +23,7 @@ use crate::{
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        market_data::{MarketData, MarketSnapshot, MarketState},
+        market_data::{MarketData, MarketDataView, MarketSnapshot, MarketState},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::quote::Order,
@@ -136,11 +136,27 @@ where
             .await?;
         Ok(OfflineSolution::from_result(&result, order))
     }
+
+    /// Solves a single order and returns the full route result (for route dumps / visualization).
+    pub async fn solve_route(
+        &self,
+        order: &Order,
+    ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
+        self.algorithm
+            .find_best_route(
+                self.graph_manager.graph(),
+                self.market.clone(),
+                None,
+                Some(self.derived.clone()),
+                order,
+            )
+            .await
+    }
 }
 
 /// Algorithm names runnable by [`run_algorithm`].
 pub const AVAILABLE_ALGORITHMS: &[&str] =
-    &["most_liquid", "bellman_ford", "split", "split_incr", "split_ff", "split_max"];
+    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split", "split_incr", "split_ff"];
 
 /// Solves every order with a named algorithm against a frozen market.
 ///
@@ -155,7 +171,8 @@ pub async fn run_algorithm(
     orders: &[Order],
 ) -> Result<Vec<Option<OfflineSolution>>, OfflineError> {
     use crate::algorithm::{
-        BellmanFordAlgorithm, ExpSplitAlgorithm, MostLiquidAlgorithm, SplitAlgorithm,
+        path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm,
     };
 
     match algo_name {
@@ -165,8 +182,11 @@ pub async fn run_algorithm(
             Ok(solve_all(market, derived, algo, orders).await)
         }
         "bellman_ford" => {
-            let algo = BellmanFordAlgorithm::with_config(config)
-                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            let algo = BellmanFordAlgorithm::with_config(config);
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "path_frank_wolfe" => {
+            let algo = PathFrankWolfeAlgorithm::new(config, PathFrankWolfeConfig::default());
             Ok(solve_all(market, derived, algo, orders).await)
         }
         "split" => {
@@ -181,11 +201,6 @@ pub async fn run_algorithm(
         }
         "split_ff" => {
             let algo = ExpSplitAlgorithm::fill_and_spill(config)
-                .map_err(|e| OfflineError::Computation(e.to_string()))?;
-            Ok(solve_all(market, derived, algo, orders).await)
-        }
-        "split_max" => {
-            let algo = ExpSplitAlgorithm::portfolio(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all(market, derived, algo, orders).await)
         }
@@ -216,6 +231,196 @@ where
         results.push(solution);
     }
     results
+}
+
+/// A token node in a [`NormalizedRoute`], matching the route-visualization normalized schema.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NormalizedToken {
+    /// Lowercase hex address, used as the unique node id.
+    pub id: String,
+    /// Token symbol for display.
+    pub symbol: String,
+    /// Token decimals for display.
+    pub decimals: u8,
+}
+
+/// A swap edge in a [`NormalizedRoute`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NormalizedSwap {
+    /// Source token id (address).
+    pub source: String,
+    /// Target token id (address).
+    pub target: String,
+    /// Raw input amount (decimal string).
+    pub amount_in: String,
+    /// Raw output amount (decimal string).
+    pub amount_out: String,
+    /// Protocol system name.
+    pub protocol: String,
+    /// Pool / component id.
+    pub pool: String,
+}
+
+/// One solved route in the route-visualization normalized schema (see the `fynd` route-viz skill).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NormalizedRoute {
+    /// Human title for the chart.
+    pub title: String,
+    /// Chain name.
+    pub chain: String,
+    /// Source (input) token id.
+    pub source: String,
+    /// Sink (output) token id.
+    pub sink: String,
+    /// All token nodes referenced by the swaps.
+    pub tokens: Vec<NormalizedToken>,
+    /// The route's swaps as flow edges.
+    pub swaps: Vec<NormalizedSwap>,
+}
+
+/// Solves every order with a named algorithm and returns each route in the normalized schema.
+///
+/// Mirrors [`run_algorithm`] but returns full routes instead of quality metrics, so the benchmark
+/// can dump routes for the route-visualization skill. `None` where the algorithm found no route.
+pub async fn run_algorithm_routes(
+    market: &MarketData,
+    derived: &SharedDerivedDataRef,
+    algo_name: &str,
+    config: crate::AlgorithmConfig,
+    orders: &[Order],
+    title_prefix: &str,
+) -> Result<Vec<Option<NormalizedRoute>>, OfflineError> {
+    use crate::algorithm::{
+        path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm,
+    };
+
+    match algo_name {
+        "most_liquid" => {
+            let algo = MostLiquidAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "bellman_ford" => {
+            let algo = BellmanFordAlgorithm::with_config(config);
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "path_frank_wolfe" => {
+            let algo = PathFrankWolfeAlgorithm::new(config, PathFrankWolfeConfig::default());
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "split" => {
+            let algo = SplitAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "split_incr" => {
+            let algo = ExpSplitAlgorithm::refined_disjoint(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "split_ff" => {
+            let algo = ExpSplitAlgorithm::fill_and_spill(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        other => Err(OfflineError::Computation(format!("unknown algorithm: {other}"))),
+    }
+}
+
+/// Builds a solver for `algo` and returns each order's route in the normalized schema.
+async fn solve_all_routes<A>(
+    market: &MarketData,
+    derived: &SharedDerivedDataRef,
+    algo: A,
+    orders: &[Order],
+    title_prefix: &str,
+) -> Vec<Option<NormalizedRoute>>
+where
+    A: Algorithm,
+    A::GraphManager: GraphManager<A::GraphType> + EdgeWeightUpdaterWithDerived + Default,
+{
+    let solver = OfflineSolver::new(market.clone(), derived.clone(), algo).await;
+    let mut routes = Vec::with_capacity(orders.len());
+    for order in orders {
+        let route = match solver.solve_route(order).await {
+            Ok(r) => {
+                let view = market.read().await;
+                Some(build_normalized_route(&r, order, &view, title_prefix))
+            }
+            Err(_) => None,
+        };
+        routes.push(route);
+    }
+    routes
+}
+
+/// Converts a [`RouteResult`](crate::types::RouteResult) into the normalized visualization schema.
+fn build_normalized_route(
+    result: &crate::types::RouteResult,
+    order: &Order,
+    market: &MarketDataView<'_>,
+    title_prefix: &str,
+) -> NormalizedRoute {
+    use std::collections::BTreeMap;
+
+    let mut tokens: BTreeMap<String, NormalizedToken> = BTreeMap::new();
+    let mut record = |addr: &Address| {
+        let id = addr.to_string().to_lowercase();
+        tokens
+            .entry(id.clone())
+            .or_insert_with(|| {
+                let (symbol, decimals) = market
+                    .get_token(addr)
+                    .map(|t| (t.symbol.clone(), t.decimals as u8))
+                    .unwrap_or_else(|| (short_addr(&id), 18));
+                NormalizedToken { id, symbol, decimals }
+            });
+    };
+
+    let mut swaps = Vec::new();
+    for swap in result.route().swaps() {
+        record(swap.token_in());
+        record(swap.token_out());
+        swaps.push(NormalizedSwap {
+            source: swap
+                .token_in()
+                .to_string()
+                .to_lowercase(),
+            target: swap
+                .token_out()
+                .to_string()
+                .to_lowercase(),
+            amount_in: swap.amount_in().to_string(),
+            amount_out: swap.amount_out().to_string(),
+            protocol: swap.protocol().to_string(),
+            pool: swap.component_id().to_string(),
+        });
+    }
+
+    NormalizedRoute {
+        title: title_prefix.to_string(),
+        chain: "ethereum".to_string(),
+        source: order
+            .token_in()
+            .to_string()
+            .to_lowercase(),
+        sink: order
+            .token_out()
+            .to_string()
+            .to_lowercase(),
+        tokens: tokens.into_values().collect(),
+        swaps,
+    }
+}
+
+/// Short `0xabcd…1234` label for a token with no metadata.
+fn short_addr(id: &str) -> String {
+    if id.len() > 12 {
+        format!("{}…{}", &id[..6], &id[id.len() - 4..])
+    } else {
+        id.to_string()
+    }
 }
 
 /// Quality metrics for a single solved order.
@@ -370,8 +575,7 @@ mod tests {
         assert!(ml_solution.num_swaps >= 1);
 
         let bf =
-            OfflineSolver::new(market, derived, BellmanFordAlgorithm::with_config(config).unwrap())
-                .await;
+            OfflineSolver::new(market, derived, BellmanFordAlgorithm::with_config(config)).await;
         let bf_solution = bf
             .solve(&order)
             .await

@@ -220,10 +220,19 @@ shared-pool splitting (fill-and-spill) and/or more chunks.
 semantics) or mega-hub timeouts. Net effect is still strongly positive (711 wins). Candidate for a
 follow-up: align hop semantics with BF and add fill-and-spill for shared-pool routes.
 
-## Hardening: `split_max`
+## Hardening: the portfolio split (`split`)
 
-`split_max` (`fynd-core/src/algorithm/split_exp.rs`, `SplitStrategy::Portfolio`) sharpens `split` on
-its two documented weaknesses (coarse allocation, pool-disjoint restriction) while never regressing.
+The portfolio split router (`fynd-core/src/algorithm/split_exp.rs`, `SplitStrategy::Portfolio`) was
+developed and benchmarked as `split_max`, then **promoted to be the `split` algorithm**:
+`SplitAlgorithm` now delegates to it, so production (`worker_pools.toml`) and the offline harness both
+run the portfolio under the name `split`. The old exhaustive water-fill it replaced is in this
+branch's git history. The `split` / `split_max` labels below are the pre-promotion benchmark names
+(incumbent exhaustive split vs. the portfolio); `split_incr` and `split_ff` remain as research
+strategies. `path_frank_wolfe` was also ported from `main` onto this branch so all algorithms run on
+the same frozen snapshot.
+
+It sharpens the old exhaustive `split` on its two documented weaknesses (coarse allocation,
+pool-disjoint restriction) while never regressing.
 
 What changed:
 
