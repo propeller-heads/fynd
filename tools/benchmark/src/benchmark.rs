@@ -180,7 +180,7 @@ fn load_requests(
     Ok((requests, requests_file.map(|s| s.to_string())))
 }
 
-async fn check_solver_health(client: &FyndClient) -> anyhow::Result<()> {
+pub(crate) async fn check_solver_health(client: &FyndClient) -> anyhow::Result<()> {
     info!("Checking solver health...");
 
     let health = client
