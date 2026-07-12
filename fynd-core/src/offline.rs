@@ -161,6 +161,7 @@ pub const AVAILABLE_ALGORITHMS: &[&str] = &[
     "path_frank_wolfe",
     "split",
     "split_legacy",
+    "split_bounded",
     "split_incr",
     "split_ff",
 ];
@@ -179,7 +180,8 @@ pub async fn run_algorithm(
 ) -> Result<Vec<Option<OfflineSolution>>, OfflineError> {
     use crate::algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitLegacyAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitBoundedAlgorithm,
+        SplitLegacyAlgorithm,
     };
 
     match algo_name {
@@ -203,6 +205,11 @@ pub async fn run_algorithm(
         }
         "split_legacy" => {
             let algo = SplitLegacyAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all(market, derived, algo, orders).await)
+        }
+        "split_bounded" => {
+            let algo = SplitBoundedAlgorithm::with_config(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all(market, derived, algo, orders).await)
         }
@@ -304,7 +311,8 @@ pub async fn run_algorithm_routes(
 ) -> Result<Vec<Option<NormalizedRoute>>, OfflineError> {
     use crate::algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, BellmanFordAlgorithm, ExpSplitAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitLegacyAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm, SplitBoundedAlgorithm,
+        SplitLegacyAlgorithm,
     };
 
     match algo_name {
@@ -328,6 +336,11 @@ pub async fn run_algorithm_routes(
         }
         "split_legacy" => {
             let algo = SplitLegacyAlgorithm::with_config(config)
+                .map_err(|e| OfflineError::Computation(e.to_string()))?;
+            Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
+        }
+        "split_bounded" => {
+            let algo = SplitBoundedAlgorithm::with_config(config)
                 .map_err(|e| OfflineError::Computation(e.to_string()))?;
             Ok(solve_all_routes(market, derived, algo, orders, title_prefix).await)
         }
