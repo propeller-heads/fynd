@@ -23,6 +23,7 @@ fastrand = "2.3"
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+sha2 = { workspace = true }
 
 [[bin]]
 name = "fynd-benchmark"
