@@ -88,6 +88,7 @@ mod tests {
         assert_eq!(args.parallelization_mode, "sequential");
         assert!(args.requests_file.is_none());
         assert!(args.output_file.is_none());
+        assert!(!args.encoding);
     }
 
     #[test]
@@ -105,6 +106,7 @@ mod tests {
             "f.json",
             "--output-file",
             "o.json",
+            "--encoding",
         ])
         .unwrap();
         let Command::Load(args) = cli.command else {
@@ -115,6 +117,7 @@ mod tests {
         assert_eq!(args.parallelization_mode, "fixed:4");
         assert_eq!(args.requests_file.as_deref(), Some("f.json"));
         assert_eq!(args.output_file.as_deref(), Some("o.json"));
+        assert!(args.encoding);
     }
 
     #[test]

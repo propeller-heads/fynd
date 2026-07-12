@@ -7,7 +7,7 @@ use std::{str::FromStr, sync::OnceLock};
 
 use alloy::hex;
 use bytes::Bytes;
-use fynd_client::{Order, OrderSide, QuoteOptions, QuoteParams};
+use fynd_client::{EncodingOptions, Order, OrderSide, QuoteOptions, QuoteParams};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
@@ -47,13 +47,23 @@ impl SwapRequest {
     }
 
     pub fn to_quote_params(&self) -> QuoteParams {
+        self.to_quote_params_with_encoding(false)
+    }
+
+    /// Like [`Self::to_quote_params`], optionally attaching standard encoding options
+    /// (0.5% slippage, `TransferFrom`) so the server exercises the full quote+encode path.
+    pub fn to_quote_params_with_encoding(&self, encoding: bool) -> QuoteParams {
         let token_in = parse_address(&self.token_in_addr);
         let token_out = parse_address(&self.token_out_addr);
         let sender = parse_address(&self.sender_addr);
         let amount = BigUint::from_str(&self.raw_amount)
             .unwrap_or_else(|e| panic!("bad amount '{}': {e}", self.raw_amount));
         let order = Order::new(token_in, token_out, amount, OrderSide::Sell, sender, None);
-        let options = QuoteOptions::default().with_timeout_ms(self.timeout_ms);
+        let mut options = QuoteOptions::default().with_timeout_ms(self.timeout_ms);
+        if encoding {
+            options =
+                options.with_encoding_options(EncodingOptions::new(DEFAULT_ENCODING_SLIPPAGE));
+        }
         QuoteParams::new(order, options)
     }
 }
@@ -66,6 +76,9 @@ fn parse_address(hex_str: &str) -> Bytes {
 }
 
 const SENDER: &str = "0x0000000000000000000000000000000000000001";
+
+/// Slippage tolerance attached when encoding is requested (0.5%).
+const DEFAULT_ENCODING_SLIPPAGE: f64 = 0.005;
 
 const PAIRS_JSON: &str = include_str!("pairs.json");
 

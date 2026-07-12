@@ -397,7 +397,7 @@ async fn run_iteration(
 
     let benchmark_start = Instant::now();
     let RunnerResults { round_trip_times, solve_times, successful_requests, .. } = mode
-        .run(Arc::clone(&client), requests, args.num_requests)
+        .run(Arc::clone(&client), requests, args.num_requests, false)
         .await;
     let total_duration_ms = benchmark_start.elapsed().as_millis() as u64;
 
