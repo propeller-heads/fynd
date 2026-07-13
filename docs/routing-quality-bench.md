@@ -311,9 +311,30 @@ Full 10k, frozen snapshot, `--max-hops 3 --timeout-ms 5000`, baseline `split_bou
 | portfolio version    | wins | losses | ties | net delta vs bounded | loss mass | p50     | p95     |
 |----------------------|-----:|-------:|-----:|---------------------:|----------:|--------:|--------:|
 | before (disjoint-only) | 346 |    442 |   22 |            +3.49e25 |   2.43e25 | 10.3 ms | 30.7 ms |
-| after (+ fill-and-spill) | **568** | **233** | 9 |        **+5.88e25** | 3.55e23 | 12.2 ms | 40.8 ms |
+| + fill-and-spill     |  568 |    233 |    9 |             +5.88e25 |   3.55e23 | 12.2 ms | 40.8 ms |
+| + split-primitives route assembly | **709** | **93** | 8 | **+5.92e25** | 4.64e19 | 14.9 ms | 51.4 ms |
 
 Coverage stays 5,891 (vs `split_bounded`'s 810 — it declines when no split beats the single path).
-The remaining 233 losses are allocation-grid noise: median 0.03 bps, max 3.8 bps. Latency cost of the
-extra allocator: +1.9 ms p50, +10 ms p95; the per-solve timeout still guards the tail and the floor
-holds under starvation (`portfolio_no_loss_under_tight_timeout`).
+The final row is the encoding-safe assembly via `split_primitives::build_split_route` (see the
+production-bug fix below): shared-hop merging and the sequential shared-overlay execution model
+also improved the measured routes, cutting losses to 93 (loss mass 4.6e19, i.e. ~zero) at the cost
+of +2.7 ms p50. The per-solve timeout still guards the tail and the floor holds under starvation
+(`portfolio_no_loss_under_tight_timeout`).
+
+### Production encode path — bugs the offline harness cannot see
+
+A live audit against the real quote/encode path (KyberSwap/Nordstern comparison, 2026-07-13)
+surfaced two bugs invisible offline because the harness never encodes routes:
+
+1. `ExpSplitAlgorithm` built raw swap lists with a split fraction on every parallel leg and an
+   empty route token map. The encoder rejected them, and after the token map was supplied it
+   panicked (BigUint underflow): tycho-execution requires the last parallel swap out of a token to
+   carry `split = 0` (remainder convention). Fix: assemble candidates via
+   `split_primitives::build_split_route` — topological swap order, remainder splits, shared-hop
+   merge, token map — the same path PFW and `split_bounded` use.
+2. The worker reported sell `amount_out` from the route's last swap only, understating every split
+   route. Backported main's fix: sum all swaps into the output token.
+
+Live-audit head-to-head on the same 808 solved trades (local, `all_onchain` min_tvl=10, no RFQ):
+the portfolio split beat `path_frank_wolfe` on 599/808 trades (74%), median +0.57 bps net-of-gas.
+Charts: PR #284 description (`assets/bench-284-audit-charts` branch).
