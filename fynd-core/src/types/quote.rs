@@ -897,10 +897,13 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
+    /// reference).
     pub(crate) fn set_amount_out(&mut self, value: BigUint) {
         self.amount_out = value;
     }
 
+    /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
     pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
         self.amount_out_net_gas = value;
     }

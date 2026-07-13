@@ -763,6 +763,10 @@ fn combine_with_surplus(
 
 /// Returns `true` if the quote has a valid permissioned layout for v1: at least one permissioned
 /// leg, all positioned as terminal legs of their respective paths (no mid-route permissioned legs).
+///
+/// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
+/// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
+/// representation but would need revisiting if routes gain explicit path-boundary markers.
 fn has_valid_permissioned_layout(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
@@ -1609,4 +1613,23 @@ mod tests {
         assert_eq!(combined[0].surplus_amount(), None);
     }
 
+    #[test]
+    fn combine_equal_net_gas_falls_back_to_public() {
+        // Equal net-of-gas does NOT count as "beats" — no surplus captured.
+        let responses = surplus_responses(900, 900);
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let policy = permissioned_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].surplus_amount(), None);
+    }
 }
