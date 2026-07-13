@@ -149,6 +149,7 @@ fn comparison_record(
 ) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
+        "tx_index": range.tx_index,
         "settled_tx": range.tx_hash,
         "venue": range.venue,
         "solver": range.solver,
@@ -162,6 +163,7 @@ fn comparison_record(
         "quoted_amount_out": range.quote.as_ref().map(|q| q.amount_out.to_string()),
         "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
         "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
+        "sandwich": range.sandwich,
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
     })
@@ -260,7 +262,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, SolverQuote},
+        decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -305,6 +307,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
+            tx_index: 3,
             venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
@@ -321,6 +324,7 @@ mod tests {
                 source: Some("relay".to_string()),
                 timestamp: Some(1_783_421_726),
             }),
+            sandwich: None,
         };
         let range = build_range(
             &trade,
@@ -329,6 +333,7 @@ mod tests {
             Outcome::Unsolvable("x".into()),
         );
         let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
         assert_eq!(
             rec.pointer("/quoted_amount_out")
                 .unwrap(),
@@ -376,6 +381,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
+            tx_index: 0,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
@@ -388,6 +394,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
         let quote = Some(
@@ -455,6 +462,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
+            tx_index: 0,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
@@ -467,6 +475,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(
@@ -486,5 +495,55 @@ mod tests {
             .pointer("/top/quote")
             .unwrap()
             .is_null());
+    }
+
+    #[test]
+    fn comparison_record_carries_sandwich_evidence_and_becomes_sandwiched_verdict() {
+        let mut trade = DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 25_000_000,
+            tx_index: 42,
+            venue: "relay".into(),
+            solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
+            sender: Address::ZERO,
+            token_in: Address::repeat_byte(0x11),
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(1_000u64),
+            venue_fee: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            sandwich: None,
+        };
+        trade.sandwich = Some(SandwichEvidence {
+            front_tx: TxHash::repeat_byte(0x11),
+            back_tx: TxHash::repeat_byte(0x22),
+            attacker: Address::repeat_byte(0x33),
+            pools: vec![Address::repeat_byte(0x44)],
+        });
+
+        let range = build_range(
+            &trade,
+            &usd::PriceMap::new(),
+            Outcome::Unsolvable("x".into()),
+            Outcome::Unsolvable("x".into()),
+        );
+        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+
+        assert_eq!(rec.pointer("/tx_index").unwrap(), 42);
+        assert_eq!(rec.pointer("/top/verdict").unwrap(), "sandwiched");
+        assert_eq!(rec.pointer("/back/verdict").unwrap(), "sandwiched");
+        assert_eq!(
+            rec.pointer("/sandwich/attacker")
+                .unwrap(),
+            &format!("{:#x}", Address::repeat_byte(0x33))
+        );
+        assert_eq!(
+            rec.pointer("/sandwich/pools/0")
+                .unwrap(),
+            &format!("{:#x}", Address::repeat_byte(0x44))
+        );
     }
 }
