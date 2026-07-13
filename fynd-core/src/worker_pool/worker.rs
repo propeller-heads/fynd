@@ -65,7 +65,6 @@ where
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
-    // TODO: make this a string to include pool name
     worker_id: usize,
     /// Pool name (used as the `pool` metric label).
     pool_name: String,
