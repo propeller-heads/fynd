@@ -11,7 +11,7 @@ use fynd_core::{
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-use tycho_simulation::tycho_common::models::{Chain, TvlThresholdTier};
+use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
