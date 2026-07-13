@@ -42,6 +42,9 @@
 //! - `experimental`: forwards [`fynd_rpc`]'s feature of the same name, which serves `GET
 //!   /v1/{chain}/prices` and `GET /v1/{chain}/tokens`. Off by default, because both endpoints and
 //!   their response shapes can change in any release.
+//! - `jemalloc` (default): uses jemalloc as the global allocator in the `fynd` binary and reports
+//!   its heap statistics as gauges. A crate embedding the library keeps its own allocator; only the
+//!   binary sets one.
 
 pub use fynd_core as core;
 pub use fynd_rpc as rpc;
@@ -50,6 +53,9 @@ pub use fynd_rpc as rpc;
 pub mod cli;
 /// Subcommands other than `serve`.
 pub mod commands;
+/// jemalloc heap-statistics reporter, spawned by [`serve::run_solver_with`].
+#[cfg(feature = "jemalloc")]
+mod jemalloc_stats;
 /// Running the solver, as `fynd serve` does.
 pub mod serve;
 
