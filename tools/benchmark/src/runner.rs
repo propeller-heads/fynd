@@ -25,14 +25,15 @@ impl ParallelizationMode {
         client: Arc<FyndClient>,
         requests: &[SwapRequest],
         num_requests: usize,
+        encoding: bool,
     ) -> RunnerResults {
         match self {
-            Self::Sequential => run_sequential(client, requests, num_requests).await,
+            Self::Sequential => run_sequential(client, requests, num_requests, encoding).await,
             Self::FixedConcurrency { concurrency } => {
-                run_fixed_concurrency(client, requests, num_requests, *concurrency).await
+                run_fixed_concurrency(client, requests, num_requests, *concurrency, encoding).await
             }
             Self::RateBased { interval_ms } => {
-                run_rate_based(client, requests, num_requests, *interval_ms).await
+                run_rate_based(client, requests, num_requests, *interval_ms, encoding).await
             }
         }
     }
@@ -43,6 +44,7 @@ async fn run_sequential(
     client: Arc<FyndClient>,
     requests: &[SwapRequest],
     num_requests: usize,
+    encoding: bool,
 ) -> RunnerResults {
     let mut round_trip_times = Vec::new();
     let mut solve_times = Vec::new();
@@ -57,7 +59,7 @@ async fn run_sequential(
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
         let template = fastrand::choice(requests).unwrap();
-        let params = template.to_quote_params();
+        let params = template.to_quote_params_with_encoding(encoding);
 
         let start = Instant::now();
         let result = client.quote(params).await;
@@ -88,6 +90,7 @@ async fn run_fixed_concurrency(
     requests: &[SwapRequest],
     num_requests: usize,
     concurrency: usize,
+    encoding: bool,
 ) -> RunnerResults {
     tracing::info!("Running {} requests with fixed concurrency of {}", num_requests, concurrency);
 
@@ -121,7 +124,7 @@ async fn run_fixed_concurrency(
 
         let task = tokio::spawn(async move {
             let template = fastrand::choice(requests.as_slice()).unwrap();
-            let params = template.to_quote_params();
+            let params = template.to_quote_params_with_encoding(encoding);
 
             let start = Instant::now();
             let result = client.quote(params).await;
@@ -200,6 +203,7 @@ async fn run_rate_based(
     requests: &[SwapRequest],
     num_requests: usize,
     interval_ms: u64,
+    encoding: bool,
 ) -> RunnerResults {
     tracing::info!(
         "Running {} requests at {}ms intervals (fire-and-forget)",
@@ -233,7 +237,7 @@ async fn run_rate_based(
 
         let task = tokio::spawn(async move {
             let template = fastrand::choice(requests.as_slice()).unwrap();
-            let params = template.to_quote_params();
+            let params = template.to_quote_params_with_encoding(encoding);
 
             let start = Instant::now();
             let result = client.quote(params).await;
@@ -437,7 +441,7 @@ mod tests {
     async fn sequential_collects_results() {
         let (_server, client) =
             setup_mock(ResponseTemplate::new(200).set_body_json(minimal_quote_json())).await;
-        let results = run_sequential(client, &test_requests(), 3).await;
+        let results = run_sequential(client, &test_requests(), 3, false).await;
         assert_eq!(results.successful_requests, 3);
         assert_eq!(results.round_trip_times.len(), 3);
         assert_eq!(results.solve_times.len(), 3);
@@ -451,7 +455,7 @@ mod tests {
     async fn fixed_concurrency_collects_results() {
         let (_server, client) =
             setup_mock(ResponseTemplate::new(200).set_body_json(minimal_quote_json())).await;
-        let results = run_fixed_concurrency(client, &test_requests(), 5, 2).await;
+        let results = run_fixed_concurrency(client, &test_requests(), 5, 2, false).await;
         assert_eq!(results.successful_requests, 5);
         assert_eq!(results.round_trip_times.len(), 5);
         assert_eq!(results.solve_times.len(), 5);
@@ -461,7 +465,7 @@ mod tests {
     async fn rate_based_collects_results() {
         let (_server, client) =
             setup_mock(ResponseTemplate::new(200).set_body_json(minimal_quote_json())).await;
-        let results = run_rate_based(client, &test_requests(), 3, 10).await;
+        let results = run_rate_based(client, &test_requests(), 3, 10, false).await;
         assert_eq!(results.successful_requests, 3);
         assert_eq!(results.round_trip_times.len(), 3);
         assert_eq!(results.solve_times.len(), 3);
@@ -475,9 +479,29 @@ mod tests {
                 "code": "BAD_REQUEST"
             })))
             .await;
-        let results = run_sequential(client, &test_requests(), 2).await;
+        let results = run_sequential(client, &test_requests(), 2, false).await;
         assert_eq!(results.successful_requests, 0);
         assert!(results.round_trip_times.is_empty());
         assert!(results.solve_times.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sequential_with_encoding_sends_encoding_options() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "options": { "encoding_options": { "slippage": "0.005" } }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json()))
+            .mount(&server)
+            .await;
+        let client = Arc::new(
+            FyndClientBuilder::new(server.uri())
+                .build_quote_only()
+                .unwrap(),
+        );
+        let results = run_sequential(client, &test_requests(), 1, true).await;
+        assert_eq!(results.successful_requests, 1, "request without encoding_options was rejected");
     }
 }

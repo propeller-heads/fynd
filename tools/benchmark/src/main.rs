@@ -6,6 +6,8 @@
 mod aggregator;
 mod audit;
 mod benchmark;
+mod capacity;
+mod capacity_report;
 mod compare;
 mod config;
 mod exporter;
@@ -41,6 +43,8 @@ enum Command {
     Scale(scale::Args),
     /// Compare Fynd quote performance against external DEX aggregators
     Audit(audit::Args),
+    /// Measure the highest sustainable request rate within the latency SLO
+    Capacity(capacity::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -67,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}")),
         Command::Scale(args) => scale::run(args).await,
         Command::Audit(args) => audit::run(args).await,
+        Command::Capacity(args) => capacity::run(args).await,
     }
 }
 
@@ -87,6 +92,7 @@ mod tests {
         assert_eq!(args.parallelization_mode, "sequential");
         assert!(args.requests_file.is_none());
         assert!(args.output_file.is_none());
+        assert!(!args.encoding);
     }
 
     #[test]
@@ -104,6 +110,7 @@ mod tests {
             "f.json",
             "--output-file",
             "o.json",
+            "--encoding",
         ])
         .unwrap();
         let Command::Load(args) = cli.command else {
@@ -114,6 +121,7 @@ mod tests {
         assert_eq!(args.parallelization_mode, "fixed:4");
         assert_eq!(args.requests_file.as_deref(), Some("f.json"));
         assert_eq!(args.output_file.as_deref(), Some("o.json"));
+        assert!(args.encoding);
     }
 
     #[test]
@@ -163,6 +171,35 @@ mod tests {
         assert_eq!(args.timeout_ms, 5000);
         assert_eq!(args.seed, 99);
         assert_eq!(args.output, "out.json");
+    }
+
+    #[test]
+    fn capacity_defaults() {
+        let cli = Cli::try_parse_from(["bin", "capacity"]).unwrap();
+        let Command::Capacity(args) = cli.command else {
+            panic!("expected Capacity");
+        };
+        assert_eq!(args.solver_url, "http://localhost:3000");
+        assert_eq!(args.ladder, "5:5:200");
+        assert_eq!(args.step_duration_secs, 60);
+        assert_eq!(args.warmup_secs, 5);
+        assert_eq!(args.baseline_requests, 50);
+        assert!((args.slo_multiplier - 1.2).abs() < f64::EPSILON);
+        assert!((args.max_http_error_rate - 0.001).abs() < f64::EPSILON);
+        assert!((args.max_excess_unsolved_rate - 0.001).abs() < f64::EPSILON);
+        assert_eq!(args.timeout_ms, 5000);
+        assert!(!args.encoding);
+        assert_eq!(args.seed, 42);
+    }
+
+    #[test]
+    fn capacity_max_excess_unsolved_rate_arg() {
+        let cli =
+            Cli::try_parse_from(["bin", "capacity", "--max-excess-unsolved-rate", "0.05"]).unwrap();
+        let Command::Capacity(args) = cli.command else {
+            panic!("expected Capacity");
+        };
+        assert!((args.max_excess_unsolved_rate - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]

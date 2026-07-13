@@ -169,6 +169,63 @@ Positive bps diffs mean solver B returned more output.
 
 ---
 
+## Capacity
+
+Steps an RPS ladder against a single solver until p95 round-trip latency breaches the SLO
+(default: 1.2x the unloaded baseline), then reports the highest sustainable rate.
+
+```bash
+cargo run -p fynd-benchmark --release -- capacity [OPTIONS]
+```
+
+**Important:** Always use `--release` for accurate performance measurements.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--solver-url` | `http://localhost:3000` | Solver URL to measure |
+| `--requests-file` | (none, uses embedded 50-trade sample) | Path to JSON file with request templates |
+| `--ladder` | `5:5:200` | RPS ladder as `start:step:max` |
+| `--step-duration-secs` | `60` | Seconds each ladder step is measured (after warm-up) |
+| `--warmup-secs` | `5` | Seconds of discarded warm-up traffic before each step |
+| `--baseline-requests` | `50` | Number of sequential requests for the unloaded baseline |
+| `--slo-multiplier` | `1.2` | p95 degradation multiplier that fails a step |
+| `--max-http-error-rate` | `0.001` | Maximum fraction of requests that may fail at the HTTP level per step |
+| `--max-excess-unsolved-rate` | `0.001` | Maximum unsolved-order rate above baseline per step |
+| `--timeout-ms` | `5000` | Per-request quote timeout |
+| `--encoding` | `false` | Attach standard encoding options to every request |
+| `--target-label` | (none) | Free-form label recorded in the report |
+| `--output-file` | (none) | Also write the JSON report to this file |
+| `--seed` | `42` | RNG seed for request sampling |
+
+### Example
+
+```bash
+cargo run -p fynd-benchmark --release -- capacity \
+  --ladder 5:5:100 \
+  --step-duration-secs 30 \
+  --output-file capacity_report.json
+```
+
+### Output
+
+Prints a one-line capacity summary, then an `=== CAPACITY REPORT JSON ===` marker line followed
+by the full `CapacityReport` JSON as the last thing on stdout — everything from the marker to EOF
+(minus the marker line) is exactly the JSON, so in-cluster Jobs can retrieve it from pod logs.
+Capacity is the highest ladder rate whose step passed the SLO; if the first step fails, capacity
+is reported as unmeasured.
+
+**Rate quantization:** request intervals are whole milliseconds, so offered rates quantize above
+~30 rps (e.g. a target of 175 rps fires at a 5ms interval, i.e. 200 rps). When reporting capacity,
+prefer the last passing step's `achieved_rps` over its `target_rps`.
+
+**Sampling noise:** a heterogeneous request set's unsolved rate fluctuates step to step from
+binomial sampling noise alone, so `--max-excess-unsolved-rate` may need a few percentage points of
+headroom above the `0.001` default to avoid failing healthy steps.
+
+---
+
 ## Request Data
 
 By default, the load test uses a single WETH->USDC swap and the compare tool samples from a built-in set of 50 real aggregator trades. Both commands accept `--requests-file` to supply custom requests. See `requests_set.json` in this directory for the format.
@@ -193,9 +250,11 @@ The dataset contains real aggregator trades pulled from Dune Analytics, covering
 
 | File | Description |
 |------|-------------|
-| `src/main.rs` | CLI entry point with `load`, `compare`, and `download-trades` subcommands |
+| `src/main.rs` | CLI entry point with `load`, `compare`, `scale`, `capacity`, `audit`, and `download-trades` subcommands |
 | `src/benchmark.rs` | Load-test implementation |
 | `src/compare.rs` | Comparison tool implementation |
+| `src/capacity.rs` | Capacity subcommand: ladder orchestration against a single solver |
+| `src/capacity_report.rs` | Capacity report types and SLO pass/fail evaluation |
 | `src/config.rs` | Benchmark config, request templates, statistics types |
 | `src/runner.rs` | Benchmark execution (sequential, fixed concurrency, rate-based) |
 | `src/exporter.rs` | Statistics calculation and JSON export |
