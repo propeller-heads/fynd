@@ -208,8 +208,9 @@ cargo run -p fynd-benchmark --release -- capacity \
 
 ### Output
 
-Prints an `=== CAPACITY REPORT JSON ===` marker line followed by the full `CapacityReport` JSON
-to stdout (so in-cluster Jobs can retrieve it from pod logs), then a one-line capacity summary.
+Prints a one-line capacity summary, then an `=== CAPACITY REPORT JSON ===` marker line followed
+by the full `CapacityReport` JSON as the last thing on stdout — everything from the marker to EOF
+(minus the marker line) is exactly the JSON, so in-cluster Jobs can retrieve it from pod logs.
 Capacity is the highest ladder rate whose step passed the SLO; if the first step fails, capacity
 is reported as unmeasured.
 
