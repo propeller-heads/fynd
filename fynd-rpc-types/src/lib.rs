@@ -1201,12 +1201,12 @@ pub struct InstanceInfo {
     /// EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
     #[cfg_attr(feature = "openapi", schema(example = 1))]
     chain_id: u64,
-    /// Address of the Tycho Router contract on this chain.
+    /// Address of the Tycho Router contract on this chain; `null` on a quote-only chain.
     #[cfg_attr(
         feature = "openapi",
-        schema(value_type = String, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
+        schema(value_type = Option<String>, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
     )]
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     /// Address of the canonical Permit2 contract (same on all EVM chains).
     #[cfg_attr(
         feature = "openapi",
@@ -1217,7 +1217,7 @@ pub struct InstanceInfo {
 
 impl InstanceInfo {
     /// Creates a new instance info.
-    pub fn new(chain_id: u64, router_address: Bytes, permit2_address: Bytes) -> Self {
+    pub fn new(chain_id: u64, router_address: Option<Bytes>, permit2_address: Bytes) -> Self {
         Self { chain_id, router_address, permit2_address }
     }
 
@@ -1226,9 +1226,9 @@ impl InstanceInfo {
         self.chain_id
     }
 
-    /// Address of the Tycho Router contract.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Address of the Tycho Router contract, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Address of the canonical Permit2 contract.
@@ -1495,8 +1495,15 @@ mod wire_format_tests {
 
         let info: InstanceInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.chain_id(), 1);
-        assert_eq!(info.router_address().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
         assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
+    }
+
+    #[test]
+    fn instance_info_router_address_is_nullable() {
+        let info = InstanceInfo::new(12345, None, Bytes::from(vec![0u8; 20]));
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert!(v["router_address"].is_null());
     }
 }
 

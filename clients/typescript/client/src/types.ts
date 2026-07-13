@@ -186,7 +186,8 @@ export interface HealthStatus {
 
 /** Static metadata about a Fynd server instance. */
 export interface InstanceInfo {
-  routerAddress: Address;
+  /** Tycho Router contract address, or `null` on a quote-only chain. */
+  routerAddress: Address | null;
   permit2Address: Address;
   chainId: number;
 }

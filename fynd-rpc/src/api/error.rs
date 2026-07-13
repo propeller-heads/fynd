@@ -43,6 +43,7 @@ impl ResponseError for ApiError {
                 SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::ComputationFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+                SolveError::FailedEncoding(_) => StatusCode::NOT_IMPLEMENTED,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
@@ -172,5 +173,13 @@ mod tests {
         let (status, body) = json_body(ApiError::SolveFailed(err)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "STALE_DATA");
+    }
+
+    #[actix_web::test]
+    async fn test_failed_encoding_returns_501() {
+        let err = SolveError::FailedEncoding("no router configured for this chain".to_string());
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "FAILED_ENCODING");
     }
 }
