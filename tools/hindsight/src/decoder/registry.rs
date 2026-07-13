@@ -1,4 +1,4 @@
-//! The decoder's address book: which contracts are solvers, clients, batch settlers, and
+//! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
 //! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
@@ -28,18 +28,18 @@ struct AddressBook {
     wrapped_native: Address,
     batch_settlers: HashSet<Address>,
     solvers: HashMap<Address, String>,
-    clients: HashMap<String, ClientAddresses>,
+    venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
 }
 
-/// A client's addresses on one chain: the contracts users enter through and the collectors its
-/// fee skims land on. Keyed by client name in the book; the name binds to a decode strategy at
-/// load time (see [`crate::decoder::clients::Client::from_name`]).
+/// A venue's addresses on one chain: the contracts users enter through and the collectors its
+/// fee skims land on. Keyed by venue name in the book; the name binds to a decode strategy at
+/// load time (see [`crate::decoder::venues::Venue::from_name`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ClientAddresses {
-    pub entry_points: HashSet<Address>,
-    pub fee_collectors: HashSet<Address>,
+pub(crate) struct VenueAddresses {
+    pub(crate) entry_points: HashSet<Address>,
+    pub(crate) fee_collectors: HashSet<Address>,
 }
 
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
@@ -47,12 +47,12 @@ pub(crate) struct ClientAddresses {
 pub(crate) struct Registry {
     /// Solver routers — the venue that actually settles a swap.
     solvers: HashMap<Address, String>,
-    /// Every known address (solvers and clients), for name resolution.
+    /// Every known address (solvers and venues), for name resolution.
     names: HashMap<Address, String>,
     /// Batch-settlement venues where `tx.to` is the settlement contract and
     /// the transaction sender is a solver, not the trader.
     batch_settlers: HashSet<Address>,
-    /// Display names for entry points that are neither clients nor venues — market-maker
+    /// Display names for entry points that are neither venues nor solvers — market-maker
     /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
     /// because `is_known` drives strategy selection and filler-entered transactions have to
     /// keep matching via their solver logs (Maker), not sender netting.
@@ -60,8 +60,8 @@ pub(crate) struct Registry {
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
-    /// Client address sets, keyed by the client name from the book.
-    clients: HashMap<String, ClientAddresses>,
+    /// Venue address sets, keyed by the venue name from the book.
+    venues: HashMap<String, VenueAddresses>,
 }
 
 impl Registry {
@@ -92,21 +92,21 @@ impl Registry {
         let book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
-        // A client section only carries addresses; its behavior is bound by name in code. An
-        // unbound name (a typo, or a client with no strategy yet) must fail here — silently
-        // never matching would just drop that client's trades.
-        for name in book.clients.keys() {
-            if crate::decoder::clients::Client::from_name(name).is_none() {
+        // A venue section only carries addresses; its behavior is bound by name in code. An
+        // unbound name (a typo, or a venue with no strategy yet) must fail here — silently
+        // never matching would just drop that venue's trades.
+        for name in book.venues.keys() {
+            if crate::decoder::venues::Venue::from_name(name).is_none() {
                 anyhow::bail!(
-                    "address book client '{name}' has no decode strategy \
-                     (see clients::Client for the recognized names)"
+                    "address book venue '{name}' has no decode strategy \
+                     (see venues::Venue for the recognized names)"
                 );
             }
         }
 
         let mut names = book.solvers.clone();
-        for (name, client) in &book.clients {
-            for &entry_point in &client.entry_points {
+        for (name, venue) in &book.venues {
+            for &entry_point in &venue.entry_points {
                 names.insert(entry_point, name.clone());
             }
         }
@@ -117,11 +117,11 @@ impl Registry {
             batch_settlers: book.batch_settlers,
             labels: book.labels,
             wrapped_native: book.wrapped_native,
-            clients: book.clients,
+            venues: book.venues,
         })
     }
 
-    /// Whether the address is a known client or solver.
+    /// Whether the address is a known venue or solver.
     pub(crate) fn is_known(&self, address: Address) -> bool {
         self.names.contains_key(&address)
     }
@@ -131,12 +131,10 @@ impl Registry {
     }
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label
-    /// vocabulary: attribution can also produce raw addresses, client names (fallback tier), and
-    /// calldata-declared names from a client's own vocabulary (MetaMask aggregator ids).
+    /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
+    /// calldata-declared names from a venue's own vocabulary (MetaMask aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
-        self.solvers
-            .values()
-            .any(|solver| solver == name)
+        self.solvers.values().any(|solver| solver == name)
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. CoW). Such trades
@@ -151,15 +149,15 @@ impl Registry {
         self.wrapped_native
     }
 
-    /// The named client's address book section, when the book has one.
-    pub(crate) fn client(&self, name: &str) -> Option<&ClientAddresses> {
-        self.clients.get(name)
+    /// The named venue's address book section, when the book has one.
+    pub(crate) fn venue(&self, name: &str) -> Option<&VenueAddresses> {
+        self.venues.get(name)
     }
 
-    /// The client whose entry point this address is, if any.
-    pub(crate) fn client_name(&self, address: Address) -> Option<&str> {
-        for (name, client) in &self.clients {
-            if client.entry_points.contains(&address) {
+    /// The venue whose entry point this address is, if any.
+    pub(crate) fn venue_name(&self, address: Address) -> Option<&str> {
+        for (name, venue) in &self.venues {
+            if venue.entry_points.contains(&address) {
                 return Some(name.as_str());
             }
         }
@@ -184,11 +182,10 @@ mod tests {
 
     #[test]
     fn embedded_ethereum_book_parses() {
-        // `ethereum()` expects; this test is what makes that expectation safe.
         let registry = Registry::ethereum();
         assert!(!registry.solvers.is_empty());
         assert!(!registry
-            .client("relay")
+            .venue("relay")
             .unwrap()
             .entry_points
             .is_empty());
@@ -248,34 +245,30 @@ mod tests {
     }
 
     #[test]
-    fn client_sections_resolve_by_name_and_entry_point() {
+    fn venue_sections_resolve_by_name_and_entry_point() {
         let registry = Registry::ethereum();
-        let relay = registry.client("relay").unwrap();
+        let relay = registry.venue("relay").unwrap();
         let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
         let router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
-        assert!(relay
-            .fee_collectors
-            .contains(&collector));
-        // The router that performs the skim is a Relay entry point, not the collector itself.
+        assert!(relay.fee_collectors.contains(&collector));
         assert!(!relay.fee_collectors.contains(&router));
         assert!(relay.entry_points.contains(&router));
 
-        assert_eq!(registry.client_name(router), Some("relay"));
+        assert_eq!(registry.venue_name(router), Some("relay"));
         assert_eq!(
-            registry.client_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
+            registry.venue_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
             Some("metamask")
         );
-        // A fee collector is not an entry point; a solver is not a client.
-        assert_eq!(registry.client_name(collector), None);
-        assert!(registry.client("kyberswap").is_none());
+        assert_eq!(registry.venue_name(collector), None);
+        assert!(registry.venue("kyberswap").is_none());
     }
 
     #[test]
-    fn client_without_strategy_is_rejected() {
-        // A client section whose name has no decode strategy would silently never match, so the
+    fn venue_without_strategy_is_rejected() {
+        // A venue section whose name has no decode strategy would silently never match, so the
         // book must fail to load.
         let text =
-            format!("{ETHEREUM_TOML}\n[clients.reiay]\nentry_points = []\nfee_collectors = []\n");
+            format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
         let err = Registry::from_toml(&text)
             .unwrap_err()
             .to_string();
@@ -295,7 +288,7 @@ mod tests {
     fn display_labels_resolve_without_becoming_known() {
         // Solver/filler labels are display-only: is_known drives strategy selection, and a
         // filler-entered tx must keep matching via its solver logs (Maker), not as a
-        // known-client Sender flow.
+        // known-venue Sender flow.
         let registry = Registry::ethereum();
         let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");
         assert_eq!(registry.label(rizzolver), "rizzolver");

@@ -215,8 +215,8 @@ fn print_trades(trades: &[decoder::DecodedTrade]) {
     for trade in trades {
         println!("  tx:         {}", trade.tx_hash);
         println!("  block:      {}", trade.block_number);
-        println!("  client:     {}", trade.client);
-        println!("  solver: {}", trade.solver);
+        println!("  venue:      {}", trade.venue);
+        println!("  solver:     {}", trade.solver);
         println!("  sender:     {}", trade.sender);
         println!("  token_in:   {}", trade.token_in);
         println!("  amount_in:  {}", trade.amount_in);

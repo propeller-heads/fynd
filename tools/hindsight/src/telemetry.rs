@@ -33,14 +33,14 @@ fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
 }
 
-/// Metric label for a range's client: registered clients (the registry's `[clients.*]` sections
+/// Metric label for a range's venue: registered venues (the registry's `[venues.*]` sections
 /// — the integrator front-ends the comparison is pitched at) keep their name; everything else —
 /// direct router entries, bots, unregistered addresses — collapses to "other". Keeps the
-/// dashboard's client filter to the registered names plus "other"; full client detail stays in
+/// dashboard's venue filter to the registered names plus "other"; full venue detail stays in
 /// the JSONL records.
-fn client_label<'a>(client: &'a str, registry: &Registry) -> &'a str {
-    if registry.client(client).is_some() {
-        client
+fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
+    if registry.venue(venue).is_some() {
+        venue
     } else {
         "other"
     }
@@ -48,7 +48,7 @@ fn client_label<'a>(client: &'a str, registry: &Registry) -> &'a str {
 
 /// Metric label for a range's settling solver: registered solver names pass through, everything
 /// else collapses to "unknown". Attribution can also produce raw addresses (largest-call guess),
-/// client names (fallback tier), and calldata-declared names from a client's own vocabulary
+/// venue names (fallback tier), and calldata-declared names from a venue's own vocabulary
 /// (MetaMask aggregator ids like "pancakeSwapRouterFeeDynamic") — none belong in the bounded
 /// metric vocabulary. The original label stays in the JSONL records, where it serves as the
 /// registry-expansion worklist.
@@ -62,7 +62,7 @@ fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
 
 /// The bounded label set shared by every per-trade metric, computed once per range.
 struct MetricLabels<'a> {
-    client: &'a str,
+    venue: &'a str,
     solver: &'a str,
     chain: &'a str,
 }
@@ -81,7 +81,7 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by client / solver / chain / outcome / state (top|back). \
+        "Re-solved trades, labeled by venue / solver / chain / outcome / state (top|back). \
          Per-pair detail lives in the JSONL comparison output; a token-pair label here is unbounded \
          on mainnet and would explode Prometheus series cardinality over a long run."
     );
@@ -97,12 +97,12 @@ pub(crate) fn describe() {
     );
     describe_histogram!(
         IMPROVEMENT_USD,
-        "Gross USD uplift on trades Fynd would improve (losses excluded — a client routes \
+        "Gross USD uplift on trades Fynd would improve (losses excluded — a venue routes \
          elsewhere when Fynd is worse). Sum = value of adding Fynd; count = improving trades"
     );
     describe_histogram!(
         VOLUME_USD,
-        "Observed settled trade volume in USD, labeled by client / solver / outcome (headline \
+        "Observed settled trade volume in USD, labeled by venue / solver / outcome (headline \
          verdict). Valued from the output leg, falling back to the input leg when the output \
          token is unpriced"
     );
@@ -130,7 +130,7 @@ pub(crate) fn record_range(
     registry: &Registry,
 ) {
     let labels = MetricLabels {
-        client: client_label(&range.client, registry),
+        venue: venue_label(&range.venue, registry),
         solver: solver_label(&range.solver, registry),
         chain,
     };
@@ -146,7 +146,7 @@ pub(crate) fn record_range(
     if let Some(volume) = volume {
         histogram!(
             VOLUME_USD,
-            "client" => labels.client.to_string(),
+            "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
             "outcome" => outcome_label(range.verdict).to_string(),
@@ -166,7 +166,7 @@ pub(crate) fn record_range(
         info!(
             tx = %range.tx_hash,
             block = range.block_number,
-            client = %range.client,
+            venue = %range.venue,
             solver = %range.solver,
             token_in = %range.token_in,
             token_out = %range.token_out,
@@ -183,7 +183,7 @@ pub(crate) fn record_range(
 
 /// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
 /// solved state — the gross bps delta, the signed USD savings, and the USD uplift (only when
-/// Fynd beats the settled trade; a client routes elsewhere when Fynd is worse). All highlighted
+/// Fynd beats the settled trade; a venue routes elsewhere when Fynd is worse). All highlighted
 /// metrics compare gross vs gross, matching the headline verdict.
 ///
 /// Returns the signed USD savings it recorded, `None` when the state is unsolved or unpriced.
@@ -196,7 +196,7 @@ fn record_state(
 ) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
-        "client" => labels.client.to_string(),
+        "venue" => labels.venue.to_string(),
         "solver" => labels.solver.to_string(),
         "chain" => labels.chain.to_string(),
         "outcome" => outcome_label(state.verdict).to_string(),
@@ -207,7 +207,7 @@ fn record_state(
     if let Some(bps) = state.deltas.raw_bps {
         histogram!(
             SAVINGS_BPS,
-            "client" => labels.client.to_string(),
+            "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
             "state" => state_label,
@@ -225,7 +225,7 @@ fn record_state(
             tx = %range.tx_hash,
             block = range.block_number,
             state = state_label,
-            client = %range.client,
+            venue = %range.venue,
             solver = %range.solver,
             token_in = %range.token_in,
             token_out = %range.token_out,
@@ -239,7 +239,7 @@ fn record_state(
     }
     histogram!(
         SAVINGS_USD,
-        "client" => labels.client.to_string(),
+        "venue" => labels.venue.to_string(),
         "solver" => labels.solver.to_string(),
         "chain" => labels.chain.to_string(),
         "state" => state_label,
@@ -249,7 +249,7 @@ fn record_state(
     if usd > 0.0 {
         histogram!(
             IMPROVEMENT_USD,
-            "client" => labels.client.to_string(),
+            "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
             "state" => state_label,
@@ -355,7 +355,7 @@ mod tests {
         DecodedTrade {
             tx_hash: Default::default(),
             block_number: 21_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -363,8 +363,8 @@ mod tests {
             token_out,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         }
@@ -423,7 +423,7 @@ mod tests {
         assert!(rendered.contains("state=\"back\""), "rendered: {rendered}");
         assert!(rendered.contains("outcome=\"win\""));
         assert!(rendered.contains("outcome=\"loss\""));
-        assert!(rendered.contains("client=\"relay\""));
+        assert!(rendered.contains("venue=\"relay\""));
         // Top beats settled → uplift recorded; volume recorded once, tagged with the headline
         // verdict so the dashboard can split volume by outcome.
         assert!(rendered.contains("hindsight_improvement_usd"));
@@ -444,14 +444,14 @@ mod tests {
 
     #[test]
     fn label_vocabulary_is_registry_bounded() {
-        // Every metric label value must come from the registry vocabulary: registered client and
+        // Every metric label value must come from the registry vocabulary: registered venue and
         // solver names pass through; raw addresses, unregistered names, and calldata-declared
-        // aggregator ids collapse — clients to "other", solvers to "unknown".
+        // aggregator ids collapse — venues to "other", solvers to "unknown".
         let registry = Registry::ethereum();
-        assert_eq!(client_label("relay", &registry), "relay");
-        assert_eq!(client_label("metamask", &registry), "metamask");
-        assert_eq!(client_label("okx", &registry), "other");
-        assert_eq!(client_label("0xD720183DdA64a8CDb424B5c13aF73baf713521f8", &registry), "other");
+        assert_eq!(venue_label("relay", &registry), "relay");
+        assert_eq!(venue_label("metamask", &registry), "metamask");
+        assert_eq!(venue_label("okx", &registry), "other");
+        assert_eq!(venue_label("0xD720183DdA64a8CDb424B5c13aF73baf713521f8", &registry), "other");
         assert_eq!(solver_label("kyberswap", &registry), "kyberswap");
         assert_eq!(solver_label("relay", &registry), "unknown");
         assert_eq!(solver_label("pancakeSwapRouterFeeDynamic", &registry), "unknown");
@@ -463,11 +463,11 @@ mod tests {
 
     #[test]
     fn raw_address_labels_collapse() {
-        // Unknown clients/solvers carry raw 0x… addresses; every distinct address would mint a
-        // fresh series set, unbounded over a long run. Clients outside the registry's
-        // [clients.*] sections collapse to "other", solvers outside [solvers] to "unknown".
+        // Unknown venues/solvers carry raw 0x… addresses; every distinct address would mint a
+        // fresh series set, unbounded over a long run. Venues outside the registry's
+        // [venues.*] sections collapse to "other", solvers outside [solvers] to "unknown".
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
-        t.client = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
+        t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
         let range =
             build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
@@ -484,14 +484,14 @@ mod tests {
             );
         });
         let rendered = handle.render();
-        assert!(rendered.contains("client=\"other\""), "rendered: {rendered}");
+        assert!(rendered.contains("venue=\"other\""), "rendered: {rendered}");
         assert!(rendered.contains("solver=\"unknown\""));
         assert!(!rendered.contains("0xD720183DdA64a8CDb424B5c13aF73baf713521f8"));
     }
 
     #[test]
     fn fallback_solver_label_collapses_to_unknown() {
-        // The Fallback tier labels the solver with the entry point — a client name like "relay",
+        // The Fallback tier labels the solver with the entry point — a venue name like "relay",
         // not a solver — which would pollute the dashboard's solver dropdown. The metric label
         // must collapse to "unknown"; the JSONL keeps the entry-point detail.
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);

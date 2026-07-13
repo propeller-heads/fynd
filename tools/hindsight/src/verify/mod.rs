@@ -391,7 +391,7 @@ mod tests {
         DecodedTrade {
             tx_hash: TxHash::ZERO,
             block_number: 1,
-            client: "relay".to_string(),
+            venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
             sender: addr(1),
@@ -399,8 +399,8 @@ mod tests {
             token_out,
             amount_in: U256::from(1000),
             amount_out: U256::from(2000),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         }

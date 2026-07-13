@@ -38,12 +38,12 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xfd0b31d2e955fa55e3fa641fe90e08b677188d35" = "tycho"
 "0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
 
-# Clients — platforms that initiate a trade and route it through a solver found in the
-# trace. Each section name must have a decode strategy in code (clients::Client);
+# Venues — platforms that initiate a trade and route it through a solver found in the
+# trace. Each section name must have a decode strategy in code (venues::Venue);
 # `entry_points` are the contracts users enter through, `fee_collectors` where its skims land.
 
-# Display names for entry points that are neither clients nor venues — market-maker fillers,
-# solver contracts, bot routers. Label-only: these must NOT be clients or solvers, because
+# Display names for entry points that are neither venues nor solvers — market-maker fillers,
+# solver contracts, bot routers. Label-only: these must NOT be venues or solvers, because
 # known-ness drives strategy selection and filler-entered transactions have to keep matching via
 # their solver logs (Maker), not sender netting. Identified from public labels (Etherscan
 # tags, Dune spellbook solver lists, project sites), ranked by observed volume in monitor runs.
@@ -69,7 +69,7 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
 "0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
 
-[clients.relay]
+[venues.relay]
 # Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies.
 entry_points = [
     "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
@@ -82,7 +82,7 @@ entry_points = [
 # on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
 fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
-[clients.metamask]
+[venues.metamask]
 # MetaMask Swap Router.
 entry_points = ["0x881d40237659c251811cec9c364ef91dc08d300c"]
 # MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the two, the

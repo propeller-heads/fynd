@@ -1,6 +1,6 @@
 //! MetaMask-specific decoding.
 //!
-//! MetaMask's Swap Router routes through a real venue and skims its fee (~87.5 bps, plus a gas
+//! MetaMask's Swap Router routes through a real solver and skims its fee (~87.5 bps, plus a gas
 //! recoup on gasless "smart swaps") to a fee wallet — from the input token before swapping or
 //! from the output after. Without backing that skim out, every comparison credits Fynd with
 //! MetaMask's own fee: the skim is charged whichever router MetaMask plugs in, so it is not
@@ -10,7 +10,10 @@
 use alloy::{primitives::Address, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    clients::client_fee_flow, ledger::TransferLedger, registry::Registry, strategy::Flow,
+    ledger::TransferLedger,
+    registry::Registry,
+    strategy::Flow,
+    venues::venue_fee_flow,
 };
 
 sol! {
@@ -19,8 +22,8 @@ sol! {
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
 
-/// The venue label declared in the router calldata's `aggregatorId`, normalized to the
-/// registry's venue names.
+/// The solver label declared in the router calldata's `aggregatorId`, normalized to the
+/// registry's solver names.
 ///
 /// MetaMask states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
@@ -53,8 +56,8 @@ fn normalize(id: &str) -> String {
     id.to_string()
 }
 
-/// Decode a MetaMask-entered transaction: net the sender's flow, back the client fee out of it,
-/// and attribute the venue from the router calldata (`input`).
+/// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of it,
+/// and attribute the solver from the router calldata (`input`).
 pub(crate) fn decode(
     ledger: &TransferLedger,
     sender: Address,
@@ -62,8 +65,8 @@ pub(crate) fn decode(
     input: &[u8],
     registry: &Registry,
 ) -> Option<Flow> {
-    let metamask = registry.client("metamask")?;
-    let mut flow = client_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
+    let metamask = registry.venue("metamask")?;
+    let mut flow = venue_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
     flow.solver_override = solver_from_calldata(input);
     Some(flow)
 }
@@ -75,10 +78,9 @@ mod tests {
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
-    /// One of the real MetaMask fee wallets, so tests exercise the registry entries.
     fn fee_wallet(registry: &Registry) -> Address {
         *registry
-            .client("metamask")
+            .venue("metamask")
             .unwrap()
             .fee_collectors
             .iter()
@@ -86,10 +88,9 @@ mod tests {
             .unwrap()
     }
 
-    /// The real MetaMask Swap Router entry point.
     fn router(registry: &Registry) -> Address {
         *registry
-            .client("metamask")
+            .venue("metamask")
             .unwrap()
             .entry_points
             .iter()
@@ -149,15 +150,15 @@ mod tests {
         let flow = decode(&ledger, user, router, &[], &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
-        assert_eq!(flow.client_fee, None);
-        assert_eq!(flow.client_fee_out, Some(U256::from(883)));
+        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_out, Some(U256::from(883)));
         assert!(flow.trader_paid_gas);
     }
 
     #[test]
     fn decode_backs_out_input_side_skim() {
         // ETH in, token out: the router skims the fee from the native input before forwarding
-        // the rest to the venue. amount_in shrinks to what actually entered the swap.
+        // the rest to the solver. amount_in shrinks to what actually entered the swap.
         let registry = Registry::ethereum();
         let collector = fee_wallet(&registry);
         let user = addr(1);
@@ -175,13 +176,13 @@ mod tests {
 
         let flow = decode(&ledger, user, router, &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
-        assert_eq!(flow.client_fee, Some(U256::from(9)));
-        assert_eq!(flow.client_fee_out, None);
+        assert_eq!(flow.venue_fee, Some(U256::from(9)));
+        assert_eq!(flow.venue_fee_out, None);
     }
 
     #[test]
-    fn decode_asserts_venue_from_calldata() {
-        // The declared aggregatorId lands on the flow as the venue override, so the orchestrator
+    fn decode_asserts_solver_from_calldata() {
+        // The declared aggregatorId lands on the flow as the solver override, so the orchestrator
         // needs no MetaMask-specific attribution branch.
         let registry = Registry::ethereum();
         let user = addr(1);
@@ -204,7 +205,6 @@ mod tests {
 
     #[test]
     fn decode_keeps_fee_free_trade_unchanged() {
-        // Some pairs are genuinely fee-free; nothing reached a fee wallet, nothing is backed out.
         let registry = Registry::ethereum();
         let user = addr(1);
         let pool = addr(50);
@@ -219,7 +219,7 @@ mod tests {
 
         let flow = decode(&ledger, user, router(&registry), &[], &registry).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
-        assert_eq!(flow.client_fee, None);
-        assert_eq!(flow.client_fee_out, None);
+        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_out, None);
     }
 }

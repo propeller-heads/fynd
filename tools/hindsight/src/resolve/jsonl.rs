@@ -150,7 +150,7 @@ fn comparison_record(
     serde_json::json!({
         "block": range.block_number,
         "settled_tx": range.tx_hash,
-        "client": range.client,
+        "venue": range.venue,
         "solver": range.solver,
         "solver_source": range.solver_source,
         "token_in": format!("{:#x}", range.token_in),
@@ -305,7 +305,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: Default::default(),
             block_number: 25_480_207,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -313,8 +313,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(69_996_280_564u64),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: Some(SolverQuote {
                 amount_out: U256::from(70_400_409_935u64),
@@ -376,7 +376,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: Default::default(),
             block_number: 25_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -384,8 +384,8 @@ mod tests {
             token_out: usdc,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         };
@@ -455,7 +455,7 @@ mod tests {
         let trade = DecodedTrade {
             tx_hash: Default::default(),
             block_number: 25_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -463,8 +463,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         };

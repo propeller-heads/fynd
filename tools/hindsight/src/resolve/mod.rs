@@ -68,7 +68,7 @@ impl StateResult {
 pub(crate) struct RangeComparison {
     pub tx_hash: String,
     pub block_number: u64,
-    pub client: String,
+    pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
@@ -125,7 +125,7 @@ pub(crate) fn build_range(
     RangeComparison {
         tx_hash: trade.tx_hash.to_string(),
         block_number: trade.block_number,
-        client: trade.client.clone(),
+        venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
         token_in: trade.token_in,
@@ -178,7 +178,7 @@ mod tests {
         DecodedTrade {
             tx_hash: Default::default(),
             block_number: 21_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -186,8 +186,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         }

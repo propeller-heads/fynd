@@ -1,10 +1,10 @@
-//! Client-specific decoding: the platforms users enter through (Relay, MetaMask).
+//! Venue-specific decoding: the platforms users enter through (Relay, MetaMask).
 //!
-//! A client owns the order flow — it picks a solver and may skim a fee — so decoding one means
-//! sender netting plus the client's own quirks: backing the fee skim out
-//! ([`client_fee_flow`]), Relay's solver-rebalance fills, MetaMask's calldata solver
-//! declaration. A module here is one client; its addresses come from the address book's
-//! `[clients.<name>]` section, bound to behavior by [`Client::from_name`].
+//! A venue owns the order flow — it picks a solver and may skim a fee — so decoding one means
+//! sender netting plus the venue's own quirks: backing the fee skim out ([`venue_fee_flow`]),
+//! Relay's solver-rebalance fills, MetaMask's calldata solver declaration. A module here is one
+//! venue; its addresses come from the address book's `[venues.<name>]` section, bound to behavior
+//! by [`Venue::from_name`].
 
 pub(crate) mod metamask;
 pub(crate) mod relay;
@@ -19,17 +19,17 @@ use crate::decoder::{
     strategy::{sender_flow, Flow},
 };
 
-/// A client platform with a decode module in this directory.
-pub(crate) enum Client {
+/// A venue platform with a decode module in this directory.
+pub(crate) enum Venue {
     Relay,
     Metamask,
 }
 
-impl Client {
-    /// The client bound to a name from the address book.
+impl Venue {
+    /// The venue bound to a name from the address book.
     ///
-    /// A `[clients.<name>]` section in the book only carries addresses; this is where its name
-    /// gets behavior. The registry validates every configured client name against this binding
+    /// A `[venues.<name>]` section in the book only carries addresses; this is where its name
+    /// gets behavior. The registry validates every configured venue name against this binding
     /// at load time, so a typo'd section fails fast instead of silently never matching.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -39,7 +39,7 @@ impl Client {
         }
     }
 
-    /// Decode a transaction entered through this client's contract.
+    /// Decode a transaction entered through this venue's contract.
     pub(crate) fn decode(
         &self,
         ledger: &TransferLedger,
@@ -55,13 +55,13 @@ impl Client {
     }
 }
 
-/// Net the sender's flow and back the client's fee skim out of it — the shared shape of every
-/// fee-skimming client entry (Relay, MetaMask).
+/// Net the sender's flow and back the venue's fee skim out of it — the shared shape of every
+/// fee-skimming venue entry (Relay, MetaMask).
 ///
 /// One exception: when the tracked trader IS a fee collector, the transaction is a treasury
 /// operation — the collector's receipts are its own output, not a skim, and backing them "out"
 /// would add the output to itself and double it.
-fn client_fee_flow(
+pub(crate) fn venue_fee_flow(
     ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
@@ -71,39 +71,39 @@ fn client_fee_flow(
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
-    Some(back_out_client_fees(flow, ledger, fee_collectors))
+    Some(back_out_venue_fees(flow, ledger, fee_collectors))
 }
 
-/// Back a client-fee skim out of a decoded user flow.
+/// Back a venue-fee skim out of a decoded user flow.
 ///
 /// The collector can skim on either side. An input-side skim is subtracted
 /// from `amount_in` (the user's gross spend included money that never entered
 /// the swap) and an output-side skim is added back into `amount_out` (the
 /// swap produced more than the user kept), so both sides are the amounts
 /// actually swapped — the like-for-like basis vs Fynd.
-fn back_out_client_fees(
+fn back_out_venue_fees(
     flow: Flow,
     ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
 ) -> Flow {
     let fees = ledger.received_by(fee_collectors);
-    let client_fee = fees
+    let venue_fee = fees
         .get(&flow.swap.token_in)
         .copied()
         .filter(|fee| !fee.is_zero());
     let amount_in =
-        client_fee.map_or(flow.swap.amount_in, |fee| flow.swap.amount_in.saturating_sub(fee));
-    let client_fee_out = fees
+        venue_fee.map_or(flow.swap.amount_in, |fee| flow.swap.amount_in.saturating_sub(fee));
+    let venue_fee_out = fees
         .get(&flow.swap.token_out)
         .copied()
         .filter(|fee| !fee.is_zero());
-    let amount_out =
-        client_fee_out.map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
+    let amount_out = venue_fee_out
+        .map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
     Flow {
         tracked: flow.tracked,
         swap: NetSwap { amount_in, amount_out, ..flow.swap },
-        client_fee,
-        client_fee_out,
+        venue_fee,
+        venue_fee_out,
         solver_override: flow.solver_override,
         trader_paid_gas: flow.trader_paid_gas,
     }
@@ -117,7 +117,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
-    fn client_fee_flow_backs_out_input_skim() {
+    fn venue_fee_flow_backs_out_input_skim() {
         // Router skims part of the input token to the collector; the rest goes to the pool.
         let user = addr(1);
         let router = addr(2);
@@ -135,14 +135,14 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = client_fee_flow(&ledger, user, router, &collectors).unwrap();
+        let flow = venue_fee_flow(&ledger, user, router, &collectors).unwrap();
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
-        assert_eq!(flow.client_fee, Some(U256::from(40)));
-        assert_eq!(flow.client_fee_out, None);
+        assert_eq!(flow.venue_fee, Some(U256::from(40)));
+        assert_eq!(flow.venue_fee_out, None);
     }
 
     #[test]
-    fn client_fee_flow_keeps_fee_free_trade_unchanged() {
+    fn venue_fee_flow_keeps_fee_free_trade_unchanged() {
         // Nothing reached a fee wallet, nothing is backed out.
         let user = addr(1);
         let pool = addr(50);
@@ -154,9 +154,9 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = client_fee_flow(&ledger, user, pool, &collectors).unwrap();
+        let flow = venue_fee_flow(&ledger, user, pool, &collectors).unwrap();
         assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
-        assert_eq!(flow.client_fee, None);
-        assert_eq!(flow.client_fee_out, None);
+        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_out, None);
     }
 }
