@@ -337,4 +337,4 @@ surfaced two bugs invisible offline because the harness never encodes routes:
 
 Live-audit head-to-head on the same 808 solved trades (local, `all_onchain` min_tvl=10, no RFQ):
 the portfolio split beat `path_frank_wolfe` on 599/808 trades (74%), median +0.57 bps net-of-gas.
-Charts: PR #284 description (`assets/bench-284-audit-charts` branch).
+Charts: PR #270 description (`assets/split-routing-charts` branch).
