@@ -6,6 +6,7 @@ Developer and operational tooling for the Fynd solver.
 |---|---|---|
 | [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | [fynd-swap-cli](#fynd-swap-cli) | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
+| [hindsight](#hindsight) | `tools/hindsight/` | Decode solver swaps from on-chain data and live-monitor re-solve quality |
 | [record-market](#record-market) | `tools/record-market/` | Record Tycho market state and expected outputs for integration tests |
 
 ---
@@ -47,6 +48,23 @@ End-to-end CLI for quoting and executing swaps. Supports both ERC-20 approval an
   `--transfer-type use-vaults-funds` (funds already in router vault)
 
 See [`docs/guides/swap-cli.md`](../docs/guides/swap-cli.md) for usage instructions.
+
+---
+
+## hindsight
+
+See [`tools/hindsight/CLAUDE.md`](hindsight/CLAUDE.md) for the full module overview.
+
+Three subcommands via `cargo run -p hindsight --release --`:
+
+- **`decode`** — Fetch block receipts, match and trace solver transactions, emit decoded trades
+  (token in/out, amounts, client, solver, settled gas). Accepts `--block N`, `--range START-END`
+  (max 1000 blocks), or defaults to the latest block.
+- **`verify`** — Diff decoded trades against Allium's `aggregator_trades` ground truth. Requires 
+  `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
+- **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, re-solving
+  each settled trade at top-of-block (N-1) and back-of-block (N). Emits JSONL and exposes
+  Prometheus metrics.
 
 ---
 
