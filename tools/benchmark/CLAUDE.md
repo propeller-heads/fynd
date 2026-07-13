@@ -4,7 +4,7 @@ Benchmark and comparison tooling for Fynd solvers. Requires one or more running 
 
 ## Commands
 
-Three subcommands available via `cargo run -p fynd-benchmark --release --`:
+Five subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver. Measures latency (round-trip, solve time, overhead) and throughput. Supports sequential, fixed-concurrency, and rate-based parallelization modes. Prints statistics and ASCII histograms to stdout; optionally exports results to JSON.
 
@@ -110,7 +110,7 @@ Key fields per participant:
 
 | Module | Purpose |
 |---|---|
-| `main.rs` | CLI entry point. Parses `load` / `compare` subcommands via clap and dispatches to the corresponding handler. |
+| `main.rs` | CLI entry point. Parses subcommands via clap and dispatches to the corresponding handler. |
 | `benchmark.rs` | `load` subcommand handler. Builds a `FyndClient`, checks solver health, loads request templates, runs the benchmark via `runner`, and prints results via `exporter`. |
 | `compare.rs` | `compare` subcommand handler. Builds two `FyndClient` instances, sends identical requests sequentially to both, computes per-request metrics (amount out diff in bps, gas diff, route match), prints a summary table, and exports full results to JSON. |
 | `config.rs` | Shared types: `ParallelizationMode` enum (`Sequential`, `FixedConcurrency`, `RateBased`), `BenchmarkConfig`, `BenchmarkResults`, `TimingStats`. |
@@ -118,6 +118,9 @@ Key fields per participant:
 | `exporter.rs` | Statistics calculation (`TimingStats::from_measurements` — min/max/mean/median/p95/p99/stddev), ASCII histogram rendering, and JSON export of `BenchmarkResults`. |
 | `requests.rs` | Request generation and loading. Provides a default WETH→USDC request, loads embedded aggregator trades, downloads the full 10k dataset, and loads custom requests from a JSON file. |
 | `scale.rs` | `scale` subcommand handler. Resolves protocols once via `resolve_protocols` (`all_onchain`/`native_onchain` expansion), then builds and tears down an in-process Fynd instance for each worker-count iteration (applying `--min-tvl`), runs load tests via `runner`, and exports scaling results to JSON. |
+| `aggregator.rs` | Aggregator API clients (Nordstern, KyberSwap, 0x) used by the `audit` subcommand. |
+| `pair_selector.rs` | Trade pair selection logic for `audit` runs. |
+| `audit/` | `audit` subcommand handler: per-trade result collection, on-chain validation via `eth_call`, JSON report writing. |
 
 ## Data Files
 

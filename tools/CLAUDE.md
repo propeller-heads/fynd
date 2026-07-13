@@ -15,12 +15,13 @@ Developer and operational tooling for the Fynd solver.
 
 See [`tools/benchmark/CLAUDE.md`](benchmark/CLAUDE.md) for the full module overview.
 
-Four subcommands via `cargo run -p fynd-benchmark --release --`:
+Five subcommands via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver (latency, throughput, histograms)
 - **`compare`** — Compare output quality between two solver instances (amount out diff in bps)
 - **`scale`** — Measure how solver throughput scales with worker thread count (in-process, no external solver needed)
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
+- **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x); writes a JSON report
 
 ---
 
@@ -33,7 +34,6 @@ End-to-end CLI for quoting and executing swaps. Supports both ERC-20 approval an
 | File | Purpose |
 |---|---|
 | `main.rs` | CLI parsing (clap), quote → sign → execute flow |
-| `erc20.rs` | ERC-20 helpers: balance checks, storage slot detection for dry-run overrides |
 | `permit2.rs` | Permit2 helpers: allowance checks, nonce fetching |
 
 ### Key Behaviors

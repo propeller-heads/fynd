@@ -40,13 +40,17 @@ Match → trace → decode → guard → record.
 | `strategy.rs` | Selects the decode strategy per matched transaction |
 | `ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `guards.rs` | Vetoes non-comparable shapes (e.g. multi-leg, maker fills) |
-| `registry.rs` | Address book: maps contract addresses to client/solver labels |
-| `clients/` | Per-client decoders (Relay, MetaMask, …) |
+| `registry.rs` | Address book: maps contract addresses to venue/solver labels |
+| `venues/` | Per-venue decoders (Relay, MetaMask, …) — at `src/decoder/venues/` |
 | `solvers/` | Per-solver decoders + embedded-quote extraction + attribution |
-| `allium.rs` | Allium API client for the `verify` subcommand |
-| `verify_decoder.rs` | Diff logic between decoded trades and Allium ground truth |
+| `intent.rs` | Intent/order parsing helpers |
+| `trace.rs` | Transaction trace fetching and processing |
 
-Three address tiers: **client** (order-flow owner, `tx.to`), **solver** (router that settled the
+`src/verify/` contains the Allium integration:
+- `allium.rs` — Allium API client for the `verify` subcommand
+- `mod.rs` — Diff logic between decoded trades and Allium ground truth
+
+Three address tiers: **venue** (order-flow owner, `tx.to`), **solver** (router that settled the
 trade), **liquidity venues** (pools inside traces — not modeled here).
 
 ### Re-solve engine (`src/resolve/`)
