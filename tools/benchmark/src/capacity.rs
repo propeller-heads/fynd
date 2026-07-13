@@ -3,9 +3,10 @@
 //!
 //! An unloaded sequential baseline is measured first; each ladder step then fires
 //! rate-based traffic for a fixed duration (after a discarded warm-up window) and
-//! is judged by [`evaluate_step`]. The report JSON is always printed to stdout
-//! after a `=== CAPACITY REPORT JSON ===` marker so in-cluster Jobs can retrieve
-//! it from the pod logs.
+//! is judged by [`evaluate_step`]. The report JSON is always the last thing
+//! printed to stdout, after a `=== CAPACITY REPORT JSON ===` marker, so
+//! in-cluster Jobs can retrieve it from the pod logs (marker to EOF, minus the
+//! marker line, is exactly the JSON).
 
 use std::{sync::Arc, time::Instant};
 
@@ -148,12 +149,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         std::fs::write(path, &json)
             .map_err(|e| anyhow::anyhow!("cannot write report to '{path}': {e}"))?;
     }
+    // Human-readable summary first, marker + JSON last: everything from the
+    // marker to EOF (minus the marker line) must be exactly the JSON so
+    // in-cluster Jobs can capture it from pod logs with a single sed.
+    match report.capacity_rps {
+        Some(rps) => println!("Capacity: {rps} rps at SLO\n"),
+        None => println!("Capacity: SLO breached at the first ladder step\n"),
+    }
     println!("{REPORT_MARKER}");
     println!("{json}");
-    match report.capacity_rps {
-        Some(rps) => println!("\nCapacity: {rps} rps at SLO"),
-        None => println!("\nCapacity: SLO breached at the first ladder step"),
-    }
     Ok(())
 }
 
