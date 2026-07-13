@@ -3427,7 +3427,6 @@ dependencies = [
  "futures 0.3.32",
  "fynd-test-fixtures",
  "itertools 0.14.0",
- "lazy_static",
  "metrics",
  "num-bigint",
  "num-rational",

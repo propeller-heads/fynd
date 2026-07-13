@@ -22,10 +22,19 @@ impl UnsupportedChainError {
 /// # Errors
 /// Returns `UnsupportedChainError` if the chain (custom) is not registered.
 pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
-    chain
+    let address = chain
         .try_wrapped_native_token()
         .map(|token| token.address)
-        .map_err(|_| UnsupportedChainError { chain: *chain })
+        .map_err(|_| UnsupportedChainError { chain: *chain })?;
+
+    // A zero address is a placeholder (e.g. Starknet) meaning the chain has no real
+    // wrapped-native token; treat it as unsupported so callers still fail fast instead of
+    // deriving a gas token from a placeholder address.
+    if address.is_zero() {
+        return Err(UnsupportedChainError { chain: *chain });
+    }
+
+    Ok(address)
 }
 
 /// Parses a chain name string (case-insensitive) into a [`Chain`].

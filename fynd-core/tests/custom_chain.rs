@@ -40,4 +40,9 @@ fn resolves_and_reads_native_for_custom_chain() {
 
     // unknown still rejected
     assert!(parse_chain("not_a_chain").is_err());
+
+    // Starknet's wrapped-native is a placeholder zero address; fail fast rather than
+    // returning it as a usable gas token.
+    let starknet = parse_chain("starknet").unwrap();
+    assert!(native_token(&starknet).is_err());
 }
