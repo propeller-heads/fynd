@@ -826,6 +826,24 @@ impl OrderQuote {
         self.amount_out_net_gas = value;
     }
 
+    /// Re-stamps the sender address in place.
+    ///
+    /// Used by the quote cache (ENG-6236) to re-address a cached solve to a new caller before
+    /// encoding fresh calldata; unused by the in-request solve/encode path.
+    #[allow(dead_code)]
+    pub(crate) fn set_sender(&mut self, sender: Bytes) {
+        self.sender = sender;
+    }
+
+    /// Re-stamps the receiver address in place.
+    ///
+    /// Used by the quote cache (ENG-6236) to re-address a cached solve to a new caller before
+    /// encoding fresh calldata; unused by the in-request solve/encode path.
+    #[allow(dead_code)]
+    pub(crate) fn set_receiver(&mut self, receiver: Bytes) {
+        self.receiver = receiver;
+    }
+
     /// Returns the order ID.
     pub fn order_id(&self) -> &str {
         &self.order_id

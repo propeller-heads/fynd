@@ -83,6 +83,20 @@ pub(crate) struct OrderResponses {
     failed_solvers: Vec<(String, SolveError)>,
 }
 
+/// Pre-encode result of solving a [`QuoteRequest`].
+///
+/// Carries the ranked, price-guard-validated best `OrderQuote` per order (one entry per order,
+/// same order as the request) together with the timing context the encode tail needs to finish a
+/// [`Quote`]. Produced by [`WorkerPoolRouter::solve`] and consumed by
+/// [`WorkerPoolRouter::encode_quote`]; the split lets a quote cache store solved quotes and
+/// re-encode them with fresh calldata.
+pub struct SolvedQuote {
+    /// Best quote per order (ranked, price-guard validated), before encoding.
+    order_quotes: Vec<OrderQuote>,
+    /// Instant solving started, used to compute the total solve time on the finished quote.
+    start: Instant,
+}
+
 /// Orchestrates multiple solver pools to find the best quote.
 pub struct WorkerPoolRouter {
     /// All registered solver pools.
@@ -128,7 +142,23 @@ impl WorkerPoolRouter {
     /// 3. Selects the best quote based on `amount_out_net_gas`
     /// 4. If `encoding_options` are set on the request, encodes winning solutions into on-chain
     ///    transactions
+    ///
+    /// This is the composition of [`solve`](Self::solve) and
+    /// [`encode_quote`](Self::encode_quote).
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
+        let options = request.options().clone();
+        let solved = self.solve(request).await?;
+        self.encode_quote(solved, &options)
+            .await
+    }
+
+    /// Solves a request without encoding: fans out to all solver pools, refines gas estimates,
+    /// ranks candidates, and applies price guard validation.
+    ///
+    /// Returns the ranked, price-guard-validated best `OrderQuote` per order (pre-encoding),
+    /// wrapped in a [`SolvedQuote`] that also carries the timing context the encode tail needs.
+    /// Callers finish the quote with [`encode_quote`](Self::encode_quote).
+    pub async fn solve(&self, request: QuoteRequest) -> Result<SolvedQuote, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -173,7 +203,7 @@ impl WorkerPoolRouter {
             .map(|e| e.price_guard())
             .filter(|c| c.enabled());
 
-        let mut order_quotes: Vec<OrderQuote> = match (&self.price_guard, price_guard_config) {
+        let order_quotes: Vec<OrderQuote> = match (&self.price_guard, price_guard_config) {
             (Some(guard), Some(config)) => guard
                 .validate(ranked_quotes, config)
                 .map_err(|e| {
@@ -192,8 +222,23 @@ impl WorkerPoolRouter {
                 .collect(),
         };
 
+        Ok(SolvedQuote { order_quotes, start })
+    }
+
+    /// Encodes a [`SolvedQuote`] into the final [`Quote`].
+    ///
+    /// When `options` carries `encoding_options`, each successful order quote is encoded into an
+    /// executable transaction; otherwise the solved quotes are returned as-is. Also computes the
+    /// aggregate gas estimate and total solve time.
+    pub async fn encode_quote(
+        &self,
+        solved: SolvedQuote,
+        options: &QuoteOptions,
+    ) -> Result<Quote, SolveError> {
+        let SolvedQuote { mut order_quotes, start } = solved;
+
         // Encode solutions if encoding_options is set
-        if let Some(encoding_options) = request.options().encoding_options() {
+        if let Some(encoding_options) = options.encoding_options() {
             order_quotes = self
                 .encoder
                 .encode(order_quotes, encoding_options.clone())
