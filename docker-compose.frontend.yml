@@ -1,0 +1,43 @@
+# Starts Fynd router + swap frontend.
+#
+# Usage:
+#   export TYCHO_API_KEY=your-api-key
+#   docker compose -f docker-compose.frontend.yml up
+#   Open http://localhost:3005
+#
+# Required env vars (set in .env or export before running):
+#   TYCHO_API_KEY  — Tycho API key (https://t.me/fynd_portal_bot)
+#
+# Optional env vars:
+#   CHAIN      — chain name (default: Ethereum)
+#   PROTOCOLS  — comma-separated protocol list (default: mainnet preset)
+#   TYCHO_URL  — Tycho WebSocket endpoint (default: tycho-fynd-ethereum.propellerheads.xyz)
+#   RUST_LOG   — tracing filter (default: fynd=info)
+
+services:
+  fynd-serve:
+    image: ghcr.io/propeller-heads/fynd:latest
+    entrypoint: ["/usr/local/bin/fynd"]
+    command:
+      - serve
+      - "--chain"
+      - "${CHAIN:-Ethereum}"
+      - "--protocols"
+      - "${PROTOCOLS:-uniswap_v2,uniswap_v3,ekubo_v2,pancakeswap_v3,sushiswap_v2,fluid_v1,pancakeswap_v2}"
+    ports:
+      - "3000:3000"
+    environment:
+      - TYCHO_API_KEY=${TYCHO_API_KEY}
+      - TYCHO_URL=${TYCHO_URL:-tycho-fynd-ethereum.propellerheads.xyz}
+      - RUST_LOG=${RUST_LOG:-fynd=info}
+
+  fynd-frontend:
+    image: ghcr.io/propeller-heads/fynd-frontend:latest
+    ports:
+      - "3005:3005"
+    environment:
+      - PATHFINDER_BASE_URL=http://fynd-serve:3000
+      - TYCHO_AUTH_TOKEN=${TYCHO_API_KEY}
+      - TYCHO_BASE_URL=${TYCHO_BASE_URL:-https://tycho-beta.propellerheads.xyz}
+    depends_on:
+      - fynd-serve
