@@ -1,3 +1,13 @@
+// Test code uses unwrap/expect/println pervasively — these are idiomatic in tests and need no
+// special handling (a panic in test code is the desired failure mode).
+#![cfg_attr(test, allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::unwrap_err_used,
+    clippy::print_stdout,
+    clippy::print_stderr,
+))]
+
 mod decoder;
 mod resolve;
 mod telemetry;
@@ -23,7 +33,7 @@ struct Cli {
 enum Command {
     /// Decode solver trades from a block or range.
     Decode(DecodeArgs),
-    /// Decode and compare against Allium's aggregator_trades ground truth.
+    /// Decode and compare against Allium's `aggregator_trades` ground truth.
     Verify(VerifyArgs),
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
@@ -83,13 +93,13 @@ struct VerifyArgs {
     /// workspace that created it, so register this SQL in your own Allium workspace and pass its
     /// ID:
     ///
-    ///   SELECT project, protocol, token_sold_address, token_sold_symbol, token_sold_amount,
-    ///          usd_sold_amount, token_bought_address, token_bought_symbol, token_bought_amount,
-    ///          usd_bought_amount, sender_address, to_address, transaction_hash,
-    ///          transaction_fees_usd, block_number, block_timestamp, log_index
-    ///   FROM ethereum.dex.aggregator_trades
-    ///   WHERE block_number = {{block_number}}
-    ///   ORDER BY log_index
+    ///   SELECT project, protocol, `token_sold_address`, `token_sold_symbol`, `token_sold_amount`,
+    ///          `usd_sold_amount`, `token_bought_address`, `token_bought_symbol`, `token_bought_amount`,
+    ///          `usd_bought_amount`, `sender_address`, `to_address`, `transaction_hash`,
+    ///          `transaction_fees_usd`, `block_number`, `block_timestamp`, `log_index`
+    ///   FROM `ethereum.dex.aggregator_trades`
+    ///   WHERE `block_number` = {{`block_number`}}
+    ///   ORDER BY `log_index`
     #[arg(long, env = "ALLIUM_QUERY_ID")]
     allium_query_id: String,
 
@@ -103,12 +113,14 @@ struct VerifyArgs {
 }
 
 #[tokio::main]
+#[expect(clippy::expect_used)]
 async fn main() -> anyhow::Result<()> {
     // ANSI colors only on a real terminal: in a pod they end up as escape sequences inside
     // Loki, where they break plain name=value field extraction.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_env("RUST_LOG").add_directive("hindsight=info".parse().unwrap()),
+            EnvFilter::from_env("RUST_LOG")
+                .add_directive("hindsight=info".parse().expect("valid static directive")),
         )
         .with_target(false)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -121,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+#[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
@@ -159,6 +172,7 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[expect(clippy::print_stdout)]
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
@@ -205,6 +219,7 @@ pub(crate) async fn resolve_blocks<P: Provider>(
     }
 }
 
+#[expect(clippy::print_stdout)]
 fn print_trades(trades: &[decoder::DecodedTrade]) {
     if trades.is_empty() {
         println!("No solver trades found.");

@@ -1,13 +1,13 @@
 //! LiFi-specific matching rules.
 //!
-//! LiFi's Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
+//! `LiFi`'s Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
 //! bridge orders, which must never decode as swaps.
 
 use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
 sol! {
-    /// Emitted by the LiFi Diamond only when an order bridges to another chain (the tuple is
-    /// LiFi's `BridgeData`); same-chain LiFi swaps emit `LiFiGenericSwapCompleted` instead.
+    /// Emitted by the `LiFi` Diamond only when an order bridges to another chain (the tuple is
+    /// `LiFi`'s `BridgeData`); same-chain `LiFi` swaps emit `LiFiGenericSwapCompleted` instead.
     event LiFiTransferStarted(
         (bytes32, string, string, address, address, address, uint256, uint256, bool, bool)
             bridgeData

@@ -63,6 +63,7 @@ pub(crate) struct VerifyReport {
 }
 
 impl VerifyReport {
+    #[expect(clippy::print_stdout)]
     pub(crate) fn print(&self) {
         let count = |status: Status| {
             self.comparisons

@@ -1,8 +1,8 @@
-//! Venue-specific decoding: the platforms users enter through (Relay, MetaMask).
+//! Venue-specific decoding: the platforms users enter through (Relay, `MetaMask`).
 //!
 //! A venue owns the order flow — it picks a solver and may skim a fee — so decoding one means
 //! sender netting plus the venue's own quirks: backing the fee skim out ([`venue_fee_flow`]),
-//! Relay's solver-rebalance fills, MetaMask's calldata solver declaration. A module here is one
+//! Relay's solver-rebalance fills, `MetaMask`'s calldata solver declaration. A module here is one
 //! venue; its addresses come from the address book's `[venues.<name>]` section, bound to behavior
 //! by [`Venue::from_name`].
 
@@ -56,7 +56,7 @@ impl Venue {
 }
 
 /// Net the sender's flow and back the venue's fee skim out of it — the shared shape of every
-/// fee-skimming venue entry (Relay, MetaMask).
+/// fee-skimming venue entry (Relay, `MetaMask`).
 ///
 /// One exception: when the tracked trader IS a fee collector, the transaction is a treasury
 /// operation — the collector's receipts are its own output, not a skim, and backing them "out"

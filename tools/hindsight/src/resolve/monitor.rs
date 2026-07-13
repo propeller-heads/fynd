@@ -33,13 +33,13 @@ use crate::{
 };
 
 /// How often to warn while the solver has not applied the next block.
-const STALL_WARN_INTERVAL: Duration = Duration::from_secs(300);
+const STALL_WARN_INTERVAL: Duration = Duration::from_mins(5);
 /// No block for this long means the feed is dead, not slow. The observed failure mode: one
 /// server-side subscription goes silent, tycho-client's block synchronizer stops emitting while
 /// it waits for it, and ~35 minutes later backpressure kills the remaining subscriptions
 /// ("Buffer full, unsubscribing!"). Nothing resubscribes, so the stream never recovers — the
 /// monitor rebuilds the solver instead of waiting.
-const FEED_DEAD_TIMEOUT: Duration = Duration::from_secs(900);
+const FEED_DEAD_TIMEOUT: Duration = Duration::from_mins(15);
 /// Pause between solver rebuild attempts after a feed death, so a struggling Tycho server is not
 /// hammered in a tight loop.
 const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
@@ -128,7 +128,7 @@ impl StepAdapter<'_> {
             .read()
             .await
             .last_updated()
-            .map(|b| b.number())
+            .map(fynd_core::BlockInfo::number)
     }
 }
 
@@ -159,11 +159,9 @@ impl SteppingSolver for StepAdapter<'_> {
         match self.solver.quote(request).await {
             Ok(quote) => quote
                 .orders()
-                .first()
-                .map(order_quote_to_outcome)
-                .unwrap_or_else(|| {
+                .first().map_or_else(|| {
                     Outcome::Unsolvable("solver returned no order quote".to_string())
-                }),
+                }, order_quote_to_outcome),
             Err(e) => Outcome::Unsolvable(format!("solve error: {e}")),
         }
     }
@@ -201,7 +199,7 @@ impl SteppingSolver for StepAdapter<'_> {
                 next_warn += STALL_WARN_INTERVAL;
             }
             tokio::select! {
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
                 peeked = self.controller.peek_next_block() => {
                     if peeked.is_none() {
                         anyhow::bail!("tycho stream ended while waiting for the next block");

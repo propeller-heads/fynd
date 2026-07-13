@@ -1,9 +1,9 @@
 //! Decode solver trades from on-chain data.
 //!
 //! Terminology — three tiers, two of which appear in every record:
-//! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, MetaMask.
+//! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, `MetaMask`.
 //!   Order-flow owners; they pick a solver and may skim a fee.
-//! - **solver** (`solvers/`): the router that computed and settled the route — KyberSwap, 1inch,
+//! - **solver** (`solvers/`): the router that computed and settled the route — `KyberSwap`, 1inch,
 //!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
 //!   their column names; the two words mean the same thing.
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
@@ -56,7 +56,7 @@ pub(crate) struct DecodedTrade {
     pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (see [`solvers::attribution`]). Downstream
-    /// analysis weighs low-trust tiers (largest_call, fallback) differently — e.g. when judging
+    /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
     pub sender: Address,
@@ -79,7 +79,7 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_out: Option<U256>,
     /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
-    /// effective_gas_price`). For venue-wrapped entries (Relay, MetaMask) the venue's own
+    /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
     /// overhead is excluded — it is charged whichever router the venue picks, like the venue
     /// fee. `None` when the trader did not pay the transaction's gas (maker fills, solver
     /// rebalances) or the route's gas could not be isolated from the trace.
@@ -131,7 +131,7 @@ impl<P: Provider> Decoder<P> {
     /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a
     /// transaction two ways: its entry point (`tx.to`) is a known venue or
     /// solver, or one of its logs was emitted by a known solver. The
-    /// second case catches filler-initiated intent fills (UniswapX, 1inch
+    /// second case catches filler-initiated intent fills (`UniswapX`, 1inch
     /// limit orders) where `tx.to` is a rotating filler. Matched transactions are
     /// traced concurrently; the trace recovers native ETH flows and attributes
     /// the settling solver.

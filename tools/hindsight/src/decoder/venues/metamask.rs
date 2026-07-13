@@ -1,9 +1,9 @@
 //! MetaMask-specific decoding.
 //!
-//! MetaMask's Swap Router routes through a real solver and skims its fee (~87.5 bps, plus a gas
+//! `MetaMask`'s Swap Router routes through a real solver and skims its fee (~87.5 bps, plus a gas
 //! recoup on gasless "smart swaps") to a fee wallet — from the input token before swapping or
 //! from the output after. Without backing that skim out, every comparison credits Fynd with
-//! MetaMask's own fee: the skim is charged whichever router MetaMask plugs in, so it is not
+//! `MetaMask`'s own fee: the skim is charged whichever router `MetaMask` plugs in, so it is not
 //! value better routing can recover. On dust trades the skim dominates and fabricated
 //! extreme "wins".
 
@@ -17,7 +17,7 @@ use crate::decoder::{
 };
 
 sol! {
-    /// The MetaMask Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
+    /// The `MetaMask` Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
     /// solver API that produced the route.
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
@@ -25,7 +25,7 @@ sol! {
 /// The solver label declared in the router calldata's `aggregatorId`, normalized to the
 /// registry's solver names.
 ///
-/// MetaMask states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
+/// `MetaMask` states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
 /// route moves no native value and enters through Permit2 — so the calldata declaration is the
 /// authoritative source. Unrecognized ids pass through as-is: "airswapV4" is still more

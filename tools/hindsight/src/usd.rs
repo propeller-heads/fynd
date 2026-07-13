@@ -65,7 +65,7 @@ fn usd_per_eth_wei(prices: &PriceMap) -> Option<f64> {
     let mut count = 0u32;
     for &(stable, decimals) in STABLECOINS {
         if let Some(price) = price_of(prices, stable) {
-            sum += price / 10f64.powi(decimals as i32);
+            sum += price / 10f64.powi(decimals.cast_signed());
             count += 1;
         }
     }
@@ -90,6 +90,9 @@ pub(crate) fn value_usd(token: Address, amount: U256, prices: &PriceMap) -> Opti
 /// multiplication. Returns `None` when `token` is not priced. The f64 round-trip loses wei-level
 /// precision, which is acceptable for a gas deduction — the cost itself is exact but its value in
 /// the output token is an estimate by nature.
+// Truncation is intentional: whole token units are sufficient for a gas estimate.
+// Sign loss is impossible: gas_wei is from a U256 and price_of only returns positive values.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn gas_in_token(gas_wei: U256, token: Address, prices: &PriceMap) -> Option<U256> {
     let price = price_of(prices, token)?;
     let gas: f64 = gas_wei.to_string().parse().ok()?;

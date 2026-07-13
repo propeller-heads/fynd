@@ -84,6 +84,7 @@ impl Registry {
     }
 
     /// The built-in Ethereum address book.
+    #[expect(clippy::expect_used)]
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
     }
@@ -132,12 +133,12 @@ impl Registry {
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label
     /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
-    /// calldata-declared names from a venue's own vocabulary (MetaMask aggregator ids).
+    /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
         self.solvers.values().any(|solver| solver == name)
     }
 
-    /// Whether `address` is a batch-settlement venue (e.g. CoW). Such trades
+    /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
     /// must be decoded by finding the order maker, not by tracking the
     /// sender: a solver settles many orders at once, so its net flow is not a
     /// single swap even when it happens to net to one token on each side.

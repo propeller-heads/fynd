@@ -47,7 +47,7 @@ pub(crate) enum TraderStrategy {
     /// `tx.to` is a batch settler entered by a solver.
     Maker,
     /// The sender is the trader, but it entered through a venue platform's own contract
-    /// (Relay's router, MetaMask's Swap Router) which then calls the solver inside the same
+    /// (Relay's router, `MetaMask`'s Swap Router) which then calls the solver inside the same
     /// transaction. Decoding is still sender netting, plus that venue's corrections — its fee
     /// skim is backed out, and its contract overhead is excluded from gas accounting — so the
     /// recovered swap is what the venue actually asked the solver for.
@@ -104,7 +104,7 @@ pub(crate) struct Flow {
     pub venue_fee: Option<U256>,
     /// Venue fee skimmed from the output token, already added back into `swap.amount_out`.
     pub venue_fee_out: Option<U256>,
-    /// Solver label asserted by the strategy itself (e.g. MetaMask declares its
+    /// Solver label asserted by the strategy itself (e.g. `MetaMask` declares its
     /// solver in calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
     /// Whether the tracked trader sent the transaction and therefore paid its gas. Decides if the

@@ -1,7 +1,7 @@
 //! Maker-finding for intent fills and batch settlements.
 //!
 //! Covers transactions where the sender is not the trader: filler-initiated
-//! intent fills (UniswapX, 1inch limit orders) and batch settlements (CoW),
+//! intent fills (`UniswapX`, 1inch limit orders) and batch settlements (`CoW`),
 //! where the real swap is an order maker's net flow.
 
 use std::collections::HashMap;

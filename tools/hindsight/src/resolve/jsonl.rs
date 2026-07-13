@@ -22,7 +22,7 @@ use crate::{
 
 /// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
 /// `comparisons-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
-/// upload CronJob) ships closed daily files instead of re-shipping one ever-growing one.
+/// upload `CronJob`) ships closed daily files instead of re-shipping one ever-growing one.
 pub(crate) struct RotatingWriter {
     dir: PathBuf,
     date: String,
@@ -68,7 +68,7 @@ impl RotatingWriter {
                 self.date = date;
             }
             Err(e) => {
-                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's")
+                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's");
             }
         }
     }
@@ -100,7 +100,7 @@ fn utc_date() -> String {
 /// Civil date for a unix timestamp (UTC), via the days-to-civil-calendar algorithm — exact for
 /// the whole unix era, so no calendar dependency is needed for a filename.
 fn date_from_unix(secs: u64) -> String {
-    let z = (secs / 86_400) as i64 + 719_468;
+    let z = (secs / 86_400).cast_signed() + 719_468_i64;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
     let year_of_era =

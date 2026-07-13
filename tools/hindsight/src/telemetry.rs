@@ -49,7 +49,7 @@ fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
 /// Metric label for a range's settling solver: registered solver names pass through, everything
 /// else collapses to "unknown". Attribution can also produce raw addresses (largest-call guess),
 /// venue names (fallback tier), and calldata-declared names from a venue's own vocabulary
-/// (MetaMask aggregator ids like "pancakeSwapRouterFeeDynamic") — none belong in the bounded
+/// (`MetaMask` aggregator ids like "pancakeSwapRouterFeeDynamic") — none belong in the bounded
 /// metric vocabulary. The original label stays in the JSONL records, where it serves as the
 /// registry-expansion worklist.
 fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
@@ -271,6 +271,7 @@ pub(crate) fn record_feed_rebuild() {
     counter!(FEED_REBUILDS).increment(1);
 }
 
+#[expect(clippy::unused_async)]
 async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")
