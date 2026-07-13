@@ -10,8 +10,8 @@
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
 //! The pipeline is match → trace → decode → guard → record: `strategy` picks how a matched
-//! transaction is decoded, `ledger` answers all value-flow questions, `guards` vetoes netted
-//! shapes that are not comparable trades, and `registry` is the address book behind matching.
+//! transaction is decoded, `ledger` answers all value-flow questions, `guards` vetoes shapes that
+//! are not comparable trades, and `registry` is the address book behind matching.
 
 mod clients;
 mod guards;
@@ -21,9 +21,6 @@ mod registry;
 mod solvers;
 mod strategy;
 mod trace;
-
-pub(crate) mod allium;
-pub(crate) mod verify_decoder;
 
 #[cfg(test)]
 mod test_utils;

@@ -2,6 +2,7 @@ mod decoder;
 mod resolve;
 mod telemetry;
 mod usd;
+mod verify;
 
 use std::time::Instant;
 
@@ -161,14 +162,14 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
+    let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
     let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
     let report =
-        decoder::verify_decoder::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
+        verify::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
     info!(elapsed_ms = start.elapsed().as_millis(), "verification complete");
 
     if args.json {
