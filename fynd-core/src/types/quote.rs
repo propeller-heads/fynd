@@ -844,9 +844,6 @@ impl OrderQuote {
     ///
     /// Set by the router when a surplus route is selected, for observability. The per-leg
     /// [`Swap::committed_amount_out`] (not this) is what the encoder acts on.
-    // Called by the surplus overlay in `combine_with_surplus` (still scaffolded); no prod caller
-    // yet.
-    #[allow(dead_code)]
     pub(crate) fn with_surplus(mut self, surplus: SurplusInfo) -> Self {
         self.surplus = Some(surplus);
         self
@@ -900,6 +897,10 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+        self.amount_out = value;
+    }
+
     pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
         self.amount_out_net_gas = value;
     }
@@ -917,6 +918,11 @@ impl OrderQuote {
     /// Returns the route, if a valid route was found.
     pub fn route(&self) -> Option<&Route> {
         self.route.as_ref()
+    }
+
+    /// Returns a mutable reference to the route.
+    pub(crate) fn route_mut(&mut self) -> Option<&mut Route> {
+        self.route.as_mut()
     }
 
     /// Consumes this solution and returns the route.
@@ -1116,6 +1122,11 @@ impl Route {
     /// Returns the swaps in this route.
     pub fn swaps(&self) -> &[Swap] {
         &self.swaps
+    }
+
+    /// Returns a mutable reference to the swaps in this route.
+    pub(crate) fn swaps_mut(&mut self) -> &mut [Swap] {
+        &mut self.swaps
     }
 
     /// Consumes the route and returns its swaps.
@@ -1642,12 +1653,8 @@ impl Swap {
     ///
     /// The router stamps this onto the single permissioned leg of a surplus route so the encoder
     /// can derive the hook's `maxExchangeRate`. See [`Swap::committed_amount_out`].
-    // Stamped by `combine_with_surplus`, whose body is still scaffolded (`todo!()`); no prod caller
-    // yet, mirroring the `OrderQuote::with_surplus` precedent.
-    #[allow(dead_code)]
-    pub(crate) fn with_committed_amount_out(mut self, committed_amount_out: BigUint) -> Self {
+    pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
-        self
     }
 
     /// Returns the component ID of the liquidity pool.
@@ -1880,7 +1887,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: surplus wiring not yet exercised end-to-end"]
     fn surplus_round_trips_through_getters() {
         let committed = BigUint::from(990u64);
         let surplus = BigUint::from(15u64);
@@ -1892,7 +1898,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: surplus wiring not yet exercised end-to-end"]
     fn public_quote_has_no_surplus() {
         let quote = make_quote(990);
         assert_eq!(quote.surplus_amount(), None);

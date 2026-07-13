@@ -866,6 +866,10 @@ impl FyndBuilder {
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
 
+        if let Some(ref policy) = permission_policy {
+            router = router.with_permission_policy(policy.clone());
+        }
+
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();
             let mut worker_handles = Vec::new();

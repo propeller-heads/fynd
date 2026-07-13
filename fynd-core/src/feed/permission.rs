@@ -87,10 +87,14 @@ impl PermissionContext {
         let Some(policy) = self.active_policy() else {
             return topology;
         };
-        // TODO: drop entries whose ComponentId resolves (via market.get_component(id)) to a
-        // ProtocolComponent for which policy.is_permissioned is true.
-        let _ = (policy, market);
-        todo!("filter permissioned components from the worker's initial topology")
+        topology
+            .into_iter()
+            .filter(|(id, _)| {
+                market
+                    .get_component(id)
+                    .is_none_or(|c| !policy.is_permissioned(c))
+            })
+            .collect()
     }
 
     /// Restricts a market event to the components this worker may see.
@@ -129,10 +133,14 @@ impl PermissionContext {
         market: &MarketState,
         ids: &[ComponentId],
     ) -> Vec<ComponentId> {
-        // TODO: keep only ids whose ProtocolComponent (via market.get_component(id)) is NOT
-        // permissioned per policy.is_permissioned.
-        let _ = (policy, market, ids);
-        todo!("filter permissioned component ids from an incremental market event")
+        ids.iter()
+            .filter(|id| {
+                market
+                    .get_component(id)
+                    .is_none_or(|c| !policy.is_permissioned(c))
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -166,7 +174,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: filter helpers are todo!()"]
     fn is_permissioned_reflects_predicate() {
         let policy = permissioned_protocol_policy();
         assert!(policy.is_permissioned(&permissioned_component("perm-1")));
@@ -174,7 +181,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: filter helpers are todo!()"]
     fn filter_topology_excludes_permissioned() {
         let policy = permissioned_protocol_policy();
         let market = market_with(vec![public_component("pub-1"), permissioned_component("perm-1")]);
@@ -190,7 +196,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: filter helpers are todo!()"]
     fn scope_event_excludes_permissioned() {
         let policy = permissioned_protocol_policy();
         let market = market_with(vec![public_component("pub-1"), permissioned_component("perm-1")]);

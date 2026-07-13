@@ -41,9 +41,9 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, price_guard::guard::PriceGuard,
+    encoding::encoder::Encoder, feed::permission::PermissionPolicy, price_guard::guard::PriceGuard,
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
-    QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
+    QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams, SurplusInfo,
 };
 
 /// The role a solver pool (a group of workers) plays in a quote.
@@ -155,6 +155,9 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
+    /// Predicate identifying permissioned components, used by `combine_with_surplus` to locate the
+    /// permissioned leg(s) in a surplus route. `None` when no permissioned pools are configured.
+    permission_policy: Option<PermissionPolicy>,
 }
 
 impl WorkerPoolRouter {
@@ -164,7 +167,13 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None }
+        Self { solver_pools, config, encoder, price_guard: None, permission_policy: None }
+    }
+
+    /// Attaches the permission policy used to identify permissioned legs in surplus routes.
+    pub fn with_permission_policy(mut self, policy: PermissionPolicy) -> Self {
+        self.permission_policy = Some(policy);
+        self
     }
 
     /// Makes price guard validation available for this router.
@@ -242,7 +251,13 @@ impl WorkerPoolRouter {
                 if has_all_pool {
                     let public_ranked =
                         self.rank_quotes(&responses.public_only(&pool_roles), request.options());
-                    combine_with_surplus(&responses, &pool_roles, request.options(), public_ranked)
+                    combine_with_surplus(
+                        &responses,
+                        &pool_roles,
+                        request.options(),
+                        public_ranked,
+                        self.permission_policy.as_ref(),
+                    )
                 } else {
                     self.rank_quotes(&responses, request.options())
                 }
@@ -335,6 +350,15 @@ impl WorkerPoolRouter {
             })
             .collect();
 
+        // Pre-compute which pool names have role All, for role-aware early return gating.
+        let surplus_pool_names: HashSet<String> = self
+            .solver_pools
+            .iter()
+            .filter(|p| p.role() == PoolRole::All)
+            .map(|p| p.name().to_string())
+            .collect();
+        let has_surplus_pool = !surplus_pool_names.is_empty();
+
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
         let mut remaining_pools: HashSet<String> = self
@@ -342,6 +366,8 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| p.name().to_string())
             .collect();
+        let mut has_public_response = false;
+        let mut has_surplus_response = false;
 
         // Collect responses with timeout
         loop {
@@ -372,16 +398,28 @@ impl WorkerPoolRouter {
                             // Remove from remaining
                             remaining_pools.remove(&pool_name);
 
+                            if surplus_pool_names.contains(&pool_name) {
+                                has_surplus_response = true;
+                            } else {
+                                has_public_response = true;
+                            }
+
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // TODO: make this gating role-aware for surplus quotes. The surplus
-                            // route can only be priced once BOTH at least one public candidate
-                            // (the committed reference) AND the surplus pool have responded (or the
-                            // deadline elapses). A plain count-based early return may fire before
-                            // the surplus pool reports, silently dropping the surplus opportunity.
-                            // Early return if min_responses reached
-                            if min_responses > 0 && quotes.len() >= min_responses {
+                            // Role-aware early return: when a surplus pool is configured, only
+                            // fire once we have ≥1 public AND the surplus pool (so the surplus
+                            // overlay has both inputs). Without a surplus pool, use pure
+                            // count-based gating (original behaviour).
+                            let role_ready = if has_surplus_pool {
+                                has_public_response && has_surplus_response
+                            } else {
+                                true
+                            };
+                            if min_responses > 0
+                                && quotes.len() >= min_responses
+                                && role_ready
+                            {
                                 debug!(
                                     order_id = %order_id,
                                     responses = quotes.len(),
@@ -394,6 +432,12 @@ impl WorkerPoolRouter {
                         }
                         Some((pool_name, Err(e))) => {
                             remaining_pools.remove(&pool_name);
+                            // A failed surplus pool still counts as "responded" for gating — we
+                            // know it won't produce a surplus quote, so the public pool can
+                            // early-return without waiting for a result that will never come.
+                            if surplus_pool_names.contains(&pool_name) {
+                                has_surplus_response = true;
+                            }
                             debug!(
                                 pool = %pool_name,
                                 order_id = %order_id,
@@ -617,23 +661,136 @@ fn combine_with_surplus(
     pool_roles: &HashMap<String, PoolRole>,
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
+    permission_policy: Option<&PermissionPolicy>,
 ) -> Vec<OrderQuote> {
-    // The committed reference and fallback chain are already computed (`public_ranked`); this
-    // function only overlays the surplus winner. TODO: implement the overlay (see the design plan
-    // for the per-leg attribution formula and the user-never-short-changed bound):
-    //
-    // 1. best_surplus = best candidate from surplus-role pools (per `pool_roles`) by
-    //    `amount_out_net_gas`, whose route has exactly one permissioned leg per path positioned as
-    //    that path's terminal leg (`is_permissioned(&swap.protocol_component)`); reject
-    //    multi-permissioned-per-path routes (out of scope for v1); respect `options.max_gas`.
-    // 2. committed reference = `public_ranked.first()`. If there is none, or best_surplus does not
-    //    beat it net-of-gas, return `public_ranked` unchanged (no surplus).
-    // 3. Otherwise build the executed quote from the surplus route, set each permissioned leg's
-    //    `Swap::with_committed_amount_out(...)`, pin the user `amount_out` to the committed
-    //    reference, attach `SurplusInfo` via `OrderQuote::with_surplus`, and PREPEND it to
-    //    `public_ranked`. debug_assert! that the user output is ≥ the committed reference.
-    let _ = (responses, pool_roles, options);
-    public_ranked
+    let Some(policy) = permission_policy else {
+        return public_ranked;
+    };
+
+    let committed = match public_ranked.first() {
+        Some(q) if q.status() == QuoteStatus::Success => q,
+        _ => return public_ranked,
+    };
+
+    // Find best surplus candidate from All-role pools, respecting max_gas and layout constraints.
+    let best_surplus = responses
+        .quotes
+        .iter()
+        .filter(|(pool, _)| {
+            pool_roles
+                .get(pool)
+                .copied()
+                .unwrap_or(PoolRole::Public) ==
+                PoolRole::All
+        })
+        .filter(|(_, q)| q.status() == QuoteStatus::Success)
+        .filter(|(_, q)| {
+            options
+                .max_gas()
+                .map(|max| q.gas_estimate() <= max)
+                .unwrap_or(true)
+        })
+        .filter(|(_, q)| has_valid_permissioned_layout(q, policy))
+        .max_by(|(_, a), (_, b)| {
+            a.amount_out_net_gas()
+                .cmp(b.amount_out_net_gas())
+        })
+        .map(|(_, q)| q);
+
+    let Some(surplus_quote) = best_surplus else {
+        return public_ranked;
+    };
+
+    // The surplus route must beat the committed reference net-of-gas.
+    if surplus_quote.amount_out_net_gas() <= committed.amount_out_net_gas() {
+        return public_ranked;
+    }
+
+    let realized_route_out = surplus_quote.amount_out();
+    let committed_route_out = committed.amount_out();
+
+    if realized_route_out <= committed_route_out {
+        return public_ranked;
+    }
+
+    let surplus_amount = realized_route_out - committed_route_out;
+
+    // Build the executed quote: clone the surplus candidate, stamp per-leg committed amounts,
+    // pin amount_out to committed, attach SurplusInfo.
+    let mut executed = surplus_quote.clone();
+
+    if let Some(route) = executed.route_mut() {
+        for swap in route.swaps_mut() {
+            if policy.is_permissioned(swap.protocol_component()) {
+                // Proportional reduction: committed_leg = leg.amount_out * committed / realized
+                // (rounds down — safe direction: under-capture)
+                let committed_leg = swap.amount_out() * committed_route_out / realized_route_out;
+                swap.set_committed_amount_out(committed_leg);
+            }
+        }
+    }
+
+    executed.set_amount_out(committed_route_out.clone());
+
+    // Recompute amount_out_net_gas relative to committed output.
+    let gas_cost = if *surplus_quote.amount_out() >= *surplus_quote.amount_out_net_gas() {
+        surplus_quote.amount_out() - surplus_quote.amount_out_net_gas()
+    } else {
+        BigUint::ZERO
+    };
+    let committed_net_gas = if *committed_route_out >= gas_cost {
+        committed_route_out - &gas_cost
+    } else {
+        BigUint::ZERO
+    };
+    executed.set_amount_out_net_gas(committed_net_gas);
+
+    let surplus_info = SurplusInfo::new(surplus_amount, committed_route_out.clone());
+    executed = executed.with_surplus(surplus_info);
+
+    debug_assert!(
+        executed.amount_out() >= committed.amount_out(),
+        "user output ({}) must be >= committed reference ({})",
+        executed.amount_out(),
+        committed.amount_out(),
+    );
+
+    let mut result = Vec::with_capacity(public_ranked.len() + 1);
+    result.push(executed);
+    result.extend(public_ranked);
+    result
+}
+
+/// Returns `true` if the quote has a valid permissioned layout for v1: at least one permissioned
+/// leg, all positioned as terminal legs of their respective paths (no mid-route permissioned legs).
+fn has_valid_permissioned_layout(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
+    let Some(route) = quote.route() else {
+        return false;
+    };
+
+    let swaps = route.swaps();
+    if swaps.is_empty() {
+        return false;
+    }
+
+    let mut permissioned_count = 0;
+
+    for (i, swap) in swaps.iter().enumerate() {
+        if !policy.is_permissioned(swap.protocol_component()) {
+            continue;
+        }
+
+        // A swap is terminal if it's the last swap or the next swap starts a new path
+        // (its token_in doesn't match this swap's token_out).
+        let is_terminal = i == swaps.len() - 1 || swaps[i + 1].token_in() != swap.token_out();
+
+        if !is_terminal {
+            return false;
+        }
+        permissioned_count += 1;
+    }
+
+    permissioned_count >= 1
 }
 
 fn refine_gas_estimates(
@@ -1206,14 +1363,119 @@ mod tests {
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
     }
 
-    /// Builds an `OrderResponses` with a public quote and a surplus quote.
-    ///
-    /// `amount_out` doubles as `amount_out_net_gas` here for simplicity.
+    fn permissioned_policy() -> PermissionPolicy {
+        PermissionPolicy::new(|c| c.protocol_system == "vm:permissioned")
+    }
+
+    /// Like `make_single_quote` but the swap uses a permissioned protocol component.
+    /// `amount_out` is used as both the route output and `amount_out_net_gas` (gas cost = 0 for
+    /// simplicity in surplus unit tests).
+    fn make_permissioned_quote(amount_out: u64) -> SingleOrderQuote {
+        let make_token = |addr: Address| Token {
+            address: addr,
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let tin = make_address(0x01);
+        let tout = make_address(0x02);
+        let tin_token = make_token(tin.clone());
+        let tout_token = make_token(tout.clone());
+        let mut comp = component(
+            "0x0000000000000000000000000000000000000002",
+            &[tin_token.clone(), tout_token.clone()],
+        );
+        comp.protocol_system = "vm:permissioned".to_string();
+        let swap = Swap::new(
+            "pool-perm".to_string(),
+            "vm:permissioned".to_string(),
+            tin.clone(),
+            tout.clone(),
+            BigUint::from(1000u64),
+            BigUint::from(amount_out),
+            BigUint::from(50_000u64),
+            comp,
+            Box::new(MockProtocolSim::default()),
+        );
+        let mut tokens = HashMap::new();
+        tokens.insert(tin, tin_token);
+        tokens.insert(tout, tout_token);
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(Route::new(vec![swap], tokens).expect("non-empty route"));
+        SingleOrderQuote::new(quote, 5)
+    }
+
+    /// Like `make_single_quote` but `amount_out` = `amount_out_net_gas` (zero gas cost) for
+    /// easier surplus math in tests.
+    fn make_public_quote_zero_gas(amount_out: u64) -> SingleOrderQuote {
+        let make_token = |addr: Address| Token {
+            address: addr,
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let tin = make_address(0x01);
+        let tout = make_address(0x02);
+        let tin_token = make_token(tin.clone());
+        let tout_token = make_token(tout.clone());
+        let swap = Swap::new(
+            "pool-1".to_string(),
+            "uniswap_v2".to_string(),
+            tin.clone(),
+            tout.clone(),
+            BigUint::from(1000u64),
+            BigUint::from(amount_out),
+            BigUint::from(50_000u64),
+            component(
+                "0x0000000000000000000000000000000000000001",
+                &[tin_token.clone(), tout_token.clone()],
+            ),
+            Box::new(MockProtocolSim::default()),
+        );
+        let mut tokens = HashMap::new();
+        tokens.insert(tin, tin_token);
+        tokens.insert(tout, tout_token);
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(Route::new(vec![swap], tokens).expect("non-empty route"));
+        SingleOrderQuote::new(quote, 5)
+    }
+
+    /// Builds an `OrderResponses` with a public quote and a surplus quote (zero gas cost).
     fn surplus_responses(public_out: u64, surplus_out: u64) -> OrderResponses {
-        let public = make_single_quote(public_out)
+        let public = make_public_quote_zero_gas(public_out)
             .order()
             .clone();
-        let surplus = make_single_quote(surplus_out)
+        let surplus = make_permissioned_quote(surplus_out)
             .order()
             .clone();
         OrderResponses {
@@ -1234,37 +1496,117 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: surplus overlay in combine_with_surplus is todo"]
     fn combine_prefers_surplus_when_it_beats_public() {
         let responses = surplus_responses(900, 950);
-        let public_ranked = vec![make_single_quote(900).order().clone()];
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let policy = permissioned_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
+            Some(&policy),
         );
 
         // The surplus winner is at the head: user is quoted the committed public output, protocol
         // captures the surplus. The public candidate remains as a fallback.
+        assert_eq!(combined.len(), 2);
         assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
         assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(900u64)));
         assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(50u64)));
     }
 
     #[test]
-    #[ignore = "scaffold: surplus overlay in combine_with_surplus is todo"]
     fn combine_falls_back_to_public_when_surplus_does_not_beat_it() {
         let responses = surplus_responses(950, 900);
-        let public_ranked = vec![make_single_quote(950).order().clone()];
+        let public_ranked = vec![make_public_quote_zero_gas(950)
+            .order()
+            .clone()];
+        let policy = permissioned_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
+            Some(&policy),
         );
 
+        assert_eq!(combined.len(), 1);
         assert_eq!(*combined[0].amount_out(), BigUint::from(950u64));
         assert_eq!(combined[0].surplus_amount(), None);
     }
+
+    #[test]
+    fn combine_stamps_per_leg_committed_amount_out() {
+        let responses = surplus_responses(900, 1000);
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let policy = permissioned_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        let surplus_quote = &combined[0];
+        let route = surplus_quote
+            .route()
+            .expect("surplus quote should have a route");
+        let perm_swap = route
+            .swaps()
+            .iter()
+            .find(|s| policy.is_permissioned(s.protocol_component()))
+            .expect("should have a permissioned swap");
+
+        // committed_leg = leg.amount_out * committed_route_out / realized_route_out
+        // = 1000 * 900 / 1000 = 900
+        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(900u64)),);
+    }
+
+    #[test]
+    fn combine_user_never_short_changed() {
+        // Surplus is only slightly better — verify the invariant holds.
+        let responses = surplus_responses(999, 1000);
+        let public_ranked = vec![make_public_quote_zero_gas(999)
+            .order()
+            .clone()];
+        let policy = permissioned_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        let surplus_quote = &combined[0];
+        assert!(
+            surplus_quote.amount_out() >= &BigUint::from(999u64),
+            "user must receive at least the committed amount"
+        );
+    }
+
+    #[test]
+    fn combine_no_policy_returns_public_unchanged() {
+        let responses = surplus_responses(900, 950);
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let combined = combine_with_surplus(
+            &responses,
+            &surplus_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked.clone(),
+            None,
+        );
+
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].surplus_amount(), None);
+    }
+
 }
