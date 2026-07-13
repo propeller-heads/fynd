@@ -138,6 +138,10 @@ pub enum SolveError {
     #[error("failed to encode: {0}")]
     FailedEncoding(String),
 
+    /// Encoding is unavailable on this chain because no Tycho router is deployed (quote-only).
+    #[error("encoding unavailable: {0}")]
+    EncodingUnavailable(String),
+
     /// Price check against external source failed.
     #[error("price check failed for order {order_id}")]
     PriceCheckFailed {

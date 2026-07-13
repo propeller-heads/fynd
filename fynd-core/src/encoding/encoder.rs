@@ -32,7 +32,7 @@ pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 ///
 /// # Fields
 /// * `tycho_encoder` - Encoder created using the configured chain for encoding solutions into tycho
-///   compatible transactions
+///   compatible transactions. `None` when the encoder is disabled (router-less / quote-only chain).
 /// * `chain` - Chain to be used.
 /// * `router_address` - Address of the Tycho Router contract on this chain, or `None` if Tycho has
 ///   no router deployed there — encoding is then unavailable and `encode()` fails clearly.
@@ -169,7 +169,7 @@ impl Encoder {
         encoding_options: EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         let Some(tycho_encoder) = self.tycho_encoder.as_ref() else {
-            return Err(SolveError::FailedEncoding(format!(
+            return Err(SolveError::EncodingUnavailable(format!(
                 "encoding is unavailable on chain '{}': no Tycho router is deployed. Fynd is \
                  running quote-only; contact ops to deploy the router/executor contracts.",
                 self.chain
@@ -640,7 +640,7 @@ mod tests {
             .encode(vec![], EncodingOptions::new(0.01))
             .await
             .expect_err("encoding must fail on a router-less chain");
-        assert!(matches!(err, SolveError::FailedEncoding(_)));
+        assert!(matches!(err, SolveError::EncodingUnavailable(_)));
     }
 
     #[test]
