@@ -65,6 +65,15 @@ pub struct Args {
     #[arg(long, env = "SLO_MULTIPLIER", default_value = "1.2")]
     pub slo_multiplier: f64,
 
+    /// Maximum fraction of requests that may fail at the HTTP level per step
+    #[arg(long, env = "MAX_HTTP_ERROR_RATE", default_value = "0.001")]
+    pub max_http_error_rate: f64,
+
+    /// Maximum unsolved-order rate above baseline per step. Heterogeneous request
+    /// sets need a few percentage points of headroom for sampling noise.
+    #[arg(long, env = "MAX_EXCESS_UNSOLVED_RATE", default_value = "0.001")]
+    pub max_excess_unsolved_rate: f64,
+
     /// Per-request quote timeout in milliseconds
     #[arg(long, env = "TIMEOUT_MS", default_value = "5000")]
     pub timeout_ms: u64,
@@ -120,7 +129,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         step_duration_secs: args.step_duration_secs,
         warmup_secs: args.warmup_secs,
         baseline_requests: args.baseline_requests,
-        policy: SloPolicy { p95_multiplier: args.slo_multiplier, ..SloPolicy::default() },
+        policy: SloPolicy {
+            p95_multiplier: args.slo_multiplier,
+            max_http_error_rate: args.max_http_error_rate,
+            max_excess_unsolved_rate: args.max_excess_unsolved_rate,
+        },
         encoding: args.encoding,
     };
     let (baseline, steps, capacity_rps) =

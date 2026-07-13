@@ -191,6 +191,8 @@ cargo run -p fynd-benchmark --release -- capacity [OPTIONS]
 | `--warmup-secs` | `5` | Seconds of discarded warm-up traffic before each step |
 | `--baseline-requests` | `50` | Number of sequential requests for the unloaded baseline |
 | `--slo-multiplier` | `1.2` | p95 degradation multiplier that fails a step |
+| `--max-http-error-rate` | `0.001` | Maximum fraction of requests that may fail at the HTTP level per step |
+| `--max-excess-unsolved-rate` | `0.001` | Maximum unsolved-order rate above baseline per step |
 | `--timeout-ms` | `5000` | Per-request quote timeout |
 | `--encoding` | `false` | Attach standard encoding options to every request |
 | `--target-label` | (none) | Free-form label recorded in the report |
@@ -217,6 +219,10 @@ is reported as unmeasured.
 **Rate quantization:** request intervals are whole milliseconds, so offered rates quantize above
 ~30 rps (e.g. a target of 175 rps fires at a 5ms interval, i.e. 200 rps). When reporting capacity,
 prefer the last passing step's `achieved_rps` over its `target_rps`.
+
+**Sampling noise:** a heterogeneous request set's unsolved rate fluctuates step to step from
+binomial sampling noise alone, so `--max-excess-unsolved-rate` may need a few percentage points of
+headroom above the `0.001` default to avoid failing healthy steps.
 
 ---
 

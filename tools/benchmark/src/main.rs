@@ -185,9 +185,21 @@ mod tests {
         assert_eq!(args.warmup_secs, 5);
         assert_eq!(args.baseline_requests, 50);
         assert!((args.slo_multiplier - 1.2).abs() < f64::EPSILON);
+        assert!((args.max_http_error_rate - 0.001).abs() < f64::EPSILON);
+        assert!((args.max_excess_unsolved_rate - 0.001).abs() < f64::EPSILON);
         assert_eq!(args.timeout_ms, 5000);
         assert!(!args.encoding);
         assert_eq!(args.seed, 42);
+    }
+
+    #[test]
+    fn capacity_max_excess_unsolved_rate_arg() {
+        let cli =
+            Cli::try_parse_from(["bin", "capacity", "--max-excess-unsolved-rate", "0.05"]).unwrap();
+        let Command::Capacity(args) = cli.command else {
+            panic!("expected Capacity");
+        };
+        assert!((args.max_excess_unsolved_rate - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]
