@@ -9,17 +9,17 @@ from decimal import Decimal
 from pathlib import Path
 
 BASE = Path("/Users/markusschmitt/Documents/GitHub/fynd-split-hardening")
-LANED = BASE / "routes_out/laned"
-CLASSIC = BASE / "routes_out/classic"
+LANED = BASE / "routes_out/fresh"
+CLASSIC = BASE / "routes_out/fresh_svg"
 OUTDIR = BASE / "routes_out/pr"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
-COLS = [("path_frank_wolfe", "Path Frank-Wolfe"), ("split_legacy", "Split"),
-        ("split", "Split Hardened")]
+COLS = [("path_frank_wolfe", "Path Frank-Wolfe"), ("split_bounded", "Split Bounded"),
+        ("split", "Portfolio Split")]
 SELECTION = [
     ("idx4", "2,000 WBTC → USDC"),
     ("idx3", "5,000 WETH → USDC"),
-    ("idx2827", "51,300 sUSDe → WETH"),
+    ("idx354", "17,000 CVX → USDC"),
     ("idx2478", "64,993 sUSDe → USDC"),
 ]
 
@@ -30,7 +30,8 @@ def out_amount(algo, idx):
     dec = next((t["decimals"] for t in r["tokens"] if t["id"] == sink), 18)
     sym = next((t["symbol"] for t in r["tokens"] if t["id"] == sink), "?")
     raw = sum(int(s["amount_out"]) for s in r["swaps"] if s["target"] == sink)
-    return raw, f"{Decimal(raw) / (Decimal(10) ** dec):,.2f} {sym}", len(r.get("paths", [{}]))
+    lanes = sum(1 for s in r["swaps"] if s["source"] == r["source"])
+    return raw, f"{Decimal(raw) / (Decimal(10) ** dec):,.2f} {sym}", lanes
 
 
 def svg(algo, idx):
@@ -40,15 +41,15 @@ def svg(algo, idx):
 
 for idx, label in SELECTION:
     pfw_raw, _, _ = out_amount("path_frank_wolfe", idx)
-    leg_raw, _, _ = out_amount("split_legacy", idx)
+    leg_raw, _, _ = out_amount("split_bounded", idx)
     cells = []
     for algo, disp in COLS:
         raw, human, lanes = out_amount(algo, idx)
         badge = ""
         if algo == "split" and leg_raw:
             bps = (raw - leg_raw) / leg_raw * 10000
-            badge = f'<span class="win">+{bps:,.1f} bps vs Split</span>'
-        elif algo == "split_legacy" and pfw_raw:
+            badge = f'<span class="win">+{bps:,.1f} bps vs Split Bounded</span>'
+        elif algo == "split_bounded" and pfw_raw:
             bps = (raw - pfw_raw) / pfw_raw * 10000
             if bps >= 1:
                 badge = f'<span class="win2">+{bps:,.0f} bps vs PFW</span>'
