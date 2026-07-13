@@ -4,7 +4,14 @@ icon: route
 
 # Split Bounded
 
-`split_bounded` is Fynd's split-routing algorithm: it splits one order across multiple parallel
+> **Superseded.** `split_bounded` is no longer in the production worker-pool registry. The
+> [`split`](split.md) portfolio router replaced it after winning the head-to-head: offline on the
+> 10k trade set the portfolio went 709W/93L on the common set (aggregate net delta +5.92e25), and
+> in a live same-block audit it won 75W/55L on meaningful (≥0.1 bps) orders for +209 bps-points
+> aggregate while covering 808 orders to `split_bounded`'s 205. The module stays in the tree as a
+> benchmark and test reference, and its bounded candidate discovery is reused by the portfolio.
+
+`split_bounded` is Fynd's earlier split-routing algorithm: it splits one order across multiple parallel
 paths to reduce price impact on large trades. Candidate discovery is a bounded, amount-aware
 search inspired by Penumbra's candidate-set routing, which keeps solve times close to the
 single-path algorithms; the [variant comparison](split-comparison.md) records how it beat two
@@ -61,19 +68,10 @@ those orders.
 
 ## Configuration
 
-```toml
-[pools.split_bounded_4_hops]
-algorithm = "split_bounded"
-num_workers = 1
-task_queue_capacity = 1000
-min_hops = 1
-max_hops = 4
-timeout_ms = 60000
-max_routes = 1024
-```
-
-Use `connector_tokens` when a deployment has domain-specific intermediate tokens that should be
-kept in the search even if they are not part of the default anchor set.
+`split_bounded` is no longer registrable as a worker-pool algorithm — `algorithm = "split_bounded"`
+is rejected. Use `algorithm = "split"` for the production split router; see its
+[configuration](split.md#configuration). This page is kept for the algorithm's design notes and
+benchmark history.
 
 ## Benchmark notes (from the source branch, 2026-07-07, gas-blind port)
 
@@ -112,4 +110,4 @@ and against Path Frank-Wolfe (live same-block: 36W/2L, +6,461 bps mean; offline 
 | --- | --- |
 | `fynd-core/src/algorithm/split_bounded.rs` | Bounded candidate discovery, split allocation, route selection |
 | `fynd-core/src/algorithm/split_primitives.rs` | Shared-hop merging and executable route assembly |
-| `fynd-core/src/worker_pool/registry.rs` | Maps `"split_bounded"` to `SplitBoundedAlgorithm` |
+| `fynd-core/src/worker_pool/registry.rs` | Registers `"split"` (`SplitAlgorithm`); `split_bounded` is no longer registered |

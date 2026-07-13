@@ -100,3 +100,25 @@ Known follow-up: bounded discovery can miss long-tail routes the exhaustive sear
 solved, in either the gas-blind or gas-aware version). Anchor-set tuning is the candidate fix.
 
 Raw artifacts: `~/Documents/llm-output/2026-07-08-fynd-split-comparison/` (local).
+
+## Epilogue: the portfolio replaced `split_bounded` (2026-07)
+
+A later round of routing-quality work (the `exp/split-hardening` offline harness on the 10k trade
+set) developed a portfolio split router against `split_bounded` and replaced it in the production
+registry as [`split`](split.md). The portfolio returns the best net of the best single path, an
+incumbent-cost coarse disjoint floor, a refined 256-chunk two-phase disjoint split, and a
+shared-pool fill-and-spill, always assembling routes through the encoding-safe split primitives.
+
+Offline on the 10k set the portfolio went 709W/93L on the common set (aggregate net delta +5.92e25,
+loss mass 4.6e19), at p50 14.9 ms versus `split_bounded`'s 2.3 ms — it pays the full
+candidate-simulation cost on every order. In a live same-block 1000-trade audit it won 75W/55L on
+meaningful (≥0.1 bps) orders and 20W/12L at ≥5 bps for +209 bps-points aggregate, while covering 808
+orders to `split_bounded`'s 205; `split_bounded` also had 4 encode failures ("0% split must be the
+last swap") against the portfolio's zero.
+
+The decisive additions over `split_bounded` were fill-and-spill with marginal-probe candidate
+selection (reaching tree routes that share a pool), the never-lose floor that always returns at
+least the best single path — so `split` can run as the only pool, unlike `split_bounded`, which
+declines to split on roughly 92% of orders — and encoding-safe route assembly via the split
+primitives. `split_bounded` remains in the tree as a benchmark and test reference, and its bounded
+candidate discovery is reused by the portfolio.
