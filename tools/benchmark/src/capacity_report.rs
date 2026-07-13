@@ -129,7 +129,10 @@ pub fn evaluate_step(policy: &SloPolicy, baseline: &BaselineStats, step: StepSta
     let unsolved_rate =
         if orders_total == 0 { 1.0 } else { step.orders_unsolved as f64 / orders_total as f64 };
     let excess_unsolved_rate = (unsolved_rate - baseline.unsolved_rate).max(0.0);
-    let p95_limit = baseline.round_trip.p95 as f64 * policy.p95_multiplier;
+    // Round-trips are measured in whole milliseconds; a sub-millisecond baseline
+    // truncates p95 to 0ms, making the limit 0 and failing every step regardless
+    // of how fast the step actually was. Floor the baseline at 1ms before scaling.
+    let p95_limit = baseline.round_trip.p95.max(1) as f64 * policy.p95_multiplier;
     let achieved_rps = if step.duration_ms == 0 {
         0.0
     } else {
@@ -177,13 +180,7 @@ pub struct CapacityReport {
 /// are never compared as like-for-like.
 pub fn sha256_hex(content: &str) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(content.as_bytes());
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write;
-        write!(hex, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    hex
+    alloy::hex::encode(Sha256::digest(content.as_bytes()))
 }
 
 #[cfg(test)]
@@ -296,6 +293,18 @@ mod tests {
     fn step_tolerates_baseline_unsolved() {
         // baseline already has 2% unsolved; matching it must pass
         let outcome = evaluate_step(&SloPolicy::default(), &baseline(), step(110, 600, 600, 12));
+        assert!(outcome.passed);
+    }
+    #[test]
+    fn step_passes_with_zero_baseline_p95() {
+        // Baseline p95 truncated to 0ms must not floor the SLO limit to 0.
+        let zero_baseline = BaselineStats {
+            requests: 50,
+            unsolved_rate: 0.02,
+            round_trip: stats(0),
+            solve_time: stats(0),
+        };
+        let outcome = evaluate_step(&SloPolicy::default(), &zero_baseline, step(1, 600, 600, 12));
         assert!(outcome.passed);
     }
 

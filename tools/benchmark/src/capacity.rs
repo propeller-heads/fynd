@@ -346,4 +346,43 @@ mod tests {
         assert!(steps.iter().all(|s| s.passed));
         assert_eq!(capacity, Some(4));
     }
+
+    #[tokio::test]
+    async fn ladder_stops_at_first_failing_step() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(minimal_quote_json())
+                    .set_delay(std::time::Duration::from_millis(20)),
+            )
+            .mount(&server)
+            .await;
+        let client = Arc::new(
+            FyndClientBuilder::new(server.uri())
+                .build_quote_only()
+                .unwrap(),
+        );
+        let templates = vec![crate::requests::default_request(5000)];
+        let params = LadderParams {
+            ladder: "2:2:4".parse().unwrap(),
+            step_duration_secs: 1,
+            warmup_secs: 0,
+            baseline_requests: 5,
+            // A multiplier well below 1.0 forces the first step's p95 to breach
+            // the SLO, so the ladder must break on step 1 without trying step 2.
+            policy: SloPolicy { p95_multiplier: 0.01, ..SloPolicy::default() },
+            encoding: false,
+        };
+
+        let (baseline, steps, capacity) = run_ladder(client, &templates, &params)
+            .await
+            .unwrap();
+
+        assert_eq!(baseline.requests, 5);
+        assert_eq!(steps.len(), 1);
+        assert!(!steps.first().unwrap().passed);
+        assert_eq!(capacity, None);
+    }
 }

@@ -214,6 +214,10 @@ by the full `CapacityReport` JSON as the last thing on stdout — everything fro
 Capacity is the highest ladder rate whose step passed the SLO; if the first step fails, capacity
 is reported as unmeasured.
 
+**Rate quantization:** request intervals are whole milliseconds, so offered rates quantize above
+~30 rps (e.g. a target of 175 rps fires at a 5ms interval, i.e. 200 rps). When reporting capacity,
+prefer the last passing step's `achieved_rps` over its `target_rps`.
+
 ---
 
 ## Request Data
