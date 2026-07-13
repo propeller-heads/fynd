@@ -47,6 +47,11 @@ pub struct WorkerPoolConfig {
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
     /// Permission scoping for this pool's workers (default: include all, no filtering).
+    ///
+    /// `IncludeAll` is safe as the default because it only applies when no `PermissionPolicy` is
+    /// configured — meaning no permissioned components exist to exclude. When a policy is set,
+    /// `FyndBuilder::assemble_components` always constructs `ExcludePermissioned(policy)` for
+    /// `Public`-role pools, so this default is never relied on in that path.
     permission: PermissionContext,
 }
 
