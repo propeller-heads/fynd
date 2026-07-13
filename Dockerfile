@@ -69,7 +69,8 @@ RUN mkdir -p tools/fynd-gas-audit/src \
     touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
         fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
         tools/fynd-swap-cli/src/main.rs tools/erc20-overrides/src/lib.rs \
-        tools/common/src/lib.rs tools/hindsight/src/main.rs && \
+        tools/common/src/lib.rs tools/hindsight/src/main.rs \
+        tools/benchmark/src/main.rs && \
     cargo build --release --package fynd --package fynd-swap-cli --package hindsight --package fynd-benchmark
 
 # Stage 2: Runtime
