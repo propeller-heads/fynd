@@ -135,7 +135,20 @@ fn default_sender() -> String {
     SENDER.to_string()
 }
 
+/// Returns `true` when a template's first order has distinct `token_in`/`token_out` addresses
+/// (compared case-insensitively, since addresses are hex strings).
+fn has_distinct_tokens(order: &FileOrder) -> bool {
+    !order
+        .token_in
+        .eq_ignore_ascii_case(&order.token_out)
+}
+
 /// Load all request templates from a JSON file (one `SwapRequest` per entry).
+///
+/// Templates whose first order has `token_in == token_out` are skipped — the Fynd server
+/// rejects same-token swaps with `400 BadRequest`, and letting them through would count as
+/// spurious HTTP errors in benchmark runs. The number skipped is logged once via
+/// `tracing::warn!` so a filtered dataset is never silently smaller than it looks.
 pub fn load_request_templates(
     path: &str,
     timeout_ms: u64,
@@ -147,29 +160,43 @@ pub fn load_request_templates(
     }
 
     let file = load_pairs_file();
-    let requests: Vec<SwapRequest> = templates
-        .iter()
-        .enumerate()
-        .map(|(i, tmpl)| {
-            let order = tmpl
-                .orders
-                .first()
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    format!("request template at index {i} has no orders").into()
-                })?;
-            let in_sym = symbol_for_address(&order.token_in, &file.tokens);
-            let out_sym = symbol_for_address(&order.token_out, &file.tokens);
+    let mut requests = Vec::with_capacity(templates.len());
+    let mut skipped_same_token = 0usize;
+    for (i, tmpl) in templates.iter().enumerate() {
+        let order = tmpl
+            .orders
+            .first()
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("request template at index {i} has no orders").into()
+            })?;
+        if !has_distinct_tokens(order) {
+            skipped_same_token += 1;
+            continue;
+        }
+        let in_sym = symbol_for_address(&order.token_in, &file.tokens);
+        let out_sym = symbol_for_address(&order.token_out, &file.tokens);
+        requests.push(SwapRequest {
+            label: format!("{} {in_sym} -> {out_sym}", order.amount),
+            token_in_addr: order.token_in.clone(),
+            token_out_addr: order.token_out.clone(),
+            raw_amount: order.amount.clone(),
+            sender_addr: order.sender.clone(),
+            timeout_ms,
+        });
+    }
 
-            Ok::<_, Box<dyn std::error::Error>>(SwapRequest {
-                label: format!("{} {in_sym} -> {out_sym}", order.amount),
-                token_in_addr: order.token_in.clone(),
-                token_out_addr: order.token_out.clone(),
-                raw_amount: order.amount.clone(),
-                sender_addr: order.sender.clone(),
-                timeout_ms,
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    if skipped_same_token > 0 {
+        tracing::warn!(
+            skipped_same_token,
+            path,
+            "skipped {skipped_same_token} request template(s) with token_in == token_out \
+             (server rejects same-token swaps with 400 BadRequest); no silent caps"
+        );
+    }
+
+    if requests.is_empty() {
+        return Err("requests file contains no requests".into());
+    }
 
     Ok(requests)
 }
@@ -190,34 +217,50 @@ pub fn load_requests_from_file(
 }
 
 /// Load the embedded 50-trade aggregator sample.
+///
+/// Same-token templates are skipped; see [`load_request_templates`] for the rationale.
 pub fn load_embedded_trades(
     n: usize,
     timeout_ms: u64,
 ) -> Result<Vec<SwapRequest>, Box<dyn std::error::Error>> {
     let templates: Vec<FileRequest> = serde_json::from_str(TRADES_SAMPLE_JSON)?;
     let file = load_pairs_file();
-    let all: Vec<SwapRequest> = templates
-        .iter()
-        .enumerate()
-        .map(|(i, tmpl)| {
-            let order = tmpl
-                .orders
-                .first()
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    format!("embedded trade at index {i} has no orders").into()
-                })?;
-            let in_sym = symbol_for_address(&order.token_in, &file.tokens);
-            let out_sym = symbol_for_address(&order.token_out, &file.tokens);
-            Ok::<_, Box<dyn std::error::Error>>(SwapRequest {
-                label: format!("{} {in_sym} -> {out_sym}", order.amount),
-                token_in_addr: order.token_in.clone(),
-                token_out_addr: order.token_out.clone(),
-                raw_amount: order.amount.clone(),
-                sender_addr: order.sender.clone(),
-                timeout_ms,
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    let mut all = Vec::with_capacity(templates.len());
+    let mut skipped_same_token = 0usize;
+    for (i, tmpl) in templates.iter().enumerate() {
+        let order = tmpl
+            .orders
+            .first()
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("embedded trade at index {i} has no orders").into()
+            })?;
+        if !has_distinct_tokens(order) {
+            skipped_same_token += 1;
+            continue;
+        }
+        let in_sym = symbol_for_address(&order.token_in, &file.tokens);
+        let out_sym = symbol_for_address(&order.token_out, &file.tokens);
+        all.push(SwapRequest {
+            label: format!("{} {in_sym} -> {out_sym}", order.amount),
+            token_in_addr: order.token_in.clone(),
+            token_out_addr: order.token_out.clone(),
+            raw_amount: order.amount.clone(),
+            sender_addr: order.sender.clone(),
+            timeout_ms,
+        });
+    }
+
+    if skipped_same_token > 0 {
+        tracing::warn!(
+            skipped_same_token,
+            "skipped {skipped_same_token} embedded trade(s) with token_in == token_out \
+             (server rejects same-token swaps with 400 BadRequest); no silent caps"
+        );
+    }
+
+    if all.is_empty() {
+        return Err("embedded trades contain no requests".into());
+    }
 
     let requests = (0..n)
         .map(|_| all[fastrand::usize(..all.len())].clone())
@@ -243,16 +286,22 @@ pub fn load_all_templates_from_file(
 
 /// Load all 50 embedded aggregator trades deterministically (no random sampling).
 ///
-/// Used for pair-distribution analysis when no external dataset is provided.
+/// Used for pair-distribution analysis when no external dataset is provided. Same-token
+/// templates are skipped; see [`load_request_templates`] for the rationale.
 pub fn load_all_embedded_templates() -> Vec<SwapRequest> {
     let Ok(templates) = serde_json::from_str::<Vec<FileRequest>>(TRADES_SAMPLE_JSON) else {
         return vec![];
     };
     let file = load_pairs_file();
-    templates
+    let mut skipped_same_token = 0usize;
+    let requests: Vec<SwapRequest> = templates
         .iter()
         .filter_map(|tmpl| {
             let order = tmpl.orders.first()?;
+            if !has_distinct_tokens(order) {
+                skipped_same_token += 1;
+                return None;
+            }
             let in_sym = symbol_for_address(&order.token_in, &file.tokens);
             let out_sym = symbol_for_address(&order.token_out, &file.tokens);
             Some(SwapRequest {
@@ -264,7 +313,17 @@ pub fn load_all_embedded_templates() -> Vec<SwapRequest> {
                 timeout_ms: 5000,
             })
         })
-        .collect()
+        .collect();
+
+    if skipped_same_token > 0 {
+        tracing::warn!(
+            skipped_same_token,
+            "skipped {skipped_same_token} embedded trade(s) with token_in == token_out \
+             (server rejects same-token swaps with 400 BadRequest); no silent caps"
+        );
+    }
+
+    requests
 }
 
 /// Download the full 10k aggregator trade dataset from GitHub Releases.
@@ -443,6 +502,65 @@ mod tests {
     #[test]
     fn load_request_templates_nonexistent() {
         assert!(load_request_templates("/nonexistent/path.json", 5000).is_err());
+    }
+
+    #[test]
+    fn load_request_templates_skips_same_token_pair() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_templates_same_token.json");
+        let content = serde_json::json!([
+            {
+                "orders": [{
+                    "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                    "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "amount": "1000000000000000000"
+                }]
+            },
+            {
+                "orders": [{
+                    "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                    "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                    "amount": "2000000000000000000"
+                }]
+            }
+        ]);
+        std::fs::write(&path, content.to_string()).unwrap();
+        let result = load_request_templates(path.to_str().unwrap(), 5000);
+        std::fs::remove_file(&path).ok();
+        let templates = result.unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].token_in_addr, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(templates[0].token_out_addr, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+    }
+
+    #[test]
+    fn load_request_templates_all_same_token_errors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_templates_all_same_token.json");
+        let content = serde_json::json!([
+            {
+                "orders": [{
+                    "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                    "token_out": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                    "amount": "1000000000000000000"
+                }]
+            },
+            {
+                "orders": [{
+                    "token_in": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "amount": "2000000000000000000"
+                }]
+            }
+        ]);
+        std::fs::write(&path, content.to_string()).unwrap();
+        let result = load_request_templates(path.to_str().unwrap(), 5000);
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no requests"));
     }
 
     #[test]
