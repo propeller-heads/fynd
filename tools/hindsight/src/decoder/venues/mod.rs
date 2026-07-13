@@ -97,8 +97,8 @@ fn back_out_venue_fees(
         .get(&flow.swap.token_out)
         .copied()
         .filter(|fee| !fee.is_zero());
-    let amount_out = venue_fee_out
-        .map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
+    let amount_out =
+        venue_fee_out.map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
     Flow {
         tracked: flow.tracked,
         swap: NetSwap { amount_in, amount_out, ..flow.swap },

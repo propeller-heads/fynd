@@ -135,7 +135,9 @@ impl Registry {
     /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
     /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
-        self.solvers.values().any(|solver| solver == name)
+        self.solvers
+            .values()
+            .any(|solver| solver == name)
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
@@ -251,7 +253,9 @@ mod tests {
         let relay = registry.venue("relay").unwrap();
         let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
         let router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
-        assert!(relay.fee_collectors.contains(&collector));
+        assert!(relay
+            .fee_collectors
+            .contains(&collector));
         assert!(!relay.fee_collectors.contains(&router));
         assert!(relay.entry_points.contains(&router));
 

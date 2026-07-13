@@ -166,7 +166,10 @@ impl<P: Provider> Decoder<P> {
 
         let mut trades = Vec::with_capacity(matched.len());
         for (matched, root) in matched.into_iter().zip(traces) {
-            if let Some(trade) = self.decode_transaction(matched, &root, block_number).await {
+            if let Some(trade) = self
+                .decode_transaction(matched, &root, block_number)
+                .await
+            {
                 trades.push(trade);
             }
         }

@@ -157,11 +157,10 @@ impl SteppingSolver for StepAdapter<'_> {
         );
 
         match self.solver.quote(request).await {
-            Ok(quote) => quote
-                .orders()
-                .first().map_or_else(|| {
-                    Outcome::Unsolvable("solver returned no order quote".to_string())
-                }, order_quote_to_outcome),
+            Ok(quote) => quote.orders().first().map_or_else(
+                || Outcome::Unsolvable("solver returned no order quote".to_string()),
+                order_quote_to_outcome,
+            ),
             Err(e) => Outcome::Unsolvable(format!("solve error: {e}")),
         }
     }
@@ -249,7 +248,11 @@ async fn decode_block_when_available<P: Provider>(
     block: u64,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
     for attempt in 0..DECODE_RPC_LAG_RETRIES {
-        let head = match decoder.provider().get_block_number().await {
+        let head = match decoder
+            .provider()
+            .get_block_number()
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 warn!(block, attempt, "failed to fetch RPC block number: {e}");

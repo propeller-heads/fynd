@@ -80,7 +80,11 @@ impl AlliumClient {
         let value = self.get(url).await?;
         value
             .as_str()
-            .or_else(|| value.get("status").and_then(Value::as_str))
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+            })
             .map(str::to_string)
             .with_context(|| format!("unexpected Allium status response: {value}"))
     }
@@ -99,7 +103,8 @@ impl AlliumClient {
     }
 
     async fn post(&self, url: &str, body: &Value) -> anyhow::Result<Value> {
-        self.send(|| self.http.post(url).json(body)).await
+        self.send(|| self.http.post(url).json(body))
+            .await
     }
 
     async fn send<F>(&self, build: F) -> anyhow::Result<Value>
@@ -119,11 +124,17 @@ impl AlliumClient {
                 continue;
             }
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_default();
                 bail!("Allium returned {status}: {body}");
             }
 
-            return response.json::<Value>().await.context("failed to decode Allium response");
+            return response
+                .json::<Value>()
+                .await
+                .context("failed to decode Allium response");
         }
         bail!("Allium rate limit: exhausted {MAX_RETRIES} retries")
     }
@@ -139,7 +150,11 @@ mod tests {
         let value: Value = serde_json::from_str("\"success\"").unwrap();
         let result = value
             .as_str()
-            .or_else(|| value.get("status").and_then(Value::as_str))
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+            })
             .map(str::to_string);
         assert_eq!(result, Some("success".to_string()));
     }
@@ -150,7 +165,11 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"status": "running"}"#).unwrap();
         let result = value
             .as_str()
-            .or_else(|| value.get("status").and_then(Value::as_str))
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+            })
             .map(str::to_string);
         assert_eq!(result, Some("running".to_string()));
     }
@@ -160,7 +179,11 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"other_key": "val"}"#).unwrap();
         let result = value
             .as_str()
-            .or_else(|| value.get("status").and_then(Value::as_str))
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+            })
             .map(str::to_string);
         assert_eq!(result, None);
     }

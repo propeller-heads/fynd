@@ -119,8 +119,15 @@ pub(crate) async fn run<P: Provider>(
             .fetch_block(block)
             .await
             .with_context(|| format!("failed to fetch Allium trades for block {block}"))?;
-        compare_block(decoder.provider(), &ours, &theirs, tolerance_bps, &mut decimals, &mut comparisons)
-            .await;
+        compare_block(
+            decoder.provider(),
+            &ours,
+            &theirs,
+            tolerance_bps,
+            &mut decimals,
+            &mut comparisons,
+        )
+        .await;
     }
     Ok(VerifyReport { comparisons })
 }
@@ -133,8 +140,10 @@ async fn compare_block<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     out: &mut Vec<TxComparison>,
 ) {
-    let our_by_tx: HashMap<TxHash, &DecodedTrade> =
-        ours.iter().map(|t| (t.tx_hash, t)).collect();
+    let our_by_tx: HashMap<TxHash, &DecodedTrade> = ours
+        .iter()
+        .map(|t| (t.tx_hash, t))
+        .collect();
     let mut their_by_tx: HashMap<TxHash, Vec<&AlliumRow>> = HashMap::new();
     for row in theirs {
         let Some(tx) = row
@@ -145,7 +154,10 @@ async fn compare_block<P: Provider>(
             warn!(hash = ?row.transaction_hash, "skipping Allium row with unusable tx hash");
             continue;
         };
-        their_by_tx.entry(tx).or_default().push(row);
+        their_by_tx
+            .entry(tx)
+            .or_default()
+            .push(row);
     }
 
     for (tx, trade) in &our_by_tx {
@@ -186,8 +198,7 @@ async fn compare_trade<P: Provider>(
     let mut detail = Vec::new();
     let token_ok = tokens_agree(ours, rows, &mut detail);
     let solver_ok = solver_agrees(ours, rows, &mut detail);
-    let amount_ok =
-        amounts_agree(provider, ours, rows, tolerance_bps, decimals, &mut detail).await;
+    let amount_ok = amounts_agree(provider, ours, rows, tolerance_bps, decimals, &mut detail).await;
 
     let status = if !token_ok {
         Status::TokenMismatch
@@ -205,11 +216,19 @@ async fn compare_trade<P: Provider>(
 fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
     let sold: HashSet<Address> = rows
         .iter()
-        .filter_map(|r| r.token_sold_address.as_deref().and_then(parse_addr))
+        .filter_map(|r| {
+            r.token_sold_address
+                .as_deref()
+                .and_then(parse_addr)
+        })
         .collect();
     let bought: HashSet<Address> = rows
         .iter()
-        .filter_map(|r| r.token_bought_address.as_deref().and_then(parse_addr))
+        .filter_map(|r| {
+            r.token_bought_address
+                .as_deref()
+                .and_then(parse_addr)
+        })
         .collect();
 
     let in_ok = sold.contains(&ours.token_in);
@@ -230,7 +249,10 @@ fn solver_agrees(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<Stri
         .filter_map(|r| r.project.as_deref())
         .any(|project| names_match(&ours_norm, &normalize_name(project)));
     if !agrees {
-        let projects: Vec<&str> = rows.iter().filter_map(|r| r.project.as_deref()).collect();
+        let projects: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.project.as_deref())
+            .collect();
         detail.push(format!("solver {} vs Allium {projects:?}", ours.solver));
     }
     agrees
@@ -253,12 +275,8 @@ async fn amounts_agree<P: Provider>(
         return true;
     };
 
-    let in_leg = AmountLeg {
-        token: ours.token_in,
-        ours: ours.amount_in,
-        theirs: sold,
-        field: "amount_in",
-    };
+    let in_leg =
+        AmountLeg { token: ours.token_in, ours: ours.amount_in, theirs: sold, field: "amount_in" };
     let out_leg = AmountLeg {
         token: ours.token_out,
         ours: ours.amount_out,
@@ -286,10 +304,7 @@ async fn amount_within<P: Provider>(
     detail: &mut Vec<String>,
 ) -> bool {
     let Some(decimals) = token_decimals(provider, leg.token, cache).await else {
-        detail.push(format!(
-            "{} not compared (decimals unavailable for {})",
-            leg.field, leg.token
-        ));
+        detail.push(format!("{} not compared (decimals unavailable for {})", leg.field, leg.token));
         return true;
     };
     let normalized = normalize_amount(leg.ours, decimals);
@@ -348,7 +363,10 @@ fn parse_addr(value: &str) -> Option<Address> {
 }
 
 fn normalize_amount(amount: U256, decimals: u8) -> f64 {
-    let raw: f64 = amount.to_string().parse().unwrap_or(0.0);
+    let raw: f64 = amount
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
     raw / 10f64.powi(i32::from(decimals))
 }
 

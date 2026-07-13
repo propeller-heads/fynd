@@ -1,12 +1,15 @@
 // Test code uses unwrap/expect/println pervasively — these are idiomatic in tests and need no
 // special handling (a panic in test code is the desired failure mode).
-#![cfg_attr(test, allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unwrap_err_used,
-    clippy::print_stdout,
-    clippy::print_stderr,
-))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::unwrap_err_used,
+        clippy::print_stdout,
+        clippy::print_stderr,
+    )
+)]
 
 mod decoder;
 mod resolve;
@@ -94,10 +97,10 @@ struct VerifyArgs {
     /// ID:
     ///
     ///   SELECT project, protocol, `token_sold_address`, `token_sold_symbol`, `token_sold_amount`,
-    ///          `usd_sold_amount`, `token_bought_address`, `token_bought_symbol`, `token_bought_amount`,
-    ///          `usd_bought_amount`, `sender_address`, `to_address`, `transaction_hash`,
-    ///          `transaction_fees_usd`, `block_number`, `block_timestamp`, `log_index`
-    ///   FROM `ethereum.dex.aggregator_trades`
+    ///          `usd_sold_amount`, `token_bought_address`, `token_bought_symbol`,
+    /// `token_bought_amount`,          `usd_bought_amount`, `sender_address`, `to_address`,
+    /// `transaction_hash`,          `transaction_fees_usd`, `block_number`, `block_timestamp`,
+    /// `log_index`   FROM `ethereum.dex.aggregator_trades`
     ///   WHERE `block_number` = {{`block_number`}}
     ///   ORDER BY `log_index`
     #[arg(long, env = "ALLIUM_QUERY_ID")]
@@ -119,8 +122,11 @@ async fn main() -> anyhow::Result<()> {
     // Loki, where they break plain name=value field extraction.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_env("RUST_LOG")
-                .add_directive("hindsight=info".parse().expect("valid static directive")),
+            EnvFilter::from_env("RUST_LOG").add_directive(
+                "hindsight=info"
+                    .parse()
+                    .expect("valid static directive"),
+            ),
         )
         .with_target(false)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -182,8 +188,7 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
-    let report =
-        verify::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
+    let report = verify::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
     info!(elapsed_ms = start.elapsed().as_millis(), "verification complete");
 
     if args.json {
