@@ -118,7 +118,8 @@ last swap") against the portfolio's zero.
 
 The decisive additions over `split_bounded` were fill-and-spill with marginal-probe candidate
 selection (reaching tree routes that share a pool), the never-lose floor that always returns at
-least the best single path — so `split` can run as the only pool, unlike `split_bounded`, which
-declines to split on roughly 92% of orders — and encoding-safe route assembly via the split
-primitives. `split_bounded` remains in the tree as a benchmark and test reference, and its bounded
-candidate discovery is reused by the portfolio.
+least the best single path — so `split` can run as the only pool, whereas `split_bounded` declined
+to split on roughly 92% of orders and needed a single-path pool alongside it — and encoding-safe
+route assembly via the split primitives. Once `split` shipped, `split_bounded` was removed from the
+tree (it is recoverable from branch history); its bounded candidate discovery lives on as the
+portfolio's discovery source in `fynd-core/src/algorithm/split_discovery.rs`.

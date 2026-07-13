@@ -4,10 +4,10 @@ icon: compass
 
 # Overview
 
-Fynd ships four built-in routing algorithms. This section explains the problem they solve and
-how each one works. [Split](split.md) is the production split-routing algorithm; the
-[Split Bounded](split-bounded.md) page and the [variant comparison](split-comparison.md) record how
-the portfolio router replaced the earlier bounded split.
+Fynd ships four built-in routing algorithms: three single-route finders (Most Liquid, Bellman-Ford,
+Path Frank-Wolfe) and the [Split](split.md) portfolio router. This section explains the problem they
+solve and how each one works; the [variant comparison](split-comparison.md) records the history of
+how the split router was developed.
 
 ## The routing problem
 

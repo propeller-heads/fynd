@@ -36,7 +36,7 @@ use tycho_simulation::{
 
 use super::{
     most_liquid::DepthAndPrice,
-    split_bounded::{find_candidate_paths, CandidateSearchConfig},
+    split_discovery::{find_candidate_paths, CandidateSearchConfig},
     split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
     Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
 };
@@ -51,7 +51,7 @@ use crate::{
 /// Maximum candidate paths simulated per order after heuristic ranking.
 const DEFAULT_MAX_CANDIDATES: usize = 5000;
 /// Cap on candidates from the bounded amount-aware discovery unioned into the candidate set
-/// (matches `split_bounded`'s own candidate cap).
+/// (matches the bounded discovery's own candidate cap in [`super::split_discovery`]).
 const BOUNDED_DISCOVERY_CANDIDATES: usize = 128;
 /// Maximum number of parallel paths in a split (matches the incumbent).
 const DEFAULT_MAX_PATHS: usize = 4;
@@ -325,7 +325,7 @@ impl ExpSplitAlgorithm {
             if view.gas_price().is_none() {
                 return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
             }
-            // Bounded amount-aware discovery (lifted from `split_bounded`): union its candidates,
+            // Bounded amount-aware discovery (see `super::split_discovery`): union its candidates
             // ahead of the pre-ranked set, so connector/anchor routes (incl. the native-ETH
             // sentinel) survive the spot×depth truncation. Discovery failure is not fatal — the
             // pre-ranked set already guarantees a route.
@@ -501,10 +501,9 @@ impl Algorithm for ExpSplitAlgorithm {
                 ) {
                     candidates.push(c);
                 }
-                // Shared-pool fill-and-spill with marginal-probe candidate selection. The
-                // head-to-head vs `split_bounded` showed its remaining wins are tree routes that
-                // split at an intermediate token (paths sharing a pool), which no pool-disjoint
-                // allocation can express.
+                // Shared-pool fill-and-spill with marginal-probe candidate selection. It captures
+                // wins that are tree routes splitting at an intermediate token (paths sharing a
+                // pool), which no pool-disjoint allocation can express.
                 if let Some(c) = self.fillspill_alloc(
                     &ordered,
                     &market,
@@ -825,9 +824,8 @@ impl ExpSplitAlgorithm {
     }
 
     /// Selects fill-and-spill candidates: the top full-amount paths plus the best first-chunk
-    /// marginal probes, mirroring `split_bounded`'s shared-candidate selection. The probe is what
-    /// makes intermediate-token splits (tree routes) reachable: the extra path often ranks poorly
-    /// at full size but wins on the margin.
+    /// marginal probes. The probe is what makes intermediate-token splits (tree routes) reachable:
+    /// the extra path often ranks poorly at full size but wins on the margin.
     fn select_shared_candidates(
         &self,
         ordered: &[Path<DepthAndPrice>],
@@ -1096,9 +1094,11 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            split_test_harness::{split_metrics, two_equal_weth_usdc},
+            split_test_harness::{
+                optimal_two_pool_output, split_metrics, two_equal_weth_usdc,
+                TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
+            },
             test_utils::addr,
-            SplitBoundedAlgorithm,
         },
         graph::GraphManager,
         types::quote::OrderSide,
@@ -1186,55 +1186,46 @@ mod tests {
         );
     }
 
-    /// The portfolio never returns a worse net than the outgoing `split_bounded`, at several order
-    /// sizes and gas levels. When `split_bounded` declines to split (returning an error), the
-    /// portfolio only has to keep solving, which it always does with the single-path floor.
+    /// On two equal fee-free pools the portfolio's gross output must come within a tight tolerance
+    /// of the analytical two-pool optimum (a 50/50 split), confirming the fine 256-chunk allocation
+    /// finds the optimal allocation, not just any splitting one.
     #[tokio::test]
-    async fn portfolio_never_loses_to_split_bounded() {
-        for gas_price in [1u64, 1_000_000_000, 20_000_000_000] {
-            for weth_amount in [1u64, 50, 500, 5000] {
-                let m = two_equal_weth_usdc(gas_price);
-                let order = whole_weth_order(&m.weth, &m.usdc, weth_amount);
+    async fn portfolio_output_near_two_pool_optimum() {
+        let m = two_equal_weth_usdc(1);
+        let trade = 500u64;
+        let order = whole_weth_order(&m.weth, &m.usdc, trade);
 
-                let portfolio = ExpSplitAlgorithm::portfolio(config())
-                    .unwrap()
-                    .find_best_route(
-                        m.weighted.graph(),
-                        m.market.clone(),
-                        None,
-                        Some(m.derived.clone()),
-                        &order,
-                    )
-                    .await
-                    .expect("portfolio solves");
-                let (portfolio_net, _, _) = split_metrics(&portfolio, &m.weth, &m.usdc);
+        let portfolio = ExpSplitAlgorithm::portfolio(config())
+            .unwrap()
+            .find_best_route(
+                m.weighted.graph(),
+                m.market.clone(),
+                None,
+                Some(m.derived.clone()),
+                &order,
+            )
+            .await
+            .expect("portfolio solves");
+        let (_, path_count, gross) = split_metrics(&portfolio, &m.weth, &m.usdc);
+        assert_eq!(path_count, 2, "the optimum uses both pools");
 
-                let bounded = SplitBoundedAlgorithm::with_config(config())
-                    .unwrap()
-                    .find_best_route(
-                        m.unweighted.graph(),
-                        m.market.clone(),
-                        None,
-                        Some(m.derived.clone()),
-                        &order,
-                    )
-                    .await;
-                let Ok(bounded) = bounded else {
-                    continue;
-                };
-                let (bounded_net, _, _) = split_metrics(&bounded, &m.weth, &m.usdc);
-                assert!(
-                    portfolio_net >= bounded_net,
-                    "portfolio lost to split_bounded at gas={gas_price} amount={weth_amount}: \
-                     portfolio={portfolio_net} bounded={bounded_net}",
-                );
-            }
-        }
+        // Fee-free reserves in raw units, so the no-fee two-pool optimum applies directly.
+        let reserve_in = TWO_EQUAL_WETH_RESERVE as f64 * 1e18;
+        let reserve_out = TWO_EQUAL_USDC_RESERVE as f64 * 1e6;
+        let trade_amount = trade as f64 * 1e18;
+        let (_, optimum) =
+            optimal_two_pool_output(reserve_in, reserve_out, reserve_in, reserve_out, trade_amount);
+
+        let gross = gross.to_f64().unwrap();
+        assert!(
+            gross >= optimum * 0.999 && gross <= optimum * 1.0001,
+            "portfolio gross {gross} should be within 0.1% of the two-pool optimum {optimum}",
+        );
     }
 
-    /// Under a tight timeout the portfolio must still not lose to `split_bounded`: the floor split
-    /// does exactly the incumbent's coarse work, so it cannot be starved into a single-path
-    /// fallback while a split would still win.
+    /// Under a tight timeout the portfolio must still not lose to the best single path: the floor
+    /// split does exactly the incumbent's coarse work, so a tight timeout cannot starve it into a
+    /// single-path fallback while a split would still win.
     #[tokio::test]
     async fn portfolio_no_loss_under_tight_timeout() {
         for ms in [1u64, 5, 50] {
@@ -1254,24 +1245,22 @@ mod tests {
                 .expect("portfolio solves");
             let (portfolio_net, _, _) = split_metrics(&portfolio, &m.weth, &m.usdc);
 
-            let bounded = SplitBoundedAlgorithm::with_config(config_ms(ms))
+            let single = MostLiquidAlgorithm::with_config(config_ms(ms))
                 .unwrap()
                 .find_best_route(
-                    m.unweighted.graph(),
+                    m.weighted.graph(),
                     m.market.clone(),
                     None,
                     Some(m.derived.clone()),
                     &order,
                 )
-                .await;
-            let Ok(bounded) = bounded else {
-                continue;
-            };
-            let (bounded_net, _, _) = split_metrics(&bounded, &m.weth, &m.usdc);
+                .await
+                .expect("ml solves");
+            let (single_net, _, _) = split_metrics(&single, &m.weth, &m.usdc);
             assert!(
-                portfolio_net >= bounded_net,
-                "portfolio lost to split_bounded under {ms}ms timeout: \
-                 portfolio={portfolio_net} bounded={bounded_net}",
+                portfolio_net >= single_net,
+                "portfolio lost to single-path under {ms}ms timeout: \
+                 portfolio={portfolio_net} single={single_net}",
             );
         }
     }

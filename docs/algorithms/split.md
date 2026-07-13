@@ -7,9 +7,10 @@ icon: route
 `split` is Fynd's production split-routing algorithm: it splits one order across multiple parallel
 paths to reduce price impact on large trades. It is a portfolio router — it evaluates several
 allocation strategies and returns the best net-of-gas result, never worse than the best single
-path. It replaced [`split_bounded`](split-bounded.md) in the worker-pool registry after winning the
-head-to-head recorded in the [variant comparison](split-comparison.md); `split_bounded` remains in
-the tree as a benchmark and test reference.
+path. It replaced an earlier bounded split router (`split_bounded`, since removed — recoverable from
+branch history) after winning the head-to-head recorded in the
+[variant comparison](split-comparison.md). That router's bounded candidate discovery survives as the
+portfolio's discovery source in `split_discovery.rs`.
 
 It runs on the `DepthAndPrice` weighted graph (like Most Liquid) and declares no hard derived-data
 requirement: it can use token gas prices when available but tolerates stale ones and never waits on
@@ -57,7 +58,7 @@ Discovery unions two sources so no useful route is dropped:
 
 1. **Exhaustive BFS** enumeration of paths between the input and output tokens (the Most Liquid path
    finder), ranked by a spot-price × depth heuristic.
-2. **Bounded amount-aware search** — the same bounded candidate search `split_bounded` uses,
+2. **Bounded amount-aware search** — a Penumbra-inspired frontier search (`split_discovery.rs`),
    expanding from the sell token with the full amount and preferring edges into the output token,
    configured `connector_tokens`, or a default anchor set. Its anchors include the native ETH
    sentinel `0x0000000000000000000000000000000000000000`, so WETH → ETH → token routes survive on
@@ -82,11 +83,11 @@ router encodes on-chain, so every route the portfolio returns encodes.
 The portfolio's guarantee is that it never returns less net than the best single path, and it holds
 under time pressure because the coarse disjoint floor does exactly the incumbent's work on the
 shared clock. Because `split` always returns at least the best single path, it can run as the only
-pool for a chain — unlike `split_bounded`, which returns `InsufficientLiquidity` when no split beats
-the single-path floor and relies on another pool to answer those orders.
+pool for a chain — a split router that returned nothing whenever it declined to split would need a
+single-path pool running alongside it to answer those orders.
 
 The property is enforced by unit tests: `portfolio_small_order_no_loss`,
-`portfolio_never_loses_to_split_bounded` (across order sizes and gas levels),
+`portfolio_output_near_two_pool_optimum` (within 0.1% of the analytical two-pool optimum),
 `portfolio_no_loss_under_tight_timeout` (1/5/50 ms), and, on the `SplitAlgorithm` entry point,
 `small_order_does_not_lose_to_single_path` and `split_beats_single_path_on_two_equal_pools`.
 
@@ -112,6 +113,6 @@ in the search even if they are not part of the default anchor set.
 | --- | --- |
 | `fynd-core/src/algorithm/split.rs` | `SplitAlgorithm` entry point (portfolio strategy) |
 | `fynd-core/src/algorithm/split_exp.rs` | Portfolio strategies: floor, refined disjoint, fill-and-spill; discovery union |
-| `fynd-core/src/algorithm/split_bounded.rs` | Bounded amount-aware candidate discovery reused by the portfolio |
+| `fynd-core/src/algorithm/split_discovery.rs` | Bounded amount-aware candidate discovery reused by the portfolio |
 | `fynd-core/src/algorithm/split_primitives.rs` | Shared-hop merging and executable route assembly |
 | `fynd-core/src/worker_pool/registry.rs` | Maps `"split"` to `SplitAlgorithm` |

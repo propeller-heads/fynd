@@ -2,12 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use alloy::primitives::U256;
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use tokio::sync::RwLock;
 use tycho_simulation::{
-    evm::protocol::uniswap_v2::state::UniswapV2State,
     tycho_core::{
         models::{token::Token, Address},
         simulation::protocol_sim::{Price, ProtocolSim},
@@ -18,7 +16,7 @@ use tycho_simulation::{
 use crate::{
     algorithm::{
         most_liquid::DepthAndPrice,
-        test_utils::{component, setup_market_unweighted, token_with_decimals},
+        test_utils::{component, setup_market_unweighted, token_with_decimals, ConstantProductSim},
         Algorithm,
     },
     derived::{DerivedData, SharedDerivedDataRef},
@@ -57,28 +55,33 @@ pub(crate) fn optimal_two_pool_output(
 
 // ==================== Weighted two-pool market for split-algorithm tests ====================
 
-/// A WETH/USDC market for the `DepthAndPrice` split algorithms (`split`, `split_exp`), with an
-/// unweighted twin graph so `split_bounded` can run against the same pools and gas price. Every
-/// algorithm shares one `MarketState`, so comparisons are apples-to-apples.
+/// A WETH/USDC market for the `DepthAndPrice` split algorithms (`split`, `split_exp`). The two
+/// pools are fee-free constant-product pools, so their optimal split matches
+/// [`optimal_two_pool_output`]. One `MarketState` backs the whole market.
 pub(crate) struct WeightedSplitMarket {
     pub market: MarketData,
     pub weighted: PetgraphStableDiGraphManager<DepthAndPrice>,
-    pub unweighted: PetgraphStableDiGraphManager<()>,
     pub derived: SharedDerivedDataRef,
     pub weth: Address,
     pub usdc: Address,
 }
 
-fn weth_usdc_pool(weth_reserve: u128, usdc_reserve: u128) -> UniswapV2State {
-    UniswapV2State::new(
-        U256::from(weth_reserve) * U256::from(10u64).pow(U256::from(18u64)),
-        U256::from(usdc_reserve) * U256::from(10u64).pow(U256::from(6u64)),
-    )
+/// Per-pool reserves for [`two_equal_weth_usdc`], in whole tokens (WETH has 18 decimals, USDC 6).
+pub(crate) const TWO_EQUAL_WETH_RESERVE: u128 = 1000;
+pub(crate) const TWO_EQUAL_USDC_RESERVE: u128 = 3_000_000;
+
+fn weth_usdc_pool() -> ConstantProductSim {
+    ConstantProductSim {
+        // reserve_0 is the lower-address token (WETH, 0x01); reserve_1 is USDC (0x02).
+        reserve_0: BigUint::from(TWO_EQUAL_WETH_RESERVE) * BigUint::from(10u64).pow(18),
+        reserve_1: BigUint::from(TWO_EQUAL_USDC_RESERVE) * BigUint::from(10u64).pow(6),
+        gas: 50_000,
+    }
 }
 
-/// Builds two equally-deep WETH/USDC constant-product pools (1000 WETH / 3,000,000 USDC each) at
-/// `gas_price` wei/gas. Derived data carries unit token gas prices so both split algorithms deduct
-/// gas in output-token terms from the same numbers.
+/// Builds two equally-deep, fee-free WETH/USDC constant-product pools (1000 WETH / 3,000,000 USDC
+/// each) at `gas_price` wei/gas. Derived data carries unit token gas prices so the split algorithms
+/// deduct gas in output-token terms.
 pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     let weth = token_with_decimals(0x01, "WETH", 18);
     let usdc = token_with_decimals(0x02, "USDC", 6);
@@ -95,7 +98,7 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     let tokens = [weth.clone(), usdc.clone()];
     let mut edge_weights = Vec::new();
     for pool_id in ["pool_a", "pool_b"] {
-        let sim = weth_usdc_pool(1000, 3_000_000);
+        let sim = weth_usdc_pool();
         let weight_to = DepthAndPrice::from_protocol_sim(&sim, &weth, &usdc).unwrap();
         let weight_from = DepthAndPrice::from_protocol_sim(&sim, &usdc, &weth).unwrap();
         market.upsert_components(std::iter::once(component(pool_id, &tokens)));
@@ -115,9 +118,6 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
             .unwrap();
     }
 
-    let mut unweighted = PetgraphStableDiGraphManager::<()>::default();
-    unweighted.initialize_graph(&market.component_topology());
-
     let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
     let mut token_prices = HashMap::new();
     token_prices.insert(weth.address.clone(), unit_price.clone());
@@ -130,7 +130,6 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
         usdc: usdc.address.clone(),
         market: MarketData::new(Arc::new(RwLock::new(market))),
         weighted,
-        unweighted,
         derived: Arc::new(RwLock::new(derived)),
     }
 }
