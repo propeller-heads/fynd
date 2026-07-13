@@ -405,6 +405,7 @@ mod tests {
         assert_eq!(outcome_label(Verdict::Loss), "loss");
         assert_eq!(outcome_label(Verdict::CoverageMiss), "coverage_miss");
         assert_eq!(outcome_label(Verdict::Unsolvable), "unsolvable");
+        assert_eq!(outcome_label(Verdict::Sandwiched), "sandwiched");
     }
 
     #[test]

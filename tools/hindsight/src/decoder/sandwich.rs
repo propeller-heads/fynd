@@ -211,6 +211,36 @@ mod tests {
     }
 
     #[test]
+    fn front_only_pool_overlap_is_not_flagged() {
+        // Both legs must re-touch a victim pool: an attacker-linked pair where only the front
+        // leg overlaps is not a bracket.
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(addr(51))]),
+        ];
+
+        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+    }
+
+    #[test]
+    fn back_only_pool_overlap_is_not_flagged() {
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(addr(51))]),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(pool)]),
+        ];
+
+        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+    }
+
+    #[test]
     fn pool_overlap_without_attacker_link_is_not_flagged() {
         let victim_sender = addr(1);
         let pool = addr(50);
