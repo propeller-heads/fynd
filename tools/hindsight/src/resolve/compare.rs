@@ -5,7 +5,7 @@ use fynd_tools_common::bps::raw_bps_diff;
 use num_bigint::BigUint;
 use serde::Serialize;
 
-use crate::resolve::Outcome;
+use crate::{resolve::Outcome, usd};
 
 /// Convert an alloy `U256` token amount to `BigUint` for the bps helpers, big-endian and without a
 /// decimal string round-trip.
@@ -60,15 +60,8 @@ pub(crate) fn served(outcome: Outcome, settled_amount_out: U256) -> Outcome {
     let Outcome::Solved(ref solved) = outcome else {
         return outcome;
     };
-    let settled: f64 = settled_amount_out
-        .to_string()
-        .parse()
-        .unwrap_or(0.0);
-    let fynd: f64 = solved
-        .amount_out
-        .to_string()
-        .parse()
-        .unwrap_or(0.0);
+    let settled = usd::u256_to_f64(settled_amount_out);
+    let fynd = usd::u256_to_f64(solved.amount_out);
     if settled > 0.0 && fynd < MIN_FILL_RATIO * settled {
         return Outcome::Partial(format!(
             "partial route: {:.0}% of settled size",

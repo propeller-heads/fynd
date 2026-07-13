@@ -230,10 +230,16 @@ fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
 }
 
 fn biguint_to_u256(value: &BigUint) -> U256 {
-    value
-        .to_string()
-        .parse()
-        .unwrap_or(U256::ZERO)
+    // Convert via big-endian bytes: avoids a decimal string round-trip and catches overflow
+    // without relying on parse. U256 fits in 32 bytes; a larger value is a solver bug.
+    let bytes = value.to_bytes_be();
+    if bytes.len() > 32 {
+        warn!(bits = value.bits(), "solver quote amount overflows U256; treating as zero");
+        return U256::ZERO;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    U256::from_be_bytes(buf)
 }
 
 /// Decode `block`, first waiting out any RPC lag. The HTTP RPC used for receipts can trail the
@@ -245,11 +251,13 @@ async fn decode_block_when_available<P: Provider>(
     block: u64,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
     for attempt in 0..DECODE_RPC_LAG_RETRIES {
-        let head = decoder
-            .provider()
-            .get_block_number()
-            .await
-            .unwrap_or(0);
+        let head = match decoder.provider().get_block_number().await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(block, attempt, "failed to fetch RPC block number: {e}");
+                0
+            }
+        };
         if head >= block {
             break;
         }

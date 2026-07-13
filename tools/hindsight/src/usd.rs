@@ -29,6 +29,19 @@ const STABLECOINS: &[(Address, u32)] = &[
     (address!("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), 18), // USDS
 ];
 
+/// Convert a `U256` token amount to `f64` via its four 64-bit limbs (little-endian).
+///
+/// Powers of 2 are exactly representable in f64, so the limb-scaling is lossless up to the
+/// mantissa width. Precision is lost above ~2^53 (≈9e15 native units) — acceptable for USD
+/// estimates.
+pub(crate) fn u256_to_f64(amount: U256) -> f64 {
+    let [a, b, c, d] = amount.as_limbs();
+    (*a as f64)
+        + (*b as f64) * 2f64.powi(64)
+        + (*c as f64) * 2f64.powi(128)
+        + (*d as f64) * 2f64.powi(192)
+}
+
 /// Positive, finite price of `token`, treating native ETH and WETH as interchangeable.
 fn price_of(prices: &PriceMap, token: Address) -> Option<f64> {
     let direct = prices.get(&token).copied();
@@ -66,7 +79,7 @@ fn usd_per_eth_wei(prices: &PriceMap) -> Option<f64> {
 pub(crate) fn value_usd(token: Address, amount: U256, prices: &PriceMap) -> Option<f64> {
     let usd_per_eth_wei = usd_per_eth_wei(prices)?;
     let price = price_of(prices, token)?;
-    let amount: f64 = amount.to_string().parse().ok()?;
+    let amount = u256_to_f64(amount);
     let usd = amount * usd_per_eth_wei / price;
     usd.is_finite().then_some(usd)
 }
