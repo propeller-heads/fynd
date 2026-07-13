@@ -309,7 +309,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/quote"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_json()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(minimal_quote_json())
+                    // Round-trips are measured in whole milliseconds; an undelayed
+                    // local mock truncates the baseline p95 to 0ms, making the SLO
+                    // limit (baseline * multiplier) zero and every step fail.
+                    .set_delay(std::time::Duration::from_millis(20)),
+            )
             .mount(&server)
             .await;
         let client = Arc::new(
@@ -323,7 +330,10 @@ mod tests {
             step_duration_secs: 1,
             warmup_secs: 0,
             baseline_requests: 5,
-            policy: SloPolicy::default(),
+            // SLO math is unit-tested in capacity_report; this test covers orchestration only.
+            // A fast mock's ~1ms baseline puts the default 1.2x multiplier inside OS jitter,
+            // so use thresholds that cannot flake.
+            policy: SloPolicy { p95_multiplier: 100.0, ..SloPolicy::default() },
             encoding: false,
         };
 
