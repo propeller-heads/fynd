@@ -31,19 +31,21 @@ use std::{
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use tycho_simulation::{
-    tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
+    tycho_common::simulation::protocol_sim::ProtocolSim,
+    tycho_core::models::Address,
 };
 
 use super::{
     most_liquid::DepthAndPrice,
     split_bounded::{find_candidate_paths, CandidateSearchConfig},
+    split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
     Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
 };
 use crate::{
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, Route, RouteResult, Swap},
+    types::{ComponentId, Order, Route, RouteResult},
     AlgorithmError,
 };
 
@@ -88,9 +90,9 @@ impl SplitStrategy {
     }
 }
 
-/// A fully-built split candidate: the swaps plus their summed gross output and gas.
+/// A fully-built split candidate: the assembled route plus its summed gross output and gas.
 struct SplitCandidate {
-    swaps: Vec<Swap>,
+    route: Route,
     gross: BigUint,
     gas: BigUint,
 }
@@ -519,10 +521,7 @@ impl Algorithm for ExpSplitAlgorithm {
             }
         }
         match best_candidate {
-            Some(cand) => {
-                let route = Route::new(cand.swaps, HashMap::new());
-                Ok(RouteResult::new(route, best_net, gas_price))
-            }
+            Some(cand) => Ok(RouteResult::new(cand.route, best_net, gas_price)),
             None => Ok(best_single),
         }
     }
@@ -633,6 +632,74 @@ impl ExpSplitAlgorithm {
         self.build_disjoint_legs(ordered, &active, &fine, market, token_prices, order)
     }
 
+    /// Simulates `amount` through `path`, reading and committing pool states via `overrides`, and
+    /// returns the allocation consumed by [`build_split_route`].
+    fn allocation_commit(
+        path: &Path<DepthAndPrice>,
+        market: &MarketState,
+        overrides: &mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        amount: BigUint,
+        flow_fraction: f64,
+    ) -> Option<PathAllocation> {
+        let amount_in = amount;
+        let mut current = amount_in.clone();
+        let mut hops = Vec::with_capacity(path.len());
+
+        for (address_in, edge, address_out) in path.iter() {
+            let token_in = market.get_token(address_in)?;
+            let token_out = market.get_token(address_out)?;
+            let component_id = &edge.component_id;
+            let state = overrides
+                .get(component_id)
+                .map(Box::as_ref)
+                .or_else(|| market.get_simulation_state(component_id))?;
+            let result = state
+                .get_amount_out(current.clone(), token_in, token_out)
+                .ok()?;
+            hops.push(SimulatedHop {
+                descriptor: HopDescriptor::new(
+                    component_id.clone(),
+                    token_in.clone(),
+                    token_out.clone(),
+                ),
+                amount_out: result.amount.clone(),
+                gas: result.gas.clone(),
+            });
+            overrides.insert(component_id.clone(), result.new_state);
+            current = result.amount;
+        }
+
+        Some(PathAllocation {
+            hops,
+            flow_fraction,
+            amount_in,
+            amount_out: current,
+            marginal_price_product: 0.0,
+        })
+    }
+
+    /// Assembles a route from the allocations via the shared split primitives (topological swap
+    /// order, tycho-execution remainder-split convention, route token map) and derives the
+    /// candidate's gross output and gas from the assembled route.
+    fn candidate_from_allocations(
+        allocations: &[PathAllocation],
+        market: &MarketState,
+        order: &Order,
+    ) -> Option<SplitCandidate> {
+        let route = build_split_route(allocations, market, order).ok()?;
+        let token_out = order.token_out();
+        let gross = route
+            .swaps()
+            .iter()
+            .filter(|s| s.token_out() == token_out)
+            .fold(BigUint::zero(), |acc, s| acc + s.amount_out());
+        if gross.is_zero() {
+            return None;
+        }
+        let gas = route.total_gas();
+        Some(SplitCandidate { route, gross, gas })
+    }
+
     /// Builds one independent leg per path at its allocated amount. `subset` and `alloc` are
     /// aligned by index; pool-disjoint paths never interfere, so each leg is a real independent
     /// simulation.
@@ -642,41 +709,31 @@ impl ExpSplitAlgorithm {
         subset: &[usize],
         alloc: &[BigUint],
         market: &MarketState,
-        token_prices: Option<&TokenGasPrices>,
+        _token_prices: Option<&TokenGasPrices>,
         order: &Order,
     ) -> Option<SplitCandidate> {
         let amount_in = order.amount().clone();
-        let mut swaps = Vec::new();
-        let mut gross = BigUint::zero();
-        let mut gas = BigUint::zero();
+        let mut allocations = Vec::new();
         for (i, &path_idx) in subset.iter().enumerate() {
             if alloc[i].is_zero() {
                 continue;
             }
-            let leg = MostLiquidAlgorithm::simulate_path(
+            // Fresh overrides per leg: legs are pool-disjoint, but a pool reused within one path
+            // must still see its own first swap.
+            let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+            let allocation = Self::allocation_commit(
                 &ordered[path_idx],
                 market,
-                token_prices,
+                &mut overrides,
                 alloc[i].clone(),
-            )
-            .ok()?;
-            let leg_route = leg.into_route();
-            let leg_gross = leg_route
-                .swaps()
-                .last()
-                .map(|s| s.amount_out().clone())
-                .unwrap_or_else(BigUint::zero);
-            gross += &leg_gross;
-            gas += leg_route.total_gas();
-            let fraction = ratio(&alloc[i], &amount_in);
-            for swap in leg_route.into_swaps() {
-                swaps.push(swap.with_split(fraction));
-            }
+                ratio(&alloc[i], &amount_in),
+            )?;
+            allocations.push(allocation);
         }
-        if swaps.is_empty() {
+        if allocations.is_empty() {
             return None;
         }
-        Some(SplitCandidate { swaps, gross, gas })
+        Self::candidate_from_allocations(&allocations, market, order)
     }
 
     /// Incremental water-fill over a set of pool-disjoint paths. Returns the amount allocated to
@@ -960,9 +1017,9 @@ impl ExpSplitAlgorithm {
         Some((counts, schedule))
     }
 
-    /// Replays a fill-and-spill schedule against a fresh overlay to build a valid route whose
-    /// summed leg output equals what the water-fill simulated. Gas is charged once per
-    /// activated path.
+    /// Rebuilds the fill-and-spill result as one leg per active path at its total allocated
+    /// amount, committed sequentially (largest allocation first) against a shared overlay — the
+    /// same execution model the router applies on-chain.
     fn build_fillspill_route(
         &self,
         ordered: &[Path<DepthAndPrice>],
@@ -976,77 +1033,27 @@ impl ExpSplitAlgorithm {
         for (i, chunk) in schedule {
             cand_in[*i] += chunk;
         }
-
-        let mut replay: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-        let mut charged: Vec<bool> = vec![false; active.len()];
-        let mut swaps: Vec<Swap> = Vec::new();
-        let mut gross = BigUint::zero();
-        let mut gas = BigUint::zero();
-
-        for (i, chunk) in schedule {
-            let path = &ordered[active[*i]];
-            let fraction = ratio(&cand_in[*i], &amount_in);
-            let mut current = chunk.clone();
-            let mut chunk_gas = BigUint::zero();
-            let mut ok = true;
-            let mut leg_swaps: Vec<Swap> = Vec::with_capacity(path.len());
-            for (address_in, edge, address_out) in path.iter() {
-                let (Some(token_in), Some(token_out)) =
-                    (market.get_token(address_in), market.get_token(address_out))
-                else {
-                    ok = false;
-                    break;
-                };
-                let component_id = &edge.component_id;
-                let Some(component) = market.get_component(component_id) else {
-                    ok = false;
-                    break;
-                };
-                let state = replay
-                    .get(component_id)
-                    .map(Box::as_ref)
-                    .or_else(|| market.get_simulation_state(component_id));
-                let Some(state) = state else {
-                    ok = false;
-                    break;
-                };
-                let Ok(result) = state.get_amount_out(current.clone(), token_in, token_out) else {
-                    ok = false;
-                    break;
-                };
-                chunk_gas += &result.gas;
-                leg_swaps.push(
-                    Swap::new(
-                        component_id.clone(),
-                        component.protocol_system.clone(),
-                        token_in.address.clone(),
-                        token_out.address.clone(),
-                        current.clone(),
-                        result.amount.clone(),
-                        result.gas.clone(),
-                        component.clone(),
-                        state.clone_box(),
-                    )
-                    .with_split(fraction),
-                );
-                current = result.amount.clone();
-                replay.insert(component_id.clone(), result.new_state);
-            }
-            if !ok {
-                continue;
-            }
-            if !charged[*i] {
-                charged[*i] = true;
-                gas += &chunk_gas;
-            }
-            gross += &current;
-            swaps.append(&mut leg_swaps);
-        }
-
-        if swaps.is_empty() {
+        let mut execution_order: Vec<usize> = (0..active.len())
+            .filter(|&i| !cand_in[i].is_zero())
+            .collect();
+        if execution_order.len() < 2 {
             return None;
         }
-        Some(SplitCandidate { swaps, gross, gas })
+        execution_order.sort_by(|&a, &b| cand_in[b].cmp(&cand_in[a]));
+
+        let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut allocations = Vec::new();
+        for i in execution_order {
+            let allocation = Self::allocation_commit(
+                &ordered[active[i]],
+                market,
+                &mut overrides,
+                cand_in[i].clone(),
+                ratio(&cand_in[i], &amount_in),
+            )?;
+            allocations.push(allocation);
+        }
+        Self::candidate_from_allocations(&allocations, market, order)
     }
 }
 

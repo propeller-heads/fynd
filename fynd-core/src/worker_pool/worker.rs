@@ -236,17 +236,21 @@ where
                         })?
                 };
                 let amount_out = if order.is_sell() {
+                    // Split routes have several final swaps into the output token; sum them all
+                    // rather than reading only the last swap.
+                    let output_token = route.output_token().ok_or_else(|| {
+                        error!(
+                            order_id = %order.id(),
+                            "route missing swaps for sell order"
+                        );
+                        SolveError::NoRouteFound { order_id: order.id().to_string() }
+                    })?;
                     route
                         .swaps()
-                        .last()
+                        .iter()
+                        .filter(|s| *s.token_out() == output_token)
                         .map(|s| s.amount_out().clone())
-                        .ok_or_else(|| {
-                            error!(
-                                order_id = %order.id(),
-                                "route missing last swap for sell order"
-                            );
-                            SolveError::NoRouteFound { order_id: order.id().to_string() }
-                        })?
+                        .fold(BigUint::ZERO, |acc, x| acc + x)
                 } else {
                     order.amount().clone()
                 };
