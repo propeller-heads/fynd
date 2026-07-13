@@ -55,7 +55,7 @@ pub(crate) fn optimal_two_pool_output(
 
 // ==================== Weighted two-pool market for split-algorithm tests ====================
 
-/// A WETH/USDC market for the `DepthAndPrice` split algorithms (`split`, `split_exp`). The two
+/// A WETH/USDC market for the `DepthAndPrice` split algorithm (`split`). The two
 /// pools are fee-free constant-product pools, so their optimal split matches
 /// [`optimal_two_pool_output`]. One `MarketState` backs the whole market.
 pub(crate) struct WeightedSplitMarket {

@@ -26,7 +26,6 @@
 * [Bellman-Ford](algorithms/bellman-ford.md)
 * [Path Frank-Wolfe](algorithms/path-frank-wolfe.md)
 * [Split](algorithms/split.md)
-* [Split variant comparison](algorithms/split-comparison.md)
 
 ## Reference
 

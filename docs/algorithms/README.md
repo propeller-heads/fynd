@@ -6,8 +6,7 @@ icon: compass
 
 Fynd ships four built-in routing algorithms: three single-route finders (Most Liquid, Bellman-Ford,
 Path Frank-Wolfe) and the [Split](split.md) portfolio router. This section explains the problem they
-solve and how each one works; the [variant comparison](split-comparison.md) records the history of
-how the split router was developed.
+solve and how each one works.
 
 ## The routing problem
 
