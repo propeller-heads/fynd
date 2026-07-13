@@ -22,7 +22,7 @@ use tracing::info;
 use crate::{
     algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, AlgorithmConfig, BellmanFordAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitBoundedAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, SplitAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
@@ -32,7 +32,7 @@ use crate::{
 
 /// List of available built-in algorithm names (for registry-based dispatch).
 pub(crate) const AVAILABLE_ALGORITHMS: &[&str] =
-    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split_bounded"];
+    &["most_liquid", "bellman_ford", "path_frank_wolfe", "split"];
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
@@ -114,7 +114,7 @@ impl AlgorithmSpawner {
                 "most_liquid" => Ok(spawn_most_liquid_workers(params)),
                 "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 "path_frank_wolfe" => Ok(spawn_path_frank_wolfe_workers(params)),
-                "split_bounded" => Ok(spawn_split_bounded_workers(params)),
+                "split" => Ok(spawn_split_workers(params)),
                 _ => Err(UnknownAlgorithmError { name: algorithm }),
             },
             Self::Custom { spawner, .. } => Ok(spawner(params)),
@@ -219,11 +219,11 @@ fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<
     spawn_workers_generic(params, &factory)
 }
 
-/// Spawns workers for the Split algorithm variant with bounded candidate discovery.
-fn spawn_split_bounded_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+/// Spawns workers for the portfolio split-routing algorithm.
+fn spawn_split_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
     let factory = |config: AlgorithmConfig| {
-        SplitBoundedAlgorithm::with_config(config)
-            .expect("invalid worker configuration for SplitBoundedAlgorithm")
+        SplitAlgorithm::with_config(config)
+            .expect("invalid worker configuration for SplitAlgorithm")
     };
     spawn_workers_generic(params, &factory)
 }
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_spawns_split_bounded() {
+    fn test_registry_spawns_split() {
         let (shutdown_tx, _) = broadcast::channel(1);
         let (_task_tx, task_rx) = async_channel::bounded(10);
         let market_data = MarketData::new_shared();
@@ -403,7 +403,7 @@ mod tests {
         let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
 
         let params = SpawnWorkersParams {
-            algorithm: "split_bounded".to_string(),
+            algorithm: "split".to_string(),
             num_workers: 1,
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
@@ -414,8 +414,7 @@ mod tests {
             shutdown_tx: shutdown_tx.clone(),
         };
 
-        let workers =
-            AlgorithmSpawner::Registry { algorithm: "split_bounded".to_string() }.spawn(params);
+        let workers = AlgorithmSpawner::Registry { algorithm: "split".to_string() }.spawn(params);
         assert!(workers.is_ok());
         assert_eq!(workers.unwrap().len(), 1);
 

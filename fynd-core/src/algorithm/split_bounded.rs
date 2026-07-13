@@ -75,7 +75,7 @@ type PoolStateUpdates = Vec<(ComponentId, Box<dyn ProtocolSim>)>;
 type SharedProbe = (BigUint, BigUint, PoolStateUpdates);
 type SplitPath<'a> = Path<'a, ()>;
 type RankedPathScores = Vec<(usize, BigInt)>;
-type CandidatePathSet<'a> = (Vec<SplitPath<'a>>, RankedPathScores);
+type CandidatePathSet<'a, W = ()> = (Vec<Path<'a, W>>, RankedPathScores);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateSearchMode {
@@ -86,31 +86,33 @@ enum CandidateSearchMode {
 }
 
 #[derive(Clone)]
-struct CandidatePathState<'a> {
+struct CandidatePathState<'a, W> {
     node: NodeIndex,
-    path: SplitPath<'a>,
+    path: Path<'a, W>,
     amount_out: BigUint,
 }
 
-struct ScoredEdge<'a> {
+struct ScoredEdge<'a, W> {
     target: NodeIndex,
-    edge: &'a EdgeData<()>,
+    edge: &'a EdgeData<W>,
     amount_out: BigUint,
     priority: u8,
 }
 
+/// Parameters for one bounded candidate-discovery run. Generic callers (e.g. the portfolio split)
+/// construct this to reuse the discovery on their own graph weight type.
 #[derive(Clone, Copy)]
-struct CandidateSearchConfig<'a> {
-    min_hops: usize,
-    max_hops: usize,
-    max_candidates: usize,
-    connector_tokens: Option<&'a HashSet<Address>>,
-    source_token: &'a Address,
-    start: &'a Instant,
-    timeout_ms: u64,
+pub(crate) struct CandidateSearchConfig<'a> {
+    pub(crate) min_hops: usize,
+    pub(crate) max_hops: usize,
+    pub(crate) max_candidates: usize,
+    pub(crate) connector_tokens: Option<&'a HashSet<Address>>,
+    pub(crate) source_token: &'a Address,
+    pub(crate) start: &'a Instant,
+    pub(crate) timeout_ms: u64,
 }
 
-trait SplitMarketRead {
+pub(crate) trait SplitMarketRead {
     fn get_token(&self, address: &Address) -> Option<&Token>;
 
     fn get_simulation_state(&self, id: &str) -> Option<&dyn ProtocolSim>;
@@ -181,6 +183,325 @@ fn default_anchor_tokens() -> &'static HashSet<Address> {
         .map(|addr| Address::from_str(addr).expect("valid default split anchor token"))
         .collect()
     })
+}
+
+/// Bounded, amount-aware candidate discovery: expand from the sell token with the full amount,
+/// simulate frontier edges live, and prefer edges into the target token, configured connector
+/// tokens, or the default anchor set (including the native-ETH sentinel).
+///
+/// Generic over the graph's edge weight `W` — discovery only reads `component_id` — so other split
+/// algorithms (e.g. the portfolio split on `StableDiGraph<DepthAndPrice>`) can reuse it. Returns
+/// the candidate paths plus their `(index, full-amount gross output)` ranking, best first.
+pub(crate) fn find_candidate_paths<'a, W, M>(
+    graph: &'a StableDiGraph<W>,
+    market: &M,
+    order: &Order,
+    cfg: CandidateSearchConfig<'_>,
+) -> Result<CandidatePathSet<'a, W>, AlgorithmError>
+where
+    W: Clone,
+    M: SplitMarketRead + ?Sized,
+{
+    if cfg.min_hops == 0 || cfg.min_hops > cfg.max_hops {
+        return Err(AlgorithmError::InvalidConfiguration {
+            reason: format!(
+                "invalid hop configuration: min_hops={} max_hops={}",
+                cfg.min_hops, cfg.max_hops,
+            ),
+        });
+    }
+    let from_idx =
+        find_token_node(graph, order.token_in(), NoPathReason::SourceTokenNotInGraph, order)?;
+    let to_idx =
+        find_token_node(graph, order.token_out(), NoPathReason::DestinationTokenNotInGraph, order)?;
+
+    let mut found = Vec::new();
+    let mut frontier = vec![CandidatePathState {
+        node: from_idx,
+        path: Path::new(),
+        amount_out: order.amount().clone(),
+    }];
+
+    for _depth in 0..cfg.max_hops {
+        if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
+            break;
+        }
+        let mut next_by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> = HashMap::new();
+        for state in frontier {
+            if state.node == to_idx && from_idx != to_idx {
+                continue;
+            }
+            expand_candidate_state(
+                graph,
+                market,
+                &cfg,
+                to_idx,
+                state,
+                &mut found,
+                &mut next_by_node,
+            );
+        }
+        frontier = prune_candidate_frontier(next_by_node);
+    }
+
+    rank_found_candidate_paths(found, cfg.max_candidates, order)
+}
+
+fn find_token_node<W>(
+    graph: &StableDiGraph<W>,
+    token: &Address,
+    reason: NoPathReason,
+    order: &Order,
+) -> Result<NodeIndex, AlgorithmError> {
+    graph
+        .node_indices()
+        .find(|&node| &graph[node] == token)
+        .ok_or(AlgorithmError::NoPath {
+            from: order.token_in().clone(),
+            to: order.token_out().clone(),
+            reason,
+        })
+}
+
+fn expand_candidate_state<'a, W, M>(
+    graph: &'a StableDiGraph<W>,
+    market: &M,
+    cfg: &CandidateSearchConfig<'_>,
+    target: NodeIndex,
+    state: CandidatePathState<'a, W>,
+    found: &mut Vec<(Path<'a, W>, BigUint)>,
+    next_by_node: &mut HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
+) where
+    W: Clone,
+    M: SplitMarketRead + ?Sized,
+{
+    let edges = candidate_edges_for_state(graph, market, cfg, target, &state);
+    for candidate in edges {
+        if timed_out(cfg.start, cfg.timeout_ms) {
+            break;
+        }
+        let mut path = state.path.clone();
+        path.add_hop(&graph[state.node], candidate.edge, &graph[candidate.target]);
+        let path_state = CandidatePathState {
+            node: candidate.target,
+            path: path.clone(),
+            amount_out: candidate.amount_out,
+        };
+        if candidate.target == target && path.len() >= cfg.min_hops {
+            found.push((path.clone(), path_state.amount_out.clone()));
+        }
+        if path.len() < cfg.max_hops {
+            next_by_node
+                .entry(candidate.target)
+                .or_default()
+                .push(path_state);
+        }
+    }
+}
+
+fn candidate_edges_for_state<'a, W, M>(
+    graph: &'a StableDiGraph<W>,
+    market: &M,
+    cfg: &CandidateSearchConfig<'_>,
+    target: NodeIndex,
+    state: &CandidatePathState<'a, W>,
+) -> Vec<ScoredEdge<'a, W>>
+where
+    M: SplitMarketRead + ?Sized,
+{
+    let mut preferred = score_candidate_edges(graph, market, cfg, target, state, true);
+    if preferred.is_empty() {
+        preferred = score_candidate_edges(graph, market, cfg, target, state, false);
+    }
+    select_candidate_edges(preferred, CANDIDATE_EDGES_PER_STATE)
+}
+
+fn score_candidate_edges<'a, W, M>(
+    graph: &'a StableDiGraph<W>,
+    market: &M,
+    cfg: &CandidateSearchConfig<'_>,
+    target: NodeIndex,
+    state: &CandidatePathState<'a, W>,
+    preferred_only: bool,
+) -> Vec<ScoredEdge<'a, W>>
+where
+    M: SplitMarketRead + ?Sized,
+{
+    let mut scored = Vec::new();
+    for edge in graph.edges(state.node) {
+        let next_node = edge.target();
+        if !can_extend_path(graph, state, next_node, target, edge.weight(), cfg) {
+            continue;
+        }
+        let priority = match candidate_priority(graph, next_node, target, cfg) {
+            Some(priority) => priority,
+            None if preferred_only => continue,
+            None => 3,
+        };
+        let Some(amount_out) = simulate_edge(
+            market,
+            &state.amount_out,
+            &graph[state.node],
+            edge.weight(),
+            &graph[next_node],
+        ) else {
+            continue;
+        };
+        scored.push(ScoredEdge { target: next_node, edge: edge.weight(), amount_out, priority });
+    }
+    scored
+}
+
+fn candidate_priority<W>(
+    graph: &StableDiGraph<W>,
+    node: NodeIndex,
+    target: NodeIndex,
+    cfg: &CandidateSearchConfig<'_>,
+) -> Option<u8> {
+    if node == target {
+        return Some(0);
+    }
+    let token = &graph[node];
+    match cfg.connector_tokens {
+        Some(tokens) => tokens.contains(token).then_some(1),
+        None => default_anchor_tokens()
+            .contains(token)
+            .then_some(2),
+    }
+}
+
+fn can_extend_path<W>(
+    graph: &StableDiGraph<W>,
+    state: &CandidatePathState<'_, W>,
+    next_node: NodeIndex,
+    target: NodeIndex,
+    edge: &EdgeData<W>,
+    cfg: &CandidateSearchConfig<'_>,
+) -> bool {
+    let next_addr = &graph[next_node];
+    if state
+        .path
+        .edge_iter()
+        .iter()
+        .any(|existing| existing.component_id == edge.component_id)
+    {
+        return false;
+    }
+    if state.path.tokens.contains(&next_addr) {
+        return false;
+    }
+    if next_addr == cfg.source_token {
+        return false;
+    }
+    if next_node == target {
+        return true;
+    }
+    cfg.connector_tokens
+        .map(|tokens| tokens.contains(next_addr))
+        .unwrap_or(true)
+}
+
+fn simulate_edge<W, M>(
+    market: &M,
+    amount: &BigUint,
+    token_in_addr: &Address,
+    edge: &EdgeData<W>,
+    token_out_addr: &Address,
+) -> Option<BigUint>
+where
+    M: SplitMarketRead + ?Sized,
+{
+    let token_in = market.get_token(token_in_addr)?;
+    let token_out = market.get_token(token_out_addr)?;
+    let state = market.get_simulation_state(&edge.component_id)?;
+    state
+        .get_amount_out(amount.clone(), token_in, token_out)
+        .ok()
+        .map(|result| result.amount)
+}
+
+fn select_candidate_edges<W>(
+    mut scored: Vec<ScoredEdge<'_, W>>,
+    max_edges: usize,
+) -> Vec<ScoredEdge<'_, W>> {
+    scored.sort_by(compare_scored_edges);
+    let mut selected = Vec::new();
+    let mut per_target: HashMap<NodeIndex, usize> = HashMap::new();
+    for edge in scored {
+        let limit = if edge.priority == 0 {
+            CANDIDATE_DIRECT_EDGES_PER_TOKEN
+        } else {
+            CANDIDATE_CONNECTOR_EDGES_PER_TOKEN
+        };
+        let count = per_target
+            .entry(edge.target)
+            .or_default();
+        if *count >= limit {
+            continue;
+        }
+        *count += 1;
+        selected.push(edge);
+        if selected.len() >= max_edges {
+            break;
+        }
+    }
+    selected
+}
+
+fn compare_scored_edges<W>(a: &ScoredEdge<'_, W>, b: &ScoredEdge<'_, W>) -> Ordering {
+    a.priority
+        .cmp(&b.priority)
+        .then_with(|| b.amount_out.cmp(&a.amount_out))
+}
+
+fn prune_candidate_frontier<W>(
+    by_node: HashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
+) -> Vec<CandidatePathState<'_, W>> {
+    by_node
+        .into_values()
+        .flat_map(|mut states| {
+            states.sort_by(|a, b| b.amount_out.cmp(&a.amount_out));
+            states.truncate(CANDIDATE_STATES_PER_NODE);
+            states
+        })
+        .collect()
+}
+
+fn rank_found_candidate_paths<'a, W>(
+    mut found: Vec<(Path<'a, W>, BigUint)>,
+    max_candidates: usize,
+    order: &Order,
+) -> Result<CandidatePathSet<'a, W>, AlgorithmError> {
+    found.sort_by(|(_, a), (_, b)| b.cmp(a));
+    let mut keys = HashSet::new();
+    let mut paths = Vec::new();
+    let mut scores = Vec::new();
+
+    for (path, amount_out) in found {
+        let key: Vec<ComponentId> = path
+            .edge_iter()
+            .iter()
+            .map(|edge| edge.component_id.clone())
+            .collect();
+        if !keys.insert(key) {
+            continue;
+        }
+        let idx = paths.len();
+        paths.push(path);
+        scores.push((idx, BigInt::from(amount_out)));
+        if paths.len() >= max_candidates {
+            break;
+        }
+    }
+
+    if paths.is_empty() {
+        return Err(AlgorithmError::NoPath {
+            from: order.token_in().clone(),
+            to: order.token_out().clone(),
+            reason: NoPathReason::NoGraphPath,
+        });
+    }
+    Ok((paths, scores))
 }
 
 /// Shared engine behind [`SplitBoundedAlgorithm`]. The exhaustive mode exists only as a
@@ -305,329 +626,6 @@ impl BoundedSplitEngine {
         }
 
         Ok(paths)
-    }
-
-    fn find_candidate_paths<'a, M>(
-        graph: &'a StableDiGraph<()>,
-        market: &M,
-        order: &Order,
-        cfg: CandidateSearchConfig<'_>,
-    ) -> Result<CandidatePathSet<'a>, AlgorithmError>
-    where
-        M: SplitMarketRead + ?Sized,
-    {
-        if cfg.min_hops == 0 || cfg.min_hops > cfg.max_hops {
-            return Err(AlgorithmError::InvalidConfiguration {
-                reason: format!(
-                    "invalid hop configuration: min_hops={} max_hops={}",
-                    cfg.min_hops, cfg.max_hops,
-                ),
-            });
-        }
-        let from_idx = Self::find_token_node(
-            graph,
-            order.token_in(),
-            NoPathReason::SourceTokenNotInGraph,
-            order,
-        )?;
-        let to_idx = Self::find_token_node(
-            graph,
-            order.token_out(),
-            NoPathReason::DestinationTokenNotInGraph,
-            order,
-        )?;
-
-        let mut found = Vec::new();
-        let mut frontier = vec![CandidatePathState {
-            node: from_idx,
-            path: Path::new(),
-            amount_out: order.amount().clone(),
-        }];
-
-        for _depth in 0..cfg.max_hops {
-            if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
-                break;
-            }
-            let mut next_by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a>>> = HashMap::new();
-            for state in frontier {
-                if state.node == to_idx && from_idx != to_idx {
-                    continue;
-                }
-                Self::expand_candidate_state(
-                    graph,
-                    market,
-                    &cfg,
-                    to_idx,
-                    state,
-                    &mut found,
-                    &mut next_by_node,
-                );
-            }
-            frontier = Self::prune_candidate_frontier(next_by_node);
-        }
-
-        Self::rank_found_candidate_paths(found, cfg.max_candidates, order)
-    }
-
-    fn find_token_node(
-        graph: &StableDiGraph<()>,
-        token: &Address,
-        reason: NoPathReason,
-        order: &Order,
-    ) -> Result<NodeIndex, AlgorithmError> {
-        graph
-            .node_indices()
-            .find(|&node| &graph[node] == token)
-            .ok_or(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason,
-            })
-    }
-
-    fn expand_candidate_state<'a, M>(
-        graph: &'a StableDiGraph<()>,
-        market: &M,
-        cfg: &CandidateSearchConfig<'_>,
-        target: NodeIndex,
-        state: CandidatePathState<'a>,
-        found: &mut Vec<(SplitPath<'a>, BigUint)>,
-        next_by_node: &mut HashMap<NodeIndex, Vec<CandidatePathState<'a>>>,
-    ) where
-        M: SplitMarketRead + ?Sized,
-    {
-        let edges = Self::candidate_edges_for_state(graph, market, cfg, target, &state);
-        for candidate in edges {
-            if timed_out(cfg.start, cfg.timeout_ms) {
-                break;
-            }
-            let mut path = state.path.clone();
-            path.add_hop(&graph[state.node], candidate.edge, &graph[candidate.target]);
-            let path_state = CandidatePathState {
-                node: candidate.target,
-                path: path.clone(),
-                amount_out: candidate.amount_out,
-            };
-            if candidate.target == target && path.len() >= cfg.min_hops {
-                found.push((path.clone(), path_state.amount_out.clone()));
-            }
-            if path.len() < cfg.max_hops {
-                next_by_node
-                    .entry(candidate.target)
-                    .or_default()
-                    .push(path_state);
-            }
-        }
-    }
-
-    fn candidate_edges_for_state<'a, M>(
-        graph: &'a StableDiGraph<()>,
-        market: &M,
-        cfg: &CandidateSearchConfig<'_>,
-        target: NodeIndex,
-        state: &CandidatePathState<'a>,
-    ) -> Vec<ScoredEdge<'a>>
-    where
-        M: SplitMarketRead + ?Sized,
-    {
-        let mut preferred = Self::score_candidate_edges(graph, market, cfg, target, state, true);
-        if preferred.is_empty() {
-            preferred = Self::score_candidate_edges(graph, market, cfg, target, state, false);
-        }
-        Self::select_candidate_edges(preferred, CANDIDATE_EDGES_PER_STATE)
-    }
-
-    fn score_candidate_edges<'a, M>(
-        graph: &'a StableDiGraph<()>,
-        market: &M,
-        cfg: &CandidateSearchConfig<'_>,
-        target: NodeIndex,
-        state: &CandidatePathState<'a>,
-        preferred_only: bool,
-    ) -> Vec<ScoredEdge<'a>>
-    where
-        M: SplitMarketRead + ?Sized,
-    {
-        let mut scored = Vec::new();
-        for edge in graph.edges(state.node) {
-            let next_node = edge.target();
-            if !Self::can_extend_path(graph, state, next_node, target, edge.weight(), cfg) {
-                continue;
-            }
-            let priority = match Self::candidate_priority(graph, next_node, target, cfg) {
-                Some(priority) => priority,
-                None if preferred_only => continue,
-                None => 3,
-            };
-            let Some(amount_out) = Self::simulate_edge(
-                market,
-                &state.amount_out,
-                &graph[state.node],
-                edge.weight(),
-                &graph[next_node],
-            ) else {
-                continue;
-            };
-            scored.push(ScoredEdge {
-                target: next_node,
-                edge: edge.weight(),
-                amount_out,
-                priority,
-            });
-        }
-        scored
-    }
-
-    fn candidate_priority(
-        graph: &StableDiGraph<()>,
-        node: NodeIndex,
-        target: NodeIndex,
-        cfg: &CandidateSearchConfig<'_>,
-    ) -> Option<u8> {
-        if node == target {
-            return Some(0);
-        }
-        let token = &graph[node];
-        match cfg.connector_tokens {
-            Some(tokens) => tokens.contains(token).then_some(1),
-            None => default_anchor_tokens()
-                .contains(token)
-                .then_some(2),
-        }
-    }
-
-    fn can_extend_path(
-        graph: &StableDiGraph<()>,
-        state: &CandidatePathState<'_>,
-        next_node: NodeIndex,
-        target: NodeIndex,
-        edge: &EdgeData<()>,
-        cfg: &CandidateSearchConfig<'_>,
-    ) -> bool {
-        let next_addr = &graph[next_node];
-        if state
-            .path
-            .edge_iter()
-            .iter()
-            .any(|existing| existing.component_id == edge.component_id)
-        {
-            return false;
-        }
-        if state.path.tokens.contains(&next_addr) {
-            return false;
-        }
-        if next_addr == cfg.source_token {
-            return false;
-        }
-        if next_node == target {
-            return true;
-        }
-        cfg.connector_tokens
-            .map(|tokens| tokens.contains(next_addr))
-            .unwrap_or(true)
-    }
-
-    fn simulate_edge<M>(
-        market: &M,
-        amount: &BigUint,
-        token_in_addr: &Address,
-        edge: &EdgeData<()>,
-        token_out_addr: &Address,
-    ) -> Option<BigUint>
-    where
-        M: SplitMarketRead + ?Sized,
-    {
-        let token_in = market.get_token(token_in_addr)?;
-        let token_out = market.get_token(token_out_addr)?;
-        let state = market.get_simulation_state(&edge.component_id)?;
-        state
-            .get_amount_out(amount.clone(), token_in, token_out)
-            .ok()
-            .map(|result| result.amount)
-    }
-
-    fn select_candidate_edges(
-        mut scored: Vec<ScoredEdge<'_>>,
-        max_edges: usize,
-    ) -> Vec<ScoredEdge<'_>> {
-        scored.sort_by(Self::compare_scored_edges);
-        let mut selected = Vec::new();
-        let mut per_target: HashMap<NodeIndex, usize> = HashMap::new();
-        for edge in scored {
-            let limit = if edge.priority == 0 {
-                CANDIDATE_DIRECT_EDGES_PER_TOKEN
-            } else {
-                CANDIDATE_CONNECTOR_EDGES_PER_TOKEN
-            };
-            let count = per_target
-                .entry(edge.target)
-                .or_default();
-            if *count >= limit {
-                continue;
-            }
-            *count += 1;
-            selected.push(edge);
-            if selected.len() >= max_edges {
-                break;
-            }
-        }
-        selected
-    }
-
-    fn compare_scored_edges(a: &ScoredEdge<'_>, b: &ScoredEdge<'_>) -> Ordering {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| b.amount_out.cmp(&a.amount_out))
-    }
-
-    fn prune_candidate_frontier<'a>(
-        by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a>>>,
-    ) -> Vec<CandidatePathState<'a>> {
-        by_node
-            .into_values()
-            .flat_map(|mut states| {
-                states.sort_by(|a, b| b.amount_out.cmp(&a.amount_out));
-                states.truncate(CANDIDATE_STATES_PER_NODE);
-                states
-            })
-            .collect()
-    }
-
-    fn rank_found_candidate_paths<'a>(
-        mut found: Vec<(SplitPath<'a>, BigUint)>,
-        max_candidates: usize,
-        order: &Order,
-    ) -> Result<CandidatePathSet<'a>, AlgorithmError> {
-        found.sort_by(|(_, a), (_, b)| b.cmp(a));
-        let mut keys = HashSet::new();
-        let mut paths = Vec::new();
-        let mut scores = Vec::new();
-
-        for (path, amount_out) in found {
-            let key: Vec<ComponentId> = path
-                .edge_iter()
-                .iter()
-                .map(|edge| edge.component_id.clone())
-                .collect();
-            if !keys.insert(key) {
-                continue;
-            }
-            let idx = paths.len();
-            paths.push(path);
-            scores.push((idx, BigInt::from(amount_out)));
-            if paths.len() >= max_candidates {
-                break;
-            }
-        }
-
-        if paths.is_empty() {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
-        }
-        Ok((paths, scores))
     }
 
     fn ranked_simulatable_paths<M>(
@@ -1239,7 +1237,7 @@ impl Algorithm for BoundedSplitEngine {
                     (paths, ranked_path_scores, view.extract_subset_with_overlay(&component_ids))
                 }
                 CandidateSearchMode::Bounded => {
-                    let (paths, ranked_path_scores) = Self::find_candidate_paths(
+                    let (paths, ranked_path_scores) = find_candidate_paths(
                         graph,
                         &view,
                         order,

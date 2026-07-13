@@ -2,20 +2,32 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use alloy::primitives::U256;
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use tokio::sync::RwLock;
-use tycho_simulation::tycho_core::{
-    models::{token::Token, Address},
-    simulation::protocol_sim::{Price, ProtocolSim},
+use tycho_simulation::{
+    evm::protocol::uniswap_v2::state::UniswapV2State,
+    tycho_core::{
+        models::{token::Token, Address},
+        simulation::protocol_sim::{Price, ProtocolSim},
+    },
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::{
-    algorithm::{test_utils::setup_market_unweighted, Algorithm},
+    algorithm::{
+        most_liquid::DepthAndPrice,
+        test_utils::{component, setup_market_unweighted, token_with_decimals},
+        Algorithm,
+    },
     derived::{DerivedData, SharedDerivedDataRef},
-    feed::market_data::MarketData,
+    feed::market_data::{MarketData, MarketState},
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
-    types::quote::{Order, OrderSide, Route},
+    types::{
+        quote::{Order, OrderSide, Route},
+        BlockInfo, RouteResult,
+    },
 };
 
 /// Returns `(fraction_for_pool_1, total_output)` — the theoretically optimal output when
@@ -41,6 +53,105 @@ pub(crate) fn optimal_two_pool_output(
     let out_2 = a2 * reserve_out_2 / (reserve_in_2 + a2);
 
     (fraction_1, out_1 + out_2)
+}
+
+// ==================== Weighted two-pool market for split-algorithm tests ====================
+
+/// A WETH/USDC market for the `DepthAndPrice` split algorithms (`split`, `split_exp`), with an
+/// unweighted twin graph so `split_bounded` can run against the same pools and gas price. Every
+/// algorithm shares one `MarketState`, so comparisons are apples-to-apples.
+pub(crate) struct WeightedSplitMarket {
+    pub market: MarketData,
+    pub weighted: PetgraphStableDiGraphManager<DepthAndPrice>,
+    pub unweighted: PetgraphStableDiGraphManager<()>,
+    pub derived: SharedDerivedDataRef,
+    pub weth: Address,
+    pub usdc: Address,
+}
+
+fn weth_usdc_pool(weth_reserve: u128, usdc_reserve: u128) -> UniswapV2State {
+    UniswapV2State::new(
+        U256::from(weth_reserve) * U256::from(10u64).pow(U256::from(18u64)),
+        U256::from(usdc_reserve) * U256::from(10u64).pow(U256::from(6u64)),
+    )
+}
+
+/// Builds two equally-deep WETH/USDC constant-product pools (1000 WETH / 3,000,000 USDC each) at
+/// `gas_price` wei/gas. Derived data carries unit token gas prices so both split algorithms deduct
+/// gas in output-token terms from the same numbers.
+pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
+    let weth = token_with_decimals(0x01, "WETH", 18);
+    let usdc = token_with_decimals(0x02, "USDC", 6);
+
+    let mut market = MarketState::new();
+    market.update_gas_price(BlockGasPrice {
+        block_number: 1,
+        block_hash: Default::default(),
+        block_timestamp: 0,
+        pricing: GasPrice::Legacy { gas_price: BigUint::from(gas_price) },
+    });
+    market.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 0));
+
+    let tokens = [weth.clone(), usdc.clone()];
+    let mut edge_weights = Vec::new();
+    for pool_id in ["pool_a", "pool_b"] {
+        let sim = weth_usdc_pool(1000, 3_000_000);
+        let weight_to = DepthAndPrice::from_protocol_sim(&sim, &weth, &usdc).unwrap();
+        let weight_from = DepthAndPrice::from_protocol_sim(&sim, &usdc, &weth).unwrap();
+        market.upsert_components(std::iter::once(component(pool_id, &tokens)));
+        market.update_states([(pool_id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>)]);
+        market.upsert_tokens(tokens.clone());
+        edge_weights.push((pool_id, weight_to, weight_from));
+    }
+
+    let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    weighted.initialize_graph(&market.component_topology());
+    for (pool_id, weight_to, weight_from) in edge_weights {
+        weighted
+            .set_edge_weight(&pool_id.to_string(), &weth.address, &usdc.address, weight_to, false)
+            .unwrap();
+        weighted
+            .set_edge_weight(&pool_id.to_string(), &usdc.address, &weth.address, weight_from, false)
+            .unwrap();
+    }
+
+    let mut unweighted = PetgraphStableDiGraphManager::<()>::default();
+    unweighted.initialize_graph(&market.component_topology());
+
+    let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
+    let mut token_prices = HashMap::new();
+    token_prices.insert(weth.address.clone(), unit_price.clone());
+    token_prices.insert(usdc.address.clone(), unit_price);
+    let mut derived = DerivedData::new();
+    derived.set_token_prices(token_prices, vec![], 1, true);
+
+    WeightedSplitMarket {
+        weth: weth.address.clone(),
+        usdc: usdc.address.clone(),
+        market: MarketData::new(Arc::new(RwLock::new(market))),
+        weighted,
+        unweighted,
+        derived: Arc::new(RwLock::new(derived)),
+    }
+}
+
+/// Extracts `(net_amount_out, path_count, gross_output)` from a split result. `path_count` counts
+/// swaps consuming `token_in` (one per parallel leg); `gross` sums swaps producing `token_out`.
+pub(crate) fn split_metrics(
+    result: &RouteResult,
+    token_in: &Address,
+    token_out: &Address,
+) -> (BigInt, usize, BigUint) {
+    let swaps = result.route().swaps();
+    let path_count = swaps
+        .iter()
+        .filter(|s| s.token_in() == token_in)
+        .count();
+    let gross = swaps
+        .iter()
+        .filter(|s| s.token_out() == token_out)
+        .fold(BigUint::zero(), |acc, s| acc + s.amount_out());
+    (result.net_amount_out().clone(), path_count, gross)
 }
 
 // ==================== Scenario harness ====================
