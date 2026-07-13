@@ -78,7 +78,7 @@ fn main() -> Result<(), anyhow::Error> {
         }
         Commands::DeriveConnectorTokens(args) => tokio::runtime::Runtime::new()
             .expect("failed to create tokio runtime")
-            .block_on(commands::derive_connector_tokens::run(args)),
+            .block_on(commands::derive_connector_tokens::run(*args)),
     }
 }
 
@@ -237,6 +237,12 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
                 SolverError::SetupError(format!("failed to load worker pools config: {}", e))
             })?
         };
+
+    if let Some(path) = &args.chains_config {
+        fynd_rpc::init_chain_registry_from_file(path)
+            .map_err(|e| SolverError::SetupError(format!("failed to load chains config: {e}")))?;
+        info!(?path, "installed custom chain registry");
+    }
 
     // Parse chain
     let chain = parse_chain(&args.chain)
