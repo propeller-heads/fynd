@@ -69,9 +69,13 @@ impl TraderStrategy {
                 )
                 .await
             }
-            Self::Venue(venue) => {
-                venue.decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.input, ctx.registry)
-            }
+            Self::Venue(venue) => venue.decode(&venues::VenueContext {
+                ledger: ctx.ledger,
+                sender: ctx.sender,
+                entry_point: ctx.entry_point,
+                input: ctx.input,
+                registry: ctx.registry,
+            }),
         }
     }
 

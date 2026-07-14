@@ -25,6 +25,19 @@ pub(crate) enum Venue {
     Metamask,
 }
 
+/// Everything a venue decoder may read from one matched transaction, so every venue is called
+/// through the same seam regardless of which inputs it uses — a venue that starts needing
+/// another input extends this struct instead of every venue's signature.
+pub(crate) struct VenueContext<'a> {
+    /// The transaction's flattened value movements.
+    pub ledger: &'a TransferLedger,
+    pub sender: Address,
+    pub entry_point: Address,
+    /// Root calldata of the transaction (venue declarations, e.g. `MetaMask`'s `aggregatorId`).
+    pub input: &'a [u8],
+    pub registry: &'a Registry,
+}
+
 impl Venue {
     /// The venue bound to a name from the address book.
     ///
@@ -40,17 +53,10 @@ impl Venue {
     }
 
     /// Decode a transaction entered through this venue's contract.
-    pub(crate) fn decode(
-        &self,
-        ledger: &TransferLedger,
-        sender: Address,
-        entry_point: Address,
-        input: &[u8],
-        registry: &Registry,
-    ) -> Option<Flow> {
+    pub(crate) fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
         match self {
-            Self::Relay => relay::decode(ledger, sender, entry_point, registry),
-            Self::Metamask => metamask::decode(ledger, sender, entry_point, input, registry),
+            Self::Relay => relay::decode(ctx),
+            Self::Metamask => metamask::decode(ctx),
         }
     }
 }

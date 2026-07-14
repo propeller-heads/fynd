@@ -10,9 +10,8 @@ use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
-    registry::Registry,
     strategy::Flow,
-    venues::venue_fee_flow,
+    venues::{venue_fee_flow, VenueContext},
 };
 
 /// Decode a Relay-entered transaction.
@@ -22,18 +21,20 @@ use crate::decoder::{
 /// solver-initiated rebalancing fill, decoded by anchoring on the fee
 /// collector instead (Relay funds the swap from it); the collector is the
 /// funding source there, not a skim, so no fee is backed out.
-pub(crate) fn decode(
-    ledger: &TransferLedger,
-    sender: Address,
-    entry_point: Address,
-    registry: &Registry,
-) -> Option<Flow> {
-    let relay = registry.venue("relay")?;
-    if let Some(flow) = venue_fee_flow(ledger, sender, entry_point, &relay.fee_collectors) {
+pub(crate) fn decode(ctx: &VenueContext<'_>) -> Option<Flow> {
+    let relay = ctx.registry.venue("relay")?;
+    if let Some(flow) =
+        venue_fee_flow(ctx.ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
+    {
         return Some(flow);
     }
-    decode_rebalance(ledger, &relay.fee_collectors, &relay.entry_points, registry.wrapped_native())
-        .map(|swap| Flow::without_fees(sender, swap))
+    decode_rebalance(
+        ctx.ledger,
+        &relay.fee_collectors,
+        &relay.entry_points,
+        ctx.registry.wrapped_native(),
+    )
+    .map(|swap| Flow::without_fees(ctx.sender, swap))
 }
 
 /// Decode a Relay solver-initiated rebalancing fill, where `tx.from` is a rotating solver EOA with
@@ -109,10 +110,23 @@ mod tests {
     use alloy::rpc::types::Log;
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+    use crate::decoder::{
+        registry::Registry,
+        test_utils::{addr, make_transfer_log, swap},
+    };
 
     fn ledger(logs: &[Log], native: &[(Address, Address, U256)]) -> TransferLedger {
         TransferLedger::from_transaction(logs, native)
+    }
+
+    /// A [`VenueContext`] over the given transaction pieces, for concise decode calls.
+    fn ctx<'a>(
+        ledger: &'a TransferLedger,
+        sender: Address,
+        entry_point: Address,
+        registry: &'a Registry,
+    ) -> VenueContext<'a> {
+        VenueContext { ledger, sender, entry_point, input: &[], registry }
     }
 
     #[test]
@@ -235,7 +249,7 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
 
-        let flow = decode(&ledger(&logs, &[]), user, router, &registry).unwrap();
+        let flow = decode(&ctx(&ledger(&logs, &[]), user, router, &registry)).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.venue_fee, Some(U256::from(40)));
@@ -262,7 +276,7 @@ mod tests {
         let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
         let native = vec![(router, collector, U256::from(1000))];
 
-        let flow = decode(&ledger(&logs, &native), collector, router, &registry).unwrap();
+        let flow = decode(&ctx(&ledger(&logs, &native), collector, router, &registry)).unwrap();
         assert_eq!(flow.tracked, collector);
         assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
         assert_eq!(flow.venue_fee, None);
@@ -292,7 +306,7 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
 
-        let flow = decode(&ledger(&logs, &[]), solver, router, &registry).unwrap();
+        let flow = decode(&ctx(&ledger(&logs, &[]), solver, router, &registry)).unwrap();
         assert_eq!(flow.tracked, solver);
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.venue_fee, None);

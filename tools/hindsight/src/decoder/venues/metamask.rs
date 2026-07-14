@@ -7,13 +7,12 @@
 //! `MetaMask`'s own fee, and on dust trades — where the skim dominates — that fabricates extreme
 //! "wins".
 
-use alloy::{primitives::Address, sol, sol_types::SolCall};
+use alloy::{sol, sol_types::SolCall};
 
 use crate::decoder::{
-    ledger::TransferLedger,
-    registry::{Registry, VenueAddresses},
+    registry::VenueAddresses,
     strategy::Flow,
-    venues::venue_fee_flow,
+    venues::{venue_fee_flow, VenueContext},
 };
 
 sol! {
@@ -35,26 +34,36 @@ fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<Strin
 }
 
 /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of it,
-/// and attribute the solver from the router calldata (`input`).
-pub(crate) fn decode(
-    ledger: &TransferLedger,
-    sender: Address,
-    entry_point: Address,
-    input: &[u8],
-    registry: &Registry,
-) -> Option<Flow> {
-    let metamask = registry.venue("metamask")?;
-    let mut flow = venue_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
-    flow.solver_override = solver_from_calldata(input, metamask);
+/// and attribute the solver from the router calldata.
+pub(crate) fn decode(ctx: &VenueContext<'_>) -> Option<Flow> {
+    let metamask = ctx.registry.venue("metamask")?;
+    let mut flow =
+        venue_fee_flow(ctx.ledger, ctx.sender, ctx.entry_point, &metamask.fee_collectors)?;
+    flow.solver_override = solver_from_calldata(ctx.input, metamask);
     Some(flow)
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Bytes, U256};
+    use alloy::primitives::{Address, Bytes, U256};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+    use crate::decoder::{
+        ledger::TransferLedger,
+        registry::Registry,
+        test_utils::{addr, make_transfer_log, swap},
+    };
+
+    /// A [`VenueContext`] over the given transaction pieces, for concise decode calls.
+    fn ctx<'a>(
+        ledger: &'a TransferLedger,
+        sender: Address,
+        entry_point: Address,
+        input: &'a [u8],
+        registry: &'a Registry,
+    ) -> VenueContext<'a> {
+        VenueContext { ledger, sender, entry_point, input, registry }
+    }
 
     fn fee_wallet(registry: &Registry) -> Address {
         *registry
@@ -129,7 +138,7 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ledger, user, router, &[], &registry).unwrap();
+        let flow = decode(&ctx(&ledger, user, router, &[], &registry)).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.venue_fee, None);
@@ -156,7 +165,7 @@ mod tests {
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ledger, user, router, &[], &registry).unwrap();
+        let flow = decode(&ctx(&ledger, user, router, &[], &registry)).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.venue_fee, Some(U256::from(9)));
         assert_eq!(flow.venue_fee_out, None);
@@ -181,7 +190,8 @@ mod tests {
         };
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ledger, user, router(&registry), &call.abi_encode(), &registry).unwrap();
+        let flow =
+            decode(&ctx(&ledger, user, router(&registry), &call.abi_encode(), &registry)).unwrap();
         assert_eq!(flow.solver_override.as_deref(), Some("1inch"));
     }
 
@@ -199,7 +209,7 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ledger, user, router(&registry), &[], &registry).unwrap();
+        let flow = decode(&ctx(&ledger, user, router(&registry), &[], &registry)).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.venue_fee, None);
         assert_eq!(flow.venue_fee_out, None);
