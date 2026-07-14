@@ -213,6 +213,9 @@ async fn compare_trade<P: Provider>(
     TxComparison { tx_hash: ours.tx_hash, status, detail: detail.join("; ") }
 }
 
+/// Allium splits a multi-leg swap into per-leg rows, so check membership in sets rather than
+/// exact one-to-one matching: our netted `token_in` must appear among the sold tokens and our
+/// `token_out` among the bought tokens across all rows for this tx.
 fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
     let sold: HashSet<Address> = rows
         .iter()
@@ -266,6 +269,9 @@ async fn amounts_agree<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     detail: &mut Vec<String>,
 ) -> bool {
+    // Allium records each leg of a multi-leg swap as its own row. We net the whole swap into one
+    // in/out pair, which has no per-leg counterpart to compare against — only compare amounts when
+    // Allium also reported a single leg.
     let [row] = rows else {
         detail.push(format!("amount not compared ({} Allium legs for this tx)", rows.len()));
         return true;
@@ -289,6 +295,8 @@ async fn amounts_agree<P: Provider>(
     in_ok && out_ok
 }
 
+/// One side of a decoded trade to compare: our on-chain amount (raw integer) vs Allium's
+/// human-readable float, which must be normalized to the same decimal scale before comparison.
 struct AmountLeg {
     token: Address,
     ours: U256,
@@ -352,6 +360,7 @@ async fn fetch_decimals<P: Provider>(provider: &P, token: Address) -> anyhow::Re
         .call(tx)
         .await
         .with_context(|| format!("decimals() call failed for {token}"))?;
+    // decimals() returns uint8 right-aligned in a 32-byte ABI word; the value is the last byte.
     result
         .last()
         .copied()
@@ -377,6 +386,8 @@ fn bps_diff(ours: f64, theirs: f64) -> f64 {
     ((ours - theirs).abs() / theirs) * 10_000.0
 }
 
+/// Lowercase and strip non-alphanumerics, then fold known aliases: `zeroex` → `0x`, so that
+/// e.g. `uniswap_x`/`uniswap`, `1inch`/`1inch_ar_v6`, and `0x`/`zeroex` compare equal.
 fn normalize_name(name: &str) -> String {
     let normalized: String = name
         .chars()

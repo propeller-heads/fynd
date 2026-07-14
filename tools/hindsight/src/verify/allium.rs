@@ -52,6 +52,7 @@ impl AlliumClient {
 
     async fn start_run(&self, block_number: u64) -> anyhow::Result<String> {
         let url = format!("{BASE_URL}/queries/{}/run-async", self.query_id);
+        // The saved query takes block_number as a string parameter.
         let body = json!({
             "parameters": {"block_number": block_number.to_string()},
             "run_config": {"limit": ROW_LIMIT},
