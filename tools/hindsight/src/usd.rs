@@ -36,10 +36,10 @@ const STABLECOINS: &[(Address, u32)] = &[
 /// estimates.
 pub(crate) fn u256_to_f64(amount: U256) -> f64 {
     let [a, b, c, d] = amount.as_limbs();
-    (*a as f64)
-        + (*b as f64) * 2f64.powi(64)
-        + (*c as f64) * 2f64.powi(128)
-        + (*d as f64) * 2f64.powi(192)
+    (*a as f64) +
+        (*b as f64) * 2f64.powi(64) +
+        (*c as f64) * 2f64.powi(128) +
+        (*d as f64) * 2f64.powi(192)
 }
 
 /// Positive, finite price of `token`, treating native ETH and WETH as interchangeable.
@@ -96,7 +96,9 @@ pub(crate) fn value_usd(token: Address, amount: U256, prices: &PriceMap) -> Opti
 pub(crate) fn gas_in_token(gas_wei: U256, token: Address, prices: &PriceMap) -> Option<U256> {
     let price = price_of(prices, token)?;
     let units = u256_to_f64(gas_wei) * price;
-    units.is_finite().then(|| U256::from(units as u128))
+    units
+        .is_finite()
+        .then(|| U256::from(units as u128))
 }
 
 /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).

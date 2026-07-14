@@ -190,10 +190,7 @@ mod tests {
         assert_eq!(verdict(&fynd, &compare(&fynd, settled, settled)), Verdict::Win);
         assert_eq!(verdict(&fynd, &compare(&fynd, settled, U256::from(9_900u64))), Verdict::Win);
         let worse = solved(9_900, 9_800);
-        assert_eq!(
-            verdict(&worse, &compare(&worse, settled, U256::from(9_000u64))),
-            Verdict::Loss
-        );
+        assert_eq!(verdict(&worse, &compare(&worse, settled, U256::from(9_000u64))), Verdict::Loss);
     }
 
     #[test]

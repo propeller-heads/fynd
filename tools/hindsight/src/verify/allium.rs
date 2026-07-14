@@ -139,7 +139,11 @@ impl AlliumClient {
 fn parse_status_value(value: &Value) -> Option<String> {
     value
         .as_str()
-        .or_else(|| value.get("status").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+        })
         .map(str::to_string)
 }
 
