@@ -95,10 +95,13 @@ New module: `tools/hindsight/src/decoder/sandwich.rs`.
 
 ## Verdict
 
-New variant `Verdict::Sandwiched`, following the `CoverageMiss` pattern: in `build_range`, a trade
-with sandwich evidence gets `Sandwiched` as its headline verdict and both per-state verdicts. The
-bps and USD deltas are still computed and written to JSONL — only the classification changes — so
-the size of MEV-inflated deltas remains studyable offline.
+New variant `Verdict::Sandwiched`, following the `CoverageMiss` pattern: in `build_range`, a
+*solved* state of a trade with sandwich evidence gets `Sandwiched` as its verdict (the headline
+follows top-of-block) — its win or loss measures the MEV that moved the settled output, not
+routing quality. Unsolved states keep `Unsolvable`/`CoverageMiss`: the sandwich explains the
+settled price, not why Fynd had no route, so the coverage shares the dashboard reports are
+unaffected by reclassification. The bps and USD deltas are still computed and written to JSONL —
+only the classification changes — so the size of MEV-inflated deltas remains studyable offline.
 
 ## Telemetry
 

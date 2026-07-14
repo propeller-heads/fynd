@@ -114,10 +114,12 @@ pub(crate) trait SteppingSolver {
 /// deduction) and subtracted from the settled output, so both sides of the net comparison carry
 /// their own gas.
 ///
-/// When the decoder flagged the trade as sandwiched, both per-state verdicts (and therefore the
-/// headline verdict) become [`Verdict::Sandwiched`] — the settled output was moved by MEV, not by
-/// inferior routing — but the bps/USD deltas are left untouched, so the size of MEV-inflated
-/// deltas stays studyable offline.
+/// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
+/// [`Verdict::Sandwiched`]: its win or loss measures the MEV that moved the settled output, not
+/// routing quality. Unsolved states keep their verdicts — a sandwich explains the settled price,
+/// not why Fynd had no route, so the coverage buckets (`Unsolvable`, `CoverageMiss`) stay
+/// intact. The bps/USD deltas are left untouched either way, so the size of MEV-inflated deltas
+/// stays studyable offline.
 pub(crate) fn build_range(
     trade: &DecodedTrade,
     prices: &usd::PriceMap,
@@ -131,8 +133,11 @@ pub(crate) fn build_range(
     let mut top = StateResult::new(top, trade.amount_out, settled_net_gas);
     let mut back = StateResult::new(back, trade.amount_out, settled_net_gas);
     if trade.sandwich.is_some() {
-        top.verdict = Verdict::Sandwiched;
-        back.verdict = Verdict::Sandwiched;
+        for state in [&mut top, &mut back] {
+            if let Outcome::Solved(_) = state.outcome {
+                state.verdict = Verdict::Sandwiched;
+            }
+        }
     }
     let verdict = top.verdict;
     RangeComparison {
@@ -296,6 +301,29 @@ mod tests {
         // Deltas are unaffected by the override: still computed for offline analysis.
         assert!(range.top.deltas.raw_bps.unwrap() > 0.0);
         assert!(range.back.deltas.raw_bps.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn build_range_sandwich_override_spares_unsolved_states() {
+        // The sandwich explains the settled price, not why Fynd had no route: an unsolved state
+        // keeps its verdict so the coverage buckets are unaffected by the reclassification.
+        let mut sandwiched = trade(10_000);
+        sandwiched.sandwich = Some(SandwichEvidence {
+            front_tx: TxHash::repeat_byte(0xaa),
+            back_tx: TxHash::repeat_byte(0xbb),
+            attacker: Address::repeat_byte(0xcc),
+            pools: vec![Address::repeat_byte(0xdd)],
+        });
+        let range = build_range(
+            &sandwiched,
+            &usd::PriceMap::new(),
+            solved(10_200, 10_100),
+            Outcome::Unsolvable("missing token in Tycho".into()),
+        );
+
+        assert_eq!(range.top.verdict, Verdict::Sandwiched);
+        assert_eq!(range.back.verdict, Verdict::Unsolvable);
+        assert_eq!(range.verdict, Verdict::Sandwiched); // headline follows top
     }
 
     #[test]

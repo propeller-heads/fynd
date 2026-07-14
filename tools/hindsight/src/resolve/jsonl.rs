@@ -524,12 +524,16 @@ mod tests {
             pools: vec![Address::repeat_byte(0x44)],
         });
 
-        let range = build_range(
-            &trade,
-            &usd::PriceMap::new(),
-            Outcome::Unsolvable("x".into()),
-            Outcome::Unsolvable("x".into()),
-        );
+        // Solved states: only those are reclassified as sandwiched (unsolved keep their verdict).
+        let solved = |amount: u64| {
+            Outcome::Solved(SolvedAmount {
+                amount_out: U256::from(amount),
+                amount_out_net_gas: U256::from(amount),
+                gas_estimate: U256::from(21_000u64),
+                quote_json: None,
+            })
+        };
+        let range = build_range(&trade, &usd::PriceMap::new(), solved(1_100), solved(1_050));
         let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);
