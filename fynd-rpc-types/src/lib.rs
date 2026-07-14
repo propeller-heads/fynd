@@ -1495,7 +1495,12 @@ mod wire_format_tests {
 
         let info: InstanceInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.chain_id(), 1);
-        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
+        assert_eq!(
+            info.router_address()
+                .expect("router_address is present in this JSON")
+                .as_ref(),
+            [0xAAu8; 20]
+        );
         assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
     }
 

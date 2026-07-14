@@ -988,7 +988,7 @@ where
         let spender_addr = match params.transfer_type {
             UserTransferType::TransferFrom => {
                 let router_address = info.router_address().ok_or_else(|| {
-                    FyndError::Protocol(
+                    FyndError::Config(
                         "server has no router_address; encoding is unavailable on this chain"
                             .into(),
                     )
@@ -2002,7 +2002,13 @@ mod tests {
 
         assert_eq!(info1.chain_id(), 1);
         assert_eq!(info2.chain_id(), 1);
-        assert_eq!(info1.router_address().unwrap().as_ref(), &[0x01u8; 20]);
+        assert_eq!(
+            info1
+                .router_address()
+                .expect("mock info response includes a router address")
+                .as_ref(),
+            &[0x01u8; 20],
+        );
         assert_eq!(info1.permit2_address().as_ref(), &[0x02u8; 20]);
         // MockServer verifies expect(1) on drop.
     }

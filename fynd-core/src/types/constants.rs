@@ -27,9 +27,13 @@ pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
         .map(|token| token.address)
         .map_err(|_| UnsupportedChainError { chain: *chain })?;
 
-    // A zero address is a placeholder (e.g. Starknet) meaning the chain has no real
-    // wrapped-native token; treat it as unsupported so callers still fail fast instead of
-    // deriving a gas token from a placeholder address.
+    // tycho-common returns a zero-address placeholder for chains with no wrapped-native token
+    // (currently Starknet — see the explicit `0x0` in its `try_wrapped_native_token` arm).
+    // `native_token` feeds the solver's gas token, so accepting a placeholder would silently build
+    // a solver with a 0x0 gas token. Reject it to preserve the fail-fast behavior Fynd had before
+    // this lookup was registry-backed (its old hardcoded map never listed Starknet). A properly
+    // configured custom chain always has a real wrapped-native address, so this never trips for
+    // one.
     if address.is_zero() {
         return Err(UnsupportedChainError { chain: *chain });
     }
