@@ -47,6 +47,8 @@ pub(crate) struct VenueAddresses {
 pub(crate) struct Registry {
     /// Solver routers — the venue that actually settles a swap.
     solvers: HashMap<Address, String>,
+    /// Display names of all registered solvers, for O(1) `is_solver_name` checks.
+    solver_names: HashSet<String>,
     /// Every known address (solvers and venues), for name resolution.
     names: HashMap<Address, String>,
     /// Batch-settlement venues where `tx.to` is the settlement contract and
@@ -111,8 +113,10 @@ impl Registry {
                 names.insert(entry_point, name.clone());
             }
         }
+        let solver_names = book.solvers.values().cloned().collect();
 
         Ok(Self {
+            solver_names,
             solvers: book.solvers,
             names,
             batch_settlers: book.batch_settlers,
@@ -135,9 +139,7 @@ impl Registry {
     /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
     /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
-        self.solvers
-            .values()
-            .any(|solver| solver == name)
+        self.solver_names.contains(name)
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
@@ -159,12 +161,10 @@ impl Registry {
 
     /// The venue whose entry point this address is, if any.
     pub(crate) fn venue_name(&self, address: Address) -> Option<&str> {
-        for (name, venue) in &self.venues {
-            if venue.entry_points.contains(&address) {
-                return Some(name.as_str());
-            }
-        }
-        None
+        self.names
+            .get(&address)
+            .filter(|name| self.venues.contains_key(name.as_str()))
+            .map(String::as_str)
     }
 
     /// Resolve an address to its known name, or its hex address if unknown.

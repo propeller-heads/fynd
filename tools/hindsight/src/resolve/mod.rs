@@ -10,7 +10,7 @@ mod compare;
 mod jsonl;
 pub(crate) mod monitor;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, TxHash, U256};
 use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
@@ -58,7 +58,7 @@ impl StateResult {
     fn new(outcome: Outcome, settled_amount_out: U256, settled_net_gas: U256) -> Self {
         let outcome = compare::served(outcome, settled_amount_out);
         let deltas = compare::compare(&outcome, settled_amount_out, settled_net_gas);
-        let verdict = compare::verdict(&outcome, settled_amount_out, settled_net_gas);
+        let verdict = compare::verdict(&outcome, &deltas);
         Self { outcome, deltas, verdict }
     }
 }
@@ -66,7 +66,7 @@ impl StateResult {
 /// A trade re-solved at both block states, presented as a range.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RangeComparison {
-    pub tx_hash: String,
+    pub tx_hash: TxHash,
     pub block_number: u64,
     pub venue: String,
     pub solver: String,
@@ -123,7 +123,7 @@ pub(crate) fn build_range(
     let back = StateResult::new(back, trade.amount_out, settled_net_gas);
     let verdict = top.verdict;
     RangeComparison {
-        tx_hash: trade.tx_hash.to_string(),
+        tx_hash: trade.tx_hash,
         block_number: trade.block_number,
         venue: trade.venue.clone(),
         solver: trade.solver.clone(),
