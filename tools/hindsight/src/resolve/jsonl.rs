@@ -22,7 +22,7 @@ use crate::{
 
 /// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
 /// `comparisons-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
-/// upload CronJob) ships closed daily files instead of re-shipping one ever-growing one.
+/// upload `CronJob`) ships closed daily files instead of re-shipping one ever-growing one.
 pub(crate) struct RotatingWriter {
     dir: PathBuf,
     date: String,
@@ -68,7 +68,7 @@ impl RotatingWriter {
                 self.date = date;
             }
             Err(e) => {
-                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's")
+                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's");
             }
         }
     }
@@ -100,7 +100,7 @@ fn utc_date() -> String {
 /// Civil date for a unix timestamp (UTC), via the days-to-civil-calendar algorithm — exact for
 /// the whole unix era, so no calendar dependency is needed for a filename.
 fn date_from_unix(secs: u64) -> String {
-    let z = (secs / 86_400) as i64 + 719_468;
+    let z = (secs / 86_400).cast_signed() + 719_468_i64;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
     let year_of_era =
@@ -150,7 +150,7 @@ fn comparison_record(
     serde_json::json!({
         "block": range.block_number,
         "settled_tx": range.tx_hash,
-        "client": range.client,
+        "venue": range.venue,
         "solver": range.solver,
         "solver_source": range.solver_source,
         "token_in": format!("{:#x}", range.token_in),
@@ -255,7 +255,7 @@ fn slim_transaction(transaction: &Transaction) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, TxHash, U256};
     use num_bigint::BigUint;
 
     use super::*;
@@ -303,9 +303,9 @@ mod tests {
     #[test]
     fn comparison_record_carries_solver_quote() {
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_480_207,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -313,8 +313,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(69_996_280_564u64),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: Some(SolverQuote {
                 amount_out: U256::from(70_400_409_935u64),
@@ -374,9 +374,9 @@ mod tests {
         let prices = usd::PriceMap::from([(usdc, 2e-9), (weth, 1.0)]);
 
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -384,8 +384,8 @@ mod tests {
             token_out: usdc,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         };
@@ -453,9 +453,9 @@ mod tests {
     #[test]
     fn comparison_record_captures_unsolvable_reason_and_null_quote() {
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -463,8 +463,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         };

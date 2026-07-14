@@ -14,7 +14,7 @@ use crate::decoder::{registry::Registry, trace};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AttributionSource {
-    /// The decode strategy read the solver from calldata (MetaMask's `aggregatorId`).
+    /// The decode strategy read the solver from calldata (`MetaMask`'s `aggregatorId`).
     Declared,
     /// The entry point (`tx.to`) is itself a known solver router: the trade settled there.
     EntryPoint,

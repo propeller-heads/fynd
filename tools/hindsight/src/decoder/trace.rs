@@ -61,7 +61,7 @@ fn transfers_value(call_type: &str) -> bool {
     matches!(call_type, "CALL" | "CALLCODE" | "CREATE" | "CREATE2" | "SELFDESTRUCT")
 }
 
-/// Gas consumed by the settled route inside a client-wrapped transaction (Relay, MetaMask), in
+/// Gas consumed by the settled route inside a client-wrapped transaction (Relay, `MetaMask`), in
 /// gas units.
 ///
 /// The wrapper's own gas — fee skim, forwarding, the base transaction cost — is charged whichever

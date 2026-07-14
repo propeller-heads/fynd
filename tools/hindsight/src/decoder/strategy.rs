@@ -2,7 +2,7 @@
 //!
 //! [`select`] decides *which* transactions are solver trades and where their trader sits
 //! ([`TraderStrategy`]); [`TraderStrategy::decode`] is the single seam the orchestrator calls.
-//! This module is tier-neutral — client-specific behavior lives in `clients/`, solver-specific
+//! This module is tier-neutral — venue-specific behavior lives in `venues/`, solver-specific
 //! knowledge in `solvers/`, and maker-finding for intent fills in `intent`.
 
 use std::collections::HashMap;
@@ -15,10 +15,11 @@ use alloy::{
 use tracing::debug;
 
 use crate::decoder::{
-    clients, intent,
+    intent,
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
     solvers::lifi,
+    venues,
 };
 
 /// Everything a decode strategy may need from one matched transaction, so every strategy is
@@ -45,12 +46,12 @@ pub(crate) enum TraderStrategy {
     /// discovered via a known solver log (`tx.to` is a rotating filler) or
     /// `tx.to` is a batch settler entered by a solver.
     Maker,
-    /// The sender is the trader, but it entered through a client platform's own contract
-    /// (Relay's router, MetaMask's Swap Router) which then calls the solver inside the same
-    /// transaction. Decoding is still sender netting, plus that client's corrections — its fee
+    /// The sender is the trader, but it entered through a venue platform's own contract
+    /// (Relay's router, `MetaMask`'s Swap Router) which then calls the solver inside the same
+    /// transaction. Decoding is still sender netting, plus that venue's corrections — its fee
     /// skim is backed out, and its contract overhead is excluded from gas accounting — so the
-    /// recovered swap is what the client actually asked the solver for.
-    Client(clients::Client),
+    /// recovered swap is what the venue actually asked the solver for.
+    Venue(venues::Venue),
 }
 
 impl TraderStrategy {
@@ -69,19 +70,19 @@ impl TraderStrategy {
                 )
                 .await
             }
-            Self::Client(client) => {
-                client.decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.input, ctx.registry)
+            Self::Venue(venue) => {
+                venue.decode(ctx.ledger, ctx.sender, ctx.entry_point, ctx.input, ctx.registry)
             }
         }
     }
 
-    /// Whether the trade runs inside a client's own contract (see [`TraderStrategy::Client`]).
-    /// The receipt's gas then includes the client's overhead — charged whichever solver the
-    /// client picks — so gas accounting reads the solver call's trace frame instead of the
+    /// Whether the trade runs inside a venue's own contract (see [`TraderStrategy::Venue`]).
+    /// The receipt's gas then includes the venue's overhead — charged whichever solver the
+    /// venue picks — so gas accounting reads the solver call's trace frame instead of the
     /// whole receipt.
     pub(crate) fn routes_via_wrapper(&self) -> bool {
         match self {
-            Self::Client(_) => true,
+            Self::Venue(_) => true,
             Self::Sender | Self::Maker => false,
         }
     }
@@ -99,13 +100,11 @@ pub(crate) struct Flow {
     /// The address whose net flow the swap was read from.
     pub tracked: Address,
     pub swap: NetSwap,
-    /// Client fee skimmed from the input token, already backed out of
-    /// `swap.amount_in`.
-    pub client_fee: Option<U256>,
-    /// Client fee skimmed from the output token, already added back into
-    /// `swap.amount_out`.
-    pub client_fee_out: Option<U256>,
-    /// Solver label asserted by the strategy itself (e.g. MetaMask declares its
+    /// Venue fee skimmed from the input token, already backed out of `swap.amount_in`.
+    pub venue_fee: Option<U256>,
+    /// Venue fee skimmed from the output token, already added back into `swap.amount_out`.
+    pub venue_fee_out: Option<U256>,
+    /// Solver label asserted by the strategy itself (e.g. `MetaMask` declares its
     /// solver in calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
     /// Whether the tracked trader sent the transaction and therefore paid its gas. Decides if the
@@ -119,8 +118,8 @@ impl Flow {
         Self {
             tracked,
             swap,
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             solver_override: None,
             trader_paid_gas: false,
         }
@@ -130,7 +129,7 @@ impl Flow {
 /// Match a receipt and choose its decode strategy.
 ///
 /// A transaction qualifies two ways: its entry point (`tx.to`) is a known
-/// client or solver, or one of its logs was emitted by a known solver
+/// venue or solver, or one of its logs was emitted by a known solver
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
 /// Matched transactions that start a cross-chain bridge order are vetoed here
 /// (see [`lifi::started_bridge_order`]), before they cost a trace.
@@ -142,7 +141,7 @@ pub(crate) fn select<'a>(
     if lifi::started_bridge_order(matched.receipt.logs()) {
         debug!(
             tx = %matched.receipt.transaction_hash,
-            client = %registry.label(matched.entry_point),
+            venue = %registry.label(matched.entry_point),
             "cross-chain bridge order; skipping"
         );
         return None;
@@ -156,11 +155,11 @@ fn match_entry<'a>(receipt: &'a TransactionReceipt, registry: &Registry) -> Opti
         return None;
     }
     let entry_point = receipt.to?;
-    if let Some(client) = registry
-        .client_name(entry_point)
-        .and_then(clients::Client::from_name)
+    if let Some(venue) = registry
+        .venue_name(entry_point)
+        .and_then(venues::Venue::from_name)
     {
-        return Some(Matched { receipt, entry_point, strategy: TraderStrategy::Client(client) });
+        return Some(Matched { receipt, entry_point, strategy: TraderStrategy::Venue(venue) });
     }
     if registry.is_known(entry_point) {
         // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is
