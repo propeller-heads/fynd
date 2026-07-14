@@ -323,3 +323,15 @@ fynd-benchmark capacity \
 - **Data** for this report: [`docs/scaling/data/2026-07-13/`](data/2026-07-13/) —
   E1/E2/E3/E6 capacity-report JSONs, `E6-metrics-samples.csv`, and the encoder finding.
 - Restore staging after a run by re-syncing helmwave (drift self-heals).
+
+## Dashboard
+
+A Grafana dashboard covering solve/queue latencies, queue depth, request rate, solver
+failures, and pod CPU/memory/HPA replicas is checked in at
+[`docs/scaling/dashboards/fynd-capacity.json`](dashboards/fynd-capacity.json). Import it via
+Grafana's "Import dashboard" (upload JSON or paste contents), then set the `DS_PROMETHEUS`
+datasource variable to the VictoriaMetrics/Prometheus source and `namespace` to the target
+namespace (defaults to `staging-fynd`). Caveat: the `worker_router_solve_duration_seconds`
+and `worker_pool_queue_wait_seconds` series are exported as Prometheus summaries, not
+histograms — there are no `_bucket` series, `histogram_quantile()` does not apply, and
+quantiles cannot be aggregated across pods, so those panels show per-pod series.
