@@ -85,6 +85,11 @@ const CANDIDATE_EDGES_PER_STATE: usize = 16;
 const CANDIDATE_DIRECT_EDGES_PER_TOKEN: usize = 4;
 /// Parallel pools kept for a discovery edge into an anchor or configured connector token.
 const CANDIDATE_CONNECTOR_EDGES_PER_TOKEN: usize = 2;
+/// Exchange-refinement step floor: the pass stops once `delta` falls below one fine chunk divided
+/// by this factor, i.e. `amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR)`.
+const EXCHANGE_DELTA_FLOOR: usize = 64;
+/// Safety bound on trial simulations across the whole exchange-refinement pass.
+const EXCHANGE_MAX_SIMS: usize = 400;
 
 /// A fully-built split candidate: the assembled route plus its summed gross output and gas.
 struct SplitCandidate {
@@ -119,6 +124,17 @@ pub struct SplitAlgorithm {
     max_candidates: usize,
     max_paths: usize,
     connector_tokens: Option<HashSet<Address>>,
+}
+
+/// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
+/// over-allocated `donor` to the under-allocated `recipient`, carrying the two paths' recomputed
+/// net outputs and the resulting gain in summed net output.
+struct ExchangeMove {
+    donor: usize,
+    recipient: usize,
+    donor_net: BigInt,
+    recip_net: BigInt,
+    gain: BigInt,
 }
 
 /// One simulated traversal of a path, with the resulting per-pool states so they can be committed.
@@ -562,7 +578,169 @@ impl SplitAlgorithm {
             chunks,
             false,
         )?;
-        self.build_disjoint_legs(ordered, &active, &fine, market, token_prices, order)
+
+        // Phase 3: exchange refinement. The fine water-fill quantizes each path to a whole chunk,
+        // so it can sit up to one chunk off the equal-marginal optimum. Nudge flow between
+        // paths at sub-chunk resolution, accepting only strictly-improving moves
+        // (never-lose).
+        let refined = self.disjoint_exchange(
+            ordered,
+            &active,
+            market,
+            gas_price,
+            token_prices,
+            order,
+            start,
+            chunks,
+            fine,
+        );
+        self.build_disjoint_legs(ordered, &active, &refined, market, token_prices, order)
+    }
+
+    /// Net output (gross output minus gas cost in output-token terms) of `path` simulated in
+    /// isolation at `amount`. Pool-disjoint paths never interfere, so an isolated re-simulation is
+    /// exact. A zero amount means the path is dropped from the route: it yields no output and,
+    /// since it is no longer swapped, no gas — so dropping a donor credits its saved gas
+    /// automatically.
+    fn path_net(
+        path: &Path<DepthAndPrice>,
+        market: &MarketState,
+        gas_price: &BigUint,
+        token_prices: Option<&TokenGasPrices>,
+        order: &Order,
+        amount: &BigUint,
+    ) -> Option<BigInt> {
+        if amount.is_zero() {
+            return Some(BigInt::zero());
+        }
+        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let step = Self::simulate_step(path, market, &empty, amount.clone())?;
+        let activation =
+            Self::gas_cost_in_token(&step.gas, gas_price, token_prices, order.token_out())
+                .map(BigInt::from)
+                .unwrap_or_else(BigInt::zero);
+        Some(BigInt::from(step.amount_out) - activation)
+    }
+
+    /// Exchange-refinement pass over the fixed active set, warm-started from the fine water-fill.
+    /// Water-fill can never un-commit a chunk, so its allocation is quantized to one fine chunk and
+    /// can miss the equal-marginal split. This shifts `delta` of input from an over-allocated donor
+    /// to an under-allocated recipient whenever the pair's summed net output strictly improves,
+    /// then halves `delta` once no move helps, down to a sub-chunk floor. Paths are
+    /// pool-disjoint, so a trial re-simulates only the two paths it touches (unchanged paths
+    /// keep their cached net), and only strictly-improving moves are accepted, so the result
+    /// never scores below the warm start.
+    #[allow(clippy::too_many_arguments)]
+    fn disjoint_exchange(
+        &self,
+        ordered: &[Path<DepthAndPrice>],
+        active: &[usize],
+        market: &MarketState,
+        gas_price: &BigUint,
+        token_prices: Option<&TokenGasPrices>,
+        order: &Order,
+        start: Instant,
+        fine_chunks: usize,
+        alloc: Vec<BigUint>,
+    ) -> Vec<BigUint> {
+        let k = active.len();
+        if k < 2 {
+            return alloc;
+        }
+        let amount_in = order.amount().clone();
+        let fine_chunks = fine_chunks.max(1);
+        let mut delta = &amount_in / fine_chunks;
+        let min_delta = &amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR);
+        if delta.is_zero() {
+            return alloc;
+        }
+        let timeout_ms = self.timeout.as_millis() as u64;
+
+        let mut cum = alloc;
+        // Cache each active path's net at its current cumulative amount so a pair trial only
+        // re-simulates the two paths it moves flow between, not the whole active set.
+        let mut net_cache: Vec<BigInt> = Vec::with_capacity(k);
+        for (i, &path_idx) in active.iter().enumerate() {
+            let Some(net) =
+                Self::path_net(&ordered[path_idx], market, gas_price, token_prices, order, &cum[i])
+            else {
+                // The warm start does not even simulate cleanly; refining it is unsafe, so keep it.
+                return cum;
+            };
+            net_cache.push(net);
+        }
+
+        let mut sims = 0usize;
+        while delta >= min_delta && !delta.is_zero() {
+            if start.elapsed().as_millis() as u64 > timeout_ms || sims >= EXCHANGE_MAX_SIMS {
+                break;
+            }
+
+            let mut best: Option<ExchangeMove> = None;
+            for donor in 0..k {
+                if cum[donor] < delta {
+                    continue;
+                }
+                let donor_amt = &cum[donor] - &delta;
+                let Some(donor_net) = Self::path_net(
+                    &ordered[active[donor]],
+                    market,
+                    gas_price,
+                    token_prices,
+                    order,
+                    &donor_amt,
+                ) else {
+                    continue;
+                };
+                sims += 1;
+                for recipient in 0..k {
+                    if recipient == donor || sims >= EXCHANGE_MAX_SIMS {
+                        continue;
+                    }
+                    let recip_amt = &cum[recipient] + &delta;
+                    let Some(recip_net) = Self::path_net(
+                        &ordered[active[recipient]],
+                        market,
+                        gas_price,
+                        token_prices,
+                        order,
+                        &recip_amt,
+                    ) else {
+                        continue;
+                    };
+                    sims += 1;
+                    let before = &net_cache[donor] + &net_cache[recipient];
+                    let after = &donor_net + &recip_net;
+                    if after <= before {
+                        continue;
+                    }
+                    let gain = after - before;
+                    if best
+                        .as_ref()
+                        .map(|m| gain > m.gain)
+                        .unwrap_or(true)
+                    {
+                        best = Some(ExchangeMove {
+                            donor,
+                            recipient,
+                            donor_net: donor_net.clone(),
+                            recip_net,
+                            gain,
+                        });
+                    }
+                }
+            }
+
+            let Some(mv) = best else {
+                delta = &delta / 2usize;
+                continue;
+            };
+            cum[mv.donor] = &cum[mv.donor] - &delta;
+            cum[mv.recipient] = &cum[mv.recipient] + &delta;
+            net_cache[mv.donor] = mv.donor_net;
+            net_cache[mv.recipient] = mv.recip_net;
+        }
+        cum
     }
 
     /// Simulates `amount` through `path`, reading and committing pool states via `overrides`, and
