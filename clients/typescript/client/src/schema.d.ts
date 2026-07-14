@@ -247,6 +247,13 @@ export interface components {
              * @example 0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35
              */
             router_address: string;
+            /**
+             * @description Fynd binary version (Cargo package version, e.g. "0.89.1").
+             *
+             *     Defaults to empty when absent so newer clients tolerate older servers that predate it.
+             * @example 0.89.1
+             */
+            version?: string;
         };
         /**
          * @description A single swap order to be solved.

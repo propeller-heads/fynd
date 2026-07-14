@@ -369,7 +369,12 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
                 permit2.len()
             )));
         }
-        Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
+        Ok(crate::types::InstanceInfo::new(
+            router,
+            permit2,
+            dto.chain_id(),
+            dto.version().to_string(),
+        ))
     }
 }
 
@@ -442,6 +447,27 @@ mod tests {
         }"#,
         )
         .expect("valid order quote JSON")
+    }
+
+    // -----------------------------------------------------------------------
+    // InstanceInfo conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn instance_info_maps_version() {
+        let dto: fynd_rpc_types::InstanceInfo = serde_json::from_str(
+            r#"{
+            "version": "9.9.9",
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }"#,
+        )
+        .expect("valid instance info JSON");
+
+        let mapped: crate::types::InstanceInfo = dto.try_into().expect("maps");
+        assert_eq!(mapped.version(), "9.9.9");
+        assert_eq!(mapped.chain_id(), 1);
     }
 
     // -----------------------------------------------------------------------
