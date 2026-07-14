@@ -26,6 +26,7 @@ const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
 #[serde(deny_unknown_fields)]
 struct AddressBook {
     wrapped_native: Address,
+    usd_stablecoins: HashMap<Address, u32>,
     batch_settlers: HashSet<Address>,
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
@@ -62,6 +63,9 @@ pub(crate) struct Registry {
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
+    /// `(stablecoin, decimals)` anchors for valuing trades in USD (see `crate::usd`), sorted by
+    /// address for deterministic averaging.
+    usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the book.
     venues: HashMap<String, VenueAddresses>,
 }
@@ -113,6 +117,11 @@ impl Registry {
             }
         }
         let solver_names = book.solvers.values().cloned().collect();
+        let mut usd_stablecoins: Vec<(Address, u32)> = book
+            .usd_stablecoins
+            .into_iter()
+            .collect();
+        usd_stablecoins.sort_unstable();
 
         Ok(Self {
             solver_names,
@@ -121,6 +130,7 @@ impl Registry {
             batch_settlers: book.batch_settlers,
             labels: book.labels,
             wrapped_native: book.wrapped_native,
+            usd_stablecoins,
             venues: book.venues,
         })
     }
@@ -151,6 +161,11 @@ impl Registry {
 
     pub(crate) fn wrapped_native(&self) -> Address {
         self.wrapped_native
+    }
+
+    /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
+    pub(crate) fn stablecoin_anchors(&self) -> &[(Address, u32)] {
+        &self.usd_stablecoins
     }
 
     /// The named venue's address book section, when the book has one.

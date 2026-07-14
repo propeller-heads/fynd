@@ -462,14 +462,14 @@ async fn run_session<P: Provider>(
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
-        let prices_top = snapshot_prices(adapter.solver).await;
+        let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
         let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
             Ok(ranges) => ranges,
             Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
-        let prices_back = snapshot_prices(adapter.solver).await;
+        let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
         // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
@@ -510,16 +510,16 @@ async fn run_session<P: Provider>(
     }
 }
 
-/// Snapshot the solver's current token prices as a [`usd::PriceMap`] (token native-units per
-/// ETH-wei). Empty until the first derived-data computation completes; tokens with an
-/// unconvertible price are skipped.
-async fn snapshot_prices(solver: &Solver) -> usd::PriceMap {
+/// Snapshot the solver's current token prices as [`usd::Prices`] (token native-units per
+/// ETH-wei), anchored by `registry`'s USD anchor tokens. Empty until the first derived-data
+/// computation completes; tokens with an unconvertible price are skipped.
+async fn snapshot_prices(solver: &Solver, registry: &Registry) -> usd::Prices {
+    let mut prices = usd::Prices::new(registry);
     let derived = solver.derived_data();
     let guard = derived.read().await;
     let Some(token_prices) = guard.token_prices() else {
-        return usd::PriceMap::new();
+        return prices;
     };
-    let mut prices = usd::PriceMap::with_capacity(token_prices.len());
     for (token, price) in token_prices {
         let (Ok(numerator), Ok(denominator)) = (
             price

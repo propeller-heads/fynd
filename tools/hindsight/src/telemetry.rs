@@ -127,8 +127,8 @@ pub(crate) fn describe() {
 pub(crate) fn record_range(
     range: &RangeComparison,
     chain: &str,
-    prices_top: &usd::PriceMap,
-    prices_back: &usd::PriceMap,
+    prices_top: &usd::Prices,
+    prices_back: &usd::Prices,
     registry: &Registry,
 ) {
     let labels = MetricLabels {
@@ -143,8 +143,9 @@ pub(crate) fn record_range(
     // and the output leg is unpriced exactly when the trade is unsolvable (a long-tail token
     // outside the solver's graph) — without the fallback, unsolvable volume would be
     // systematically undercounted.
-    let volume = usd::value_usd(range.token_out, range.settled_amount_out, prices_top)
-        .or_else(|| usd::value_usd(range.token_in, range.amount_in, prices_top));
+    let volume = prices_top
+        .value_usd(range.token_out, range.settled_amount_out)
+        .or_else(|| prices_top.value_usd(range.token_in, range.amount_in));
     if let Some(volume) = volume {
         histogram!(
             VOLUME_USD,
@@ -164,7 +165,11 @@ pub(crate) fn record_range(
     // message and field names stable — the LogQL query extracts them by regexp. Zero means
     // "unpriced" (or, for quoted_usd, "the solver declared no quote").
     if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &range.top.outcome) {
-        let priced = |amount| usd::value_usd(range.token_out, amount, prices_top).unwrap_or(0.0);
+        let priced = |amount| {
+            prices_top
+                .value_usd(range.token_out, amount)
+                .unwrap_or(0.0)
+        };
         info!(
             tx = %range.tx_hash,
             block = range.block_number,
@@ -200,7 +205,7 @@ fn record_state(
     state: &StateResult,
     state_label: &'static str,
     labels: &MetricLabels<'_>,
-    prices: &usd::PriceMap,
+    prices: &usd::Prices,
 ) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
@@ -231,8 +236,7 @@ fn record_state(
     let Outcome::Solved(solved) = &state.outcome else {
         return None;
     };
-    let usd =
-        usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)?;
+    let usd = prices.savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)?;
     if sandwiched {
         return Some(usd);
     }
@@ -249,7 +253,7 @@ fn record_state(
             amount_in = %range.amount_in,
             settled_out = %range.settled_amount_out,
             fynd_out = %solved.amount_out,
-            token_out_price = ?prices.get(&range.token_out),
+            token_out_price = ?prices.get(range.token_out),
             usd,
             "USD outlier — inspect for token mispricing vs genuinely large trade"
         );
@@ -369,6 +373,10 @@ mod tests {
         resolve::{build_range, SolvedAmount},
     };
 
+    fn empty_prices() -> usd::Prices {
+        usd::Prices::new(&Registry::ethereum())
+    }
+
     fn trade(token_out: Address, settled: u64) -> DecodedTrade {
         DecodedTrade {
             tx_hash: TxHash::default(),
@@ -423,12 +431,13 @@ mod tests {
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &usd::PriceMap::new(),
+            &empty_prices(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
         );
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
-        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
 
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()
@@ -497,8 +506,7 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
-        let range =
-            build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -506,8 +514,8 @@ mod tests {
             record_range(
                 &range,
                 "ethereum",
-                &usd::PriceMap::new(),
-                &usd::PriceMap::new(),
+                &empty_prices(),
+                &empty_prices(),
                 &Registry::ethereum(),
             );
         });
@@ -525,8 +533,7 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.solver = "relay".to_string();
         t.solver_source = AttributionSource::Fallback;
-        let range =
-            build_range(&t, &usd::PriceMap::new(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -534,8 +541,8 @@ mod tests {
             record_range(
                 &range,
                 "ethereum",
-                &usd::PriceMap::new(),
-                &usd::PriceMap::new(),
+                &empty_prices(),
+                &empty_prices(),
                 &Registry::ethereum(),
             );
         });
@@ -555,11 +562,12 @@ mod tests {
         t.amount_in = U256::from(1_000_000_000u64); // 1000 USDC
         let range = build_range(
             &t,
-            &usd::PriceMap::new(),
+            &empty_prices(),
             Outcome::Unsolvable("no route".into()),
             Outcome::Unsolvable("no route".into()),
         );
-        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
 
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()
@@ -580,7 +588,7 @@ mod tests {
     fn record_range_skips_savings_when_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
-            &usd::PriceMap::new(),
+            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
         );
@@ -590,8 +598,8 @@ mod tests {
             record_range(
                 &range,
                 "ethereum",
-                &usd::PriceMap::new(),
-                &usd::PriceMap::new(),
+                &empty_prices(),
+                &empty_prices(),
                 &Registry::ethereum(),
             );
         });
@@ -612,7 +620,8 @@ mod tests {
             attacker: Address::repeat_byte(0xcc),
             pools: vec![Address::repeat_byte(0xdd)],
         });
-        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
         let range = build_range(
             &sandwiched,
             &prices,

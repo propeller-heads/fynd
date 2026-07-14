@@ -10,6 +10,15 @@ wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 # a solver, not the trader (CoW Protocol Settlement).
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 
+# Stablecoins anchoring the native token to USD for reporting (address = decimals): a priced
+# stablecoin is worth ~$1 per 10^decimals native units, which pins the native token's USD value.
+[usd_stablecoins]
+"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" = 6  # USDC
+"0xdac17f958d2ee523a2206206994597c13d831ec7" = 6  # USDT
+"0x6b175474e89094c44da98b954eedeac495271d0f" = 18 # DAI
+"0x4c9edd5852cd905f086c759e8383e09bff1e68b3" = 18 # USDe
+"0xdc035d45d973e3ec169d2276ddab16f1e407384f" = 18 # USDS
+
 # Solver routers — the venue that actually settles a swap.
 [solvers]
 # 1inch v6 and v5 Aggregation Routers
