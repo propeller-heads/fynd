@@ -13,10 +13,17 @@ use std::collections::HashSet;
 use alloy::{
     primitives::{Address, TxHash},
     rpc::types::TransactionReceipt,
+    sol,
     sol_types::SolEvent,
 };
 
-use crate::decoder::{ledger::Transfer, registry::Registry};
+use crate::decoder::{ledger::Transfer, registry::Registry, trace::PERMIT2};
+
+sol! {
+    /// ERC-20 `Approval` — emitted by token contracts, never by pools, so its emitters are
+    /// filtered out of pool candidates like `Transfer`'s.
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
 
 /// Transactions scanned on each side of the victim for a bracket pair.
 const WINDOW: usize = 2;
@@ -46,7 +53,7 @@ pub(crate) fn detect(
     victim_sender: Address,
     registry: &Registry,
 ) -> Option<SandwichEvidence> {
-    let victim_pools = pool_addresses(&receipts[victim_index]);
+    let victim_pools = pool_addresses(&receipts[victim_index], registry);
     if victim_pools.is_empty() {
         return None;
     }
@@ -61,7 +68,7 @@ pub(crate) fn detect(
             let Some(attacker) = shared_attacker(front, back, victim_sender, registry) else {
                 continue;
             };
-            let Some(pools) = overlapping_pools(&victim_pools, front, back) else {
+            let Some(pools) = overlapping_pools(&victim_pools, front, back, registry) else {
                 continue;
             };
             return Some(SandwichEvidence {
@@ -106,12 +113,13 @@ fn overlapping_pools(
     victim_pools: &HashSet<Address>,
     front: &TransactionReceipt,
     back: &TransactionReceipt,
+    registry: &Registry,
 ) -> Option<Vec<Address>> {
-    let front_overlap: HashSet<Address> = pool_addresses(front)
+    let front_overlap: HashSet<Address> = pool_addresses(front, registry)
         .intersection(victim_pools)
         .copied()
         .collect();
-    let back_overlap: HashSet<Address> = pool_addresses(back)
+    let back_overlap: HashSet<Address> = pool_addresses(back, registry)
         .intersection(victim_pools)
         .copied()
         .collect();
@@ -126,15 +134,26 @@ fn overlapping_pools(
     Some(pools)
 }
 
-/// The addresses that emitted a non-ERC20-`Transfer` log in a transaction — candidate pool
-/// contracts. Filtering out Transfer-emitters keeps token contracts (WETH, USDC) from producing
-/// trivial overlaps between transactions that merely share a token.
-fn pool_addresses(receipt: &TransactionReceipt) -> HashSet<Address> {
+/// The addresses that emitted a log in a transaction, minus everything known not to be a pool —
+/// candidate pool contracts.
+///
+/// `Transfer` and `Approval` emitters are token contracts, and the wrapped-native token
+/// (`Deposit`/`Withdrawal`) and Permit2 (its own permit events) log on most swaps without being
+/// pools: counting any of them would give two transactions that merely share a token or its
+/// plumbing a trivial "pool" overlap.
+fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {
-        if log.topics().first() != Some(&Transfer::SIGNATURE_HASH) {
-            pools.insert(log.address());
+        let token_event = log
+            .topics()
+            .first()
+            .is_some_and(|topic| {
+                *topic == Transfer::SIGNATURE_HASH || *topic == Approval::SIGNATURE_HASH
+            });
+        if token_event || log.address() == registry.wrapped_native() || log.address() == PERMIT2 {
+            continue;
         }
+        pools.insert(log.address());
     }
     pools
 }
@@ -333,6 +352,47 @@ mod tests {
                 vec![make_transfer_log(token, victim_sender, addr(11), U256::from(1u64))],
             ),
             receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(addr(50))]),
+        ];
+
+        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+    }
+
+    #[test]
+    fn wrapped_native_logs_are_not_pools() {
+        // Every ETH-wrapping transaction logs from the WETH contract (Deposit/Withdrawal are not
+        // Transfer events), so WETH alone must never count as a shared pool.
+        let registry = Registry::ethereum();
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let weth = registry.wrapped_native();
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(weth)]),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(weth)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(weth)]),
+        ];
+
+        assert!(detect(&receipts, 1, victim_sender, &registry).is_none());
+    }
+
+    #[test]
+    fn approval_logs_are_not_pools() {
+        // ERC-20 Approval is emitted by token contracts; a shared token approval is not a
+        // shared pool.
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let token = addr(60);
+        let approval = |owner: Address| {
+            let primitive = alloy::primitives::Log::new_unchecked(
+                token,
+                vec![Approval::SIGNATURE_HASH, owner.into_word(), addr(70).into_word()],
+                alloy::primitives::Bytes::new(),
+            );
+            alloy::rpc::types::Log { inner: primitive, ..Default::default() }
+        };
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), vec![approval(attacker)]),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![approval(victim_sender)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), vec![approval(attacker)]),
         ];
 
         assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());

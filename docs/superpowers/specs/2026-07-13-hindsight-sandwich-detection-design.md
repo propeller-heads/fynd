@@ -28,9 +28,11 @@ a pair `(front, back)` with `front.index < i < back.index` satisfying both condi
    check; real sandwich bots settle through private contracts. Pairs where the linking address
    equals the victim's sender are excluded (self-trades are not sandwiches).
 2. **Pool overlap** — both `front` and `back` emitted at least one log from a pool contract the
-   victim's swap touched. Pool contracts are the addresses that emitted a non-ERC20-Transfer log
-   (`topic0 != Transfer`) in the victim transaction; filtering out Transfer-emitters keeps token
-   contracts (WETH, USDC) from producing trivial overlaps.
+   victim's swap touched. Pool contracts are the addresses that emitted a log in the victim
+   transaction, excluding everything known not to be a pool: ERC-20 `Transfer` and `Approval`
+   emitters (token contracts), the wrapped-native token (its `Deposit`/`Withdrawal` logs appear
+   on every wrapping transaction), and Permit2. Counting any of those would give two
+   transactions that merely share a token or its plumbing a trivial overlap.
 
 Known coarseness: Uniswap V4's singleton PoolManager collapses all V4 pools into one log address,
 so overlap there is per-protocol rather than per-pool. Acceptable — the attacker link must also
@@ -86,7 +88,8 @@ Unit tests in `sandwich.rs` with synthetic receipts:
 - no flag when the attacker link holds but pool overlap fails (and vice versa);
 - window boundary: pairs beyond `W = 2` on either side are ignored;
 - self-sandwich (linking address == victim sender) excluded;
-- token-contract logs (Transfer-only emitters) do not count as pools.
+- token-contract logs (Transfer/Approval emitters), the wrapped-native token, and Permit2 do not
+  count as pools.
 
 Plus: `build_range` verdict override test, JSONL serialization test for the new fields, and a
 telemetry test that sandwiched states skip the savings histograms. The existing `verify`
