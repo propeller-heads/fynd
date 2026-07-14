@@ -28,7 +28,7 @@ net output, or the best single path if none beats it:
 3. **Refined disjoint split** — a two-phase pool-disjoint allocation: pick the active path set at
    coarse (20-chunk) granularity where the gas-activation gate is correct, then refine the
    allocation over that fixed set on a fine 256-chunk grid with no gate (the gas is already
-   justified).
+   justified). An exchange-refinement pass then polishes the result below the grid.
 4. **Fill-and-spill** — a shared-pool overlay allocation with marginal-probe candidate selection,
    which can express splits that diverge at an intermediate token (tree routes sharing a pool) that
    no pool-disjoint allocation can.
@@ -48,6 +48,17 @@ Naive fine-graining regresses on large trades: a smaller first chunk can fail a 
 gas-activation gate, so a profitable second path never turns on. The fix is two phases — decide the
 active path set at coarse granularity, where the activation gate is correct, then refine the
 allocation over that fixed set with the gate off, since the gas is already justified.
+
+## Exchange refinement
+
+A greedy water-fill can never un-commit a chunk, so the refined disjoint allocation is quantized to
+one fine chunk (1/256 of the order) and can sit up to a chunk off the true equal-marginal split. The
+exchange pass fixes that: warm-starting from the fine allocation, it shifts a delta of input from an
+over-allocated path to an under-allocated one whenever the pair's summed net output strictly
+improves, halving the delta once no move helps, down to a sub-chunk floor. Active paths are
+pool-disjoint, so a trial re-simulates only the two paths it touches, and the pass is bounded by the
+solve timeout and a hard cap on trial simulations. Because only strictly-improving moves are
+accepted, the result never scores below the water-fill allocation.
 
 ## Candidate discovery
 
