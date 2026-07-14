@@ -4,7 +4,7 @@ Benchmark and comparison tooling for Fynd solvers. Requires one or more running 
 
 ## Commands
 
-Five subcommands available via `cargo run -p fynd-benchmark --release --`:
+Six subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver. Measures latency (round-trip, solve time, overhead) and throughput. Supports sequential, fixed-concurrency, and rate-based parallelization modes. Prints statistics and ASCII histograms to stdout; optionally exports results to JSON.
 
@@ -15,6 +15,8 @@ Five subcommands available via `cargo run -p fynd-benchmark --release --`:
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases for use with `--requests-file`.
 
 - **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x). Runs over a trade dataset, records per-trade participant results (amount out, gas, protocols, route, eth_call on-chain validation), and writes a JSON report.
+
+- **`generate-requests`** — Generate a synthetic per-chain request dataset (JSON) for capacity load testing, for chains the Ethereum-only `download-trades` set does not cover. Fetches token/pool-count data from Tycho (via `fynd_rpc::protocols::fetch_token_pool_stats`, the same pool-count query as `derive-connector-tokens`), samples token pairs weighted by pool count, and log-spaces amounts around one whole token. Deterministic for a fixed `--seed`. Output is loadable via `--requests-file`. Accepts `--chain` values `ethereum`, `base`, `unichain`, `bsc`, `arbitrum`, `polygon` (case-insensitive); `zksync` parses but needs an explicit `--tycho-url`.
 
 Run `--help` on any subcommand for detailed options.
 
@@ -118,6 +120,7 @@ Key fields per participant:
 | `exporter.rs` | Statistics calculation (`TimingStats::from_measurements` — min/max/mean/median/p95/p99/stddev), ASCII histogram rendering, and JSON export of `BenchmarkResults`. |
 | `requests.rs` | Request generation and loading. Provides a default WETH→USDC request, loads embedded aggregator trades, downloads the full 10k dataset, and loads custom requests from a JSON file. |
 | `scale.rs` | `scale` subcommand handler. Resolves protocols once via `resolve_protocols` (`all_onchain`/`native_onchain` expansion), then builds and tears down an in-process Fynd instance for each worker-count iteration (applying `--min-tvl`), runs load tests via `runner`, and exports scaling results to JSON. |
+| `generate_requests.rs` | `generate-requests` subcommand handler. Fetches per-token pool counts and decimals from Tycho via `fynd_rpc::protocols::fetch_token_pool_stats`, samples token pairs weighted by pool count (seeded `StdRng`, no self-pairs), log-spaces amounts around one whole token, and writes a `--requests-file`-compatible JSON array. |
 | `aggregator.rs` | Aggregator API clients (Nordstern, KyberSwap, 0x) used by the `audit` subcommand. |
 | `pair_selector.rs` | Trade pair selection logic for `audit` runs. |
 | `audit/` | `audit` subcommand handler: per-trade result collection, on-chain validation via `eth_call`, JSON report writing. |
