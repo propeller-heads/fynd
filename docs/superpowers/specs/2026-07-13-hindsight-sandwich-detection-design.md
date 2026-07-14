@@ -43,12 +43,31 @@ a pair `(front, back)` with `front.index < i < back.index` satisfying all three 
    the same busy pool twice inside the window would flag every unrelated trade between its two
    transactions.
 
-Known coarseness: Uniswap V4's singleton PoolManager collapses all V4 pools into one log address,
-so overlap there is per-protocol rather than per-pool. Acceptable — the attacker link and
-direction must also hold. The direction condition misses an attacker whose legs move only native
-ETH (invisible in receipts) — rare, since bots keep inventory wrapped.
-
 The first matching pair (closest bracket) wins; multi-victim grouping is out of scope.
+
+### Known limitations
+
+The heuristic is bounded in both directions; the effect on the aggregates differs:
+
+**False negatives** — a real sandwich is not flagged, so its MEV-inflated "win" keeps polluting
+the savings aggregates exactly as every sandwich did before this feature. Detection reduces that
+pollution; it does not eliminate it:
+
+- an attacker sandwiching an intermediate hop of a multi-hop victim (direction is checked on the
+  victim's output token only);
+- an attacker whose legs move only native ETH — invisible in receipts; rare, since pools settle
+  in WETH;
+- an attacker rotating both its sender and its contract between the two legs (no link holds);
+- middle victims of a sandwich spanning more than `W = 2` transactions per side;
+- Uniswap V4: the singleton PoolManager collapses all V4 pools into one log address, so overlap
+  there is per-protocol rather than per-pool (coarser evidence, not a miss by itself — the link
+  and direction must still hold).
+
+**False positives** — a genuine comparison is reclassified to `sandwiched` and drops out of the
+savings aggregates: a filler or batch-settlement solver EOA settling two opposite-direction
+fills around an unrelated victim satisfies all three conditions. Label-known addresses cannot be
+blanket-excluded, because several labeled operators are themselves sandwich bots. The evidence
+keeps the attacker address, so the rate is measurable from the JSONL by joining attacker labels.
 
 ### Evidence
 
