@@ -27,7 +27,7 @@ pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Log as PrimitiveLog, U256};
+    use alloy::primitives::{Bytes, Log as PrimitiveLog, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log};
@@ -40,7 +40,7 @@ mod tests {
         let primitive = PrimitiveLog::new_unchecked(
             diamond,
             vec![LiFiTransferStarted::SIGNATURE_HASH],
-            Default::default(),
+            Bytes::default(),
         );
         let logs = vec![Log { inner: primitive, ..Default::default() }];
         assert!(started_bridge_order(&logs));

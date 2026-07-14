@@ -103,7 +103,6 @@ struct VerifyArgs {
 }
 
 #[tokio::main]
-#[expect(clippy::expect_used)]
 async fn main() -> anyhow::Result<()> {
     // ANSI colors only on a real terminal: in a pod they end up as escape sequences inside
     // Loki, where they break plain name=value field extraction.

@@ -70,7 +70,7 @@ pub(crate) fn decode(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::U256;
+    use alloy::primitives::{Bytes, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
@@ -113,7 +113,7 @@ mod tests {
                 aggregatorId: id.to_string(),
                 tokenFrom: addr(10),
                 amount: U256::from(1000),
-                data: Default::default(),
+                data: Bytes::default(),
             };
             assert_eq!(solver_from_calldata(&call.abi_encode()).as_deref(), Some(want));
         }
@@ -192,7 +192,7 @@ mod tests {
             aggregatorId: "oneInchV6FeeDynamic".to_string(),
             tokenFrom: addr(10),
             amount: U256::from(1_000),
-            data: Default::default(),
+            data: Bytes::default(),
         };
         let ledger = TransferLedger::from_transaction(&logs, &[]);
 

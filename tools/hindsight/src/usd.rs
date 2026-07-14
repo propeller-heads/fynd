@@ -34,6 +34,8 @@ const STABLECOINS: &[(Address, u32)] = &[
 /// Powers of 2 are exactly representable in f64, so the limb-scaling is lossless up to the
 /// mantissa width. Precision is lost above ~2^53 (≈9e15 native units) — acceptable for USD
 /// estimates.
+// Precision loss is intentional: this function exists specifically to approximate a U256 as f64.
+#[expect(clippy::cast_precision_loss)]
 pub(crate) fn u256_to_f64(amount: U256) -> f64 {
     let [a, b, c, d] = amount.as_limbs();
     (*a as f64) +

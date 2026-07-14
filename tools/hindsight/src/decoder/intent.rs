@@ -112,7 +112,7 @@ mod tests {
         RootProvider::new(RpcClient::mocked(asserter.clone()))
     }
 
-    /// The maker/pool inverse-swap fixture: maker sells token_a for token_b, pool nets the
+    /// The maker/pool inverse-swap fixture: maker sells `token_a` for `token_b`, pool nets the
     /// inverse.
     fn inverse_swap_ledger() -> TransferLedger {
         let logs = vec![

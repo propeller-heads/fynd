@@ -345,7 +345,7 @@ fn configure_buckets(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, Address, U256};
+    use alloy::primitives::{address, Address, TxHash, U256};
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
@@ -356,7 +356,7 @@ mod tests {
 
     fn trade(token_out: Address, settled: u64) -> DecodedTrade {
         DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 21_000_000,
             venue: "relay".into(),
             solver: "tycho".into(),

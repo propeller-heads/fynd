@@ -255,7 +255,7 @@ fn slim_transaction(transaction: &Transaction) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, TxHash, U256};
     use num_bigint::BigUint;
 
     use super::*;
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn comparison_record_carries_solver_quote() {
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_480_207,
             venue: "relay".into(),
             solver: "kyberswap".into(),
@@ -374,7 +374,7 @@ mod tests {
         let prices = usd::PriceMap::from([(usdc, 2e-9), (weth, 1.0)]);
 
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_000_000,
             venue: "relay".into(),
             solver: "1inch".into(),
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn comparison_record_captures_unsolvable_reason_and_null_quote() {
         let trade = DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 25_000_000,
             venue: "relay".into(),
             solver: "1inch".into(),

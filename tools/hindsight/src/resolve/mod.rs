@@ -176,7 +176,7 @@ mod tests {
 
     fn trade(settled: u64) -> DecodedTrade {
         DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 21_000_000,
             venue: "relay".into(),
             solver: "tycho".into(),

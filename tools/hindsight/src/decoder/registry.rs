@@ -86,7 +86,6 @@ impl Registry {
     }
 
     /// The built-in Ethereum address book.
-    #[expect(clippy::expect_used)]
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
     }
