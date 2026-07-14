@@ -327,11 +327,12 @@ fynd-benchmark capacity \
 ## Dashboard
 
 A Grafana dashboard covering solve/queue latencies, queue depth, request rate, solver
-failures, and pod CPU/memory/HPA replicas is checked in at
-[`docs/scaling/dashboards/fynd-capacity.json`](dashboards/fynd-capacity.json). Import it via
-Grafana's "Import dashboard" (upload JSON or paste contents), then set the `DS_PROMETHEUS`
-datasource variable to the VictoriaMetrics/Prometheus source and `namespace` to the target
-namespace (defaults to `staging-fynd`). Caveat: the `worker_router_solve_duration_seconds`
-and `worker_pool_queue_wait_seconds` series are exported as Prometheus summaries, not
-histograms — there are no `_bucket` series, `histogram_quantile()` does not apply, and
-quantiles cannot be aggregated across pods, so those panels show per-pod series.
+failures, and pod CPU/memory/HPA replicas is provisioned from
+`terraform-infrastructure/terraform/modules/k8s-addons/dashboards/fynd/fynd-capacity.json`
+(Grafana folder "fynd", uid `fynd-capacity`) — it ships automatically with the
+VictoriaMetrics k8s stack, no manual import. Its `namespace` variable covers
+`staging-fynd` and, once prod exports metrics, `prod-fynd`. Caveat: the
+`worker_router_solve_duration_seconds` and `worker_pool_queue_wait_seconds` series are
+exported as Prometheus summaries, not histograms — there are no `_bucket` series,
+`histogram_quantile()` does not apply, and quantiles cannot be aggregated across pods,
+so those panels show per-pod series.
