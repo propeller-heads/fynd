@@ -1,3 +1,11 @@
+## [0.89.2](https://github.com/propeller-heads/fynd/compare/0.89.1...0.89.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **hindsight:** add outcome label to savings_bps histogram ([e8b149f](https://github.com/propeller-heads/fynd/commit/e8b149f3d3d4af57ef9eb9ed3940aece9be9e8ef))
+* **hindsight:** replace U256→f64 string round-trips with u256_to_f64 ([d27de8c](https://github.com/propeller-heads/fynd/commit/d27de8c7498e118877215f4f37249b6434954889))
+
 ## [0.89.1](https://github.com/propeller-heads/fynd/compare/0.89.0...0.89.1) (2026-07-12)
 
 

@@ -10,7 +10,7 @@ mod compare;
 mod jsonl;
 pub(crate) mod monitor;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, TxHash, U256};
 use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
@@ -58,7 +58,7 @@ impl StateResult {
     fn new(outcome: Outcome, settled_amount_out: U256, settled_net_gas: U256) -> Self {
         let outcome = compare::served(outcome, settled_amount_out);
         let deltas = compare::compare(&outcome, settled_amount_out, settled_net_gas);
-        let verdict = compare::verdict(&outcome, settled_amount_out, settled_net_gas);
+        let verdict = compare::verdict(&outcome, &deltas);
         Self { outcome, deltas, verdict }
     }
 }
@@ -66,9 +66,9 @@ impl StateResult {
 /// A trade re-solved at both block states, presented as a range.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RangeComparison {
-    pub tx_hash: String,
+    pub tx_hash: TxHash,
     pub block_number: u64,
-    pub client: String,
+    pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
@@ -123,9 +123,9 @@ pub(crate) fn build_range(
     let back = StateResult::new(back, trade.amount_out, settled_net_gas);
     let verdict = top.verdict;
     RangeComparison {
-        tx_hash: trade.tx_hash.to_string(),
+        tx_hash: trade.tx_hash,
         block_number: trade.block_number,
-        client: trade.client.clone(),
+        venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
         token_in: trade.token_in,
@@ -176,9 +176,9 @@ mod tests {
 
     fn trade(settled: u64) -> DecodedTrade {
         DecodedTrade {
-            tx_hash: Default::default(),
+            tx_hash: TxHash::default(),
             block_number: 21_000_000,
-            client: "relay".into(),
+            venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             sender: Address::ZERO,
@@ -186,8 +186,8 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
         }

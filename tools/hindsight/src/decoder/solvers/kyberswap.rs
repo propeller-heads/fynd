@@ -10,11 +10,11 @@ use alloy::primitives::U256;
 
 use crate::decoder::solvers::SolverQuote;
 
-/// Extract KyberSwap's `clientData` quote from transaction calldata.
+/// Extract `KyberSwap`'s `clientData` quote from transaction calldata.
 ///
 /// The blob is plain ASCII JSON inside ABI-encoded bytes, so it is located by its `{"Source"`
 /// marker rather than by decoding the router call — which also finds it when Kyber's calldata is
-/// nested inside a wrapper's (Relay, MetaMask). The JSON is flat, so the object ends at the
+/// nested inside a wrapper's (Relay, `MetaMask`). The JSON is flat, so the object ends at the
 /// first closing brace. Anything malformed or missing returns `None`.
 pub(crate) fn embedded_quote(input: &[u8]) -> Option<SolverQuote> {
     const MARKER: &[u8] = b"{\"Source\"";

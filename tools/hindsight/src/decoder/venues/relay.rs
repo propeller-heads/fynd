@@ -1,7 +1,7 @@
 //! Relay-specific decoding.
 //!
 //! Relay differs from direct solver swaps in two ways: its router skims a
-//! client fee to a collector address on either side of the swap, and its
+//! venue fee to a collector address on either side of the swap, and its
 //! solvers submit rebalancing fills whose transaction sender has no net flow.
 
 use std::collections::HashSet;
@@ -9,16 +9,16 @@ use std::collections::HashSet;
 use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
-    clients::client_fee_flow,
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
     strategy::Flow,
+    venues::venue_fee_flow,
 };
 
 /// Decode a Relay-entered transaction.
 ///
 /// The common case is a user swap: net the sender's flow, then back the
-/// client fee out of it. When the sender has no net flow the transaction is a
+/// venue fee out of it. When the sender has no net flow the transaction is a
 /// solver-initiated rebalancing fill, decoded by anchoring on the fee
 /// collector instead (Relay funds the swap from it); the collector is the
 /// funding source there, not a skim, so no fee is backed out.
@@ -28,8 +28,8 @@ pub(crate) fn decode(
     entry_point: Address,
     registry: &Registry,
 ) -> Option<Flow> {
-    let relay = registry.client("relay")?;
-    if let Some(flow) = client_fee_flow(ledger, sender, entry_point, &relay.fee_collectors) {
+    let relay = registry.venue("relay")?;
+    if let Some(flow) = venue_fee_flow(ledger, sender, entry_point, &relay.fee_collectors) {
         return Some(flow);
     }
     decode_rebalance(ledger, &relay.fee_collectors, &relay.entry_points, registry.wrapped_native())
@@ -53,7 +53,6 @@ fn decode_rebalance(
     relay_entry_points: &HashSet<Address>,
     wrapped_native: Address,
 ) -> Option<NetSwap> {
-    // token_in: the single token the collector(s) net-send.
     let net_in: Vec<(Address, U256)> = ledger
         .group_net_sent(fee_collectors)
         .into_iter()
@@ -78,7 +77,7 @@ fn decode_rebalance(
 
     // C1 external fill: the single pure-sink recipient, excluding infrastructure (routers,
     // collector, the wrapped-native token, the zero address) and the input token.
-    let mut outputs: Vec<(Address, U256)> = Vec::new(); // (token_out, amount)
+    let mut outputs: Vec<(Address, U256)> = Vec::new();
     for (recipient, token, amount) in ledger.sink_receipts() {
         if relay_entry_points.contains(&recipient) ||
             fee_collectors.contains(&recipient) ||
@@ -117,7 +116,6 @@ mod tests {
 
     #[test]
     fn rebalance_external_token_fill() {
-        // Collector funds token_in -> pool -> token_out delivered to an external recipient.
         let fee = addr(99);
         let pool = addr(50);
         let recipient = addr(7);
@@ -135,9 +133,6 @@ mod tests {
 
     #[test]
     fn rebalance_external_native_eth_out() {
-        // C1 with native-ETH output: collector funds token_in into a pool, which converts and
-        // sends native ETH on to the recipient. The pool both receives and sends, marking a
-        // genuine conversion (an absorbing counterparty would read as an unconverted payout).
         let fee = addr(99);
         let pool = addr(50);
         let recipient = addr(7);
@@ -153,7 +148,6 @@ mod tests {
 
     #[test]
     fn rebalance_internal_back_to_collector() {
-        // C2: collector sends token_in, receives token_out back (inventory rebalance).
         let fee = addr(99);
         let pool = addr(50);
         let token_in = addr(10);
@@ -170,7 +164,6 @@ mod tests {
 
     #[test]
     fn rebalance_declines_multi_recipient() {
-        // One input token but two external recipients = batched multi-order fill -> decline.
         let fee = addr(99);
         let pool = addr(50);
         let token_in = addr(10);
@@ -210,7 +203,6 @@ mod tests {
 
     #[test]
     fn rebalance_declines_without_collector_outflow() {
-        // No transfer from a fee collector -> nothing to anchor on.
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000))];
         let collectors = HashSet::from([addr(99)]);
         let routers = HashSet::from([addr(2)]);
@@ -223,7 +215,7 @@ mod tests {
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
         let collector = *registry
-            .client("relay")
+            .venue("relay")
             .unwrap()
             .fee_collectors
             .iter()
@@ -245,9 +237,8 @@ mod tests {
         let flow = decode(&ledger(&logs, &[]), user, router, &registry).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
-        assert_eq!(flow.client_fee, Some(U256::from(40)));
-        assert_eq!(flow.client_fee_out, None);
-        // The user sent the transaction, so the settled route's gas is chargeable.
+        assert_eq!(flow.venue_fee, Some(U256::from(40)));
+        assert_eq!(flow.venue_fee_out, None);
         assert!(flow.trader_paid_gas);
     }
 
@@ -258,7 +249,7 @@ mod tests {
         // output.
         let registry = Registry::ethereum();
         let collector = *registry
-            .client("relay")
+            .venue("relay")
             .unwrap()
             .fee_collectors
             .iter()
@@ -273,8 +264,8 @@ mod tests {
         let flow = decode(&ledger(&logs, &native), collector, router, &registry).unwrap();
         assert_eq!(flow.tracked, collector);
         assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
-        assert_eq!(flow.client_fee, None);
-        assert_eq!(flow.client_fee_out, None);
+        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_out, None);
     }
 
     #[test]
@@ -282,7 +273,7 @@ mod tests {
         // Solver fill: the sender has no net flow; the collector funds the swap. No fee back-out.
         let registry = Registry::ethereum();
         let collector = *registry
-            .client("relay")
+            .venue("relay")
             .unwrap()
             .fee_collectors
             .iter()
@@ -303,9 +294,8 @@ mod tests {
         let flow = decode(&ledger(&logs, &[]), solver, router, &registry).unwrap();
         assert_eq!(flow.tracked, solver);
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
-        assert_eq!(flow.client_fee, None);
-        assert_eq!(flow.client_fee_out, None);
-        // A solver paid this fill's gas, not the order's trader — no gas deduction.
+        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_out, None);
         assert!(!flow.trader_paid_gas);
     }
 }

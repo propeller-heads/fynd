@@ -1,13 +1,13 @@
 //! LiFi-specific matching rules.
 //!
-//! LiFi's Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
+//! `LiFi`'s Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
 //! bridge orders, which must never decode as swaps.
 
 use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
 sol! {
-    /// Emitted by the LiFi Diamond only when an order bridges to another chain (the tuple is
-    /// LiFi's `BridgeData`); same-chain LiFi swaps emit `LiFiGenericSwapCompleted` instead.
+    /// Emitted by the `LiFi` Diamond only when an order bridges to another chain (the tuple is
+    /// `LiFi`'s `BridgeData`); same-chain `LiFi` swaps emit `LiFiGenericSwapCompleted` instead.
     event LiFiTransferStarted(
         (bytes32, string, string, address, address, address, uint256, uint256, bool, bool)
             bridgeData
@@ -27,7 +27,7 @@ pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Log as PrimitiveLog, U256};
+    use alloy::primitives::{Bytes, Log as PrimitiveLog, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log};
@@ -40,7 +40,7 @@ mod tests {
         let primitive = PrimitiveLog::new_unchecked(
             diamond,
             vec![LiFiTransferStarted::SIGNATURE_HASH],
-            Default::default(),
+            Bytes::default(),
         );
         let logs = vec![Log { inner: primitive, ..Default::default() }];
         assert!(started_bridge_order(&logs));
