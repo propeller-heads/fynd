@@ -33,9 +33,13 @@ enum Command {
 /// Chain access shared by every subcommand: the RPC endpoint and the decoder's address book.
 #[derive(Args)]
 pub(crate) struct RpcArgs {
-    /// Ethereum RPC URL
+    /// Chain RPC URL
     #[arg(long, env = "RPC_URL")]
     pub rpc_url: String,
+
+    /// Chain to operate on — selects the decoder's address book (only ethereum is built in)
+    #[arg(long, default_value = "ethereum")]
+    pub chain: String,
 
     /// Decoder address-book TOML (defaults to the chain's built-in book)
     #[arg(long, env = "HINDSIGHT_REGISTRY")]
@@ -129,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let registry = decoder::Registry::load(&args.rpc.chain, args.rpc.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
@@ -169,7 +173,7 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.rpc.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let registry = decoder::Registry::load(&args.rpc.chain, args.rpc.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");

@@ -69,10 +69,6 @@ pub(crate) struct MonitorArgs {
     #[arg(long, env = "TYCHO_URL")]
     pub tycho_url: String,
 
-    /// Chain to monitor (the decoder is Ethereum-only for now)
-    #[arg(long, default_value = "ethereum")]
-    pub chain: String,
-
     /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
     /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
     #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
@@ -291,7 +287,7 @@ async fn build_solver(
     pools_config: &fynd_rpc::config::WorkerPoolsConfig,
 ) -> anyhow::Result<(Solver, BlockStepController)> {
     info!(
-        chain = cfg.chain,
+        chain = cfg.rpc.chain,
         protocols = protocols.len(),
         "building in-process solver (loading tokens may take minutes)…"
     );
@@ -316,8 +312,8 @@ async fn build_solver(
 /// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = parse_chain(&cfg.chain)
-        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain))?;
+    let chain = parse_chain(&cfg.rpc.chain)
+        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.rpc.chain))?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
@@ -350,7 +346,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
     let mut decoder = Decoder::new(
         provider_from(&cfg.rpc.rpc_url)?,
-        Registry::load(&cfg.chain, cfg.rpc.registry.as_deref())?,
+        Registry::load(&cfg.rpc.chain, cfg.rpc.registry.as_deref())?,
     );
 
     if let Some(port) = cfg.metrics_port {
@@ -485,7 +481,7 @@ async fn run_session<P: Provider>(
         for range in &ranges {
             telemetry::record_range(
                 range,
-                &cfg.chain,
+                &cfg.rpc.chain,
                 &prices_top,
                 &prices_back,
                 decoder.registry(),
@@ -565,9 +561,8 @@ mod tests {
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
-            rpc: crate::RpcArgs { rpc_url, registry: None },
+            rpc: crate::RpcArgs { rpc_url, chain: "ethereum".to_string(), registry: None },
             tycho_url,
-            chain: "ethereum".to_string(),
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
             min_tvl: 10_000.0,
