@@ -88,7 +88,8 @@ pub(crate) fn describe() {
     describe_histogram!(
         SAVINGS_BPS,
         Unit::Count,
-        "Gross bps delta of Fynd vs settled (positive = Fynd better), the headline basis"
+        "Gross bps delta of Fynd vs settled (positive = Fynd better), labeled by venue / solver / \
+         chain / outcome / state (top|back)"
     );
     describe_histogram!(
         SAVINGS_USD,
@@ -210,6 +211,7 @@ fn record_state(
             "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
+            "outcome" => outcome_label(state.verdict).to_string(),
             "state" => state_label,
         )
         .record(bps);
@@ -435,9 +437,16 @@ mod tests {
         assert!(volume_line.contains("outcome=\"win\""), "volume line: {volume_line}");
         // Histograms must render as true histograms (le-labeled _bucket series), not summaries:
         // the dashboard reads them with histogram_quantile(..., *_bucket).
+        // outcome label on savings_bps lets the dashboard show median per win/loss.
         assert!(
             rendered.contains("hindsight_savings_bps_bucket"),
             "savings_bps rendered as a summary, not a histogram: {rendered}"
+        );
+        assert!(
+            rendered
+                .lines()
+                .any(|l| l.contains("hindsight_savings_bps_bucket") && l.contains("outcome=")),
+            "savings_bps missing outcome label: {rendered}"
         );
         assert!(rendered.contains("hindsight_savings_usd_bucket"));
         assert!(rendered.contains("le=\"3\""));
