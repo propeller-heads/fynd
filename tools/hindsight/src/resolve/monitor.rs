@@ -561,12 +561,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires live TYCHO_URL + RPC_URL"]
     async fn monitor_one_block_smoke() {
-        let (Ok(rpc_url), Ok(tycho_url)) = (std::env::var("RPC_URL"), std::env::var("TYCHO_URL"))
-        else {
-            eprintln!("skipping: set RPC_URL and TYCHO_URL");
-            return;
-        };
-
+        let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
+        let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
             rpc: crate::RpcArgs { rpc_url, registry: None },

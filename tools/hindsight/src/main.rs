@@ -1,16 +1,3 @@
-// Test code uses unwrap/expect/println pervasively — these are idiomatic in tests and need no
-// special handling (a panic in test code is the desired failure mode).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::unwrap_err_used,
-        clippy::print_stdout,
-        clippy::print_stderr,
-    )
-)]
-
 mod decoder;
 mod resolve;
 mod telemetry;
