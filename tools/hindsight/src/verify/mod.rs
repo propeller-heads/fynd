@@ -372,11 +372,7 @@ fn parse_addr(value: &str) -> Option<Address> {
 }
 
 fn normalize_amount(amount: U256, decimals: u8) -> f64 {
-    let raw: f64 = amount
-        .to_string()
-        .parse()
-        .unwrap_or(0.0);
-    raw / 10f64.powi(i32::from(decimals))
+    crate::usd::u256_to_f64(amount) / 10f64.powi(i32::from(decimals))
 }
 
 fn bps_diff(ours: f64, theirs: f64) -> f64 {

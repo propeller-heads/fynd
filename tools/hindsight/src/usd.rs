@@ -95,11 +95,8 @@ pub(crate) fn value_usd(token: Address, amount: U256, prices: &PriceMap) -> Opti
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn gas_in_token(gas_wei: U256, token: Address, prices: &PriceMap) -> Option<U256> {
     let price = price_of(prices, token)?;
-    let gas: f64 = gas_wei.to_string().parse().ok()?;
-    let units = gas * price;
-    units
-        .is_finite()
-        .then(|| U256::from(units as u128))
+    let units = u256_to_f64(gas_wei) * price;
+    units.is_finite().then(|| U256::from(units as u128))
 }
 
 /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).
