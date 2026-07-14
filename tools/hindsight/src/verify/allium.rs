@@ -79,14 +79,7 @@ impl AlliumClient {
 
     async fn status(&self, url: &str) -> anyhow::Result<String> {
         let value = self.get(url).await?;
-        value
-            .as_str()
-            .or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string)
+        parse_status_value(&value)
             .with_context(|| format!("unexpected Allium status response: {value}"))
     }
 
@@ -141,6 +134,15 @@ impl AlliumClient {
     }
 }
 
+/// Parse a status value from the Allium API, which returns either a bare JSON string
+/// (`"success"`) or an object (`{"status": "running"}`).
+fn parse_status_value(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .or_else(|| value.get("status").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,43 +151,19 @@ mod tests {
     fn status_parses_bare_string() {
         // The API sometimes returns a bare JSON string "success" instead of {"status": "success"}.
         let value: Value = serde_json::from_str("\"success\"").unwrap();
-        let result = value
-            .as_str()
-            .or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string);
-        assert_eq!(result, Some("success".to_string()));
+        assert_eq!(parse_status_value(&value), Some("success".to_string()));
     }
 
     #[test]
     fn status_parses_object_form() {
         // The API can also return {"status": "running"}.
         let value: Value = serde_json::from_str(r#"{"status": "running"}"#).unwrap();
-        let result = value
-            .as_str()
-            .or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string);
-        assert_eq!(result, Some("running".to_string()));
+        assert_eq!(parse_status_value(&value), Some("running".to_string()));
     }
 
     #[test]
     fn status_returns_none_for_unexpected_shape() {
         let value: Value = serde_json::from_str(r#"{"other_key": "val"}"#).unwrap();
-        let result = value
-            .as_str()
-            .or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string);
-        assert_eq!(result, None);
+        assert_eq!(parse_status_value(&value), None);
     }
 }

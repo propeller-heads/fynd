@@ -65,8 +65,8 @@ trade), **liquidity venues** (pools inside traces — not modeled here).
 ### Verdict model
 
 Each re-solved trade produces a `top` (optimistic, state N-1) and `back` (pessimistic, state N)
-result. The headline `verdict` is top-of-block. Possible verdicts: `Win`, `Loss`, `Tie`,
-`CoverageMiss` (Fynd filled <10% of the settled size), `Unsolvable`.
+result. The headline `verdict` is top-of-block. Possible verdicts: `Win`, `Loss`,
+`CoverageMiss` (Fynd filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`.
 
 ### Key types
 

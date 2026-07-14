@@ -233,6 +233,8 @@ fn print_trades(trades: &[decoder::DecodedTrade]) {
     }
 }
 
+const MAX_RANGE_BLOCKS: u64 = 1000;
+
 fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
     let parts: Vec<&str> = range.split('-').collect();
     if parts.len() != 2 {
@@ -247,8 +249,8 @@ fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
     if end < start {
         anyhow::bail!("end block ({end}) must be >= start block ({start})");
     }
-    if end - start > 1000 {
-        anyhow::bail!("range too large: {} blocks (max 1000)", end - start);
+    if end - start > MAX_RANGE_BLOCKS {
+        anyhow::bail!("range too large: {} blocks (max {MAX_RANGE_BLOCKS})", end - start);
     }
     Ok((start..=end).collect())
 }
