@@ -51,13 +51,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DECODE_RPC_LAG_RETRIES: usize = 5;
 const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
 
-/// Falling this many blocks (~20 min at 12s) behind chain head means the session is crippled
-/// without being dead — seen live: a worker lost its derived-data channel, every solve crawled,
-/// the feed-dead watchdog never fired (blocks still trickled through), and the monitor slid
-/// hours behind while warn-spamming. The remedy is the same as a dead feed: tear down and
-/// rebuild, which resubscribes at head and keeps the data gap bounded.
-const MAX_LAG_BLOCKS: u64 = 100;
-
 /// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
 /// configuration.
 #[derive(clap::Args)]
@@ -99,6 +92,14 @@ pub(crate) struct MonitorArgs {
     /// Stop after this many blocks (runs until interrupted if omitted)
     #[arg(long)]
     pub max_blocks: Option<u64>,
+
+    /// Chain-head lag (in blocks) beyond which the session is considered unhealthy and the solver
+    /// is rebuilt — seen live: a worker died, every solve crawled, and the monitor slid hours
+    /// behind while the feed-dead watchdog never fired (blocks still trickled through). The
+    /// default is ~20 minutes on Ethereum mainnet's 12s blocks; scale it to the chain's block
+    /// time
+    #[arg(long, default_value_t = 100)]
+    pub max_lag_blocks: u64,
 
     /// Write one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
     /// coverage gaps) into this directory as `comparisons-YYYY-MM-DD.jsonl`, rotated at each UTC
@@ -435,7 +436,7 @@ async fn run_session<P: Provider>(
             .get_block_number()
             .await
         {
-            if head.saturating_sub(target) > MAX_LAG_BLOCKS {
+            if head.saturating_sub(target) > cfg.max_lag_blocks {
                 return SessionEnd::Unhealthy(format!(
                     "monitor is {} blocks behind head {head}; presuming a crippled session",
                     head - target
@@ -576,6 +577,7 @@ mod tests {
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
+            max_lag_blocks: 100,
             comparisons_dir: None,
         })
         .await
