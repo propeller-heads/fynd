@@ -9,7 +9,7 @@ pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
 
-use alloy::primitives::U256;
+use alloy::{primitives::U256, rpc::types::Log};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
@@ -28,6 +28,14 @@ pub(crate) struct SolverQuote {
     /// Unix timestamp of the quote, when present. Joined against block time downstream to
     /// separate stale-quote slippage from routing quality.
     pub timestamp: Option<u64>,
+}
+
+/// Match-time veto: order shapes a solver's own logs mark as not same-chain swaps, checked
+/// before the transaction costs a trace. Netting such a transaction would pair its input with a
+/// leftover refund as a phantom trade. Adding a solver's veto is one check here — the matching
+/// in `strategy` stays solver-agnostic.
+pub(crate) fn match_veto(logs: &[Log]) -> Option<&'static str> {
+    lifi::started_bridge_order(logs).then_some("cross-chain bridge order")
 }
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
@@ -56,7 +64,27 @@ pub(crate) fn plausible_quote(quote: &SolverQuote, settled_amount_out: U256) -> 
 
 #[cfg(test)]
 mod tests {
+    use alloy::{
+        primitives::{Bytes, Log as PrimitiveLog},
+        sol_types::SolEvent,
+    };
+
     use super::*;
+    use crate::decoder::test_utils::{addr, make_transfer_log};
+
+    #[test]
+    fn match_veto_flags_bridge_orders_only() {
+        let primitive = PrimitiveLog::new_unchecked(
+            addr(70),
+            vec![lifi::LiFiTransferStarted::SIGNATURE_HASH],
+            Bytes::default(),
+        );
+        let bridge_logs = vec![Log { inner: primitive, ..Default::default() }];
+        assert_eq!(match_veto(&bridge_logs), Some("cross-chain bridge order"));
+
+        let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
+        assert_eq!(match_veto(&swap_logs), None);
+    }
 
     #[test]
     fn plausible_quote_accepts_slippage_and_rejects_unit_mismatch() {
