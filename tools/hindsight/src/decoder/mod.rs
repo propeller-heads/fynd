@@ -17,6 +17,7 @@ mod guards;
 mod intent;
 mod ledger;
 mod registry;
+mod sandwich;
 mod solvers;
 mod strategy;
 mod trace;
@@ -43,6 +44,7 @@ use crate::decoder::{
 };
 pub(crate) use crate::decoder::{
     registry::Registry,
+    sandwich::SandwichEvidence,
     solvers::{attribution::AttributionSource, SolverQuote},
 };
 
@@ -53,6 +55,9 @@ pub(crate) use crate::decoder::{
 pub(crate) struct DecodedTrade {
     pub tx_hash: TxHash,
     pub block_number: u64,
+    /// The transaction's position in its block, from the receipt (falls back to its position in
+    /// the fetched receipt slice when the RPC omitted it).
+    pub tx_index: u64,
     pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (see [`solvers::attribution`]). Downstream
@@ -91,6 +96,10 @@ pub(crate) struct DecodedTrade {
     /// execution delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<SolverQuote>,
+    /// Evidence that a front-run and a back-run bracketed this trade (see
+    /// [`sandwich::detect`]). `None` when no bracket pair was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandwich: Option<SandwichEvidence>,
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -146,9 +155,15 @@ impl<P: Provider> Decoder<P> {
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
 
-        let matched: Vec<Matched> = receipts
+        // Paired with each receipt's position in the slice, since that position — not the
+        // transaction_index field, which the RPC may omit — is what "neighbor" means for the
+        // sandwich scan below: receipts are already in block order.
+        let matched: Vec<(usize, Matched)> = receipts
             .iter()
-            .filter_map(|receipt| strategy::select(receipt, &self.registry))
+            .enumerate()
+            .filter_map(|(index, receipt)| {
+                strategy::select(receipt, &self.registry).map(|matched| (index, matched))
+            })
             .collect();
 
         // Per-block batch: trace every matched tx concurrently (bounded),
@@ -158,18 +173,24 @@ impl<P: Provider> Decoder<P> {
         let traces = futures::stream::iter(
             matched
                 .iter()
-                .map(|m| fetch_trace(&self.provider, m.receipt.transaction_hash)),
+                .map(|(_, m)| fetch_trace(&self.provider, m.receipt.transaction_hash)),
         )
         .buffered(TRACE_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
 
         let mut trades = Vec::with_capacity(matched.len());
-        for (matched, root) in matched.into_iter().zip(traces) {
-            if let Some(trade) = self
-                .decode_transaction(matched, &root, block_number)
+        for ((index, matched), root) in matched.into_iter().zip(traces) {
+            let tx_index = matched
+                .receipt
+                .transaction_index
+                .unwrap_or(index as u64);
+            if let Some(mut trade) = self
+                .decode_transaction(matched, &root, block_number, tx_index)
                 .await
             {
+                let evidence = sandwich::detect(&receipts, index, &trade, &self.registry);
+                trade.sandwich = evidence;
                 trades.push(trade);
             }
         }
@@ -183,6 +204,7 @@ impl<P: Provider> Decoder<P> {
         matched: Matched<'_>,
         root: &CallFrame,
         block_number: u64,
+        tx_index: u64,
     ) -> Option<DecodedTrade> {
         let Self { provider, registry, code_cache } = self;
         let Matched { receipt, entry_point, strategy } = matched;
@@ -257,6 +279,7 @@ impl<P: Provider> Decoder<P> {
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
+            tx_index,
             venue: registry.label(entry_point),
             solver: attribution.solver,
             solver_source: attribution.source,
@@ -269,6 +292,9 @@ impl<P: Provider> Decoder<P> {
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
             quote,
+            // The full receipts slice isn't available here (this fn only sees the one matched
+            // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
+            sandwich: None,
         })
     }
 }

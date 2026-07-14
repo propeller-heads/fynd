@@ -417,6 +417,7 @@ mod tests {
         DecodedTrade {
             tx_hash: TxHash::ZERO,
             block_number: 1,
+            tx_index: 0,
             venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
@@ -429,6 +430,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         }
     }
 
