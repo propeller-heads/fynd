@@ -72,10 +72,7 @@ mod tests {
     use alloy::primitives::address;
 
     use super::*;
-    use crate::decoder::{
-        test_utils::{addr, frame},
-        trace::PERMIT2,
-    };
+    use crate::decoder::test_utils::{addr, frame, PERMIT2};
 
     #[test]
     fn declared_solver_outranks_the_trace() {

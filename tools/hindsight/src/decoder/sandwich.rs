@@ -21,7 +21,6 @@ use alloy::{
 use crate::decoder::{
     ledger::{to_primitive_log, Transfer},
     registry::Registry,
-    trace::PERMIT2,
     DecodedTrade,
 };
 
@@ -148,10 +147,10 @@ fn overlapping_pools(
 /// The addresses that emitted a log in a transaction, minus everything known not to be a pool —
 /// candidate pool contracts.
 ///
-/// `Transfer` and `Approval` emitters are token contracts, and the wrapped-native token
-/// (`Deposit`/`Withdrawal`) and Permit2 (its own permit events) log on most swaps without being
-/// pools: counting any of them would give two transactions that merely share a token or its
-/// plumbing a trivial "pool" overlap.
+/// `Transfer` and `Approval` emitters are token contracts, and the registry's infrastructure
+/// addresses (the wrapped-native token's `Deposit`/`Withdrawal`, Permit2's permit events) log on
+/// most swaps without being pools: counting any of them would give two transactions that merely
+/// share a token or its plumbing a trivial "pool" overlap.
 fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {
@@ -161,7 +160,7 @@ fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<
             .is_some_and(|topic| {
                 *topic == Transfer::SIGNATURE_HASH || *topic == Approval::SIGNATURE_HASH
             });
-        if token_event || log.address() == registry.wrapped_native() || log.address() == PERMIT2 {
+        if token_event || registry.is_infrastructure(log.address()) {
             continue;
         }
         pools.insert(log.address());

@@ -1,15 +1,11 @@
 use alloy::{
-    primitives::{address, Address, TxHash, U256},
+    primitives::{Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
     rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
 };
 use anyhow::Context;
 
 use crate::decoder::registry::Registry;
-
-/// The canonical Permit2 deployment (same address on every chain) — token-pull infrastructure
-/// that routers call first, never the venue settling a swap.
-pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
 
 /// Fetch the callTracer root frame for a transaction.
 ///
@@ -108,8 +104,8 @@ pub(crate) fn find_solver_frame<'a>(
 }
 
 /// The client's direct child call that moved the most native value, excluding
-/// self-calls, refunds to the sender, Permit2, and the wrapped-native contract. Best guess at
-/// an unknown router.
+/// self-calls, refunds to the sender, and the registry's infrastructure addresses (Permit2, the
+/// wrapped-native contract). Best guess at an unknown router.
 ///
 /// The wrapped-native exclusion matters most: on an ETH-input swap through an unknown router,
 /// the highest-value call is typically the `WETH.deposit()` wrapping the input — infrastructure,
@@ -130,7 +126,7 @@ pub(crate) fn largest_external_call(
             continue;
         }
         let Some(to) = child.to else { continue };
-        if to == entry_point || to == sender || to == PERMIT2 || to == registry.wrapped_native() {
+        if to == entry_point || to == sender || registry.is_infrastructure(to) {
             continue;
         }
         let value = child.value.unwrap_or_default();

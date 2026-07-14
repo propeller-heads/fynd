@@ -6,6 +6,10 @@
 # intermediary.
 wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
+# Token-movement infrastructure that traces touch on most swaps without ever being the settling
+# venue: attribution guesses skip these (the wrapped-native token above is always skipped too).
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"]
+
 # Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
 # a solver, not the trader (CoW Protocol Settlement).
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]

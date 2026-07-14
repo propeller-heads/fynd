@@ -26,6 +26,7 @@ const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
 #[serde(deny_unknown_fields)]
 struct AddressBook {
     wrapped_native: Address,
+    infrastructure: HashSet<Address>,
     usd_stablecoins: HashMap<Address, u32>,
     batch_settlers: HashSet<Address>,
     solvers: HashMap<Address, String>,
@@ -63,6 +64,9 @@ pub(crate) struct Registry {
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
+    /// Token-movement infrastructure (e.g. Permit2): contracts traces touch on most swaps
+    /// without ever being the settling venue.
+    infrastructure: HashSet<Address>,
     /// `(stablecoin, decimals)` anchors for valuing trades in USD (see `crate::usd`), sorted by
     /// address for deterministic averaging.
     usd_stablecoins: Vec<(Address, u32)>,
@@ -130,6 +134,7 @@ impl Registry {
             batch_settlers: book.batch_settlers,
             labels: book.labels,
             wrapped_native: book.wrapped_native,
+            infrastructure: book.infrastructure,
             usd_stablecoins,
             venues: book.venues,
         })
@@ -161,6 +166,13 @@ impl Registry {
 
     pub(crate) fn wrapped_native(&self) -> Address {
         self.wrapped_native
+    }
+
+    /// Whether the address is token-movement infrastructure (Permit2, the wrapped-native
+    /// token): contracts a trace touches on most swaps without ever being the settling venue,
+    /// so attribution guesses must skip them.
+    pub(crate) fn is_infrastructure(&self, address: Address) -> bool {
+        self.infrastructure.contains(&address) || address == self.wrapped_native
     }
 
     /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
@@ -249,6 +261,15 @@ mod tests {
         assert!(registry.is_solver(oneinch));
         assert!(registry.is_known(relay));
         assert!(!registry.is_solver(relay));
+    }
+
+    #[test]
+    fn infrastructure_covers_permit2_and_wrapped_native() {
+        let registry = Registry::ethereum();
+        let permit2 = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
+        assert!(registry.is_infrastructure(permit2));
+        assert!(registry.is_infrastructure(registry.wrapped_native()));
+        assert!(!registry.is_infrastructure(addr(123)));
     }
 
     #[test]
