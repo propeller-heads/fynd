@@ -189,7 +189,8 @@ impl<P: Provider> Decoder<P> {
                 .decode_transaction(matched, &root, block_number, tx_index)
                 .await
             {
-                trade.sandwich = sandwich::detect(&receipts, index, trade.sender, &self.registry);
+                let evidence = sandwich::detect(&receipts, index, &trade, &self.registry);
+                trade.sandwich = evidence;
                 trades.push(trade);
             }
         }

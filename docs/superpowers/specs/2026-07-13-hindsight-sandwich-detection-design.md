@@ -13,14 +13,15 @@ sandwiches, record the evidence, and classify them apart from real wins and loss
 
 ## Detection methodology
 
-Bracket-pair with pool overlap — the zeromev/EigenPhi heuristic without direction decoding.
+Bracket-pair with pool overlap — the zeromev/EigenPhi heuristic — plus a log-level direction
+check on the attacker's token flow.
 
 Detection runs inside `Decoder::decode_block`, which already fetches every receipt of the block in
 one `eth_getBlockReceipts` call. All signals below come from those receipts; detection makes no
 additional RPC calls.
 
 For a victim trade at transaction index `i`, scan a window of `W = 2` transactions on each side for
-a pair `(front, back)` with `front.index < i < back.index` satisfying both conditions:
+a pair `(front, back)` with `front.index < i < back.index` satisfying all three conditions:
 
 1. **Attacker link** — `front.from == back.from`, or `front.to == back.to` where that shared
    target is not a registry-known client or solver. The registry exclusion prevents two unrelated
@@ -33,10 +34,19 @@ a pair `(front, back)` with `front.index < i < back.index` satisfying both condi
    emitters (token contracts), the wrapped-native token (its `Deposit`/`Withdrawal` logs appear
    on every wrapping transaction), and Permit2. Counting any of those would give two
    transactions that merely share a token or its plumbing a trivial overlap.
+3. **Direction** — some linked entity accumulated the victim's output token in `front` and
+   disposed of it in `back` (per that leg's ERC-20 `Transfer` logs), the shape of buying before
+   the victim and selling after. Checked on the linking address and, for a shared-sender link,
+   on the pair's shared target contract too — a bot's inventory usually sits in its private
+   contract, not the signing EOA. A native-ETH output is checked as its wrapped form (native
+   moves emit no log; pools settle in WETH). Without this condition, an arbitrage bot trading
+   the same busy pool twice inside the window would flag every unrelated trade between its two
+   transactions.
 
 Known coarseness: Uniswap V4's singleton PoolManager collapses all V4 pools into one log address,
-so overlap there is per-protocol rather than per-pool. Acceptable — the attacker link must also
-hold.
+so overlap there is per-protocol rather than per-pool. Acceptable — the attacker link and
+direction must also hold. The direction condition misses an attacker whose legs move only native
+ETH (invisible in receipts) — rare, since bots keep inventory wrapped.
 
 The first matching pair (closest bracket) wins; multi-victim grouping is out of scope.
 
@@ -89,7 +99,9 @@ Unit tests in `sandwich.rs` with synthetic receipts:
 - window boundary: pairs beyond `W = 2` on either side are ignored;
 - self-sandwich (linking address == victim sender) excluded;
 - token-contract logs (Transfer/Approval emitters), the wrapped-native token, and Permit2 do not
-  count as pools.
+  count as pools;
+- direction: a linked pair with no token flow, or accumulating on both legs (arbitrage repeat),
+  is not flagged; inventory held in the bot contract and native-output (WETH-mapped) flows are.
 
 Plus: `build_range` verdict override test, JSONL serialization test for the new fields, and a
 telemetry test that sandwiched states skip the savings histograms. The existing `verify`
@@ -97,7 +109,7 @@ subcommand remains a live check that detection does not disturb decoding.
 
 ## Out of scope
 
-- Direction-aware decoding of attacker swaps (opposite-direction verification).
 - Changes to the Python analysis package under `tools/hindsight/analysis` — the new fields are
   additive; segmentation on them can come later.
 - Multi-victim sandwich grouping.
+- Amount-aware direction checks (back-leg disposal sized against the front-leg accumulation).

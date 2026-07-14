@@ -2,8 +2,9 @@
 //!
 //! For a victim trade, scans the receipts immediately around it — already fetched by
 //! [`super::Decoder::decode_block`] in one `eth_getBlockReceipts` call, so detection makes no
-//! extra RPC calls — for a front-run/back-run pair that both link to one attacker and both touch
-//! a pool the victim's swap touched. See
+//! extra RPC calls — for a front-run/back-run pair that links to one attacker, touches a pool
+//! the victim's swap touched, and moves the victim's output token in sandwich direction
+//! (accumulate before the victim, dispose after). See
 //! `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the heuristic
 //! and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool overlap to
 //! per-protocol).
@@ -11,13 +12,18 @@
 use std::collections::HashSet;
 
 use alloy::{
-    primitives::{Address, TxHash},
+    primitives::{Address, TxHash, U256},
     rpc::types::TransactionReceipt,
     sol,
     sol_types::SolEvent,
 };
 
-use crate::decoder::{ledger::Transfer, registry::Registry, trace::PERMIT2};
+use crate::decoder::{
+    ledger::{to_primitive_log, Transfer},
+    registry::Registry,
+    trace::PERMIT2,
+    DecodedTrade,
+};
 
 sol! {
     /// ERC-20 `Approval` — emitted by token contracts, never by pools, so its emitters are
@@ -41,22 +47,23 @@ pub(crate) struct SandwichEvidence {
 }
 
 /// Scan the window around `victim_index` for the closest front/back pair that brackets the
-/// victim trade (see the module docs for the two conditions a pair must satisfy).
+/// victim trade (see the module docs for the three conditions a pair must satisfy).
 ///
 /// `receipts` is the block's full receipt list in block order; `victim_index` is the victim's
-/// position in that slice, and `victim_sender` its trader (excluded as a linking address — a
-/// trader on both sides of their own trade is not a sandwich). Candidate pairs are tried closest
-/// front first, then closest back, so the first match found is the tightest bracket.
+/// position in that slice. The victim's sender is excluded as a linking address — a trader on
+/// both sides of their own trade is not a sandwich. Candidate pairs are tried closest front
+/// first, then closest back, so the first match found is the tightest bracket.
 pub(crate) fn detect(
     receipts: &[TransactionReceipt],
     victim_index: usize,
-    victim_sender: Address,
+    victim: &DecodedTrade,
     registry: &Registry,
 ) -> Option<SandwichEvidence> {
     let victim_pools = pool_addresses(&receipts[victim_index], registry);
     if victim_pools.is_empty() {
         return None;
     }
+    let token = direction_token(victim.token_out, registry);
 
     let front_start = victim_index.saturating_sub(WINDOW);
     let back_end = (victim_index + WINDOW).min(receipts.len().saturating_sub(1));
@@ -65,12 +72,16 @@ pub(crate) fn detect(
         for back_index in (victim_index + 1)..=back_end {
             let front = &receipts[front_index];
             let back = &receipts[back_index];
-            let Some(attacker) = shared_attacker(front, back, victim_sender, registry) else {
+            let Some(attacker) = shared_attacker(front, back, victim.sender, registry) else {
                 continue;
             };
             let Some(pools) = overlapping_pools(&victim_pools, front, back, registry) else {
                 continue;
             };
+            let entities = direction_entities(front, back, attacker, victim.sender, registry);
+            if !accumulates_then_disposes(front, back, &entities, token) {
+                continue;
+            }
             return Some(SandwichEvidence {
                 front_tx: front.transaction_hash,
                 back_tx: back.transaction_hash,
@@ -158,12 +169,133 @@ fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<
     pools
 }
 
+/// The token whose flow confirms sandwich direction: the victim's output token, in the form
+/// receipts can see. Native ETH moves emit no log, so the wrapped form stands in — pools hold
+/// and transfer WETH even when the trader's side settles native.
+fn direction_token(victim_token_out: Address, registry: &Registry) -> Address {
+    if victim_token_out == Address::ZERO {
+        registry.wrapped_native()
+    } else {
+        victim_token_out
+    }
+}
+
+/// The addresses whose token flow can confirm the attacker's direction: the linking address
+/// itself, plus the pair's shared target contract when the link was a shared sender — a bot's
+/// inventory usually sits in its private contract, not in the EOA that signs.
+fn direction_entities(
+    front: &TransactionReceipt,
+    back: &TransactionReceipt,
+    attacker: Address,
+    victim_sender: Address,
+    registry: &Registry,
+) -> Vec<Address> {
+    let mut entities = vec![attacker];
+    if let (Some(front_to), Some(back_to)) = (front.to, back.to) {
+        if front_to == back_to &&
+            front_to != attacker &&
+            front_to != victim_sender &&
+            !registry.is_known(front_to)
+        {
+            entities.push(front_to);
+        }
+    }
+    entities
+}
+
+/// Whether any linked entity accumulated `token` in the front leg and disposed of it in the back
+/// leg — the shape of a real sandwich (buy the victim's output token before them, sell it after).
+///
+/// A linked pair without this flow is far more often benign repeat activity on a busy pool (an
+/// arbitrage bot trading it twice in the window) than a sandwich, so it is not flagged. The cost
+/// is missing an attacker whose legs move only native ETH — invisible in receipts — which is rare:
+/// bots keep inventory wrapped precisely because pools settle in WETH.
+fn accumulates_then_disposes(
+    front: &TransactionReceipt,
+    back: &TransactionReceipt,
+    entities: &[Address],
+    token: Address,
+) -> bool {
+    entities.iter().any(|&entity| {
+        let (front_received, front_sent) = token_flow(front, entity, token);
+        let (back_received, back_sent) = token_flow(back, entity, token);
+        front_received > front_sent && back_sent > back_received
+    })
+}
+
+/// `(received, sent)` totals of `token` for `entity` across a receipt's ERC-20 `Transfer` logs.
+fn token_flow(receipt: &TransactionReceipt, entity: Address, token: Address) -> (U256, U256) {
+    let mut received = U256::ZERO;
+    let mut sent = U256::ZERO;
+    for log in receipt.logs() {
+        if log.address() != token {
+            continue;
+        }
+        let Ok(transfer) = Transfer::decode_log(&to_primitive_log(log)) else {
+            continue;
+        };
+        if transfer.to == entity {
+            received = received.saturating_add(transfer.value);
+        }
+        if transfer.from == entity {
+            sent = sent.saturating_add(transfer.value);
+        }
+    }
+    (received, sent)
+}
+
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, U256};
+    use alloy::{
+        primitives::{address, U256},
+        rpc::types::Log,
+    };
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_pool_log, make_transfer_log, receipt, tx_hash};
+    use crate::decoder::{
+        test_utils::{addr, make_pool_log, make_transfer_log, receipt, tx_hash},
+        AttributionSource,
+    };
+
+    /// The victim fixture's output token, unless a test overrides it.
+    fn token_out() -> Address {
+        addr(60)
+    }
+
+    fn victim(sender: Address) -> DecodedTrade {
+        victim_swapping_into(sender, token_out())
+    }
+
+    fn victim_swapping_into(sender: Address, token_out: Address) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 1,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
+            sender,
+            token_in: addr(59),
+            token_out,
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(2_000u64),
+            venue_fee: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            sandwich: None,
+        }
+    }
+
+    /// Front-leg logs: touch `pool` and accumulate `token` into `entity` (the pool pays out).
+    fn buys(pool: Address, token: Address, entity: Address) -> Vec<Log> {
+        vec![make_pool_log(pool), make_transfer_log(token, pool, entity, U256::from(500u64))]
+    }
+
+    /// Back-leg logs: touch `pool` and dispose of `token` from `entity` (paid into the pool).
+    fn sells(pool: Address, token: Address, entity: Address) -> Vec<Log> {
+        vec![make_pool_log(pool), make_transfer_log(token, entity, pool, U256::from(500u64))]
+    }
 
     #[test]
     fn detects_same_from_bracket() {
@@ -171,12 +303,12 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(pool, token_out(), attacker)),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), sells(pool, token_out(), attacker)),
         ];
 
-        let evidence = detect(&receipts, 1, victim_sender, &Registry::ethereum()).unwrap();
+        let evidence = detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).unwrap();
         assert_eq!(evidence.front_tx, tx_hash(1));
         assert_eq!(evidence.back_tx, tx_hash(3));
         assert_eq!(evidence.attacker, attacker);
@@ -189,29 +321,29 @@ mod tests {
         let shared_to = addr(77);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), addr(20), Some(shared_to), vec![make_pool_log(pool)]),
+            receipt(tx_hash(1), addr(20), Some(shared_to), buys(pool, token_out(), shared_to)),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), addr(21), Some(shared_to), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), addr(21), Some(shared_to), sells(pool, token_out(), shared_to)),
         ];
 
-        let evidence = detect(&receipts, 1, victim_sender, &Registry::ethereum()).unwrap();
+        let evidence = detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).unwrap();
         assert_eq!(evidence.attacker, shared_to);
     }
 
     #[test]
     fn same_to_registry_known_is_not_flagged() {
         // 1inch is a registered solver: two unrelated traders entering it must not read as a
-        // shared-attacker link.
+        // shared-attacker link, even when the token flows happen to line up.
         let victim_sender = addr(1);
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), addr(20), Some(oneinch), vec![make_pool_log(pool)]),
+            receipt(tx_hash(1), addr(20), Some(oneinch), buys(pool, token_out(), oneinch)),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), addr(21), Some(oneinch), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), addr(21), Some(oneinch), sells(pool, token_out(), oneinch)),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -221,12 +353,22 @@ mod tests {
         let pool = addr(50);
         let unrelated_pool = addr(51);
         let receipts = vec![
-            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(unrelated_pool)]),
+            receipt(
+                tx_hash(1),
+                attacker,
+                Some(addr(10)),
+                buys(unrelated_pool, token_out(), attacker),
+            ),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(unrelated_pool)]),
+            receipt(
+                tx_hash(3),
+                attacker,
+                Some(addr(12)),
+                sells(unrelated_pool, token_out(), attacker),
+            ),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -237,12 +379,12 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(pool, token_out(), attacker)),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(addr(51))]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), sells(addr(51), token_out(), attacker)),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -251,12 +393,12 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(addr(51))]),
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(addr(51), token_out(), attacker)),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), sells(pool, token_out(), attacker)),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -269,7 +411,88 @@ mod tests {
             receipt(tx_hash(3), addr(21), Some(addr(31)), vec![make_pool_log(pool)]),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
+    }
+
+    #[test]
+    fn linked_pair_without_token_flow_is_not_flagged() {
+        // Attacker link and pool overlap hold, but neither leg moves the victim's output token
+        // for any linked entity — repeat activity on a busy pool, not a bracket.
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(pool)]),
+        ];
+
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
+    }
+
+    #[test]
+    fn same_direction_both_legs_is_not_flagged() {
+        // An arbitrage bot buying the same token on the same pool twice around an unrelated
+        // victim accumulates on both legs — no dispose leg, no sandwich.
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(pool, token_out(), attacker)),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), buys(pool, token_out(), attacker)),
+        ];
+
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
+    }
+
+    #[test]
+    fn inventory_in_shared_contract_confirms_direction() {
+        // Typical bot shape: one EOA signs both legs (the link), but the token inventory moves
+        // through its private contract — the shared `to` — not the EOA itself.
+        let attacker_eoa = addr(90);
+        let bot_contract = addr(80);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(
+                tx_hash(1),
+                attacker_eoa,
+                Some(bot_contract),
+                buys(pool, token_out(), bot_contract),
+            ),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(3),
+                attacker_eoa,
+                Some(bot_contract),
+                sells(pool, token_out(), bot_contract),
+            ),
+        ];
+
+        let evidence = detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).unwrap();
+        assert_eq!(evidence.attacker, attacker_eoa);
+    }
+
+    #[test]
+    fn native_output_checks_wrapped_flow() {
+        // The victim receives native ETH, which emits no log: the attacker's legs show as WETH
+        // transfers instead, so direction is confirmed on the wrapped form.
+        let registry = Registry::ethereum();
+        let weth = registry.wrapped_native();
+        let attacker = addr(90);
+        let victim_sender = addr(1);
+        let pool = addr(50);
+        let receipts = vec![
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(pool, weth, attacker)),
+            receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), sells(pool, weth, attacker)),
+        ];
+
+        let evidence =
+            detect(&receipts, 1, &victim_swapping_into(victim_sender, Address::ZERO), &registry)
+                .unwrap();
+        assert_eq!(evidence.attacker, attacker);
     }
 
     #[test]
@@ -280,16 +503,16 @@ mod tests {
         // Victim at index 3; the matching pair sits at distance 3 on each side (indices 0 and 6),
         // one step outside the W=2 window, so no bracket must be reported.
         let receipts = vec![
-            receipt(tx_hash(0), attacker, Some(addr(40)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(0), attacker, Some(addr(40)), buys(pool, token_out(), attacker)),
             receipt(tx_hash(1), addr(21), Some(addr(41)), vec![]),
             receipt(tx_hash(2), addr(22), Some(addr(42)), vec![]),
             receipt(tx_hash(3), victim_sender, Some(addr(43)), vec![make_pool_log(pool)]),
             receipt(tx_hash(4), addr(24), Some(addr(44)), vec![]),
             receipt(tx_hash(5), addr(25), Some(addr(45)), vec![]),
-            receipt(tx_hash(6), attacker, Some(addr(46)), vec![make_pool_log(pool)]),
+            receipt(tx_hash(6), attacker, Some(addr(46)), sells(pool, token_out(), attacker)),
         ];
 
-        assert!(detect(&receipts, 3, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 3, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -299,14 +522,34 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(0), far_attacker, Some(addr(20)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(1), close_attacker, Some(addr(21)), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(0),
+                far_attacker,
+                Some(addr(20)),
+                buys(pool, token_out(), far_attacker),
+            ),
+            receipt(
+                tx_hash(1),
+                close_attacker,
+                Some(addr(21)),
+                buys(pool, token_out(), close_attacker),
+            ),
             receipt(tx_hash(2), victim_sender, Some(addr(22)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), close_attacker, Some(addr(23)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(4), far_attacker, Some(addr(24)), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(3),
+                close_attacker,
+                Some(addr(23)),
+                sells(pool, token_out(), close_attacker),
+            ),
+            receipt(
+                tx_hash(4),
+                far_attacker,
+                Some(addr(24)),
+                sells(pool, token_out(), far_attacker),
+            ),
         ];
 
-        let evidence = detect(&receipts, 2, victim_sender, &Registry::ethereum()).unwrap();
+        let evidence = detect(&receipts, 2, &victim(victim_sender), &Registry::ethereum()).unwrap();
         assert_eq!(evidence.attacker, close_attacker);
     }
 
@@ -316,12 +559,22 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), victim_sender, Some(addr(10)), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(1),
+                victim_sender,
+                Some(addr(10)),
+                buys(pool, token_out(), victim_sender),
+            ),
             receipt(tx_hash(2), victim_sender, Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), victim_sender, Some(addr(12)), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(3),
+                victim_sender,
+                Some(addr(12)),
+                sells(pool, token_out(), victim_sender),
+            ),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -330,12 +583,22 @@ mod tests {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
-            receipt(tx_hash(1), addr(20), Some(victim_sender), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(1),
+                addr(20),
+                Some(victim_sender),
+                buys(pool, token_out(), victim_sender),
+            ),
             receipt(tx_hash(2), addr(30), Some(addr(11)), vec![make_pool_log(pool)]),
-            receipt(tx_hash(3), addr(21), Some(victim_sender), vec![make_pool_log(pool)]),
+            receipt(
+                tx_hash(3),
+                addr(21),
+                Some(victim_sender),
+                sells(pool, token_out(), victim_sender),
+            ),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -344,17 +607,17 @@ mod tests {
         let victim_sender = addr(1);
         let token = addr(60);
         let receipts = vec![
-            receipt(tx_hash(1), attacker, Some(addr(10)), vec![make_pool_log(addr(50))]),
+            receipt(tx_hash(1), attacker, Some(addr(10)), buys(addr(50), token_out(), attacker)),
             receipt(
                 tx_hash(2),
                 victim_sender,
                 Some(addr(11)),
                 vec![make_transfer_log(token, victim_sender, addr(11), U256::from(1u64))],
             ),
-            receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(addr(50))]),
+            receipt(tx_hash(3), attacker, Some(addr(12)), sells(addr(50), token_out(), attacker)),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -371,7 +634,7 @@ mod tests {
             receipt(tx_hash(3), attacker, Some(addr(12)), vec![make_pool_log(weth)]),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &registry).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &registry).is_none());
     }
 
     #[test]
@@ -387,7 +650,7 @@ mod tests {
                 vec![Approval::SIGNATURE_HASH, owner.into_word(), addr(70).into_word()],
                 alloy::primitives::Bytes::new(),
             );
-            alloy::rpc::types::Log { inner: primitive, ..Default::default() }
+            Log { inner: primitive, ..Default::default() }
         };
         let receipts = vec![
             receipt(tx_hash(1), attacker, Some(addr(10)), vec![approval(attacker)]),
@@ -395,7 +658,7 @@ mod tests {
             receipt(tx_hash(3), attacker, Some(addr(12)), vec![approval(attacker)]),
         ];
 
-        assert!(detect(&receipts, 1, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 1, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 
     #[test]
@@ -404,6 +667,6 @@ mod tests {
         let receipts =
             vec![receipt(tx_hash(0), victim_sender, Some(addr(9)), vec![make_pool_log(addr(50))])];
 
-        assert!(detect(&receipts, 0, victim_sender, &Registry::ethereum()).is_none());
+        assert!(detect(&receipts, 0, &victim(victim_sender), &Registry::ethereum()).is_none());
     }
 }
