@@ -105,3 +105,19 @@ fee_collectors = [
     "0xe3478b0bb1a5084567c319096437924948be1964",
     "0xf326e4de8f66a0bdc0970b79e0924e33c79f1915",
 ]
+
+# MetaMask's calldata solver vocabulary: its router names the solver API behind each swap in an
+# aggregatorId like "oneInchV6FeeDynamic" or "okx6". The first substring below found in the
+# lowercased id maps it to the solver label used in this book — trimming MetaMask's version/fee
+# decoration, not a 1:1 rename. Ids matching nothing pass through as-is: still more informative
+# than a raw executor address, and a signal to extend this table.
+[venues.metamask.solver_aliases]
+oneinch = "1inch"
+zeroex = "0x"
+uniswap = "uniswap"
+okx = "okx"
+kyber = "kyberswap"
+paraswap = "paraswap"
+airswap = "airswap"
+openocean = "openocean"
+hashflow = "hashflow"

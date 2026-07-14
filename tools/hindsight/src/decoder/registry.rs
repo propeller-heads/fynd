@@ -7,7 +7,7 @@
 //! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
 };
@@ -34,14 +34,37 @@ struct AddressBook {
     labels: HashMap<Address, String>,
 }
 
-/// A venue's addresses on one chain: the contracts users enter through and the collectors its
-/// fee skims land on. Keyed by venue name in the book; the name binds to a decode strategy at
-/// load time (see [`crate::decoder::venues::Venue::from_name`]).
+/// A venue's book section on one chain: the contracts users enter through, the collectors its
+/// fee skims land on, and its calldata solver vocabulary. Keyed by venue name in the book; the
+/// name binds to a decode strategy at load time (see
+/// [`crate::decoder::venues::Venue::from_name`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
     pub(crate) entry_points: HashSet<Address>,
     pub(crate) fee_collectors: HashSet<Address>,
+    /// Lowercase substrings of the venue's calldata solver ids, mapped to the solver name used
+    /// in this book. Ordered for deterministic matching; empty for venues that declare no
+    /// solver in calldata.
+    #[serde(default)]
+    solver_aliases: BTreeMap<String, String>,
+}
+
+impl VenueAddresses {
+    /// Normalize a solver id this venue declared in calldata to the book's solver vocabulary:
+    /// the first alias needle (in alias order) contained in the lowercased id names the solver,
+    /// trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a 1:1 rename.
+    /// Unmatched ids pass through as-is: still more informative than a raw executor address,
+    /// and a signal to extend the book.
+    pub(crate) fn normalize_solver(&self, id: &str) -> String {
+        let lower = id.to_lowercase();
+        for (needle, name) in &self.solver_aliases {
+            if lower.contains(needle) {
+                return name.clone();
+            }
+        }
+        id.to_string()
+    }
 }
 
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
@@ -99,7 +122,7 @@ impl Registry {
     }
 
     fn from_toml(text: &str) -> anyhow::Result<Self> {
-        let book: AddressBook =
+        let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
         // A venue section only carries addresses; its behavior is bound by name in code. An
@@ -126,6 +149,14 @@ impl Registry {
             .into_iter()
             .collect();
         usd_stablecoins.sort_unstable();
+        // Alias needles match against lowercased ids, so a mixed-case needle in the book would
+        // silently never match — canonicalize at load.
+        for venue in book.venues.values_mut() {
+            venue.solver_aliases = std::mem::take(&mut venue.solver_aliases)
+                .into_iter()
+                .map(|(needle, name)| (needle.to_lowercase(), name))
+                .collect();
+        }
 
         Ok(Self {
             solver_names,
@@ -261,6 +292,38 @@ mod tests {
         assert!(registry.is_solver(oneinch));
         assert!(registry.is_known(relay));
         assert!(!registry.is_solver(relay));
+    }
+
+    #[test]
+    fn normalize_solver_trims_metamask_ids_and_passes_unknown_through() {
+        let registry = Registry::ethereum();
+        let metamask = registry.venue("metamask").unwrap();
+        assert_eq!(metamask.normalize_solver("oneInchV6FeeDynamic"), "1inch");
+        assert_eq!(metamask.normalize_solver("uniswapPermit2FeeDynamic"), "uniswap");
+        assert_eq!(metamask.normalize_solver("okx6"), "okx");
+        assert_eq!(metamask.normalize_solver("someFutureSolver"), "someFutureSolver");
+    }
+
+    #[test]
+    fn solver_aliases_are_scoped_to_their_venue() {
+        // The alias table is one venue's calldata vocabulary; a venue without one passes every
+        // id through unchanged.
+        let registry = Registry::ethereum();
+        let relay = registry.venue("relay").unwrap();
+        assert_eq!(relay.normalize_solver("oneInchV6FeeDynamic"), "oneInchV6FeeDynamic");
+    }
+
+    #[test]
+    fn mixed_case_alias_needle_still_matches() {
+        // Needles are canonicalized to lowercase at load, so a capitalized needle in the book
+        // matches the same ids as a lowercase one.
+        let book = ETHEREUM_TOML.replace(
+            "[venues.metamask.solver_aliases]",
+            "[venues.metamask.solver_aliases]\nBeBop = \"bebop\"",
+        );
+        let registry = Registry::from_toml(&book).unwrap();
+        let metamask = registry.venue("metamask").unwrap();
+        assert_eq!(metamask.normalize_solver("bebopJamV2"), "bebop");
     }
 
     #[test]

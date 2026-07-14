@@ -10,7 +10,10 @@
 use alloy::{primitives::Address, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    ledger::TransferLedger, registry::Registry, strategy::Flow, venues::venue_fee_flow,
+    ledger::TransferLedger,
+    registry::{Registry, VenueAddresses},
+    strategy::Flow,
+    venues::venue_fee_flow,
 };
 
 sol! {
@@ -19,38 +22,16 @@ sol! {
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
 
-/// The solver label declared in the router calldata's `aggregatorId`, normalized to the
-/// registry's solver names.
+/// The solver label declared in the router calldata's `aggregatorId`, normalized to the book's
+/// solver names via the `[venues.metamask.solver_aliases]` section.
 ///
 /// `MetaMask` states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
 /// route moves no native value and enters through Permit2 — so the calldata declaration is the
-/// authoritative source. Unrecognized ids pass through as-is: "airswapV4" is still more
-/// informative than a raw executor address.
-fn solver_from_calldata(input: &[u8]) -> Option<String> {
+/// authoritative source.
+fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<String> {
     let call = swapCall::abi_decode(input).ok()?;
-    Some(normalize(&call.aggregatorId))
-}
-
-fn normalize(id: &str) -> String {
-    let lower = id.to_lowercase();
-    let names = [
-        ("oneinch", "1inch"),
-        ("zeroex", "0x"),
-        ("uniswap", "uniswap"),
-        ("okx", "okx"),
-        ("kyber", "kyberswap"),
-        ("paraswap", "paraswap"),
-        ("airswap", "airswap"),
-        ("openocean", "openocean"),
-        ("hashflow", "hashflow"),
-    ];
-    for (needle, name) in names {
-        if lower.contains(needle) {
-            return name.to_string();
-        }
-    }
-    id.to_string()
+    Some(metamask.normalize_solver(&call.aggregatorId))
 }
 
 /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of it,
@@ -64,7 +45,7 @@ pub(crate) fn decode(
 ) -> Option<Flow> {
     let metamask = registry.venue("metamask")?;
     let mut flow = venue_fee_flow(ledger, sender, entry_point, &metamask.fee_collectors)?;
-    flow.solver_override = solver_from_calldata(input);
+    flow.solver_override = solver_from_calldata(input, metamask);
     Some(flow)
 }
 
@@ -103,6 +84,8 @@ mod tests {
 
     #[test]
     fn solver_from_calldata_normalizes_known_ids() {
+        let registry = Registry::ethereum();
+        let metamask = registry.venue("metamask").unwrap();
         for (id, want) in [
             ("oneInchV6FeeDynamic", "1inch"),
             ("uniswapPermit2FeeDynamic", "uniswap"),
@@ -115,14 +98,16 @@ mod tests {
                 amount: U256::from(1000),
                 data: Bytes::default(),
             };
-            assert_eq!(solver_from_calldata(&call.abi_encode()).as_deref(), Some(want));
+            assert_eq!(solver_from_calldata(&call.abi_encode(), metamask).as_deref(), Some(want));
         }
     }
 
     #[test]
     fn solver_from_calldata_declines_other_selectors() {
-        assert_eq!(solver_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
-        assert_eq!(solver_from_calldata(&[]), None);
+        let registry = Registry::ethereum();
+        let metamask = registry.venue("metamask").unwrap();
+        assert_eq!(solver_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00], metamask), None);
+        assert_eq!(solver_from_calldata(&[], metamask), None);
     }
 
     #[test]
