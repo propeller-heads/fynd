@@ -21,6 +21,8 @@ Subcommands via `cargo run -p fynd-benchmark --release --`:
 - **`scale`** — Measure how solver throughput scales with worker thread count (in-process, no external solver needed)
 - **`capacity`** — Step an RPS ladder against a solver until p95 breaches the latency SLO; reports the highest sustainable rate
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
+- **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x); writes a JSON report
+- **`generate-requests`** — Generate a synthetic per-chain request dataset (weighted by Tycho pool counts) for capacity testing on non-Ethereum chains
 
 ---
 

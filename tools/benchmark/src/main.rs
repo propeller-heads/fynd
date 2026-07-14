@@ -11,6 +11,7 @@ mod capacity_report;
 mod compare;
 mod config;
 mod exporter;
+mod generate_requests;
 mod pair_selector;
 mod requests;
 mod runner;
@@ -45,6 +46,8 @@ enum Command {
     Audit(audit::Args),
     /// Measure the highest sustainable request rate within the latency SLO
     Capacity(capacity::Args),
+    /// Generate a synthetic per-chain request dataset for capacity testing
+    GenerateRequests(generate_requests::Args),
 }
 
 /// Download the full 10k aggregator trade dataset for benchmarking.
@@ -72,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Scale(args) => scale::run(args).await,
         Command::Audit(args) => audit::run(args).await,
         Command::Capacity(args) => capacity::run(args).await,
+        Command::GenerateRequests(args) => generate_requests::run(args).await,
     }
 }
 

@@ -20,6 +20,7 @@ alloy = { workspace = true }
 bytes = { workspace = true }
 num-bigint = { workspace = true }
 fastrand = "2.3"
+rand = "0.9"
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
