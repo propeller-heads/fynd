@@ -13,7 +13,7 @@ use alloy::{primitives::U256, rpc::types::Log};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
-/// This is the number the client compared against at decision time — what the solver's API
+/// This is the number the venue compared against at decision time — what the solver's API
 /// promised — as opposed to the settled amount, which is what execution delivered. The fields
 /// carry no solver name (the record's `solver` column already says who); see
 /// [`embedded_quote`] for which solvers declare one and how.

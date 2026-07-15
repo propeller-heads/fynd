@@ -33,11 +33,10 @@ fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
 }
 
-/// Metric label for a range's venue: registered venues (the registry's `[venues.*]` sections
-/// — the integrator front-ends the comparison is pitched at) keep their name; everything else —
-/// direct router entries, bots, unregistered addresses — collapses to "other". Keeps the
-/// dashboard's venue filter to the registered names plus "other"; full venue detail stays in
-/// the JSONL records.
+/// Metric label for a range's venue. Venues registered in the address book — the integrator
+/// front-ends the comparison is pitched at — keep their name; everything else (direct router
+/// entries, bots, unregistered addresses) collapses to "other". This keeps the dashboard's
+/// venue filter bounded; full venue detail stays in the JSONL records.
 fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
     if registry.venue(venue).is_some() {
         venue
@@ -46,12 +45,11 @@ fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
     }
 }
 
-/// Metric label for a range's settling solver: registered solver names pass through, everything
-/// else collapses to "unknown". Attribution can also produce raw addresses (largest-call guess),
-/// venue names (fallback tier), and calldata-declared names from a venue's own vocabulary
-/// (`MetaMask` aggregator ids like "pancakeSwapRouterFeeDynamic") — none belong in the bounded
+/// Metric label for a range's settling solver. Registered solver names pass through; everything
+/// else collapses to "unknown". Attribution can also produce raw addresses, venue names, and
+/// venue-declared ids like "pancakeSwapRouterFeeDynamic" — none of which belong in a bounded
 /// metric vocabulary. The original label stays in the JSONL records, where it serves as the
-/// registry-expansion worklist.
+/// worklist for expanding the address book.
 fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
     if registry.is_solver_name(solver) {
         solver
@@ -194,10 +192,10 @@ pub(crate) fn record_range(
 /// metrics compare gross vs gross, matching the headline verdict.
 ///
 /// A sandwiched state's output was moved by MEV, not by Fynd's own routing, so it skips the
-/// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD pair carry no outcome
-/// label, so skipping is the only way to keep the "value of adding Fynd" aggregates clean. The
-/// USD value is still computed and returned so the per-trade Loki line (in [`record_range`])
-/// keeps logging.
+/// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD histograms carry no
+/// outcome label, so skipping is the only way to keep the "value of adding Fynd" aggregates
+/// clean. The USD value is still computed and returned so the per-trade Loki line (in
+/// [`record_range`]) keeps logging.
 ///
 /// Returns the signed USD savings it computed, `None` when the state is unsolved or unpriced.
 fn record_state(

@@ -40,13 +40,14 @@ pub(crate) fn decode(
 /// no net flow (so sender netting finds nothing) and the swap moves Relay's own liquidity.
 ///
 /// Anchors on the fee collector, which always funds the input: `token_in` is the single token it
-/// net-sends. The output is either the token that returns to the collector (an **internal**
-/// inventory rebalance) or the asset received by the single external **pure-sink** recipient —
-/// see [`TransferLedger::sink_receipts`] — for a cross-chain order fill.
+/// net-sends. The output is one of two shapes — the token that comes back to the collector (an
+/// internal inventory rebalance), or the asset received by the single external recipient that
+/// only receives and never sends (a cross-chain order fill; see
+/// [`TransferLedger::sink_receipts`]).
 ///
-/// Returns `None` (declines) when the shape is ambiguous: not exactly one input token, a same-token
-/// "swap", more than one token back to the collector, or more than one external recipient/output
-/// (a batched multi-order fill, like the multi-leg netting guard).
+/// Declines (returns `None`) when the shape is ambiguous: not exactly one input token, a
+/// same-token "swap", more than one token back to the collector, or more than one external
+/// recipient or output (a batched multi-order fill, like the multi-leg netting guard).
 fn decode_rebalance(
     ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,

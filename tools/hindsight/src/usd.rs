@@ -1,14 +1,14 @@
 //! USD valuation from Fynd's own token prices.
 //!
-//! The in-process solver exposes, via its derived data, each token's mid-price relative to the gas
-//! token (ETH): `price[token]` is the token's native-unit amount per 1 ETH-wei (tycho's
-//! best-spread mid-price). Those prices are ETH-denominated, not USD, so to report USD we anchor
-//! ETH→USD using the stablecoins' own entries in the same price map (a stablecoin is worth ~$1 per
-//! `10^decimals` native units). Which stablecoins anchor — and which wrapped-native token is
-//! interchangeable with the gas token — comes from the chain's address book, so valuation carries
-//! no chain knowledge of its own. This values any trade whose output token Fynd has priced, using
-//! the solver's self-consistent price view. The prices are f64 approximations suitable for a USD
-//! estimate, not execution.
+//! The in-process solver prices every token it knows relative to the gas token (ETH):
+//! `price[token]` is the token's native-unit amount per 1 ETH-wei (tycho's best-spread
+//! mid-price). Those prices are ETH-denominated, not USD, so ETH itself is anchored to USD via
+//! the stablecoins' own entries in the same price map — a stablecoin is worth ~$1 per
+//! `10^decimals` native units. Which stablecoins anchor, and which wrapped-native token is
+//! interchangeable with the gas token, comes from the chain's address book, so valuation carries
+//! no chain knowledge of its own. Any trade whose output token Fynd has priced can be valued
+//! this way, using the solver's self-consistent price view. The prices are f64 approximations —
+//! fine for a USD estimate, not for execution.
 
 use std::collections::HashMap;
 

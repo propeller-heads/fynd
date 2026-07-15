@@ -1,13 +1,14 @@
 //! Bracket-pair sandwich detection.
 //!
-//! For a victim trade, scans the receipts immediately around it — already fetched by
-//! [`super::Decoder::decode_block`] in one `eth_getBlockReceipts` call, so detection makes no
-//! extra RPC calls — for a front-run/back-run pair that links to one attacker, touches a pool
-//! the victim's swap touched, and moves the victim's output token in sandwich direction
-//! (accumulate before the victim, dispose after). See
-//! `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the heuristic
-//! and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool overlap to
-//! per-protocol).
+//! For each victim trade, scan the transactions immediately around it in the block for a
+//! front-run/back-run pair that satisfies three conditions: both legs link to one attacker,
+//! both touch a pool the victim's swap touched, and the attacker accumulates the victim's
+//! output token before the victim trades and disposes of it after. The block's receipts were
+//! already fetched for decoding, so detection costs no extra RPC calls.
+//!
+//! See `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the
+//! heuristic and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool
+//! overlap to per-protocol).
 
 use std::collections::HashSet;
 
@@ -93,11 +94,12 @@ pub(crate) fn detect(
 }
 
 /// Whether `front` and `back` share a link that plausibly identifies one attacker running both
-/// legs: the same sender, or the same target contract that is not a registry-known venue or
-/// solver. The registry exclusion keeps two unrelated users entering the same popular router
-/// (Universal Router, 1inch) from tripping the same-`to` check — real sandwich bots settle
-/// through private contracts. A link matching the victim's own sender is excluded: a trader on
-/// both sides of their own trade is not a sandwich.
+/// legs: the same sender, or the same target contract.
+///
+/// A shared target only counts when it is not a known venue or solver — otherwise two unrelated
+/// users entering the same popular router (Universal Router, 1inch) would look linked, while
+/// real sandwich bots settle through private contracts. A link matching the victim's own sender
+/// is also excluded: a trader on both sides of their own trade is not a sandwich.
 fn shared_attacker(
     front: &TransactionReceipt,
     back: &TransactionReceipt,

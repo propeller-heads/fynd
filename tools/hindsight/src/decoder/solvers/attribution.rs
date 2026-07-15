@@ -18,13 +18,13 @@ pub(crate) enum AttributionSource {
     Declared,
     /// The entry point (`tx.to`) is itself a known solver router: the trade settled there.
     EntryPoint,
-    /// A known solver router was called inside the trace (client-wrapped entries).
+    /// A known solver router was called inside the trace (venue-wrapped entries).
     TraceMatch,
     /// No known router anywhere: best guess is the external call that moved the most native
     /// value (an unknown router's address).
     LargestCall,
     /// Even the guess was indeterminate (e.g. a token→token trace where no call moves value).
-    /// The record is labeled with its entry point — typically the client's name — flagging it
+    /// The record is labeled with its entry point — typically the venue's name — flagging it
     /// for registry expansion.
     Fallback,
 }

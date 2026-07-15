@@ -2,10 +2,10 @@
 //!
 //! `MetaMask`'s Swap Router routes through a real solver and skims its fee (~87.5 bps, plus a gas
 //! recoup on gasless "smart swaps") to a fee wallet — from the input token before swapping or
-//! from the output after. Without backing that skim out, every comparison credits Fynd with
-//! `MetaMask`'s own fee: the skim is charged whichever router `MetaMask` plugs in, so it is not
-//! value better routing can recover. On dust trades the skim dominates and fabricated
-//! extreme "wins".
+//! from the output after. The skim is charged whichever router `MetaMask` plugs in, so it is not
+//! value better routing can recover; without backing it out, every comparison credits Fynd with
+//! `MetaMask`'s own fee, and on dust trades — where the skim dominates — that fabricates extreme
+//! "wins".
 
 use alloy::{primitives::Address, sol, sol_types::SolCall};
 

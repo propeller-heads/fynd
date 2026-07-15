@@ -98,7 +98,8 @@ pub(crate) struct RangeComparison {
 
 /// Solves a sell order at the current block state and steps to the next block. The production
 /// implementation ([`monitor`]) drives an in-process `fynd-core` solver via
-/// [`BlockStepController`]; tests use a mock returning a top- then back-of-block outcome.
+/// [`fynd_core::BlockStepController`]; tests use a mock returning a top- then back-of-block
+/// outcome.
 #[async_trait]
 pub(crate) trait SteppingSolver {
     /// Solve a sell order at the solver's current block state.
