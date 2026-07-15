@@ -1195,6 +1195,13 @@ impl HealthStatus {
 }
 
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+///
+/// `/v1/info` is a public wire contract. When extending this type: add the field with
+/// `#[serde(default)]` and a builder setter — additive, so older clients ignore it and newer
+/// clients still deserialize responses from older servers. Never rename, remove, or retype an
+/// existing field: that breaks the contract. Every shape change is surfaced by the OpenAPI/TS
+/// drift check (regenerate via `./scripts/update-openapi.sh`) and the semver gate, so it cannot
+/// merge unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[non_exhaustive]
