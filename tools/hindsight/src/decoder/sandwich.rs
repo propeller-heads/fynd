@@ -275,6 +275,7 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
+            decode_strategy: "netting",
             sender,
             token_in: addr(59),
             token_out,

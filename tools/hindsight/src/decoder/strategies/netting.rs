@@ -26,6 +26,10 @@ pub(crate) struct TransferNetting;
 
 #[async_trait]
 impl<P: Provider> DecodeStrategy<P> for TransferNetting {
+    fn name(&self) -> &'static str {
+        "netting"
+    }
+
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<Flow> {
         let sender = ctx.receipt.from;
         match trader_shape(ctx.entry_point, ctx.registry) {

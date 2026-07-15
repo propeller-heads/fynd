@@ -67,6 +67,9 @@ pub(crate) struct DecodedTrade {
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
+    /// Which decode strategy recovered this trade (see `strategies`). Once several strategies
+    /// exist this measures how often each one carries a trade the others could not.
+    pub decode_strategy: &'static str,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -234,12 +237,12 @@ impl<P: Provider> Decoder<P> {
         let mut flow = None;
         for decode_strategy in strategies.iter() {
             if let Some(decoded) = decode_strategy.decode(&mut ctx).await {
-                flow = Some(decoded);
+                flow = Some((decode_strategy.name(), decoded));
                 break;
             }
         }
 
-        let Some(mut flow) = flow else {
+        let Some((decode_strategy, mut flow)) = flow else {
             warn!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
@@ -288,6 +291,7 @@ impl<P: Provider> Decoder<P> {
             venue: registry.label(entry_point),
             solver: attribution.solver,
             solver_source: attribution.source,
+            decode_strategy,
             sender: flow.tracked,
             token_in: flow.swap.token_in,
             token_out: flow.swap.token_out,

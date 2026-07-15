@@ -42,6 +42,10 @@ use crate::decoder::{
 /// an address for contract code.
 #[async_trait]
 pub(crate) trait DecodeStrategy<P: Provider>: Send + Sync {
+    /// Label recorded on the trades this strategy decoded, so the JSONL records say which
+    /// method produced each trade (deliberately not a metric label).
+    fn name(&self) -> &'static str;
+
     /// Recover the trader's flow, or `None` when this method cannot decode the transaction.
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<Flow>;
 }
