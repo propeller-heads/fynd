@@ -74,6 +74,7 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
         Verdict::Loss => "loss",
         Verdict::CoverageMiss => "coverage_miss",
         Verdict::Unsolvable => "unsolvable",
+        Verdict::Sandwiched => "sandwiched",
     }
 }
 
@@ -187,7 +188,13 @@ pub(crate) fn record_range(
 /// Fynd beats the settled trade; a venue routes elsewhere when Fynd is worse). All highlighted
 /// metrics compare gross vs gross, matching the headline verdict.
 ///
-/// Returns the signed USD savings it recorded, `None` when the state is unsolved or unpriced.
+/// A sandwiched state's output was moved by MEV, not by Fynd's own routing, so it skips the
+/// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD pair carry no outcome
+/// label, so skipping is the only way to keep the "value of adding Fynd" aggregates clean. The
+/// USD value is still computed and returned so the per-trade Loki line (in [`record_range`])
+/// keeps logging.
+///
+/// Returns the signed USD savings it computed, `None` when the state is unsolved or unpriced.
 fn record_state(
     range: &RangeComparison,
     state: &StateResult,
@@ -205,16 +212,20 @@ fn record_state(
     )
     .increment(1);
 
-    if let Some(bps) = state.deltas.raw_bps {
-        histogram!(
-            SAVINGS_BPS,
-            "venue" => labels.venue.to_string(),
-            "solver" => labels.solver.to_string(),
-            "chain" => labels.chain.to_string(),
-            "outcome" => outcome_label(state.verdict).to_string(),
-            "state" => state_label,
-        )
-        .record(bps);
+    let sandwiched = state.verdict == Verdict::Sandwiched;
+
+    if !sandwiched {
+        if let Some(bps) = state.deltas.raw_bps {
+            histogram!(
+                SAVINGS_BPS,
+                "venue" => labels.venue.to_string(),
+                "solver" => labels.solver.to_string(),
+                "chain" => labels.chain.to_string(),
+                "outcome" => outcome_label(state.verdict).to_string(),
+                "state" => state_label,
+            )
+            .record(bps);
+        }
     }
 
     let Outcome::Solved(solved) = &state.outcome else {
@@ -222,6 +233,10 @@ fn record_state(
     };
     let usd =
         usd::savings_usd(range.token_out, solved.amount_out, range.settled_amount_out, prices)?;
+    if sandwiched {
+        return Some(usd);
+    }
+
     if is_usd_outlier(usd) {
         warn!(
             tx = %range.tx_hash,
@@ -350,7 +365,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade},
+        decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -358,6 +373,7 @@ mod tests {
         DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 21_000_000,
+            tx_index: 0,
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
@@ -370,6 +386,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         }
     }
 
@@ -388,6 +405,7 @@ mod tests {
         assert_eq!(outcome_label(Verdict::Loss), "loss");
         assert_eq!(outcome_label(Verdict::CoverageMiss), "coverage_miss");
         assert_eq!(outcome_label(Verdict::Unsolvable), "unsolvable");
+        assert_eq!(outcome_label(Verdict::Sandwiched), "sandwiched");
     }
 
     #[test]
@@ -582,5 +600,42 @@ mod tests {
         // No solved state and no prices → no savings/improvement samples.
         assert!(!rendered.contains("hindsight_savings_bps"));
         assert!(!rendered.contains("hindsight_improvement_usd"));
+    }
+
+    #[test]
+    fn record_range_skips_savings_when_sandwiched() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let mut sandwiched = trade(usdc, 1_000_000_000);
+        sandwiched.sandwich = Some(SandwichEvidence {
+            front_tx: TxHash::repeat_byte(0xaa),
+            back_tx: TxHash::repeat_byte(0xbb),
+            attacker: Address::repeat_byte(0xcc),
+            pools: vec![Address::repeat_byte(0xdd)],
+        });
+        let prices = usd::PriceMap::from([(usdc, 2e-9)]);
+        let range = build_range(
+            &sandwiched,
+            &prices,
+            solved(1_100_000_000, 1_090_000_000),
+            solved(1_100_000_000, 1_090_000_000),
+        );
+        assert_eq!(range.verdict, Verdict::Sandwiched);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        assert!(rendered.contains("outcome=\"sandwiched\""), "rendered: {rendered}");
+        // Volume is still tracked, tagged with the sandwiched outcome — only the "value of adding
+        // Fynd" histograms are excluded.
+        assert!(rendered.contains("hindsight_volume_usd"));
+        assert!(!rendered.contains("hindsight_savings_bps"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_savings_usd"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_improvement_usd"), "rendered: {rendered}");
     }
 }
