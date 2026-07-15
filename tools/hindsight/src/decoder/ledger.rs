@@ -57,15 +57,20 @@ pub(crate) struct NetSwap {
     pub amount_out: U256,
 }
 
-/// A token's flow through the whole transaction, tracked alongside the netted
-/// per-address balances so residue legs can be told apart from real ones.
+/// One token's totals from a single pass over a transaction's transfers, seen from one
+/// tracked address. `gross` and `routed_third_party` describe the whole transaction's flow of
+/// the token — facts the tracked address's own totals cannot tell, which the residue rules in
+/// [`TransferLedger::net_swap`] need.
 #[derive(Default)]
-struct TokenFlow {
-    /// Total value of the token moved in the transaction, by any party.
+struct TokenAmounts {
+    /// Gross amount the tracked address sent; nets against `received`.
+    sent: U256,
+    /// Gross amount the tracked address received; nets against `sent`.
+    received: U256,
+    /// Total amount of the token moved in the transaction, by any party.
     gross: U256,
-    /// Whether the token also moved between two parties other than the
-    /// tracked address — the signature of a routing intermediate.
-    intermediate: bool,
+    /// Whether the token also moved between two parties that are both not the tracked address.
+    routed_third_party: bool,
 }
 
 /// Every value movement in one transaction, flattened for flow queries.
@@ -97,44 +102,45 @@ impl TransferLedger {
         Self { transfers }
     }
 
-    /// Determine what `tracked` sent and received, netting intermediate hops.
+    /// Net what `tracked` sent and received per token, cancelling intermediate hops.
     ///
-    /// Returns `None` unless exactly one token nets out and exactly one token nets in (see the
-    /// module docs for why ambiguous nets decline).
+    /// `Some` only when exactly one token nets out and exactly one nets in; ambiguous nets
+    /// decline (see the module docs).
     ///
-    /// One exception: a genuine single swap can carry a **residue leg** — an RFQ hop consumes an
-    /// exact intermediate amount and the surplus lands on the trader, or rounding leaves dust of
-    /// a routing token. An ambiguous side first drops legs that are provably residue: the token
-    /// also moved between parties other than the tracked address (a routing intermediate), the
-    /// leg is under 1% of the token's gross flow in the transaction, *and* the tracked address's
-    /// own flow in the token is one-directional. All three are same-token comparisons, so no
-    /// prices are needed, and a real batch leg (all of its token's flow) is never dropped. The
-    /// one-directional condition is what keeps the gross-flow test unspoofable: surplus and dust
-    /// only ever land on the trader, while a token the trader both sent and received is a real
-    /// position change however small its net — and gross flow can be inflated arbitrarily by
-    /// unrelated loops of the same token elsewhere in the transaction (seen live: an MEV bundle
-    /// whose $10k wash loops made a $51 net leg pass the 1% test, tx `0x280b9939…`).
-    /// Residue on a token that never routed third-party (e.g. a rebasing input token) and
-    /// fixed-token protocol fees still decline, logged at debug level.
+    /// # The residue-leg exception
+    ///
+    /// A leg is one token's net amount on one side of the trade. Routing can leave the trader a
+    /// small extra leg — an RFQ hop's surplus, rounding dust of an intermediate token — and
+    /// declining every such trade would throw away real ones. An ambiguous side therefore first
+    /// drops legs that are *provably* residue, meaning all three of:
+    ///
+    /// - the token also moved between third parties (a routing token, not one only paid to or by
+    ///   the trader),
+    /// - the leg is under 1% of that token's total flow in the transaction,
+    /// - the trader's own flow in the token is one-directional.
+    ///
+    /// All three compare same-token amounts, so the proof needs no prices. Each condition
+    /// closed a real mis-decode (the last: a wash-loop MEV bundle, tx `0x280b9939…`, whose $10k
+    /// loops let a $51 position change pass the 1% test).
     pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
-        let mut sent: HashMap<Address, U256> = HashMap::new();
-        let mut received: HashMap<Address, U256> = HashMap::new();
-        let mut flows: HashMap<Address, TokenFlow> = HashMap::new();
+        let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
-            let flow = flows.entry(token).or_default();
-            flow.gross = flow.gross.saturating_add(value);
+            let amounts = amounts_by_token
+                .entry(token)
+                .or_default();
+            amounts.gross = amounts.gross.saturating_add(value);
             if from != tracked && to != tracked {
-                flow.intermediate = true;
+                amounts.routed_third_party = true;
             }
             if from == tracked {
-                *sent.entry(token).or_default() += value;
+                amounts.sent += value;
             }
             if to == tracked {
-                *received.entry(token).or_default() += value;
+                amounts.received += value;
             }
         }
 
-        net_trade(&sent, &received, &flows)
+        net_trade(&amounts_by_token)
     }
 
     /// Every address that sent or received value, ordered for deterministic iteration.
@@ -239,38 +245,23 @@ fn net_positive(
 /// fraction of the token's gross transaction flow: `net * RESIDUE_GROSS_RATIO < gross` (1%).
 const RESIDUE_GROSS_RATIO: u64 = 100;
 
-/// Net the sent and received balances into a single swap (see [`TransferLedger::net_swap`]).
-fn net_trade(
-    sent: &HashMap<Address, U256>,
-    received: &HashMap<Address, U256>,
-    flows: &HashMap<Address, TokenFlow>,
-) -> Option<NetSwap> {
+/// Net the per-token amounts into a single swap (see [`TransferLedger::net_swap`]).
+fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
 
-    let all_tokens: HashSet<Address> = sent
-        .keys()
-        .chain(received.keys())
-        .copied()
-        .collect();
-    for token in all_tokens {
-        let s = sent
-            .get(&token)
-            .copied()
-            .unwrap_or_default();
-        let r = received
-            .get(&token)
-            .copied()
-            .unwrap_or_default();
-        if s > r {
-            net_sent.insert(token, s - r);
-        } else if r > s {
-            net_received.insert(token, r - s);
+    for (&token, amounts) in amounts_by_token {
+        if amounts.sent > amounts.received {
+            net_sent.insert(token, amounts.sent - amounts.received);
+        } else if amounts.received > amounts.sent {
+            net_received.insert(token, amounts.received - amounts.sent);
         }
     }
 
-    drop_residue_legs(&mut net_sent, flows, received);
-    drop_residue_legs(&mut net_received, flows, sent);
+    // The one-directional residue condition looks at the tracked address's gross flow on the
+    // side opposite the leg: for a net-sent leg that is what it received, and vice versa.
+    drop_residue_legs(&mut net_sent, amounts_by_token, |amounts| amounts.received);
+    drop_residue_legs(&mut net_received, amounts_by_token, |amounts| amounts.sent);
 
     if net_sent.len() != 1 || net_received.len() != 1 {
         // Flow on both sides but more than one significant token on one of them: a real batch
@@ -285,30 +276,28 @@ fn net_trade(
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
-/// Drop residue legs from one side of an ambiguous net (see [`TransferLedger::net_swap`]). Only
-/// runs when the side has more than one leg — a lone leg is the swap itself, however small.
+/// Drop residue legs from one side of an ambiguous net, per the three-condition proof in
+/// [`TransferLedger::net_swap`]. Only runs when the side has more than one leg — a lone leg is
+/// the swap itself, however small.
 ///
-/// `opposite` is the tracked address's gross flow on the other side: a leg only qualifies as
-/// residue when the tracked address's flow in that token is one-directional, since surplus and
-/// dust land on the trader but never also leave it.
+/// `opposite_flow` reads the tracked address's gross flow on the other side of the trade from a
+/// token's amounts; any flow there makes the token bidirectional and therefore never residue.
 fn drop_residue_legs(
     net: &mut HashMap<Address, U256>,
-    flows: &HashMap<Address, TokenFlow>,
-    opposite: &HashMap<Address, U256>,
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+    opposite_flow: fn(&TokenAmounts) -> U256,
 ) {
     if net.len() <= 1 {
         return;
     }
     net.retain(|token, amount| {
-        let bidirectional = opposite
-            .get(token)
-            .is_some_and(|flow| !flow.is_zero());
-        let Some(flow) = flows.get(token) else {
+        let Some(amounts) = amounts_by_token.get(token) else {
             return true;
         };
+        let bidirectional = !opposite_flow(amounts).is_zero();
         let residue = !bidirectional &&
-            flow.intermediate &&
-            amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < flow.gross;
+            amounts.routed_third_party &&
+            amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < amounts.gross;
         !residue
     });
 }
