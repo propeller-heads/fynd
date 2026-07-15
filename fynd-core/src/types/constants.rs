@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use lazy_static::lazy_static;
 use tycho_simulation::{tycho_common::models::Chain, tycho_core::models::Address};
@@ -47,12 +47,6 @@ lazy_static! {
             0xAE, 0xBF, 0x2D, 0xE0, 0x8D, 0x91, 0x73, 0xBC, 0x09, 0x5C,
         ]));
 
-        // Flare - WFLR (0x1D80c49BbBCd1C0911346656B529DF9E5c2F783d)
-        map.insert(Chain::Flare, Address::from([
-            0x1D, 0x80, 0xC4, 0x9B, 0xBB, 0xCD, 0x1C, 0x09, 0x11, 0x34,
-            0x66, 0x56, 0xB5, 0x29, 0xDF, 0x9E, 0x5C, 0x2F, 0x78, 0x3D,
-        ]));
-
         map
     };
 }
@@ -73,26 +67,35 @@ impl UnsupportedChainError {
 
 /// Returns the wrapped native token address for the given chain.
 ///
+/// Built-in chains resolve from the compile-time map; custom chains resolve from the
+/// tycho chain-config registry (`TYCHO_CHAINS_CONFIG`).
+///
 /// # Errors
 ///
-/// Returns `UnsupportedChainError` if the chain is not in the registry.
+/// Returns `UnsupportedChainError` if the chain is in neither registry.
 pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
-    NATIVE_TOKEN
-        .get(chain)
-        .cloned()
-        .ok_or(UnsupportedChainError { chain: *chain })
+    if let Some(address) = NATIVE_TOKEN.get(chain) {
+        return Ok(address.clone());
+    }
+    if let Chain::Custom(_) = chain {
+        if let Ok(token) = chain.try_wrapped_native_token() {
+            return Ok(token.address);
+        }
+    }
+    Err(UnsupportedChainError { chain: *chain })
 }
 
 /// Parses a chain name string (case-insensitive) into a [`Chain`] enum.
 ///
-/// Uses serde deserialization so it automatically supports all `Chain` variants.
+/// Built-in chains parse directly; other names resolve against the tycho chain-config
+/// registry (`TYCHO_CHAINS_CONFIG`), so custom chains like `flare` work when configured.
 ///
 /// # Errors
 ///
-/// Returns an error if the chain name is not recognized.
+/// Returns an error if the chain name is neither a built-in chain nor a registered
+/// custom chain.
 pub fn parse_chain(chain: &str) -> Result<Chain, ParseChainError> {
-    let candidate = format!("\"{}\"", chain.to_ascii_lowercase());
-    serde_json::from_str::<Chain>(&candidate).map_err(|_| ParseChainError(chain.to_string()))
+    Chain::from_str(&chain.to_ascii_lowercase()).map_err(|_| ParseChainError(chain.to_string()))
 }
 
 /// Error returned when a chain name string cannot be parsed.

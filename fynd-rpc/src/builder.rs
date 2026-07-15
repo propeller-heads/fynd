@@ -175,6 +175,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Overrides the Tycho stream timeout in seconds (default: derived from the chain's block
+    /// time by tycho-client).
+    pub fn stream_timeout_secs(mut self, timeout_secs: Option<u64>) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .stream_timeout_secs(timeout_secs);
+        self
+    }
+
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
         self.fynd_builder = self.fynd_builder.encoder(encoder);

@@ -123,6 +123,11 @@ pub struct ServeArgs {
     #[arg(long)]
     pub partial_blocks: bool,
 
+    /// Override the Tycho stream timeout in seconds. When unset, tycho-client derives it from
+    /// the chain's block time, which can be too tight for indexers that pause during catch-up.
+    #[arg(long, env = "FYND_STREAM_TIMEOUT_SECS")]
+    pub stream_timeout_secs: Option<u64>,
+
     /// Enable price guard validation against external price sources.
     /// Disabled by default.
     #[arg(long)]
