@@ -8,14 +8,14 @@
 //! Token and pool-count data comes from the same Tycho query the `derive-connector-tokens` command
 //! uses, exposed as `fynd_rpc::protocols::fetch_token_pool_stats`.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_rpc::{
     config::defaults::default_tycho_url,
     parse_chain,
-    protocols::{fetch_token_pool_stats, resolve_protocols, TokenPoolStats},
+    protocols::{fetch_token_pool_stats, resolve_protocols, TokenPoolStats, TokenPoolStatsParams},
 };
 use num_bigint::BigUint;
 use rand::{
@@ -64,6 +64,18 @@ pub struct Args {
     /// `native_onchain` expansion tokens.
     #[arg(long, value_delimiter = ',', default_value = "all_onchain")]
     pub protocols: Vec<String>,
+
+    /// Minimum pool TVL (in the chain's native token) for a pool to be counted, passed to Tycho as
+    /// `tvl_gt`. Leave unset to count all pools. The dedicated `tycho-fynd-*` indexer endpoints
+    /// plan-gate component queries and reject them unless this is set.
+    #[arg(long)]
+    pub min_tvl: Option<f64>,
+
+    /// Client-side timeout, in seconds, for each per-protocol Tycho fetch. A degraded indexer can
+    /// otherwise hang the fetch indefinitely; on timeout the run fails fast, naming the protocol
+    /// system so it can be excluded with --protocols.
+    #[arg(long, default_value_t = 300)]
+    pub fetch_timeout_secs: u64,
 
     /// Number of most-connected tokens to sample pairs from.
     #[arg(long, default_value_t = 50)]
@@ -235,14 +247,16 @@ pub async fn run(args: Args) -> Result<()> {
     .await?;
     info!("Resolved {} protocol system(s)", protocols.len());
 
-    let mut tokens = fetch_token_pool_stats(
-        &tycho_url,
-        args.tycho_api_key.as_deref(),
-        !args.disable_tls,
+    let stats_params = TokenPoolStatsParams {
+        tycho_url: &tycho_url,
+        auth_key: args.tycho_api_key.as_deref(),
+        use_tls: !args.disable_tls,
         chain,
-        &protocols,
-    )
-    .await?;
+        protocols: &protocols,
+        min_tvl: args.min_tvl,
+        fetch_timeout: Duration::from_secs(args.fetch_timeout_secs),
+    };
+    let mut tokens = fetch_token_pool_stats(&stats_params).await?;
     tokens.truncate(args.top_n_tokens);
     info!("Sampling {} request(s) from top {} token(s)", args.num_requests, tokens.len());
 
@@ -333,6 +347,38 @@ mod tests {
         assert_eq!(amounts(&first), amounts(&second));
         let different = sample_requests(&tokens, 100, 43, 5000).unwrap();
         assert_ne!(amounts(&first), amounts(&different));
+    }
+
+    #[test]
+    fn args_parse_min_tvl_and_fetch_timeout() {
+        let args = Args::try_parse_from([
+            "generate-requests",
+            "--chain",
+            "ethereum",
+            "--output",
+            "out.json",
+            "--min-tvl",
+            "250.5",
+            "--fetch-timeout-secs",
+            "45",
+        ])
+        .unwrap();
+        assert_eq!(args.min_tvl, Some(250.5));
+        assert_eq!(args.fetch_timeout_secs, 45);
+    }
+
+    #[test]
+    fn args_default_fetch_timeout_and_no_min_tvl() {
+        let args = Args::try_parse_from([
+            "generate-requests",
+            "--chain",
+            "ethereum",
+            "--output",
+            "out.json",
+        ])
+        .unwrap();
+        assert_eq!(args.min_tvl, None);
+        assert_eq!(args.fetch_timeout_secs, 300);
     }
 
     #[test]
