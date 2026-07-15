@@ -43,7 +43,7 @@ sol! {
 }
 
 /// Convert an RPC log to a primitive log for event decoding.
-fn to_primitive_log(log: &Log) -> PrimitiveLog {
+pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
     PrimitiveLog::new_unchecked(log.address(), log.topics().to_vec(), log.data().data.clone())
 }
 

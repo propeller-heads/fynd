@@ -33,13 +33,13 @@ use crate::{
 };
 
 /// How often to warn while the solver has not applied the next block.
-const STALL_WARN_INTERVAL: Duration = Duration::from_secs(300);
+const STALL_WARN_INTERVAL: Duration = Duration::from_mins(5);
 /// No block for this long means the feed is dead, not slow. The observed failure mode: one
 /// server-side subscription goes silent, tycho-client's block synchronizer stops emitting while
 /// it waits for it, and ~35 minutes later backpressure kills the remaining subscriptions
 /// ("Buffer full, unsubscribing!"). Nothing resubscribes, so the stream never recovers — the
 /// monitor rebuilds the solver instead of waiting.
-const FEED_DEAD_TIMEOUT: Duration = Duration::from_secs(900);
+const FEED_DEAD_TIMEOUT: Duration = Duration::from_mins(15);
 /// Pause between solver rebuild attempts after a feed death, so a struggling Tycho server is not
 /// hammered in a tight loop.
 const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
@@ -128,7 +128,7 @@ impl StepAdapter<'_> {
             .read()
             .await
             .last_updated()
-            .map(|b| b.number())
+            .map(fynd_core::BlockInfo::number)
     }
 }
 
@@ -157,13 +157,10 @@ impl SteppingSolver for StepAdapter<'_> {
         );
 
         match self.solver.quote(request).await {
-            Ok(quote) => quote
-                .orders()
-                .first()
-                .map(order_quote_to_outcome)
-                .unwrap_or_else(|| {
-                    Outcome::Unsolvable("solver returned no order quote".to_string())
-                }),
+            Ok(quote) => quote.orders().first().map_or_else(
+                || Outcome::Unsolvable("solver returned no order quote".to_string()),
+                order_quote_to_outcome,
+            ),
             Err(e) => Outcome::Unsolvable(format!("solve error: {e}")),
         }
     }
@@ -201,7 +198,7 @@ impl SteppingSolver for StepAdapter<'_> {
                 next_warn += STALL_WARN_INTERVAL;
             }
             tokio::select! {
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
                 peeked = self.controller.peek_next_block() => {
                     if peeked.is_none() {
                         anyhow::bail!("tycho stream ended while waiting for the next block");
@@ -230,10 +227,16 @@ fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
 }
 
 fn biguint_to_u256(value: &BigUint) -> U256 {
-    value
-        .to_string()
-        .parse()
-        .unwrap_or(U256::ZERO)
+    // Convert via big-endian bytes: avoids a decimal string round-trip and catches overflow
+    // without relying on parse. U256 fits in 32 bytes; a larger value is a solver bug.
+    let bytes = value.to_bytes_be();
+    if bytes.len() > 32 {
+        warn!(bits = value.bits(), "solver quote amount overflows U256; treating as zero");
+        return U256::ZERO;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    U256::from_be_bytes(buf)
 }
 
 /// Decode `block`, first waiting out any RPC lag. The HTTP RPC used for receipts can trail the
@@ -245,11 +248,17 @@ async fn decode_block_when_available<P: Provider>(
     block: u64,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
     for attempt in 0..DECODE_RPC_LAG_RETRIES {
-        let head = decoder
+        let head = match decoder
             .provider()
             .get_block_number()
             .await
-            .unwrap_or(0);
+        {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(block, attempt, "failed to fetch RPC block number: {e}");
+                0
+            }
+        };
         if head >= block {
             break;
         }
@@ -552,12 +561,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires live TYCHO_URL + RPC_URL"]
     async fn monitor_one_block_smoke() {
-        let (Ok(rpc_url), Ok(tycho_url)) = (std::env::var("RPC_URL"), std::env::var("TYCHO_URL"))
-        else {
-            eprintln!("skipping: set RPC_URL and TYCHO_URL");
-            return;
-        };
-
+        let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
+        let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
             rpc: crate::RpcArgs { rpc_url, registry: None },

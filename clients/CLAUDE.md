@@ -78,17 +78,15 @@ endpoint response shape. This determines which signing and execution paths to us
 
 For full details, see [`.claude/knowledge/typescript.md`](../.claude/knowledge/typescript.md).
 
-pnpm workspace at `clients/typescript/` with two packages:
+pnpm workspace at `clients/typescript/` with two packages: `client` and `examples/tutorial`.
 
-- **`@fynd/autogen`** (`autogen/`) — Generated types from `openapi-typescript`. `schema.d.ts` is
-  auto-generated; do not edit manually.
 - **`@kayibal/fynd-client`** (`client/`) — Typed HTTP client: `FyndClient`, signing, Permit2, error types.
+  Contains `autogen.ts` and `schema.d.ts` (generated from `openapi-typescript`; do not edit manually).
 
 ### Build & Test
 
 ```bash
 pnpm --dir clients/typescript install --frozen-lockfile
-pnpm --dir clients/typescript --filter @fynd/autogen run build
 pnpm --dir clients/typescript --filter @kayibal/fynd-client run typecheck
 pnpm --dir clients/typescript --filter @kayibal/fynd-client run lint
 pnpm --dir clients/typescript --filter @kayibal/fynd-client run test

@@ -1,3 +1,11 @@
+//! Decoder verification against Allium's `aggregator_trades` ground truth.
+//!
+//! The `verify` subcommand decodes a block locally, fetches the same block from Allium, and diffs
+//! the two sets of trades — reporting matches, token/solver/amount mismatches, and gaps in either
+//! direction. This is a development sanity check, not a production code path.
+
+pub(crate) mod allium;
+
 use std::collections::{HashMap, HashSet};
 
 use alloy::{
@@ -8,9 +16,9 @@ use alloy::{
 use anyhow::Context;
 use tracing::warn;
 
-use crate::decoder::{
-    allium::{AlliumClient, AlliumRow},
-    DecodedTrade, Decoder,
+use crate::{
+    decoder::{DecodedTrade, Decoder},
+    verify::allium::{AlliumClient, AlliumRow},
 };
 
 const NATIVE_DECIMALS: u8 = 18;
@@ -20,7 +28,7 @@ const DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
 /// Outcome of comparing one transaction's decode against Allium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Status {
+pub(crate) enum Status {
     Match,
     TokenMismatch,
     SolverMismatch,
@@ -43,19 +51,20 @@ impl Status {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct TxComparison {
-    pub tx_hash: TxHash,
-    pub status: Status,
-    pub detail: String,
+pub(crate) struct TxComparison {
+    pub(crate) tx_hash: TxHash,
+    pub(crate) status: Status,
+    pub(crate) detail: String,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct VerifyReport {
-    pub comparisons: Vec<TxComparison>,
+pub(crate) struct VerifyReport {
+    pub(crate) comparisons: Vec<TxComparison>,
 }
 
 impl VerifyReport {
-    pub fn print(&self) {
+    #[expect(clippy::print_stdout)]
+    pub(crate) fn print(&self) {
         let count = |status: Status| {
             self.comparisons
                 .iter()
@@ -66,7 +75,7 @@ impl VerifyReport {
         println!("  compared txs:          {}", self.comparisons.len());
         println!("  matches:               {}", count(Status::Match));
         println!("  token mismatches:      {}", count(Status::TokenMismatch));
-        println!("  solver mismatches: {}", count(Status::SolverMismatch));
+        println!("  solver mismatches:     {}", count(Status::SolverMismatch));
         println!("  amount mismatches:     {}", count(Status::AmountMismatch));
         println!("  ours only:             {}", count(Status::OursOnly));
         println!("  allium only (gaps):    {}", count(Status::AlliumOnly));
@@ -90,7 +99,7 @@ impl VerifyReport {
 }
 
 /// Decode each block locally and compare against Allium's `aggregator_trades`.
-pub async fn run<P: Provider>(
+pub(crate) async fn run<P: Provider>(
     decoder: &mut Decoder<P>,
     allium: &AlliumClient,
     blocks: &[u64],
@@ -204,9 +213,9 @@ async fn compare_trade<P: Provider>(
     TxComparison { tx_hash: ours.tx_hash, status, detail: detail.join("; ") }
 }
 
-/// Allium splits a trade into per-leg rows. Treat the decode as agreeing if
-/// our netted input token appears among the sold tokens and our output token
-/// among the bought tokens.
+/// Allium splits a multi-leg swap into per-leg rows, so check membership in sets rather than
+/// exact one-to-one matching: our netted `token_in` must appear among the sold tokens and our
+/// `token_out` among the bought tokens across all rows for this tx.
 fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
     let sold: HashSet<Address> = rows
         .iter()
@@ -260,10 +269,9 @@ async fn amounts_agree<P: Provider>(
     decimals: &mut HashMap<Address, u8>,
     detail: &mut Vec<String>,
 ) -> bool {
-    // Allium records each leg of a split swap as its own row, so a single decoded trade can map to
-    // several Allium rows for the same tx. We net the whole swap into one in/out pair, which has no
-    // per-leg counterpart to compare against, so only compare amounts when Allium also reported a
-    // single leg.
+    // Allium records each leg of a multi-leg swap as its own row. We net the whole swap into one
+    // in/out pair, which has no per-leg counterpart to compare against — only compare amounts when
+    // Allium also reported a single leg.
     let [row] = rows else {
         detail.push(format!("amount not compared ({} Allium legs for this tx)", rows.len()));
         return true;
@@ -287,7 +295,8 @@ async fn amounts_agree<P: Provider>(
     in_ok && out_ok
 }
 
-/// One side of a trade to compare: our decoded amount against Allium's.
+/// One side of a decoded trade to compare: our on-chain amount (raw integer) vs Allium's
+/// human-readable float, which must be normalized to the same decimal scale before comparison.
 struct AmountLeg {
     token: Address,
     ours: U256,
@@ -351,8 +360,7 @@ async fn fetch_decimals<P: Provider>(provider: &P, token: Address) -> anyhow::Re
         .call(tx)
         .await
         .with_context(|| format!("decimals() call failed for {token}"))?;
-    // decimals() returns uint8 right-aligned in a 32-byte word: the value is
-    // the last byte.
+    // decimals() returns uint8 right-aligned in a 32-byte ABI word; the value is the last byte.
     result
         .last()
         .copied()
@@ -364,11 +372,7 @@ fn parse_addr(value: &str) -> Option<Address> {
 }
 
 fn normalize_amount(amount: U256, decimals: u8) -> f64 {
-    let raw: f64 = amount
-        .to_string()
-        .parse()
-        .unwrap_or(0.0);
-    raw / 10f64.powi(i32::from(decimals))
+    crate::usd::u256_to_f64(amount) / 10f64.powi(i32::from(decimals))
 }
 
 fn bps_diff(ours: f64, theirs: f64) -> f64 {
@@ -378,8 +382,8 @@ fn bps_diff(ours: f64, theirs: f64) -> f64 {
     ((ours - theirs).abs() / theirs) * 10_000.0
 }
 
-/// Lowercase, strip non-alphanumerics, and fold venue aliases so `uniswap_x`
-/// and `uniswap`, `1inch` and `1inch_ar_v6`, or `0x` and `zeroex` compare equal.
+/// Lowercase and strip non-alphanumerics, then fold known aliases: `zeroex` → `0x`, so that
+/// e.g. `uniswap_x`/`uniswap`, `1inch`/`1inch_ar_v6`, and `0x`/`zeroex` compare equal.
 fn normalize_name(name: &str) -> String {
     let normalized: String = name
         .chars()
@@ -398,14 +402,23 @@ fn names_match(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
+
     use super::*;
-    use crate::decoder::{test_utils::addr, AttributionSource};
+    use crate::decoder::AttributionSource;
+
+    fn addr(n: u8) -> Address {
+        let mut bytes = [0u8; 20];
+        bytes[19] = n;
+        Address::from(bytes)
+    }
 
     fn trade(token_in: Address, token_out: Address, solver: &str) -> DecodedTrade {
         DecodedTrade {
             tx_hash: TxHash::ZERO,
             block_number: 1,
-            client: "relay".to_string(),
+            tx_index: 0,
+            venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
             sender: addr(1),
@@ -413,10 +426,11 @@ mod tests {
             token_out,
             amount_in: U256::from(1000),
             amount_out: U256::from(2000),
-            client_fee: None,
-            client_fee_out: None,
+            venue_fee: None,
+            venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         }
     }
 

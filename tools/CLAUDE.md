@@ -6,6 +6,7 @@ Developer and operational tooling for the Fynd solver.
 |---|---|---|
 | [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | [fynd-swap-cli](#fynd-swap-cli) | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
+| [hindsight](#hindsight) | `tools/hindsight/` | Decode solver swaps from on-chain data and live-monitor re-solve quality |
 | [record-market](#record-market) | `tools/record-market/` | Record Tycho market state and expected outputs for integration tests |
 
 ---
@@ -14,12 +15,13 @@ Developer and operational tooling for the Fynd solver.
 
 See [`tools/benchmark/CLAUDE.md`](benchmark/CLAUDE.md) for the full module overview.
 
-Four subcommands via `cargo run -p fynd-benchmark --release --`:
+Five subcommands via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver (latency, throughput, histograms)
 - **`compare`** — Compare output quality between two solver instances (amount out diff in bps)
 - **`scale`** — Measure how solver throughput scales with worker thread count (in-process, no external solver needed)
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
+- **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x); writes a JSON report
 
 ---
 
@@ -32,7 +34,6 @@ End-to-end CLI for quoting and executing swaps. Supports both ERC-20 approval an
 | File | Purpose |
 |---|---|
 | `main.rs` | CLI parsing (clap), quote → sign → execute flow |
-| `erc20.rs` | ERC-20 helpers: balance checks, storage slot detection for dry-run overrides |
 | `permit2.rs` | Permit2 helpers: allowance checks, nonce fetching |
 
 ### Key Behaviors
@@ -47,6 +48,23 @@ End-to-end CLI for quoting and executing swaps. Supports both ERC-20 approval an
   `--transfer-type use-vaults-funds` (funds already in router vault)
 
 See [`docs/guides/swap-cli.md`](../docs/guides/swap-cli.md) for usage instructions.
+
+---
+
+## hindsight
+
+See [`tools/hindsight/CLAUDE.md`](hindsight/CLAUDE.md) for the full module overview.
+
+Three subcommands via `cargo run -p hindsight --release --`:
+
+- **`decode`** — Fetch block receipts, match and trace solver transactions, emit decoded trades
+  (token in/out, amounts, client, solver, settled gas). Accepts `--block N`, `--range START-END`
+  (max 1000 blocks), or defaults to the latest block.
+- **`verify`** — Diff decoded trades against Allium's `aggregator_trades` ground truth. Requires 
+  `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
+- **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, re-solving
+  each settled trade at top-of-block (N-1) and back-of-block (N). Emits JSONL and exposes
+  Prometheus metrics.
 
 ---
 

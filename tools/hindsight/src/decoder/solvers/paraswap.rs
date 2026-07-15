@@ -2,7 +2,7 @@
 //!
 //! Augustus v6 swap methods carry the trade parameters as consecutive 32-byte words —
 //! `…, fromAmount, toAmount, quotedAmount, …` — where `toAmount` is the slippage floor and
-//! `quotedAmount` the off-chain quoted output, kept on-chain for ParaSwap's surplus accounting
+//! `quotedAmount` the off-chain quoted output, kept on-chain for `ParaSwap`'s surplus accounting
 //! (the user is capped at the quote, so settled often equals it exactly). The triple's offset
 //! differs per method selector, so it is located by value rather than per-selector ABI: the word
 //! equal to the trade's decoded input amount, followed by a floor-and-quote pair.
@@ -11,7 +11,7 @@ use alloy::primitives::U256;
 
 use crate::decoder::solvers::SolverQuote;
 
-/// Extract ParaSwap's `quotedAmount` from Augustus calldata.
+/// Extract `ParaSwap`'s `quotedAmount` from Augustus calldata.
 ///
 /// Scans word-aligned calldata for `amount_in` and reads the two words after it as
 /// `(toAmount, quotedAmount)`. A false positive would need a word that equals the exact input
