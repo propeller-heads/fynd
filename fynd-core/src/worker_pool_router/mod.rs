@@ -49,7 +49,7 @@ use crate::{
 /// The role a solver pool (a group of workers) plays in a quote.
 ///
 /// A `Public` worker routes only through public liquidity and provides the committed (quoted)
-/// reference output. An `All` worker also routes through permissioned components and may beat that
+/// reference output. An `All` worker also routes through exclusive components and may beat that
 /// reference, in which case the protocol captures the surplus.
 ///
 /// Serialized in lowercase (`"public"` / `"all"`) in `worker_pools.toml` via [`PoolConfig`].
@@ -61,7 +61,7 @@ pub enum PoolRole {
     /// Routes through public liquidity only. Establishes the committed reference output. Default.
     #[default]
     Public,
-    /// Routes through all liquidity, including permissioned components; source of surplus quotes.
+    /// Routes through all liquidity, including exclusive components; source of surplus quotes.
     All,
 }
 
@@ -82,7 +82,7 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, role: PoolRole::Public }
     }
 
-    /// Sets the pool's role (e.g. [`PoolRole::All`] for the permissioned-inclusive pool).
+    /// Sets the pool's role (e.g. [`PoolRole::All`] for the pool that includes exclusive liquidity).
     pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self
@@ -155,8 +155,8 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
-    /// Predicate identifying permissioned components, used by `combine_with_surplus` to locate the
-    /// permissioned leg(s) in a surplus route. `None` when no permissioned pools are configured.
+    /// Predicate identifying exclusive components, used by `combine_with_surplus` to locate the
+    /// exclusive leg(s) in a surplus route. `None` when no exclusive pools are configured.
     permission_policy: Option<PermissionPolicy>,
 }
 
@@ -170,7 +170,7 @@ impl WorkerPoolRouter {
         Self { solver_pools, config, encoder, price_guard: None, permission_policy: None }
     }
 
-    /// Attaches the permission policy used to identify permissioned legs in surplus routes.
+    /// Attaches the permission policy used to identify exclusive legs in surplus routes.
     pub fn with_permission_policy(mut self, policy: PermissionPolicy) -> Self {
         self.permission_policy = Some(policy);
         self
@@ -647,12 +647,12 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// `public_ranked` is the public-only ranking from `rank_quotes` — both the committed reference and
 /// the price-guard fallback chain. If the best surplus candidate beats the committed reference
 /// net-of-gas, the executed surplus quote is returned at the head of the list (its `amount_out`
-/// pinned to the committed reference, an order-level `SurplusInfo` attached, and each permissioned
+/// pinned to the committed reference, an order-level `SurplusInfo` attached, and each exclusive
 /// leg's `Swap::committed_amount_out` set), preserving the public candidates as fallbacks.
 /// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
 /// public market.
 ///
-/// Each permissioned leg's `committed_amount_out` is its realized output reduced by the same
+/// Each exclusive leg's `committed_amount_out` is its realized output reduced by the same
 /// proportion as the order-level reduction; the protocol captures the difference. The per-leg
 /// attribution formula and the bound that keeps the user at or above the committed reference are
 /// derived in the design plan.
@@ -690,7 +690,7 @@ fn combine_with_surplus(
                 .map(|max| q.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|(_, q)| has_valid_permissioned_layout(q, policy))
+        .filter(|(_, q)| has_valid_exclusive_layout(q, policy))
         .max_by(|(_, a), (_, b)| {
             a.amount_out_net_gas()
                 .cmp(b.amount_out_net_gas())
@@ -721,7 +721,7 @@ fn combine_with_surplus(
 
     if let Some(route) = executed.route_mut() {
         for swap in route.swaps_mut() {
-            if policy.is_permissioned(swap.protocol_component()) {
+            if policy.is_exclusive(swap.protocol_component()) {
                 // Proportional reduction: committed_leg = leg.amount_out * committed / realized
                 // (rounds down — safe direction: under-capture)
                 let committed_leg = swap.amount_out() * committed_route_out / realized_route_out;
@@ -761,13 +761,13 @@ fn combine_with_surplus(
     result
 }
 
-/// Returns `true` if the quote has a valid permissioned layout for v1: at least one permissioned
-/// leg, all positioned as terminal legs of their respective paths (no mid-route permissioned legs).
+/// Returns `true` if the quote has a valid exclusive layout for v1: at least one exclusive
+/// leg, all positioned as terminal legs of their respective paths (no mid-route exclusive legs).
 ///
 /// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
 /// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
 /// representation but would need revisiting if routes gain explicit path-boundary markers.
-fn has_valid_permissioned_layout(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
+fn has_valid_exclusive_layout(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
@@ -777,10 +777,10 @@ fn has_valid_permissioned_layout(quote: &OrderQuote, policy: &PermissionPolicy) 
         return false;
     }
 
-    let mut permissioned_count = 0;
+    let mut exclusive_count = 0;
 
     for (i, swap) in swaps.iter().enumerate() {
-        if !policy.is_permissioned(swap.protocol_component()) {
+        if !policy.is_exclusive(swap.protocol_component()) {
             continue;
         }
 
@@ -791,10 +791,10 @@ fn has_valid_permissioned_layout(quote: &OrderQuote, policy: &PermissionPolicy) 
         if !is_terminal {
             return false;
         }
-        permissioned_count += 1;
+        exclusive_count += 1;
     }
 
-    permissioned_count >= 1
+    exclusive_count >= 1
 }
 
 fn refine_gas_estimates(
@@ -1367,14 +1367,14 @@ mod tests {
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
     }
 
-    fn permissioned_policy() -> PermissionPolicy {
-        PermissionPolicy::new(|c| c.protocol_system == "vm:permissioned")
+    fn exclusive_policy() -> PermissionPolicy {
+        PermissionPolicy::new(|c| c.protocol_system == "vm:exclusive")
     }
 
-    /// Like `make_single_quote` but the swap uses a permissioned protocol component.
+    /// Like `make_single_quote` but the swap uses an exclusive protocol component.
     /// `amount_out` is used as both the route output and `amount_out_net_gas` (gas cost = 0 for
     /// simplicity in surplus unit tests).
-    fn make_permissioned_quote(amount_out: u64) -> SingleOrderQuote {
+    fn make_exclusive_quote(amount_out: u64) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -1392,10 +1392,10 @@ mod tests {
             "0x0000000000000000000000000000000000000002",
             &[tin_token.clone(), tout_token.clone()],
         );
-        comp.protocol_system = "vm:permissioned".to_string();
+        comp.protocol_system = "vm:exclusive".to_string();
         let swap = Swap::new(
             "pool-perm".to_string(),
-            "vm:permissioned".to_string(),
+            "vm:exclusive".to_string(),
             tin.clone(),
             tout.clone(),
             BigUint::from(1000u64),
@@ -1479,7 +1479,7 @@ mod tests {
         let public = make_public_quote_zero_gas(public_out)
             .order()
             .clone();
-        let surplus = make_permissioned_quote(surplus_out)
+        let surplus = make_exclusive_quote(surplus_out)
             .order()
             .clone();
         OrderResponses {
@@ -1505,7 +1505,7 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = permissioned_policy();
+        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
@@ -1528,7 +1528,7 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(950)
             .order()
             .clone()];
-        let policy = permissioned_policy();
+        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
@@ -1548,7 +1548,7 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = permissioned_policy();
+        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
@@ -1564,8 +1564,8 @@ mod tests {
         let perm_swap = route
             .swaps()
             .iter()
-            .find(|s| policy.is_permissioned(s.protocol_component()))
-            .expect("should have a permissioned swap");
+            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .expect("should have an exclusive swap");
 
         // committed_leg = leg.amount_out * committed_route_out / realized_route_out
         // = 1000 * 900 / 1000 = 900
@@ -1579,7 +1579,7 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(999)
             .order()
             .clone()];
-        let policy = permissioned_policy();
+        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),
@@ -1620,7 +1620,7 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = permissioned_policy();
+        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &surplus_pool_roles(),

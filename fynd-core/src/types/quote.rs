@@ -704,7 +704,7 @@ impl SingleOrderQuote {
     }
 }
 
-/// Order-level surplus summary for a quote routed through a permissioned component:
+/// Order-level surplus summary for a quote routed through an exclusive component:
 /// `surplus_amount` is what the protocol captures (realized output minus the committed
 /// public-market output the user is quoted), in the order's `token_out`.
 ///
@@ -793,7 +793,7 @@ pub struct OrderQuote {
     /// Why no route was found (internal use only; only set for `NoRouteFound`).
     #[serde(skip)]
     no_route_reason: Option<NoPathReason>,
-    /// Order-level surplus summary, populated when this quote executes through a permissioned
+    /// Order-level surplus summary, populated when this quote executes through an exclusive
     /// pool.
     ///
     /// Informational only (observability); the value the encoder acts on is the per-leg
@@ -849,14 +849,14 @@ impl OrderQuote {
         self
     }
 
-    /// Returns the captured surplus amount, if this quote routes through a permissioned component.
+    /// Returns the captured surplus amount, if this quote routes through an exclusive component.
     pub fn surplus_amount(&self) -> Option<&BigUint> {
         self.surplus
             .as_ref()
             .map(SurplusInfo::surplus_amount)
     }
 
-    /// Returns the committed public-market output, if this quote routes through a permissioned
+    /// Returns the committed public-market output, if this quote routes through an exclusive
     /// component.
     pub fn committed_amount_out(&self) -> Option<&BigUint> {
         self.surplus
@@ -1607,9 +1607,9 @@ pub struct Swap {
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
-    /// Per-leg committed output for a permissioned swap.
+    /// Per-leg committed output for an exclusive swap.
     ///
-    /// Set only on the single permissioned leg of a surplus route. The on-chain hook signs a
+    /// Set only on the single exclusive leg of a surplus route. The on-chain hook signs a
     /// `maxExchangeRate` derived from this value (`committed_amount_out * denom / amount_in`); the
     /// component then captures `amount_out - committed_amount_out` as surplus, denominated in this
     /// swap's `token_out`. `None` for ordinary public swaps. In-process only — consumed by the
@@ -1652,9 +1652,9 @@ impl Swap {
         self
     }
 
-    /// Sets the per-leg committed output for a permissioned swap.
+    /// Sets the per-leg committed output for an exclusive swap.
     ///
-    /// The router stamps this onto the single permissioned leg of a surplus route so the encoder
+    /// The router stamps this onto the single exclusive leg of a surplus route so the encoder
     /// can derive the hook's `maxExchangeRate`. See [`Swap::committed_amount_out`].
     pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
@@ -1710,7 +1710,7 @@ impl Swap {
         &self.split
     }
 
-    /// Returns the per-leg committed output, if this is the permissioned leg of a surplus route.
+    /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
     ///
     /// `None` for ordinary public swaps. When `Some`, the encoder derives the hook's
     /// `maxExchangeRate` as `committed_amount_out * denom / amount_in`.

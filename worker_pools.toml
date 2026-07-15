@@ -12,9 +12,9 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: a permissioned-inclusive "surplus" pool. `role = "all"` lets this pool route
-# through permissioned components to capture surplus above the best public rate.
-# Public pools (role omitted; defaults to "public") never see permissioned components.
+# Example: a surplus pool that includes exclusive liquidity. `role = "all"` lets this pool route
+# through exclusive components to capture surplus above the best public rate.
+# Public pools (role omitted; defaults to "public") never see exclusive components.
 # [pools.surplus]
 # algorithm = "bellman_ford"
 # num_workers = 3

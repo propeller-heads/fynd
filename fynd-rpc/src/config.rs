@@ -24,8 +24,8 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: a permissioned-inclusive "surplus" pool (see repo-root worker_pools.toml).
-# Public pools (role omitted; defaults to "public") never see permissioned components.
+# Example: a surplus pool that includes exclusive liquidity (see repo-root worker_pools.toml).
+# Public pools (role omitted; defaults to "public") never see exclusive components.
 # [pools.surplus]
 # algorithm = "bellman_ford"
 # num_workers = 3

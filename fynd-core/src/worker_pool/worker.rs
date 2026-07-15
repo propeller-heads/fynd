@@ -72,7 +72,7 @@ where
     /// Permission scoping for this worker's local graph.
     ///
     /// `IncludeAll` (the default) preserves the original non-filtered behaviour. A public worker
-    /// is configured with `ExcludePermissioned(policy)` so permissioned components never enter
+    /// is configured with `ExcludeExclusive(policy)` so exclusive components never enter
     /// its graph; a surplus worker uses `IncludeAll`.
     permission: PermissionContext,
 }
@@ -118,7 +118,7 @@ where
 
     /// Configures this worker's permission scoping.
     ///
-    /// Public workers pass `ExcludePermissioned(policy)`; surplus workers pass `IncludeAll`.
+    /// Public workers pass `ExcludeExclusive(policy)`; surplus workers pass `IncludeAll`.
     pub(crate) fn with_permission(mut self, permission: PermissionContext) -> Self {
         self.permission = permission;
         self

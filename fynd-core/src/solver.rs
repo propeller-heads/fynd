@@ -159,7 +159,7 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool role: `public` (default) or `all` (permissioned-inclusive).
+    /// Pool role: `public` (default) or `all` (includes exclusive liquidity).
     #[serde(default)]
     role: PoolRole,
 }
@@ -421,7 +421,7 @@ pub struct FyndBuilder {
     price_guard_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
-    /// Predicate identifying permissioned components. Shared by all pools: public pools exclude
+    /// Predicate identifying exclusive components. Shared by all pools: public pools exclude
     /// matching components, the surplus pool includes them. `None` ⇒ no pool filters anything.
     permission_policy: Option<PermissionPolicy>,
 }
@@ -644,7 +644,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the predicate that classifies components as permissioned.
+    /// Sets the predicate that classifies components as exclusive.
     ///
     /// Public pools exclude matching components from their graphs; the surplus pool includes them.
     /// Without a policy, no pool performs any permission filtering.
@@ -744,7 +744,7 @@ impl FyndBuilder {
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
 
-        // Shared across all pools: public pools exclude permissioned components, the surplus pool
+        // Shared across all pools: public pools exclude exclusive components, the surplus pool
         // includes them. `None` ⇒ no pool filters anything (original behaviour).
         let permission_policy = self.permission_policy.take();
         let pools = std::mem::take(&mut self.pools);
@@ -757,7 +757,7 @@ impl FyndBuilder {
             // policy filters; the surplus pool (and any pool without a policy) includes everything.
             let pool_role = pool_entry.role();
             let permission = match (pool_role, permission_policy.clone()) {
-                (PoolRole::Public, Some(policy)) => PermissionContext::ExcludePermissioned(policy),
+                (PoolRole::Public, Some(policy)) => PermissionContext::ExcludeExclusive(policy),
                 _ => PermissionContext::IncludeAll,
             };
 

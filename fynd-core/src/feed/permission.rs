@@ -1,6 +1,6 @@
-//! Per-worker permission scoping for permissioned components.
+//! Per-worker permission scoping for exclusive components.
 //!
-//! "Permissioned" means accessible only to Fynd: such components must never enter the route a
+//! "Exclusive" means accessible only to Fynd: such components must never enter the route a
 //! public pool returns, yet the surplus pool is allowed to route through them to capture the
 //! surplus they offer above the best public-market rate. Both pool kinds serve the same request;
 //! they differ only in which liquidity their workers may route through. Isolation is achieved by
@@ -19,30 +19,30 @@ use crate::{
     types::ComponentId,
 };
 
-/// Classifies a [`ProtocolComponent`] as permissioned or public.
+/// Classifies a [`ProtocolComponent`] as exclusive or public.
 ///
 /// The predicate is supplied by the caller rather than hard-coded against an id or protocol name,
-/// so the notion of "permissioned" can evolve (e.g. a hook address allowlist) without touching the
+/// so the notion of "exclusive" can evolve (e.g. a hook address allowlist) without touching the
 /// routing core.
 #[derive(Clone)]
 pub struct PermissionPolicy {
-    /// Returns `true` when the component is permissioned and therefore excluded from public
+    /// Returns `true` when the component is exclusive and therefore excluded from public
     /// quotes.
-    is_permissioned: Arc<dyn Fn(&ProtocolComponent) -> bool + Send + Sync>,
+    is_exclusive: Arc<dyn Fn(&ProtocolComponent) -> bool + Send + Sync>,
 }
 
 impl PermissionPolicy {
-    /// Creates a policy from a predicate identifying permissioned components.
+    /// Creates a policy from a predicate identifying exclusive components.
     pub fn new<F>(predicate: F) -> Self
     where
         F: Fn(&ProtocolComponent) -> bool + Send + Sync + 'static,
     {
-        Self { is_permissioned: Arc::new(predicate) }
+        Self { is_exclusive: Arc::new(predicate) }
     }
 
-    /// Returns `true` if the component is permissioned.
-    pub fn is_permissioned(&self, component: &ProtocolComponent) -> bool {
-        (self.is_permissioned)(component)
+    /// Returns `true` if the component is exclusive.
+    pub fn is_exclusive(&self, component: &ProtocolComponent) -> bool {
+        (self.is_exclusive)(component)
     }
 }
 
@@ -57,27 +57,27 @@ impl std::fmt::Debug for PermissionPolicy {
 ///
 /// Each worker gets exactly one context for its lifetime, derived from its pool's role. All graph
 /// filtering for a worker flows through this type, so the worker never reasons about
-/// permissioned-ness itself — it just hands its topology and incoming events here.
+/// exclusivity itself — it just hands its topology and incoming events here.
 #[derive(Clone, Debug)]
 pub enum PermissionContext {
     /// See every component — the default. No filtering is applied.
     IncludeAll,
-    /// Drop components classified as permissioned by this policy, so they never enter the graph.
-    ExcludePermissioned(PermissionPolicy),
+    /// Drop components classified as exclusive by this policy, so they never enter the graph.
+    ExcludeExclusive(PermissionPolicy),
 }
 
 impl PermissionContext {
     /// Returns the policy to enforce, or `None` when this worker filters nothing.
     fn active_policy(&self) -> Option<&PermissionPolicy> {
         match self {
-            Self::ExcludePermissioned(policy) => Some(policy),
+            Self::ExcludeExclusive(policy) => Some(policy),
             Self::IncludeAll => None,
         }
     }
 
     /// Filters a full topology map to the components this worker may see.
     ///
-    /// Public workers drop permissioned components; surplus workers (and workers with no policy)
+    /// Public workers drop exclusive components; surplus workers (and workers with no policy)
     /// receive the map unchanged.
     pub(crate) fn filter_topology(
         &self,
@@ -92,15 +92,15 @@ impl PermissionContext {
             .filter(|(id, _)| {
                 market
                     .get_component(id)
-                    .is_none_or(|c| !policy.is_permissioned(c))
+                    .is_none_or(|c| !policy.is_exclusive(c))
             })
             .collect()
     }
 
     /// Restricts a market event to the components this worker may see.
     ///
-    /// Public workers drop permissioned component ids from the added/updated/removed lists so a
-    /// permissioned component is never ingested mid-stream; other workers see the event unchanged.
+    /// Public workers drop exclusive component ids from the added/updated/removed lists so an
+    /// exclusive component is never ingested mid-stream; other workers see the event unchanged.
     pub(crate) fn scope_event(&self, market: &MarketState, event: MarketEvent) -> MarketEvent {
         let Some(policy) = self.active_policy() else {
             return event;
@@ -126,7 +126,7 @@ impl PermissionContext {
         MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
     }
 
-    /// Keeps only the component ids that are NOT permissioned under `policy`.
+    /// Keeps only the component ids that are NOT exclusive under `policy`.
     fn filter_component_ids(
         &self,
         policy: &PermissionPolicy,
@@ -137,7 +137,7 @@ impl PermissionContext {
             .filter(|id| {
                 market
                     .get_component(id)
-                    .is_none_or(|c| !policy.is_permissioned(c))
+                    .is_none_or(|c| !policy.is_exclusive(c))
             })
             .cloned()
             .collect()
@@ -152,14 +152,14 @@ mod tests {
         feed::{events::MarketEvent, market_data::MarketState},
     };
 
-    /// A predicate that treats the `vm:permissioned` protocol system as permissioned.
-    fn permissioned_protocol_policy() -> PermissionPolicy {
-        PermissionPolicy::new(|c: &ProtocolComponent| c.protocol_system == "vm:permissioned")
+    /// A predicate that treats the `vm:exclusive` protocol system as exclusive.
+    fn exclusive_protocol_policy() -> PermissionPolicy {
+        PermissionPolicy::new(|c: &ProtocolComponent| c.protocol_system == "vm:exclusive")
     }
 
-    fn permissioned_component(id: &str) -> ProtocolComponent {
+    fn exclusive_component(id: &str) -> ProtocolComponent {
         let mut c = component(id, &[token(0x01, "A"), token(0x02, "B")]);
-        c.protocol_system = "vm:permissioned".to_string();
+        c.protocol_system = "vm:exclusive".to_string();
         c
     }
 
@@ -174,19 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn is_permissioned_reflects_predicate() {
-        let policy = permissioned_protocol_policy();
-        assert!(policy.is_permissioned(&permissioned_component("perm-1")));
-        assert!(!policy.is_permissioned(&public_component("pub-1")));
+    fn is_exclusive_reflects_predicate() {
+        let policy = exclusive_protocol_policy();
+        assert!(policy.is_exclusive(&exclusive_component("perm-1")));
+        assert!(!policy.is_exclusive(&public_component("pub-1")));
     }
 
     #[test]
-    fn filter_topology_excludes_permissioned() {
-        let policy = permissioned_protocol_policy();
-        let market = market_with(vec![public_component("pub-1"), permissioned_component("perm-1")]);
+    fn filter_topology_excludes_exclusive() {
+        let policy = exclusive_protocol_policy();
+        let market = market_with(vec![public_component("pub-1"), exclusive_component("perm-1")]);
         let topology = market.component_topology();
 
-        let public = PermissionContext::ExcludePermissioned(policy);
+        let public = PermissionContext::ExcludeExclusive(policy);
         let public_view = public.filter_topology(&market, topology.clone());
         assert!(public_view.contains_key("pub-1"));
         assert!(!public_view.contains_key("perm-1"));
@@ -196,9 +196,9 @@ mod tests {
     }
 
     #[test]
-    fn scope_event_excludes_permissioned() {
-        let policy = permissioned_protocol_policy();
-        let market = market_with(vec![public_component("pub-1"), permissioned_component("perm-1")]);
+    fn scope_event_excludes_exclusive() {
+        let policy = exclusive_protocol_policy();
+        let market = market_with(vec![public_component("pub-1"), exclusive_component("perm-1")]);
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::from([
                 ("pub-1".to_string(), vec![]),
@@ -208,7 +208,7 @@ mod tests {
             updated_components: vec!["pub-1".to_string(), "perm-1".to_string()],
         };
 
-        let public = PermissionContext::ExcludePermissioned(policy);
+        let public = PermissionContext::ExcludeExclusive(policy);
         let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
             public.scope_event(&market, event);
         assert!(added_components.contains_key("pub-1"));

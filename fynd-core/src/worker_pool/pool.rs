@@ -49,8 +49,8 @@ pub struct WorkerPoolConfig {
     /// Permission scoping for this pool's workers (default: include all, no filtering).
     ///
     /// `IncludeAll` is safe as the default because it only applies when no `PermissionPolicy` is
-    /// configured — meaning no permissioned components exist to exclude. When a policy is set,
-    /// `FyndBuilder::assemble_components` always constructs `ExcludePermissioned(policy)` for
+    /// configured — meaning no exclusive components exist to exclude. When a policy is set,
+    /// `FyndBuilder::assemble_components` always constructs `ExcludeExclusive(policy)` for
     /// `Public`-role pools, so this default is never relied on in that path.
     permission: PermissionContext,
 }
@@ -267,7 +267,7 @@ impl WorkerPoolBuilder {
 
     /// Sets the permission scoping for this pool's workers.
     ///
-    /// `ExcludePermissioned(policy)` (public pools) drops permissioned components from each
+    /// `ExcludeExclusive(policy)` (public pools) drops exclusive components from each
     /// worker's graph; `IncludeAll` (surplus pools, the default) keeps every component.
     pub fn permission(mut self, permission: PermissionContext) -> Self {
         self.config.permission = permission;
