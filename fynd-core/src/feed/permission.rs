@@ -8,7 +8,7 @@
 //! shared `MarketState` is never duplicated.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::Arc,
 };
 
@@ -108,18 +108,7 @@ impl PermissionContext {
         let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
             event;
 
-        let added_ids: Vec<ComponentId> = added_components
-            .keys()
-            .cloned()
-            .collect();
-        let permitted_added: HashSet<ComponentId> = self
-            .filter_component_ids(policy, market, &added_ids)
-            .into_iter()
-            .collect();
-        let added_components = added_components
-            .into_iter()
-            .filter(|(id, _)| permitted_added.contains(id))
-            .collect();
+        let added_components = self.filter_topology(market, added_components);
         let removed_components = self.filter_component_ids(policy, market, &removed_components);
         let updated_components = self.filter_component_ids(policy, market, &updated_components);
 
