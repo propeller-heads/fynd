@@ -757,7 +757,7 @@ impl FyndBuilder {
             // policy filters; the surplus pool (and any pool without a policy) includes everything.
             let pool_role = pool_entry.role();
             let permission = match (pool_role, permission_policy.clone()) {
-                (PoolRole::Public, Some(policy)) => PermissionContext::ExcludeExclusive(policy),
+                (PoolRole::Public, Some(policy)) => PermissionContext::PublicOnly(policy),
                 _ => PermissionContext::IncludeAll,
             };
 

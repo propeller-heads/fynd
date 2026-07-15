@@ -62,15 +62,15 @@ impl std::fmt::Debug for PermissionPolicy {
 pub enum PermissionContext {
     /// See every component — the default. No filtering is applied.
     IncludeAll,
-    /// Drop components classified as exclusive by this policy, so they never enter the graph.
-    ExcludeExclusive(PermissionPolicy),
+    /// See only public components — exclusive ones are filtered out by the attached policy.
+    PublicOnly(PermissionPolicy),
 }
 
 impl PermissionContext {
     /// Returns the policy to enforce, or `None` when this worker filters nothing.
     fn active_policy(&self) -> Option<&PermissionPolicy> {
         match self {
-            Self::ExcludeExclusive(policy) => Some(policy),
+            Self::PublicOnly(policy) => Some(policy),
             Self::IncludeAll => None,
         }
     }
@@ -186,7 +186,7 @@ mod tests {
         let market = market_with(vec![public_component("pub-1"), exclusive_component("perm-1")]);
         let topology = market.component_topology();
 
-        let public = PermissionContext::ExcludeExclusive(policy);
+        let public = PermissionContext::PublicOnly(policy);
         let public_view = public.filter_topology(&market, topology.clone());
         assert!(public_view.contains_key("pub-1"));
         assert!(!public_view.contains_key("perm-1"));
@@ -208,7 +208,7 @@ mod tests {
             updated_components: vec!["pub-1".to_string(), "perm-1".to_string()],
         };
 
-        let public = PermissionContext::ExcludeExclusive(policy);
+        let public = PermissionContext::PublicOnly(policy);
         let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
             public.scope_event(&market, event);
         assert!(added_components.contains_key("pub-1"));
