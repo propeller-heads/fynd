@@ -22,8 +22,8 @@ sol! {
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
 
-/// The solver label declared in the router calldata's `aggregatorId`, normalized to the book's
-/// solver names via the `[venues.metamask.solver_aliases]` section.
+/// The solver label declared in the router calldata's `aggregatorId`, normalized to the address
+/// book's solver names via the `[venues.metamask.solver_aliases]` section.
 ///
 /// `MetaMask` states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token

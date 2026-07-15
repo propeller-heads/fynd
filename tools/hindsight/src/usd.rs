@@ -173,8 +173,8 @@ mod tests {
 
     #[test]
     fn anchors_come_from_the_address_book() {
-        // USDC and WETH are anchors because the ethereum book registers them, not because this
-        // module knows them.
+        // USDC and WETH are anchors because the ethereum address book registers them, not
+        // because this module knows them.
         let registry = Registry::ethereum();
         assert!(registry
             .stablecoin_anchors()

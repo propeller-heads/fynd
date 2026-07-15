@@ -1,9 +1,9 @@
 //! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
-//! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
-//! from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain book without
-//! recompiling. This module only holds the lookups the decode strategies ask
+//! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
+//! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
+//! address book without recompiling. This module only holds the lookups the decode strategies ask
 //! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
 use std::{
@@ -34,9 +34,9 @@ struct AddressBook {
     labels: HashMap<Address, String>,
 }
 
-/// A venue's book section on one chain: the contracts users enter through, the collectors its
-/// fee skims land on, and its calldata solver vocabulary. Keyed by venue name in the book; the
-/// name binds to a decode strategy at load time (see
+/// A venue's address-book section on one chain: the contracts users enter through, the
+/// collectors its fee skims land on, and its calldata solver vocabulary. Keyed by venue name in
+/// the address book; the name binds to a decode strategy at load time (see
 /// [`crate::decoder::venues::Venue::from_name`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,18 +44,18 @@ pub(crate) struct VenueAddresses {
     pub(crate) entry_points: HashSet<Address>,
     pub(crate) fee_collectors: HashSet<Address>,
     /// Lowercase substrings of the venue's calldata solver ids, mapped to the solver name used
-    /// in this book. Ordered for deterministic matching; empty for venues that declare no
-    /// solver in calldata.
+    /// in the address book. Ordered for deterministic matching; empty for venues that declare
+    /// no solver in calldata.
     #[serde(default)]
     solver_aliases: BTreeMap<String, String>,
 }
 
 impl VenueAddresses {
-    /// Normalize a solver id this venue declared in calldata to the book's solver vocabulary:
-    /// the first alias needle (in alias order) contained in the lowercased id names the solver,
-    /// trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a 1:1 rename.
-    /// Unmatched ids pass through as-is: still more informative than a raw executor address,
-    /// and a signal to extend the book.
+    /// Normalize a solver id this venue declared in calldata to the address book's solver
+    /// vocabulary: the first alias needle (in alias order) contained in the lowercased id names
+    /// the solver, trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a
+    /// 1:1 rename. Unmatched ids pass through as-is: still more informative than a raw executor
+    /// address, and a signal to extend the address book.
     pub(crate) fn normalize_solver(&self, id: &str) -> String {
         let lower = id.to_lowercase();
         for (needle, name) in &self.solver_aliases {
@@ -93,7 +93,7 @@ pub(crate) struct Registry {
     /// `(stablecoin, decimals)` anchors for valuing trades in USD (see `crate::usd`), sorted by
     /// address for deterministic averaging.
     usd_stablecoins: Vec<(Address, u32)>,
-    /// Venue address sets, keyed by the venue name from the book.
+    /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
 }
 
@@ -149,8 +149,8 @@ impl Registry {
             .into_iter()
             .collect();
         usd_stablecoins.sort_unstable();
-        // Alias needles match against lowercased ids, so a mixed-case needle in the book would
-        // silently never match — canonicalize at load.
+        // Alias needles match against lowercased ids, so a mixed-case needle in the address
+        // book would silently never match — canonicalize at load.
         for venue in book.venues.values_mut() {
             venue.solver_aliases = std::mem::take(&mut venue.solver_aliases)
                 .into_iter()
@@ -315,8 +315,8 @@ mod tests {
 
     #[test]
     fn mixed_case_alias_needle_still_matches() {
-        // Needles are canonicalized to lowercase at load, so a capitalized needle in the book
-        // matches the same ids as a lowercase one.
+        // Needles are canonicalized to lowercase at load, so a capitalized needle in the
+        // address book matches the same ids as a lowercase one.
         let book = ETHEREUM_TOML.replace(
             "[venues.metamask.solver_aliases]",
             "[venues.metamask.solver_aliases]\nBeBop = \"bebop\"",
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn venue_without_strategy_is_rejected() {
         // A venue section whose name has no decode strategy would silently never match, so the
-        // book must fail to load.
+        // address book must fail to load.
         let text =
             format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
         let err = Registry::from_toml(&text)

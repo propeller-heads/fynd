@@ -1,4 +1,4 @@
-# Ethereum address book for trade decoding: which contracts are solvers, clients, batch
+# Ethereum address book for trade decoding: which contracts are solvers, venues, batch
 # settlers, and venue infrastructure. Loaded by `Registry` (see registry.rs for what each section
 # drives); pass a modified copy via `--registry` to extend it without recompiling.
 
@@ -110,7 +110,7 @@ fee_collectors = [
 
 # MetaMask's router names the solver API behind each swap in a calldata aggregatorId like
 # "oneInchV6FeeDynamic" or "okx6". Each entry maps a lowercase substring of that id to a solver
-# name used in this book; ids that match no entry are recorded as-is.
+# name used in this address book; ids that match no entry are recorded as-is.
 [venues.metamask.solver_aliases]
 oneinch = "1inch"
 zeroex = "0x"
