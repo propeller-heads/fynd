@@ -1,0 +1,707 @@
+{
+  "timestamp_unix": 1784128535,
+  "target_url": "http://polygon-fynd.staging-fynd.svc.cluster.local:3000",
+  "target_label": "polygon-2vcpu-1w-t3a",
+  "requests_file": "/requests/trades.json",
+  "requests_sha256": "09abbd46e626c8ec985f80bc02ef8dc18a8580b21d1bb65fea763f2af8ddb2d1",
+  "encoding": false,
+  "timeout_ms": 5000,
+  "step_duration_secs": 60,
+  "slo": {
+    "p95_multiplier": 3.0,
+    "max_http_error_rate": 0.001,
+    "max_excess_unsolved_rate": 0.05
+  },
+  "baseline": {
+    "requests": 500,
+    "unsolved_rate": 0.192,
+    "round_trip": {
+      "min": 1,
+      "max": 36,
+      "mean": 4,
+      "median": 5,
+      "p95": 6,
+      "p99": 8,
+      "std_dev": 2.0750903594783527
+    },
+    "solve_time": {
+      "min": 0,
+      "max": 35,
+      "mean": 3,
+      "median": 3,
+      "p95": 5,
+      "p99": 6,
+      "std_dev": 1.9783831782544048
+    }
+  },
+  "steps": [
+    {
+      "target_rps": 5,
+      "achieved_rps": 5.016051364365971,
+      "requests_sent": 300,
+      "requests_succeeded": 300,
+      "orders_solved": 232,
+      "orders_unsolved": 68,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.22666666666666666,
+      "round_trip": {
+        "min": 1,
+        "max": 68,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 13,
+        "std_dev": 5.31224999411737
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 66,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 12,
+        "std_dev": 5.207366576943347
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 10,
+      "achieved_rps": 10.014688209373748,
+      "requests_sent": 600,
+      "requests_succeeded": 600,
+      "orders_solved": 483,
+      "orders_unsolved": 117,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.195,
+      "round_trip": {
+        "min": 1,
+        "max": 162,
+        "mean": 5,
+        "median": 6,
+        "p95": 9,
+        "p99": 26,
+        "std_dev": 8.261557560976824
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 160,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 25,
+        "std_dev": 8.104011352410607
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 15,
+      "achieved_rps": 15.165812887570773,
+      "requests_sent": 900,
+      "requests_succeeded": 900,
+      "orders_solved": 719,
+      "orders_unsolved": 181,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.2011111111111111,
+      "round_trip": {
+        "min": 1,
+        "max": 155,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 14,
+        "std_dev": 6.534608719052053
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 153,
+        "mean": 3,
+        "median": 4,
+        "p95": 6,
+        "p99": 13,
+        "std_dev": 6.397482143607576
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 20,
+      "achieved_rps": 20.01367601194149,
+      "requests_sent": 1200,
+      "requests_succeeded": 1200,
+      "orders_solved": 973,
+      "orders_unsolved": 227,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.18916666666666668,
+      "round_trip": {
+        "min": 1,
+        "max": 165,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 29,
+        "std_dev": 7.93840874063142
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 164,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 28,
+        "std_dev": 7.579797710581288
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 25,
+      "achieved_rps": 25.013757566661663,
+      "requests_sent": 1500,
+      "requests_succeeded": 1500,
+      "orders_solved": 1200,
+      "orders_unsolved": 300,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.2,
+      "round_trip": {
+        "min": 1,
+        "max": 72,
+        "mean": 5,
+        "median": 6,
+        "p95": 9,
+        "p99": 16,
+        "std_dev": 3.8390971160764695
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 71,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 14,
+        "std_dev": 3.6032392833856224
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 30,
+      "achieved_rps": 30.316300064001076,
+      "requests_sent": 1800,
+      "requests_succeeded": 1800,
+      "orders_solved": 1437,
+      "orders_unsolved": 363,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20166666666666666,
+      "round_trip": {
+        "min": 1,
+        "max": 66,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 16,
+        "std_dev": 3.6564250907743814
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 65,
+        "mean": 3,
+        "median": 4,
+        "p95": 6,
+        "p99": 14,
+        "std_dev": 3.608785575970583
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 35,
+      "achieved_rps": 35.72643756379721,
+      "requests_sent": 2100,
+      "requests_succeeded": 2100,
+      "orders_solved": 1666,
+      "orders_unsolved": 434,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20666666666666667,
+      "round_trip": {
+        "min": 1,
+        "max": 84,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 25,
+        "std_dev": 5.107837115648853
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 83,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 24,
+        "std_dev": 4.954891762788808
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 40,
+      "achieved_rps": 40.01200360108032,
+      "requests_sent": 2400,
+      "requests_succeeded": 2400,
+      "orders_solved": 1871,
+      "orders_unsolved": 529,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.22041666666666668,
+      "round_trip": {
+        "min": 1,
+        "max": 129,
+        "mean": 5,
+        "median": 5,
+        "p95": 7,
+        "p99": 26,
+        "std_dev": 6.547582250978855
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 128,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 24,
+        "std_dev": 6.410310704898269
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 45,
+      "achieved_rps": 45.46832373446499,
+      "requests_sent": 2700,
+      "requests_succeeded": 2700,
+      "orders_solved": 2167,
+      "orders_unsolved": 533,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.19740740740740742,
+      "round_trip": {
+        "min": 1,
+        "max": 175,
+        "mean": 6,
+        "median": 6,
+        "p95": 10,
+        "p99": 33,
+        "std_dev": 8.899126049474996
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 173,
+        "mean": 5,
+        "median": 4,
+        "p95": 9,
+        "p99": 31,
+        "std_dev": 8.54370029991776
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 50,
+      "achieved_rps": 50.009168347530384,
+      "requests_sent": 3000,
+      "requests_succeeded": 3000,
+      "orders_solved": 2425,
+      "orders_unsolved": 575,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.19166666666666668,
+      "round_trip": {
+        "min": 1,
+        "max": 129,
+        "mean": 5,
+        "median": 6,
+        "p95": 9,
+        "p99": 32,
+        "std_dev": 6.323369355019522
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 127,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 26,
+        "std_dev": 5.965595807070182
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 55,
+      "achieved_rps": 55.562103278164095,
+      "requests_sent": 3300,
+      "requests_succeeded": 3300,
+      "orders_solved": 2617,
+      "orders_unsolved": 683,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20696969696969697,
+      "round_trip": {
+        "min": 1,
+        "max": 126,
+        "mean": 5,
+        "median": 5,
+        "p95": 8,
+        "p99": 29,
+        "std_dev": 5.904954263030735
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 125,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 28,
+        "std_dev": 5.641566513591125
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 60,
+      "achieved_rps": 62.50651109490572,
+      "requests_sent": 3600,
+      "requests_succeeded": 3600,
+      "orders_solved": 2875,
+      "orders_unsolved": 725,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.2013888888888889,
+      "round_trip": {
+        "min": 1,
+        "max": 138,
+        "mean": 6,
+        "median": 5,
+        "p95": 9,
+        "p99": 41,
+        "std_dev": 7.796277601807445
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 137,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 39,
+        "std_dev": 7.6559163759510565
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 65,
+      "achieved_rps": 66.67464482929581,
+      "requests_sent": 3900,
+      "requests_succeeded": 3900,
+      "orders_solved": 3115,
+      "orders_unsolved": 785,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.2012820512820513,
+      "round_trip": {
+        "min": 1,
+        "max": 124,
+        "mean": 5,
+        "median": 5,
+        "p95": 8,
+        "p99": 27,
+        "std_dev": 5.226436742718793
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 123,
+        "mean": 4,
+        "median": 4,
+        "p95": 6,
+        "p99": 23,
+        "std_dev": 4.968154999852974
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 70,
+      "achieved_rps": 71.43586080212266,
+      "requests_sent": 4200,
+      "requests_succeeded": 4200,
+      "orders_solved": 3350,
+      "orders_unsolved": 850,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20238095238095238,
+      "round_trip": {
+        "min": 1,
+        "max": 131,
+        "mean": 5,
+        "median": 5,
+        "p95": 9,
+        "p99": 28,
+        "std_dev": 6.116546644728777
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 130,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 26,
+        "std_dev": 5.859323055325305
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 75,
+      "achieved_rps": 76.92307692307692,
+      "requests_sent": 4500,
+      "requests_succeeded": 4500,
+      "orders_solved": 3604,
+      "orders_unsolved": 896,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.1991111111111111,
+      "round_trip": {
+        "min": 1,
+        "max": 171,
+        "mean": 6,
+        "median": 5,
+        "p95": 8,
+        "p99": 40,
+        "std_dev": 9.479252197416326
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 169,
+        "mean": 4,
+        "median": 4,
+        "p95": 7,
+        "p99": 34,
+        "std_dev": 9.358371178314693
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 80,
+      "achieved_rps": 83.33912077227585,
+      "requests_sent": 4800,
+      "requests_succeeded": 4800,
+      "orders_solved": 3832,
+      "orders_unsolved": 968,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20166666666666666,
+      "round_trip": {
+        "min": 1,
+        "max": 163,
+        "mean": 6,
+        "median": 5,
+        "p95": 10,
+        "p99": 59,
+        "std_dev": 10.90552230141531
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 161,
+        "mean": 5,
+        "median": 4,
+        "p95": 8,
+        "p99": 56,
+        "std_dev": 10.572152887026684
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 85,
+      "achieved_rps": 90.9123319904453,
+      "requests_sent": 5100,
+      "requests_succeeded": 5100,
+      "orders_solved": 4103,
+      "orders_unsolved": 997,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.19549019607843138,
+      "round_trip": {
+        "min": 1,
+        "max": 134,
+        "mean": 7,
+        "median": 6,
+        "p95": 16,
+        "p99": 60,
+        "std_dev": 9.704749191130347
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 132,
+        "mean": 5,
+        "median": 4,
+        "p95": 14,
+        "p99": 58,
+        "std_dev": 9.496841580230766
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 90,
+      "achieved_rps": 90.90143927278848,
+      "requests_sent": 5400,
+      "requests_succeeded": 5400,
+      "orders_solved": 4303,
+      "orders_unsolved": 1097,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20314814814814816,
+      "round_trip": {
+        "min": 1,
+        "max": 130,
+        "mean": 7,
+        "median": 6,
+        "p95": 14,
+        "p99": 51,
+        "std_dev": 8.29878393590379
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 129,
+        "mean": 5,
+        "median": 4,
+        "p95": 12,
+        "p99": 49,
+        "std_dev": 8.10150877580494
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 95,
+      "achieved_rps": 100.00350889504895,
+      "requests_sent": 5700,
+      "requests_succeeded": 5700,
+      "orders_solved": 4515,
+      "orders_unsolved": 1185,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20789473684210527,
+      "round_trip": {
+        "min": 1,
+        "max": 155,
+        "mean": 6,
+        "median": 5,
+        "p95": 12,
+        "p99": 61,
+        "std_dev": 10.963344028201512
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 154,
+        "mean": 5,
+        "median": 4,
+        "p95": 10,
+        "p99": 60,
+        "std_dev": 10.738543466852182
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 100,
+      "achieved_rps": 99.98333611064822,
+      "requests_sent": 6000,
+      "requests_succeeded": 6000,
+      "orders_solved": 4766,
+      "orders_unsolved": 1234,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.20566666666666666,
+      "round_trip": {
+        "min": 1,
+        "max": 125,
+        "mean": 6,
+        "median": 5,
+        "p95": 15,
+        "p99": 56,
+        "std_dev": 8.928148370929625
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 123,
+        "mean": 5,
+        "median": 4,
+        "p95": 12,
+        "p99": 54,
+        "std_dev": 8.668381240654643
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 105,
+      "achieved_rps": 111.07584893684545,
+      "requests_sent": 6300,
+      "requests_succeeded": 6300,
+      "orders_solved": 5043,
+      "orders_unsolved": 1257,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.19952380952380952,
+      "round_trip": {
+        "min": 1,
+        "max": 141,
+        "mean": 7,
+        "median": 5,
+        "p95": 16,
+        "p99": 72,
+        "std_dev": 12.103777450508108
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 140,
+        "mean": 6,
+        "median": 4,
+        "p95": 15,
+        "p99": 68,
+        "std_dev": 11.824416492868703
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 110,
+      "achieved_rps": 111.0942786446498,
+      "requests_sent": 6600,
+      "requests_succeeded": 6600,
+      "orders_solved": 5307,
+      "orders_unsolved": 1293,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.19590909090909092,
+      "round_trip": {
+        "min": 1,
+        "max": 133,
+        "mean": 7,
+        "median": 5,
+        "p95": 13,
+        "p99": 69,
+        "std_dev": 11.13007800348391
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 131,
+        "mean": 5,
+        "median": 4,
+        "p95": 12,
+        "p99": 66,
+        "std_dev": 10.85511330426748
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 115,
+      "achieved_rps": 125.0,
+      "requests_sent": 6900,
+      "requests_succeeded": 6900,
+      "orders_solved": 5488,
+      "orders_unsolved": 1412,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.2046376811594203,
+      "round_trip": {
+        "min": 1,
+        "max": 125,
+        "mean": 10,
+        "median": 6,
+        "p95": 39,
+        "p99": 71,
+        "std_dev": 13.45325778120438
+      },
+      "solve_time": {
+        "min": 0,
+        "max": 123,
+        "mean": 9,
+        "median": 5,
+        "p95": 36,
+        "p99": 69,
+        "std_dev": 13.053812814097927
+      },
+      "passed": false
+    }
+  ],
+  "capacity_rps": 110
+}
