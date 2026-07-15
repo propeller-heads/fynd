@@ -6,9 +6,11 @@
 # intermediary.
 wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
-# Token-movement infrastructure that traces touch on most swaps without ever being the settling
-# venue: attribution guesses skip these (the wrapped-native token above is always skipped too).
-infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"]
+# Contracts nearly every swap routes through but that never settle the trade. Hindsight guesses
+# an unknown swap's settling venue from on-chain activity; without this list those guesses would
+# land on the plumbing instead of the real venue. The wrapped-native token above is skipped the
+# same way.
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
 
 # Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
 # a solver, not the trader (CoW Protocol Settlement).
@@ -106,11 +108,9 @@ fee_collectors = [
     "0xf326e4de8f66a0bdc0970b79e0924e33c79f1915",
 ]
 
-# MetaMask's calldata solver vocabulary: its router names the solver API behind each swap in an
-# aggregatorId like "oneInchV6FeeDynamic" or "okx6". The first substring below found in the
-# lowercased id maps it to the solver label used in this book — trimming MetaMask's version/fee
-# decoration, not a 1:1 rename. Ids matching nothing pass through as-is: still more informative
-# than a raw executor address, and a signal to extend this table.
+# MetaMask's router names the solver API behind each swap in a calldata aggregatorId like
+# "oneInchV6FeeDynamic" or "okx6". Each entry maps a lowercase substring of that id to a solver
+# name used in this book; ids that match no entry are recorded as-is.
 [venues.metamask.solver_aliases]
 oneinch = "1inch"
 zeroex = "0x"

@@ -30,12 +30,17 @@ pub(crate) struct SolverQuote {
     pub timestamp: Option<u64>,
 }
 
-/// Match-time veto: order shapes a solver's own logs mark as not same-chain swaps, checked
-/// before the transaction costs a trace. Netting such a transaction would pair its input with a
-/// leftover refund as a phantom trade. Adding a solver's veto is one check here — the matching
-/// in `strategy` stays solver-agnostic.
+/// The reason a matched transaction must be skipped instead of decoded, if any.
+///
+/// Some solver routers also settle orders that are not same-chain swaps; decoding those would
+/// fabricate phantom trades, so they are vetoed from their logs before the transaction costs a
+/// trace. Each solver contributes one check here, keeping the matching in `strategy`
+/// solver-agnostic.
 pub(crate) fn match_veto(logs: &[Log]) -> Option<&'static str> {
-    lifi::started_bridge_order(logs).then_some("cross-chain bridge order")
+    if lifi::started_bridge_order(logs) {
+        return Some("cross-chain bridge order");
+    }
+    None
 }
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed

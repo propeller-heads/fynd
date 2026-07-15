@@ -63,7 +63,7 @@ const MAX_LAG_BLOCKS: u64 = 100;
 #[derive(clap::Args)]
 pub(crate) struct MonitorArgs {
     #[command(flatten)]
-    pub rpc: crate::RpcArgs,
+    pub chain: crate::ChainArgs,
 
     /// Tycho WebSocket URL feeding the in-process solver
     #[arg(long, env = "TYCHO_URL")]
@@ -287,12 +287,17 @@ async fn build_solver(
     pools_config: &fynd_rpc::config::WorkerPoolsConfig,
 ) -> anyhow::Result<(Solver, BlockStepController)> {
     info!(
-        chain = cfg.rpc.chain,
+        chain = cfg.chain.name,
         protocols = protocols.len(),
         "building in-process solver (loading tokens may take minutes)…"
     );
-    let mut builder =
-        FyndBuilder::new(chain, &cfg.tycho_url, &cfg.rpc.rpc_url, protocols.to_vec(), cfg.min_tvl);
+    let mut builder = FyndBuilder::new(
+        chain,
+        &cfg.tycho_url,
+        &cfg.chain.rpc_url,
+        protocols.to_vec(),
+        cfg.min_tvl,
+    );
     if let Some(key) = cfg.tycho_api_key.as_deref() {
         builder = builder.tycho_api_key(key);
     }
@@ -312,8 +317,8 @@ async fn build_solver(
 /// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = parse_chain(&cfg.rpc.chain)
-        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.rpc.chain))?;
+    let chain = parse_chain(&cfg.chain.name)
+        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain.name))?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
@@ -345,8 +350,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         };
 
     let mut decoder = Decoder::new(
-        provider_from(&cfg.rpc.rpc_url)?,
-        Registry::load(&cfg.rpc.chain, cfg.rpc.registry.as_deref())?,
+        provider_from(&cfg.chain.rpc_url)?,
+        Registry::load(&cfg.chain.name, cfg.chain.registry.as_deref())?,
     );
 
     if let Some(port) = cfg.metrics_port {
@@ -481,7 +486,7 @@ async fn run_session<P: Provider>(
         for range in &ranges {
             telemetry::record_range(
                 range,
-                &cfg.rpc.chain,
+                &cfg.chain.name,
                 &prices_top,
                 &prices_back,
                 decoder.registry(),
@@ -561,7 +566,7 @@ mod tests {
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
-            rpc: crate::RpcArgs { rpc_url, chain: "ethereum".to_string(), registry: None },
+            chain: crate::ChainArgs { name: "ethereum".to_string(), rpc_url, registry: None },
             tycho_url,
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
