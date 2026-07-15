@@ -13,8 +13,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, trace, warn};
+use tracing::{error, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::types::ComponentId;
@@ -64,10 +65,11 @@ impl ChangedComponents {
 }
 
 use super::{
-    computation::DerivedComputation,
+    computation::{ComputationId, ComputationRequirements, DerivedComputation},
     computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
     events::DerivedDataEvent,
+    registry::ErasedComputation,
     store::DerivedData,
 };
 use crate::feed::{
@@ -78,11 +80,7 @@ use crate::feed::{
 /// Thread-safe handle to shared derived data store.
 pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
 
-/// Configuration for the ComputationManager.
-///
-/// TODO: Consider making this a registry of computation configs using `Box<dyn ComputationConfig>`
-/// to support dynamic computation registration. This would allow adding new computation types
-/// without modifying this struct. For now, we hardcode the three computation types.
+/// Configuration for the default computation set built by [`ComputationManager::new`].
 #[derive(Debug, Clone)]
 pub struct ComputationManagerConfig {
     /// Gas token address (e.g., WETH) for token price computation.
@@ -145,14 +143,18 @@ pub struct ComputationManager {
     market_data: MarketData,
     /// Shared derived data store (write access).
     store: SharedDerivedDataRef,
-    /// Token gas price computation.
-    token_price_computation: TokenGasPriceComputation,
-    /// Spot price computation.
-    spot_price_computation: SpotPriceComputation,
-    /// Pool depth computation.
-    pool_depth_computation: PoolDepthComputation,
+    /// Registered computations, driven in dependency-stage order each block.
+    computations: Vec<Box<dyn ErasedComputation>>,
     /// Event broadcaster for derived data updates.
     event_tx: broadcast::Sender<DerivedDataEvent>,
+}
+
+/// A dependency-ordered execution plan for the registered computations.
+struct ComputationSchedule {
+    /// Indices into `ComputationManager::computations`, grouped into stages run in order.
+    stages: Vec<Vec<usize>>,
+    /// Indices that could not be ordered because of a requirement cycle.
+    unscheduled: Vec<usize>,
 }
 
 impl ComputationManager {
@@ -165,22 +167,58 @@ impl ComputationManager {
         config: ComputationManagerConfig,
         market_data: MarketData,
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
-        let pool_depth_computation = PoolDepthComputation::new(config.depth_slippage_threshold)?;
-        let (event_tx, event_rx) = broadcast::channel(64);
+        let (mut manager, event_rx) = Self::empty(market_data);
+        manager.register(SpotPriceComputation::new())?;
+        manager.register(
+            TokenGasPriceComputation::default()
+                .with_max_hops(config.max_hop)
+                .with_gas_token(config.gas_token),
+        )?;
+        manager.register(PoolDepthComputation::new(config.depth_slippage_threshold)?)?;
+        Ok((manager, event_rx))
+    }
 
-        Ok((
+    /// Creates a manager with no computations registered.
+    ///
+    /// [`new`](Self::new) builds on this to assemble the default computation set, and
+    /// tests drive a custom set through [`register`](Self::register).
+    pub(crate) fn empty(market_data: MarketData) -> (Self, broadcast::Receiver<DerivedDataEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(64);
+        (
             Self {
                 market_data,
                 store: DerivedData::new_shared(),
-                token_price_computation: TokenGasPriceComputation::default()
-                    .with_max_hops(config.max_hop)
-                    .with_gas_token(config.gas_token),
-                spot_price_computation: SpotPriceComputation::new(),
-                pool_depth_computation,
+                computations: Vec::new(),
                 event_tx,
             },
             event_rx,
-        ))
+        )
+    }
+
+    /// Registers a computation to be driven each block.
+    ///
+    /// Registration order is preserved within a dependency stage; cross-stage order is
+    /// derived from each computation's
+    /// [`requirements`](crate::derived::computation::DerivedComputation::requirements).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComputationError::DuplicateComputationId`] if a computation with the same
+    /// [`ID`](DerivedComputation::ID) is already registered.
+    pub(crate) fn register<C: DerivedComputation>(
+        &mut self,
+        computation: C,
+    ) -> Result<(), ComputationError> {
+        if self
+            .computations
+            .iter()
+            .any(|existing| existing.id() == C::ID)
+        {
+            return Err(ComputationError::DuplicateComputationId(C::ID));
+        }
+        self.computations
+            .push(Box::new(computation));
+        Ok(())
     }
 
     /// Returns a reference to the shared derived data store.
@@ -239,15 +277,13 @@ impl ComputationManager {
         }
     }
 
-    /// Runs all computations and updates the store.
+    /// Runs all registered computations for the current block and updates the store.
     ///
-    /// This is called on market updates and lag recovery.
-    /// Broadcasts `DerivedDataEvent` for each computation that completes.
-    ///
-    /// **Dependency order**:
-    /// 1. `SpotPriceComputation` - no dependencies
-    /// 2. `TokenGasPriceComputation` - depends on spot_prices in store
-    /// 3. `PoolDepthComputation` - no dependencies (runs in parallel with token prices)
+    /// Computations run in dependency stages derived from their
+    /// [`requirements`](crate::derived::computation::DerivedComputation::requirements):
+    /// a stage runs concurrently and is written before the next stage starts, and a
+    /// computation whose requirement did not succeed this block is skipped and reported
+    /// as failed. Broadcasts a `DerivedDataEvent` per computation.
     async fn compute_all(&self, changed: &ChangedComponents) {
         let total_start = Instant::now();
 
@@ -268,180 +304,171 @@ impl ComputationManager {
             .event_tx
             .send(DerivedDataEvent::NewBlock { block });
 
-        // Phase 1: Compute spot prices first (no dependencies)
-        let spot_start = Instant::now();
-        let spot_prices_result = self
-            .spot_price_computation
-            .compute(&self.market_data, &self.store, changed)
+        let nodes: Vec<(ComputationId, ComputationRequirements)> = self
+            .computations
+            .iter()
+            .map(|computation| (computation.id(), computation.requirements()))
+            .collect();
+        let schedule = build_schedule(&nodes);
+        for &idx in &schedule.unscheduled {
+            let computation_id = nodes[idx].0;
+            error!(computation = computation_id, "computation skipped: requirement cycle");
+            let _ = self
+                .event_tx
+                .send(DerivedDataEvent::ComputationFailed { computation_id, block });
+        }
+
+        let mut succeeded: HashSet<ComputationId> = HashSet::new();
+        for stage in &schedule.stages {
+            // Split the stage into runnable computations and ones whose requirements did
+            // not hold this block; the latter are skipped and reported as failed.
+            let mut runnable = Vec::new();
+            {
+                let store = self.store.read().await;
+                for &idx in stage {
+                    let reqs = &nodes[idx].1;
+                    let fresh_ready = reqs
+                        .fresh_requirements()
+                        .iter()
+                        .all(|id| succeeded.contains(id));
+                    let stale_ready = reqs
+                        .stale_requirements()
+                        .iter()
+                        .all(|id| succeeded.contains(id) || store.output_block(id).is_some());
+                    if fresh_ready && stale_ready {
+                        runnable.push(idx);
+                    } else {
+                        let _ = self
+                            .event_tx
+                            .send(DerivedDataEvent::ComputationFailed {
+                                computation_id: nodes[idx].0,
+                                block,
+                            });
+                    }
+                }
+            }
+
+            if runnable.is_empty() {
+                continue;
+            }
+
+            // Run this stage's computations concurrently; they read the store as needed.
+            let results = join_all(runnable.iter().map(|&idx| async move {
+                let start = Instant::now();
+                let result = self.computations[idx]
+                    .compute_erased(&self.market_data, &self.store, changed, block)
+                    .await;
+                (idx, result, start.elapsed())
+            }))
             .await;
-        let spot_elapsed = spot_start.elapsed();
 
-        // Write spot prices to store before dependent computations
-        match spot_prices_result {
-            Ok(output) => {
-                let count = output.data.len();
-                if output.has_failures() {
-                    warn!(
-                        count,
-                        failed = output.failed_items.len(),
-                        "spot prices partial failures"
-                    );
-                    for item in &output.failed_items {
-                        debug!(key = %item.key, error = %item.error, "spot price failed item");
+            // Persist and report in stage order, taking the write lock once for the stage.
+            let mut store = self.store.write().await;
+            for (idx, result, elapsed) in results {
+                let computation_id = nodes[idx].0;
+                match result {
+                    Ok(write) => {
+                        (write.persist)(&mut store);
+                        info!(
+                            computation = computation_id,
+                            failed = write.failed_items.len(),
+                            elapsed_ms = elapsed.as_millis(),
+                            "computation complete"
+                        );
+                        let _ = self
+                            .event_tx
+                            .send(DerivedDataEvent::ComputationComplete {
+                                computation_id,
+                                block,
+                                failed_items: write.failed_items,
+                            });
+                        succeeded.insert(computation_id);
                     }
-                } else {
-                    info!(count, elapsed_ms = spot_elapsed.as_millis(), "spot prices computed");
+                    Err(e) => {
+                        warn!(
+                            error = ?e,
+                            computation = computation_id,
+                            elapsed_ms = elapsed.as_millis(),
+                            "computation failed"
+                        );
+                        let _ = self
+                            .event_tx
+                            .send(DerivedDataEvent::ComputationFailed { computation_id, block });
+                    }
                 }
-                self.store
-                    .write()
-                    .await
-                    .set_spot_prices(
-                        output.data,
-                        output.failed_items.clone(),
-                        block,
-                        changed.is_full_recompute,
-                    );
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationComplete {
-                        computation_id: SpotPriceComputation::ID,
-                        block,
-                        failed_items: output.failed_items,
-                    });
-            }
-            Err(e) => {
-                warn!(error = ?e, elapsed_ms = spot_elapsed.as_millis(), "spot price computation failed");
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationFailed {
-                        computation_id: SpotPriceComputation::ID,
-                        block,
-                    });
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationFailed {
-                        computation_id: TokenGasPriceComputation::ID,
-                        block,
-                    });
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationFailed {
-                        computation_id: PoolDepthComputation::ID,
-                        block,
-                    });
-                // Cannot proceed with token prices if spot prices failed
-                return;
             }
         }
 
-        // Phase 2: Run dependent computations (token gas prices and pool depths need spot prices)
-        let (token_prices_result, pool_depths_result) = tokio::join!(
-            async {
-                let start = Instant::now();
-                let result = self
-                    .token_price_computation
-                    .compute(&self.market_data, &self.store, changed)
-                    .await;
-                (result, start.elapsed())
-            },
-            async {
-                let start = Instant::now();
-                let result = self
-                    .pool_depth_computation
-                    .compute(&self.market_data, &self.store, changed)
-                    .await;
-                (result, start.elapsed())
-            }
+        info!(
+            block,
+            total_ms = total_start.elapsed().as_millis(),
+            "all derived computations complete"
         );
-        let (token_prices_result, token_elapsed) = token_prices_result;
-        let (pool_depths_result, depth_elapsed) = pool_depths_result;
-
-        // Update store with remaining results
-        let mut store_write = self.store.write().await;
-
-        match token_prices_result {
-            Ok(output) => {
-                let count = output.data.len();
-                if output.has_failures() {
-                    warn!(
-                        count,
-                        failed = output.failed_items.len(),
-                        "token prices partial failures"
-                    );
-                    for item in &output.failed_items {
-                        debug!(key = %item.key, error = %item.error, "token price failed item");
-                    }
-                } else {
-                    info!(count, elapsed_ms = token_elapsed.as_millis(), "token prices computed");
-                }
-                store_write.set_token_prices(
-                    output.data,
-                    output.failed_items.clone(),
-                    block,
-                    changed.is_full_recompute,
-                );
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationComplete {
-                        computation_id: TokenGasPriceComputation::ID,
-                        block,
-                        failed_items: output.failed_items,
-                    });
-            }
-            Err(e) => {
-                warn!(error = ?e, "token price computation failed");
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationFailed {
-                        computation_id: TokenGasPriceComputation::ID,
-                        block,
-                    });
-            }
-        }
-
-        match pool_depths_result {
-            Ok(output) => {
-                let count = output.data.len();
-                if output.has_failures() {
-                    warn!(
-                        count,
-                        failed = output.failed_items.len(),
-                        "pool depths partial failures"
-                    );
-                    for item in &output.failed_items {
-                        debug!(key = %item.key, error = %item.error, "pool depth failed item");
-                    }
-                } else {
-                    info!(count, elapsed_ms = depth_elapsed.as_millis(), "pool depths computed");
-                }
-                store_write.set_pool_depths(
-                    output.data,
-                    output.failed_items.clone(),
-                    block,
-                    changed.is_full_recompute,
-                );
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationComplete {
-                        computation_id: PoolDepthComputation::ID,
-                        block,
-                        failed_items: output.failed_items,
-                    });
-            }
-            Err(e) => {
-                warn!(error = ?e, "pool depth computation failed");
-                let _ = self
-                    .event_tx
-                    .send(DerivedDataEvent::ComputationFailed {
-                        computation_id: PoolDepthComputation::ID,
-                        block,
-                    });
-            }
-        }
-
-        let total_elapsed = total_start.elapsed();
-        info!(block, total_ms = total_elapsed.as_millis(), "all derived computations complete");
     }
+}
+
+/// Computes the dependency-ordered execution plan for `nodes` (id paired with its
+/// requirements).
+///
+/// Each node lands in a later stage than the `nodes` it requires; input order is
+/// preserved within a stage. Nodes caught in a requirement cycle cannot be ordered and
+/// are returned as `unscheduled`. A requirement naming an id absent from `nodes` does
+/// not affect ordering (it is left to the runtime readiness check).
+fn build_schedule(nodes: &[(ComputationId, ComputationRequirements)]) -> ComputationSchedule {
+    let ids: Vec<ComputationId> = nodes
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    let mut stage_of: Vec<Option<usize>> = vec![None; nodes.len()];
+
+    loop {
+        let mut progressed = false;
+        for (idx, (_, reqs)) in nodes.iter().enumerate() {
+            if stage_of[idx].is_some() {
+                continue;
+            }
+            let mut stage = 0;
+            let mut ready = true;
+            for dep in reqs
+                .fresh_requirements()
+                .iter()
+                .chain(reqs.stale_requirements().iter())
+            {
+                let Some(dep_idx) = ids.iter().position(|id| id == dep) else {
+                    continue;
+                };
+                match stage_of[dep_idx] {
+                    Some(dep_stage) => stage = stage.max(dep_stage + 1),
+                    None => {
+                        ready = false;
+                        break;
+                    }
+                }
+            }
+            if ready {
+                stage_of[idx] = Some(stage);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    let stage_count = stage_of
+        .iter()
+        .filter_map(|stage| *stage)
+        .max()
+        .map_or(0, |max| max + 1);
+    let mut stages = vec![Vec::new(); stage_count];
+    let mut unscheduled = Vec::new();
+    for (idx, stage) in stage_of.iter().enumerate() {
+        match stage {
+            Some(stage) => stages[*stage].push(idx),
+            None => unscheduled.push(idx),
+        }
+    }
+    ComputationSchedule { stages, unscheduled }
 }
 
 #[async_trait]
@@ -482,13 +509,20 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
 
     use tokio::sync::broadcast;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{component, setup_market_weighted, token, MockProtocolSim},
+        derived::computation::{ComputationOutput, FailedItem, FailedItemError},
         feed::market_data::{MarketData, MarketState},
         types::BlockInfo,
     };
@@ -505,6 +539,107 @@ mod tests {
             }
         }
         events
+    }
+
+    // --- build_schedule: dependency staging (pure) --------------------------------
+
+    #[test]
+    fn schedule_empty_has_no_stages() {
+        let schedule = build_schedule(&[]);
+        assert!(schedule.stages.is_empty());
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_single_root_is_one_stage() {
+        let schedule = build_schedule(&[("a", ComputationRequirements::none())]);
+        assert_eq!(schedule.stages, vec![vec![0]]);
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_independent_roots_share_one_stage() {
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::none()),
+            ("b", ComputationRequirements::none()),
+        ]);
+        assert_eq!(schedule.stages, vec![vec![0, 1]]);
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_chain_orders_into_successive_stages() {
+        // a <- b <- c
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::none()),
+            ("b", ComputationRequirements::fresh(["a"])),
+            ("c", ComputationRequirements::fresh(["b"])),
+        ]);
+        assert_eq!(schedule.stages, vec![vec![0], vec![1], vec![2]]);
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_diamond_places_join_after_both_parents() {
+        // a <- {b, c} <- d; mirrors fynd's spot -> {token, pool} fan-out.
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::none()),
+            ("b", ComputationRequirements::fresh(["a"])),
+            ("c", ComputationRequirements::fresh(["a"])),
+            ("d", ComputationRequirements::fresh(["b", "c"])),
+        ]);
+        assert_eq!(schedule.stages, vec![vec![0], vec![1, 2], vec![3]]);
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_preserves_input_order_within_a_stage() {
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::none()),
+            ("b", ComputationRequirements::fresh(["a"])),
+            ("c", ComputationRequirements::fresh(["a"])),
+        ]);
+        // b registered before c, so it comes first in the shared stage.
+        assert_eq!(schedule.stages, vec![vec![0], vec![1, 2]]);
+    }
+
+    #[test]
+    fn schedule_stale_requirement_orders_after_its_producer() {
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::none()),
+            ("b", ComputationRequirements::stale(["a"])),
+        ]);
+        assert_eq!(schedule.stages, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn schedule_requirement_on_unregistered_id_does_not_affect_ordering() {
+        // "ghost" is not registered, so "a" is treated as a root.
+        let schedule = build_schedule(&[("a", ComputationRequirements::fresh(["ghost"]))]);
+        assert_eq!(schedule.stages, vec![vec![0]]);
+        assert!(schedule.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_two_node_cycle_is_unscheduled() {
+        let schedule = build_schedule(&[
+            ("a", ComputationRequirements::fresh(["b"])),
+            ("b", ComputationRequirements::fresh(["a"])),
+        ]);
+        assert!(schedule.stages.is_empty());
+        assert_eq!(schedule.unscheduled, vec![0, 1]);
+    }
+
+    #[test]
+    fn schedule_isolates_cycle_from_schedulable_nodes() {
+        // "root" schedules normally; "x" and "y" form a cycle and are unscheduled.
+        let schedule = build_schedule(&[
+            ("root", ComputationRequirements::none()),
+            ("x", ComputationRequirements::fresh(["y"])),
+            ("y", ComputationRequirements::fresh(["x"])),
+        ]);
+        assert_eq!(schedule.stages, vec![vec![0]]);
+        assert_eq!(schedule.unscheduled, vec![1, 2]);
     }
 
     #[test]
@@ -592,6 +727,385 @@ mod tests {
             .await
             .expect("manager should shutdown")
             .expect("task should complete successfully");
+    }
+
+    // --- registry seam: custom computations driven through the manager -------------
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct CounterOutput(u32);
+
+    /// A minimal computation that ignores market data and uses the default `persist`
+    /// (the path a downstream computation takes: store into the generic slot).
+    struct CounterComputation;
+
+    #[async_trait::async_trait]
+    impl DerivedComputation for CounterComputation {
+        type Output = CounterOutput;
+        const ID: ComputationId = "counter";
+
+        async fn compute(
+            &self,
+            _market: &MarketData,
+            _store: &SharedDerivedDataRef,
+            _changed: &ChangedComponents,
+        ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+            Ok(ComputationOutput::success(CounterOutput(7)))
+        }
+    }
+
+    /// Builds a market carrying a `last_updated` block so `compute_all` runs.
+    fn market_with_block() -> MarketData {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(0),
+        )]);
+        market
+    }
+
+    #[tokio::test]
+    async fn registered_custom_computation_runs_and_persists_via_default_slot() {
+        let (mut manager, mut event_rx) = ComputationManager::empty(market_with_block());
+        manager
+            .register(CounterComputation)
+            .unwrap();
+
+        manager
+            .compute_all(&ChangedComponents { is_full_recompute: true, ..Default::default() })
+            .await;
+
+        let store = manager.store();
+        let guard = store.read().await;
+        assert_eq!(
+            guard.output::<CounterOutput>(CounterComputation::ID),
+            Some(&CounterOutput(7)),
+            "default persist should write the output into the generic slot"
+        );
+        assert!(guard
+            .output_block(CounterComputation::ID)
+            .is_some());
+
+        let events = drain_events(&mut event_rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationComplete { computation_id: "counter", .. }
+            )),
+            "expected ComputationComplete(counter), got: {events:?}"
+        );
+    }
+
+    #[test]
+    fn registering_duplicate_id_is_rejected() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager
+            .register(CounterComputation)
+            .unwrap();
+
+        let result = manager.register(CounterComputation);
+
+        assert!(matches!(result, Err(ComputationError::DuplicateComputationId("counter"))));
+    }
+
+    // --- exact event sequences (characterization) ---------------------------------
+
+    /// Reduces an event stream to `(kind, computation_id)` pairs for exact comparison.
+    fn event_summary(events: &[DerivedDataEvent]) -> Vec<(&'static str, &'static str)> {
+        events
+            .iter()
+            .map(|event| match event {
+                DerivedDataEvent::NewBlock { .. } => ("new_block", ""),
+                DerivedDataEvent::ComputationComplete { computation_id, .. } => {
+                    ("complete", *computation_id)
+                }
+                DerivedDataEvent::ComputationFailed { computation_id, .. } => {
+                    ("failed", *computation_id)
+                }
+            })
+            .collect()
+    }
+
+    /// Subscribes, runs one full-recompute pass, and returns the events it emitted.
+    async fn run_full_recompute(manager: &ComputationManager) -> Vec<DerivedDataEvent> {
+        let mut event_rx = manager.event_sender().subscribe();
+        manager
+            .compute_all(&ChangedComponents { is_full_recompute: true, ..Default::default() })
+            .await;
+        drain_events(&mut event_rx)
+    }
+
+    /// Defines a market-independent test computation with a fixed id, requirements, result.
+    macro_rules! test_computation {
+        ($name:ident, $id:literal, $reqs:expr, $result:expr) => {
+            struct $name;
+
+            #[async_trait::async_trait]
+            impl DerivedComputation for $name {
+                type Output = ();
+                const ID: ComputationId = $id;
+
+                fn requirements(&self) -> ComputationRequirements {
+                    $reqs
+                }
+
+                async fn compute(
+                    &self,
+                    _market: &MarketData,
+                    _store: &SharedDerivedDataRef,
+                    _changed: &ChangedComponents,
+                ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+                    $result
+                }
+            }
+        };
+    }
+
+    test_computation!(
+        RootOk,
+        "root",
+        ComputationRequirements::none(),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        DepOnRoot,
+        "dep",
+        ComputationRequirements::fresh(["root"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        SecondDepOnRoot,
+        "dep2",
+        ComputationRequirements::fresh(["root"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        RootErr,
+        "boom",
+        ComputationRequirements::none(),
+        Err(ComputationError::InvalidConfiguration("boom".to_string()))
+    );
+    test_computation!(
+        DepOnBoom,
+        "dep_boom",
+        ComputationRequirements::fresh(["boom"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        ThirdOnBoom,
+        "third",
+        ComputationRequirements::fresh(["dep_boom"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        StaleDepOnFlaky,
+        "stale_dep",
+        ComputationRequirements::stale(["flaky"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        GhostDependent,
+        "needs_ghost",
+        ComputationRequirements::fresh(["ghost"]),
+        Ok(ComputationOutput::success(()))
+    );
+    test_computation!(
+        PartialProducer,
+        "partial",
+        ComputationRequirements::none(),
+        Ok(ComputationOutput::with_failures(
+            (),
+            vec![FailedItem { key: "x".to_string(), error: FailedItemError::MissingSpotPrice }]
+        ))
+    );
+    test_computation!(
+        DepOnPartial,
+        "dep_partial",
+        ComputationRequirements::fresh(["partial"]),
+        Ok(ComputationOutput::success(()))
+    );
+
+    /// A producer that succeeds while its flag is set and fails once it is cleared, so a
+    /// later block can exercise the stale-dependency path (producer failed this block, but
+    /// a prior-block value is still in the store).
+    struct FlakyProducer {
+        succeed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl DerivedComputation for FlakyProducer {
+        type Output = ();
+        const ID: ComputationId = "flaky";
+
+        async fn compute(
+            &self,
+            _market: &MarketData,
+            _store: &SharedDerivedDataRef,
+            _changed: &ChangedComponents,
+        ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+            if self.succeed.load(Ordering::SeqCst) {
+                Ok(ComputationOutput::success(()))
+            } else {
+                Err(ComputationError::InvalidConfiguration("flaky".to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn events_follow_dependency_order_across_stages() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager.register(RootOk).unwrap();
+        manager.register(DepOnRoot).unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        assert_eq!(
+            event_summary(&events),
+            vec![("new_block", ""), ("complete", "root"), ("complete", "dep")]
+        );
+    }
+
+    #[tokio::test]
+    async fn events_preserve_registration_order_within_a_stage() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager.register(RootOk).unwrap();
+        manager.register(DepOnRoot).unwrap();
+        manager
+            .register(SecondDepOnRoot)
+            .unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        // root runs in stage 0; dep then dep2 share stage 1 in registration order.
+        assert_eq!(
+            event_summary(&events),
+            vec![
+                ("new_block", ""),
+                ("complete", "root"),
+                ("complete", "dep"),
+                ("complete", "dep2"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_dependency_cascades_to_dependents() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager.register(RootErr).unwrap();
+        manager.register(DepOnBoom).unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        // boom fails in stage 0; its dependent is skipped and reported failed.
+        assert_eq!(
+            event_summary(&events),
+            vec![("new_block", ""), ("failed", "boom"), ("failed", "dep_boom")]
+        );
+    }
+
+    #[tokio::test]
+    async fn computation_with_unregistered_requirement_is_skipped() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager
+            .register(GhostDependent)
+            .unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        // "ghost" is never registered, so its fresh dependent never runs.
+        assert_eq!(event_summary(&events), vec![("new_block", ""), ("failed", "needs_ghost")]);
+    }
+
+    #[tokio::test]
+    async fn fresh_dependent_runs_when_producer_succeeds_partially() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager
+            .register(PartialProducer)
+            .unwrap();
+        manager.register(DepOnPartial).unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        // A partial success (Ok with failed_items) still counts as succeeded, so the fresh
+        // dependent runs -- the compatibility invariant with the old hardcoded flow.
+        assert_eq!(
+            event_summary(&events),
+            vec![("new_block", ""), ("complete", "partial"), ("complete", "dep_partial"),]
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_cascade_propagates_through_three_levels() {
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager.register(RootErr).unwrap();
+        manager.register(DepOnBoom).unwrap();
+        manager.register(ThirdOnBoom).unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        // boom fails; dep_boom is skipped; third (needs dep_boom) is skipped transitively.
+        assert_eq!(
+            event_summary(&events),
+            vec![
+                ("new_block", ""),
+                ("failed", "boom"),
+                ("failed", "dep_boom"),
+                ("failed", "third"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_dependency_runs_on_prior_value_after_producer_fails() {
+        let succeed = Arc::new(AtomicBool::new(true));
+        let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+        manager
+            .register(FlakyProducer { succeed: Arc::clone(&succeed) })
+            .unwrap();
+        manager
+            .register(StaleDepOnFlaky)
+            .unwrap();
+
+        // Block 1: producer succeeds and its value is stored.
+        let first = run_full_recompute(&manager).await;
+        assert_eq!(
+            event_summary(&first),
+            vec![("new_block", ""), ("complete", "flaky"), ("complete", "stale_dep")]
+        );
+
+        // Block 2: producer fails, but its prior-block value remains, so the stale
+        // dependent still runs.
+        succeed.store(false, Ordering::SeqCst);
+        let second = run_full_recompute(&manager).await;
+        assert_eq!(
+            event_summary(&second),
+            vec![("new_block", ""), ("failed", "flaky"), ("complete", "stale_dep")]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_computations_cascade_failure_in_registration_order() {
+        // Real fynd flow: a full recompute with no sim state makes spot prices fail
+        // outright, cascading ComputationFailed to every dependent in registration order.
+        let (manager, _event_rx) = ComputationManager::new(
+            ComputationManagerConfig::new(),
+            market_with_component_no_sim_state(),
+        )
+        .unwrap();
+
+        let events = run_full_recompute(&manager).await;
+
+        assert_eq!(
+            event_summary(&events),
+            vec![
+                ("new_block", ""),
+                ("failed", "spot_prices"),
+                ("failed", "token_prices"),
+                ("failed", "pool_depths"),
+            ]
+        );
     }
 
     /// Creates a market with a component in topology but WITHOUT simulation state.

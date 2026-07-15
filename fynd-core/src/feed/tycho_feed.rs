@@ -13,6 +13,8 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+#[cfg(feature = "experimental")]
+use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
     evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
     protocol::models::Update,
@@ -49,6 +51,11 @@ pub(crate) struct TychoFeed {
     market_data: MarketData,
     /// Event broadcaster.
     event_tx: broadcast::Sender<MarketEvent>,
+}
+
+/// Client-metadata entries Fynd reports to Tycho via the `X-Tycho-Client-Metadata` header.
+fn fynd_client_metadata() -> [(&'static str, &'static str); 1] {
+    [("fynd_version", env!("CARGO_PKG_VERSION"))]
 }
 
 impl TychoFeed {
@@ -130,7 +137,8 @@ impl TychoFeed {
             .auth_key(self.config.tycho_api_key.clone())
             .no_tls(!self.config.use_tls)
             .skip_state_decode_failures(true)
-            .min_token_quality(self.config.min_token_quality as u32);
+            .min_token_quality(self.config.min_token_quality as u32)
+            .add_client_metadata(fynd_client_metadata());
 
             if self.config.partial_blocks {
                 stream_builder = stream_builder.enable_partial_blocks();
@@ -321,6 +329,7 @@ impl TychoFeed {
         .auth_key(self.config.tycho_api_key.clone())
         .skip_state_decode_failures(true)
         .min_token_quality(self.config.min_token_quality as u32)
+        .add_client_metadata(fynd_client_metadata())
         .set_tokens(all_tokens.clone())
         .await;
 
@@ -356,6 +365,195 @@ impl TychoFeed {
         }
 
         // Spawn RFQ stream (same as run()) — runs alongside the EVM pending stream.
+        let (mut rfq_rx, mut rfq_handle) = if self
+            .config
+            .protocols
+            .iter()
+            .any(|p| p.starts_with("rfq:"))
+        {
+            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
+            let rfq_stream_builder = register_rfq(
+                RFQStreamBuilder::new()
+                    .set_tokens(all_tokens)
+                    .await,
+                self.config.chain,
+                self.config.min_tvl,
+                &self.config.protocols,
+                rfq_tokens,
+            )?;
+            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
+            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
+                rfq_stream_builder
+                    .build(rfq_tx)
+                    .await
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                Ok(())
+            });
+            (Some(rfq_rx), Some(rfq_handle))
+        } else {
+            (None, None)
+        };
+
+        loop {
+            tokio::select! {
+                msg = protocol_stream.next() => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from protocol stream: {:?}", msg);
+                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("Protocol stream ended");
+                            break;
+                        }
+                    }
+                }
+                msg = async {
+                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
+                    else { std::future::pending().await }
+                } => {
+                    match msg {
+                        Some(msg) => {
+                            trace!("Received message from RFQ stream: {:?}", msg);
+                            self.handle_tycho_message(msg).await?;
+                        }
+                        None => {
+                            info!("RFQ stream ended");
+                            break;
+                        }
+                    }
+                }
+                rfq_result = async {
+                    if let Some(handle) = &mut rfq_handle { handle.await }
+                    else { std::future::pending().await }
+                } => {
+                    match rfq_result {
+                        Ok(Ok(())) => {
+                            return Err(DataFeedError::StreamError(
+                                "RFQ stream task ended unexpectedly".to_string(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
+                        }
+                        Err(e) => {
+                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Like [`run`](Self::run) but gates each block behind a [`BlockStepController`].
+    ///
+    /// Delivers the controller (or an error string) via `controller_tx` once the stream is
+    /// built and before the first block is processed. The caller must call
+    /// [`BlockStepController::trigger_next_block`] for each block to be processed.
+    ///
+    /// Only valid when at least one non-RFQ protocol is configured. Returns
+    /// [`DataFeedError::Config`] if all protocols are RFQ.
+    #[cfg(feature = "experimental")]
+    pub(crate) async fn run_with_step_controller(
+        self,
+        controller_tx: oneshot::Sender<Result<BlockStepController, String>>,
+    ) -> Result<(), DataFeedError> {
+        info!(
+            tycho_url = %self.config.tycho_url,
+            protocols = ?self.config.protocols,
+            "Starting Data Feed (with step controller)..."
+        );
+
+        if self
+            .config
+            .protocols
+            .iter()
+            .all(|p| p.starts_with("rfq:"))
+        {
+            let msg = "step controller requires at least one non-RFQ protocol".to_string();
+            let _ = controller_tx.send(Err(msg.clone()));
+            return Err(DataFeedError::Config(msg));
+        }
+
+        let tycho_api_key = self
+            .config
+            .tycho_api_key
+            .clone()
+            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
+
+        let all_tokens = match load_all_tokens(
+            self.config.tycho_url.as_str(),
+            !self.config.use_tls,
+            tycho_api_key.as_deref(),
+            true,
+            self.config.chain,
+            Some(self.config.min_token_quality),
+            self.config.traded_n_days_ago,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let e = DataFeedError::StreamError(e.to_string());
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        };
+
+        debug!("Loaded {} tokens from Tycho", all_tokens.len());
+
+        let tvl_filter = ComponentFilter::with_tvl_range(
+            self.config.min_tvl / self.config.tvl_buffer_ratio,
+            self.config.min_tvl,
+        )
+        .blocklist(
+            self.config
+                .blocklisted_components
+                .clone(),
+        );
+
+        let mut stream_builder = match register_exchanges(
+            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                .skip_state_decode_failures(true),
+            tvl_filter,
+            &self.config.protocols,
+        ) {
+            Ok(sb) => sb,
+            Err(e) => {
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        }
+        .auth_key(self.config.tycho_api_key.clone())
+        .skip_state_decode_failures(true)
+        .min_token_quality(self.config.min_token_quality as u32)
+        .add_client_metadata(fynd_client_metadata());
+
+        if self.config.partial_blocks {
+            stream_builder = stream_builder.enable_partial_blocks();
+        }
+
+        let stream_builder = stream_builder
+            .set_tokens(all_tokens.clone())
+            .await;
+        let (stream_builder, controller) = stream_builder.with_step_controller();
+
+        let mut protocol_stream = match stream_builder.build().await {
+            Ok(stream) => {
+                let _ = controller_tx.send(Ok(controller));
+                Box::pin(stream)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = controller_tx.send(Err(msg.clone()));
+                return Err(DataFeedError::StreamError(msg));
+            }
+        };
+
+        // Spawn rfq stream (same as run()).
         let (mut rfq_rx, mut rfq_handle) = if self
             .config
             .protocols
@@ -798,6 +996,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_message_errs_when_no_subscribers() {
+        // A broadcast send fails when no receivers are subscribed. The feed surfaces that as an
+        // error rather than silently dropping the market event, which could leave worker graphs
+        // stale; the underlying subscriber-exit is debugged separately.
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        drop(feed.subscribe()); // leaves zero live receivers
+
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1, token2]),
+        );
+        let update = Update::new(12345, HashMap::new(), new_pairs);
+
+        // There are changes, so this reaches the broadcast send, which errors with no receivers.
+        assert!(feed
+            .handle_tycho_message(update)
+            .await
+            .is_err());
+
+        // The market state is still applied before the (failed) notification.
+        assert!(market_data
+            .read()
+            .await
+            .get_component(component_id)
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn test_handle_message_removes_components() {
         let market_data = new_shared_market_data();
 
@@ -1131,6 +1362,14 @@ mod tests {
             Ok(_) => panic!("Should not broadcast event for empty update"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    #[test]
+    fn fynd_client_metadata_reports_version() {
+        // Pins the wire key the server telemetry keys off and guarantees a non-empty version.
+        let [(key, value)] = fynd_client_metadata();
+        assert_eq!(key, "fynd_version");
+        assert!(!value.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")] // Multi-thread needed because tycho decoder does some blocking operations

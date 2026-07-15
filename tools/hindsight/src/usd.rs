@@ -29,6 +29,21 @@ const STABLECOINS: &[(Address, u32)] = &[
     (address!("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), 18), // USDS
 ];
 
+/// Convert a `U256` token amount to `f64` via its four 64-bit limbs (little-endian).
+///
+/// Powers of 2 are exactly representable in f64, so the limb-scaling is lossless up to the
+/// mantissa width. Precision is lost above ~2^53 (≈9e15 native units) — acceptable for USD
+/// estimates.
+// Precision loss is intentional: this function exists specifically to approximate a U256 as f64.
+#[expect(clippy::cast_precision_loss)]
+pub(crate) fn u256_to_f64(amount: U256) -> f64 {
+    let [a, b, c, d] = amount.as_limbs();
+    (*a as f64) +
+        (*b as f64) * 2f64.powi(64) +
+        (*c as f64) * 2f64.powi(128) +
+        (*d as f64) * 2f64.powi(192)
+}
+
 /// Positive, finite price of `token`, treating native ETH and WETH as interchangeable.
 fn price_of(prices: &PriceMap, token: Address) -> Option<f64> {
     let direct = prices.get(&token).copied();
@@ -52,7 +67,7 @@ fn usd_per_eth_wei(prices: &PriceMap) -> Option<f64> {
     let mut count = 0u32;
     for &(stable, decimals) in STABLECOINS {
         if let Some(price) = price_of(prices, stable) {
-            sum += price / 10f64.powi(decimals as i32);
+            sum += price / 10f64.powi(decimals.cast_signed());
             count += 1;
         }
     }
@@ -66,9 +81,26 @@ fn usd_per_eth_wei(prices: &PriceMap) -> Option<f64> {
 pub(crate) fn value_usd(token: Address, amount: U256, prices: &PriceMap) -> Option<f64> {
     let usd_per_eth_wei = usd_per_eth_wei(prices)?;
     let price = price_of(prices, token)?;
-    let amount: f64 = amount.to_string().parse().ok()?;
+    let amount = u256_to_f64(amount);
     let usd = amount * usd_per_eth_wei / price;
     usd.is_finite().then_some(usd)
+}
+
+/// Convert a native gas cost (ETH-wei) into `token` native units at the snapshot price.
+///
+/// `price[token]` is the token's native-unit amount per ETH-wei, so the conversion is one
+/// multiplication. Returns `None` when `token` is not priced. The f64 round-trip loses wei-level
+/// precision, which is acceptable for a gas deduction — the cost itself is exact but its value in
+/// the output token is an estimate by nature.
+// Truncation is intentional: whole token units are sufficient for a gas estimate.
+// Sign loss is impossible: gas_wei is from a U256 and price_of only returns positive values.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) fn gas_in_token(gas_wei: U256, token: Address, prices: &PriceMap) -> Option<U256> {
+    let price = price_of(prices, token)?;
+    let units = u256_to_f64(gas_wei) * price;
+    units
+        .is_finite()
+        .then(|| U256::from(units as u128))
 }
 
 /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).
@@ -163,6 +195,19 @@ mod tests {
         let one_weth = U256::from(10u64).pow(U256::from(18u64));
         let v = value_usd(WETH, one_weth, &prices()).unwrap();
         assert!((v - 2_000.0).abs() < 1e-3, "expected $2000, got {v}");
+    }
+
+    #[test]
+    fn gas_in_token_converts_wei_at_snapshot_price() {
+        // 0.001 ETH of gas, USDC at 2e-9 native units per wei (ETH = $2000) → 2 USDC.
+        let gas_wei = U256::from(10u64).pow(U256::from(15u64));
+        let got = gas_in_token(gas_wei, USDC, &prices()).unwrap();
+        assert_eq!(got, U256::from(2_000_000u64));
+    }
+
+    #[test]
+    fn gas_in_token_unpriced_token_is_none() {
+        assert_eq!(gas_in_token(U256::from(1u64), Address::repeat_byte(0x42), &prices()), None);
     }
 
     #[test]

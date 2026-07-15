@@ -9,7 +9,7 @@ infrastructure.
 |---|---|
 | `builder.rs` | `FyndRPCBuilder` wraps `FyndBuilder`, adds HTTP server config. `FyndRPC` struct runs the server with graceful shutdown |
 | `config.rs` | `WorkerPoolsConfig` (TOML loader), `BlocklistConfig`, `defaults` module re-exporting `fynd-core` defaults + HTTP-specific ones |
-| `protocols.rs` | `fetch_protocol_systems()` — paginated Tycho RPC call to discover available protocols |
+| `protocols.rs` | `fetch_protocol_systems()` — paginated Tycho RPC call to discover available protocols; `resolve_protocols()` — higher-level wrapper used by `serve` and `scale` that expands `all_onchain`/`native_onchain` tokens and applies min-TVL filtering |
 | `api/` | HTTP endpoint handlers and OpenAPI documentation |
 
 ## Features

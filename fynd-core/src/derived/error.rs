@@ -22,6 +22,10 @@ pub enum ComputationError {
     #[error("type mismatch for computation {0}")]
     TypeMismatch(ComputationId),
 
+    /// A computation was registered with an id already in use.
+    #[error("duplicate computation id: {0}")]
+    DuplicateComputationId(ComputationId),
+
     /// Computation exceeded its timeout.
     #[error("computation timed out after {elapsed_ms}ms")]
     Timeout {

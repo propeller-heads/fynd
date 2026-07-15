@@ -2,6 +2,7 @@ mod decoder;
 mod resolve;
 mod telemetry;
 mod usd;
+mod verify;
 
 use std::time::Instant;
 
@@ -12,7 +13,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "hindsight", about = "Decode aggregator swaps from on-chain data")]
+#[command(name = "hindsight", about = "Decode solver swaps from on-chain data")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -20,27 +21,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Decode aggregator trades from a block or range.
+    /// Decode solver trades from a block or range.
     Decode(DecodeArgs),
-    /// Decode and compare against Allium's aggregator_trades ground truth.
+    /// Decode and compare against Allium's `aggregator_trades` ground truth.
     Verify(VerifyArgs),
-    /// Decode a block's trades and re-solve each through a running Fynd instance.
-    Resolve(ResolveArgs),
+    /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
+    /// trades at top-of-block (N-1) and back-of-block (N).
+    Monitor(resolve::monitor::MonitorArgs),
+}
+
+/// Chain access shared by every subcommand: the RPC endpoint and the decoder's address book.
+#[derive(Args)]
+pub(crate) struct RpcArgs {
+    /// Ethereum RPC URL
+    #[arg(long, env = "RPC_URL")]
+    pub rpc_url: String,
+
+    /// Decoder address-book TOML (defaults to the chain's built-in book)
+    #[arg(long, env = "HINDSIGHT_REGISTRY")]
+    pub registry: Option<std::path::PathBuf>,
+}
+
+/// Block selection shared by the decode and verify subcommands.
+#[derive(Args)]
+struct BlockArgs {
+    /// Block number to process (latest if omitted)
+    #[arg(long)]
+    block: Option<u64>,
+
+    /// Range of blocks to process (e.g. 21000000-21000010)
+    #[arg(long, conflicts_with = "block")]
+    range: Option<String>,
 }
 
 #[derive(Args)]
 struct DecodeArgs {
-    /// Ethereum RPC URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
+    #[command(flatten)]
+    rpc: RpcArgs,
 
-    /// Block number to decode (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to decode (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
+    #[command(flatten)]
+    blocks: BlockArgs,
 
     /// Output as JSON instead of human-readable
     #[arg(long)]
@@ -49,17 +69,11 @@ struct DecodeArgs {
 
 #[derive(Args)]
 struct VerifyArgs {
-    /// Ethereum RPC URL
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
+    #[command(flatten)]
+    rpc: RpcArgs,
 
-    /// Block number to verify (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to verify (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
+    #[command(flatten)]
+    blocks: BlockArgs,
 
     /// Allium API key
     #[arg(long, env = "ALLIUM_API_KEY")]
@@ -69,13 +83,13 @@ struct VerifyArgs {
     /// workspace that created it, so register this SQL in your own Allium workspace and pass its
     /// ID:
     ///
-    ///   SELECT project, protocol, token_sold_address, token_sold_symbol, token_sold_amount,
-    ///          usd_sold_amount, token_bought_address, token_bought_symbol, token_bought_amount,
-    ///          usd_bought_amount, sender_address, to_address, transaction_hash,
-    ///          transaction_fees_usd, block_number, block_timestamp, log_index
-    ///   FROM ethereum.dex.aggregator_trades
-    ///   WHERE block_number = {{block_number}}
-    ///   ORDER BY log_index
+    ///   SELECT project, protocol, `token_sold_address`, `token_sold_symbol`, `token_sold_amount`,
+    ///          `usd_sold_amount`, `token_bought_address`, `token_bought_symbol`,
+    /// `token_bought_amount`,          `usd_bought_amount`, `sender_address`, `to_address`,
+    /// `transaction_hash`,          `transaction_fees_usd`, `block_number`, `block_timestamp`,
+    /// `log_index`   FROM `ethereum.dex.aggregator_trades`
+    ///   WHERE `block_number` = {{`block_number`}}
+    ///   ORDER BY `log_index`
     #[arg(long, env = "ALLIUM_QUERY_ID")]
     allium_query_id: String,
 
@@ -88,78 +102,44 @@ struct VerifyArgs {
     json: bool,
 }
 
-#[derive(Args)]
-struct ResolveArgs {
-    /// Ethereum RPC URL (used to decode the block's settled trades)
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: String,
-
-    /// Base URL of a running Fynd solver to re-solve trades through
-    #[arg(long, env = "FYND_URL", default_value = "http://localhost:3000")]
-    fynd_url: String,
-
-    /// Chain label applied to metrics (the decoder is Ethereum-only for now)
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
-
-    /// Block number to re-solve (latest if omitted)
-    #[arg(long)]
-    block: Option<u64>,
-
-    /// Range of blocks to re-solve (e.g. 21000000-21000010)
-    #[arg(long, conflicts_with = "block")]
-    range: Option<String>,
-
-    /// Per-quote timeout in milliseconds for Fynd
-    #[arg(long, default_value_t = 10_000)]
-    timeout_ms: u64,
-
-    /// Serve Prometheus metrics on this port; keeps running after the pass so it can be scraped
-    #[arg(long)]
-    metrics_port: Option<u16>,
-
-    /// Output as JSON instead of human-readable
-    #[arg(long)]
-    json: bool,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ANSI colors only on a real terminal: in a pod they end up as escape sequences inside
+    // Loki, where they break plain name=value field extraction.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_env("RUST_LOG").add_directive("hindsight=info".parse().unwrap()),
+            EnvFilter::from_env("RUST_LOG").add_directive(
+                "hindsight=info"
+                    .parse()
+                    .expect("valid static directive"),
+            ),
         )
         .with_target(false)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
-        Command::Resolve(args) => {
-            resolve::run::run(resolve::run::ResolveConfig {
-                rpc_url: &args.rpc_url,
-                fynd_url: &args.fynd_url,
-                chain: &args.chain,
-                block: args.block,
-                range: args.range.as_deref(),
-                timeout_ms: args.timeout_ms,
-                metrics_port: args.metrics_port,
-                json: args.json,
-            })
-            .await
-        }
+        Command::Monitor(args) => resolve::monitor::run(args).await,
     }
 }
 
+#[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc_url)?;
-    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
+    let provider = provider_from(&args.rpc.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
+    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let mut decoder = decoder::Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
-        info!(block = block_number, "decoding aggregator trades");
+        info!(block = block_number, "decoding solver trades");
         let start = Instant::now();
-        let trades = match decoder::decode_block(&provider, *block_number).await {
+        let trades = match decoder
+            .decode_block(*block_number)
+            .await
+        {
             Ok(trades) => trades,
             Err(error) => {
                 warn!(block = block_number, %error, "failed to decode block; skipping");
@@ -169,7 +149,7 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
         let elapsed_ms = start.elapsed().as_millis();
 
         if trades.is_empty() {
-            info!(block = block_number, elapsed_ms, "no aggregator trades found");
+            info!(block = block_number, elapsed_ms, "no solver trades found");
         } else {
             info!(block = block_number, count = trades.len(), elapsed_ms, "decoded trades");
         }
@@ -184,15 +164,17 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[expect(clippy::print_stdout)]
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc_url)?;
-    let blocks = resolve_blocks(&provider, args.block, args.range.as_deref()).await?;
-    let allium = decoder::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
+    let provider = provider_from(&args.rpc.rpc_url)?;
+    let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
+    let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
+    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
-    let report =
-        decoder::verify_decoder::run(&provider, &allium, &blocks, args.tolerance_bps).await?;
+    let report = verify::run(&mut decoder, &allium, &blocks, args.tolerance_bps).await?;
     info!(elapsed_ms = start.elapsed().as_millis(), "verification complete");
 
     if args.json {
@@ -228,26 +210,36 @@ pub(crate) async fn resolve_blocks<P: Provider>(
     }
 }
 
+#[expect(clippy::print_stdout)]
 fn print_trades(trades: &[decoder::DecodedTrade]) {
     if trades.is_empty() {
-        println!("No aggregator trades found.");
+        println!("No solver trades found.");
         return;
     }
 
-    println!("\n{} aggregator trade(s) found:\n", trades.len());
+    println!("\n{} solver trade(s) found:\n", trades.len());
     for trade in trades {
         println!("  tx:         {}", trade.tx_hash);
+        println!("  tx_index:   {}", trade.tx_index);
         println!("  block:      {}", trade.block_number);
-        println!("  client:     {}", trade.client);
-        println!("  aggregator: {}", trade.aggregator);
+        println!("  venue:      {}", trade.venue);
+        println!("  solver:     {}", trade.solver);
         println!("  sender:     {}", trade.sender);
         println!("  token_in:   {}", trade.token_in);
         println!("  amount_in:  {}", trade.amount_in);
         println!("  token_out:  {}", trade.token_out);
         println!("  amount_out: {}", trade.amount_out);
+        if let Some(sandwich) = &trade.sandwich {
+            println!(
+                "  sandwich:   front={} back={} attacker={}",
+                sandwich.front_tx, sandwich.back_tx, sandwich.attacker
+            );
+        }
         println!();
     }
 }
+
+const MAX_RANGE_BLOCKS: u64 = 1000;
 
 fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
     let parts: Vec<&str> = range.split('-').collect();
@@ -263,8 +255,8 @@ fn parse_range(range: &str) -> anyhow::Result<Vec<u64>> {
     if end < start {
         anyhow::bail!("end block ({end}) must be >= start block ({start})");
     }
-    if end - start > 1000 {
-        anyhow::bail!("range too large: {} blocks (max 1000)", end - start);
+    if end - start > MAX_RANGE_BLOCKS {
+        anyhow::bail!("range too large: {} blocks (max {MAX_RANGE_BLOCKS})", end - start);
     }
     Ok((start..=end).collect())
 }

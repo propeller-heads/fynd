@@ -1,121 +1,302 @@
-use std::{collections::HashMap, sync::LazyLock};
+//! The decoder's address book: which contracts are solvers, venues, batch settlers, and
+//! venue infrastructure on one chain.
+//!
+//! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
+//! from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain book without
+//! recompiling. This module only holds the lookups the decode strategies ask
+//! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
-use alloy::primitives::{address, Address};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
-/// Known aggregator routers — the venue that actually settles a swap.
-/// Start with top aggregators — expand later.
-static KNOWN_AGGREGATORS: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
-    HashMap::from([
-        // 1inch v6 and v5 Aggregation Routers
-        (address!("0x111111125421ca6dc452d289314280a0f8842a65"), "1inch"),
-        (address!("0x1111111254eeb25477b68fb85ed929f73a960582"), "1inch"),
-        // 0x Exchange Proxy (legacy) and AllowanceHolder (Settler)
-        (address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff"), "0x"),
-        (address!("0x0000000000001ff3684f28c67538d4d072c22734"), "0x"),
-        // CoW Protocol Settlement
-        (address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41"), "cow"),
-        // ParaSwap Augustus v6.2
-        (address!("0x6a000f20005980200259b80c5102003040001068"), "paraswap"),
-        // Uniswap Universal Router
-        (address!("0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad"), "uniswap"),
-        // UniswapX Dutch order reactor (filler-initiated; found via its log)
-        (address!("0x00000011f84b9aa48e5f8aa8b9897600006289be"), "uniswapx"),
-        // OKX DEX Router
-        (address!("0xf3de3c0d654fda23dad170f0f320a92172509127"), "okx"),
-        // Tycho (PropellerHeads) router — current, v2, and prior deployment
-        (address!("0x1f8db310f32d48b6180ff902ec60c586128cef47"), "tycho"),
-        (address!("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35"), "tycho"),
-        (address!("0xda892c989d07a18b5dd3f392d949f00df15c5736"), "tycho"),
-    ])
-});
+use alloy::primitives::Address;
+use anyhow::Context;
+use serde::Deserialize;
 
-pub(crate) fn known_aggregators() -> &'static HashMap<Address, &'static str> {
-    &KNOWN_AGGREGATORS
+/// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
+/// cannot fail to parse at runtime).
+const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
+
+/// On-disk shape of a chain's address book. Field meanings are documented in
+/// `registry/ethereum.toml`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressBook {
+    wrapped_native: Address,
+    batch_settlers: HashSet<Address>,
+    solvers: HashMap<Address, String>,
+    venues: HashMap<String, VenueAddresses>,
+    labels: HashMap<Address, String>,
 }
 
-/// Known client contracts — the platform that initiates a trade and routes
-/// it through an aggregator. The settling aggregator is found in the trace.
-static KNOWN_CLIENTS: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
-    HashMap::from([
-        // Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies
-        (address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222"), "relay"),
-        (address!("0x3ec130b627944cad9b2750300ecb0a695da522b6"), "relay"),
-        (address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"), "relay"),
-        (address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be"), "relay"),
-        (address!("0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7"), "relay"),
-    ])
-});
-
-pub(crate) fn known_clients() -> &'static HashMap<Address, &'static str> {
-    &KNOWN_CLIENTS
+/// A venue's addresses on one chain: the contracts users enter through and the collectors its
+/// fee skims land on. Keyed by venue name in the book; the name binds to a decode strategy at
+/// load time (see [`crate::decoder::venues::Venue::from_name`]).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VenueAddresses {
+    pub(crate) entry_points: HashSet<Address>,
+    pub(crate) fee_collectors: HashSet<Address>,
 }
 
-/// Whether `address` is a batch-settlement venue where `tx.to` is the settlement contract and the
-/// transaction sender is a solver, not the trader.
-///
-/// Such trades must be decoded by finding the order maker (like a filler-initiated intent fill),
-/// not by tracking the sender: a solver settles many orders at once, so its net flow is not a
-/// single swap even when it happens to net to one token on each side.
-pub(crate) fn is_batch_settler(address: &Address) -> bool {
-    // CoW Protocol Settlement.
-    const COW_SETTLEMENT: Address = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
-    *address == COW_SETTLEMENT
+/// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
+#[derive(Debug)]
+pub(crate) struct Registry {
+    /// Solver routers — the venue that actually settles a swap.
+    solvers: HashMap<Address, String>,
+    /// Display names of all registered solvers, for O(1) `is_solver_name` checks.
+    solver_names: HashSet<String>,
+    /// Every known address (solvers and venues), for name resolution.
+    names: HashMap<Address, String>,
+    /// Batch-settlement venues where `tx.to` is the settlement contract and
+    /// the transaction sender is a solver, not the trader.
+    batch_settlers: HashSet<Address>,
+    /// Display names for entry points that are neither venues nor solvers — market-maker
+    /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
+    /// because `is_known` drives strategy selection and filler-entered transactions have to
+    /// keep matching via their solver logs (Maker), not sender netting.
+    labels: HashMap<Address, String>,
+    /// The chain's wrapped-native token (e.g. WETH), which appears in flows
+    /// only as a wrap/unwrap intermediary.
+    wrapped_native: Address,
+    /// Venue address sets, keyed by the venue name from the book.
+    venues: HashMap<String, VenueAddresses>,
 }
 
-/// All known addresses, for resolving an address to a human name.
-static KNOWN_NAMES: LazyLock<HashMap<Address, &'static str>> = LazyLock::new(|| {
-    let mut names = known_aggregators().clone();
-    names.extend(
-        known_clients()
-            .iter()
-            .map(|(&k, &v)| (k, v)),
-    );
-    names
-});
+impl Registry {
+    /// Load the address book for a chain, or from an explicit TOML file when given (which wins
+    /// over the chain name — the file says what it describes).
+    pub(crate) fn load(chain: &str, override_path: Option<&Path>) -> anyhow::Result<Self> {
+        if let Some(path) = override_path {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("failed to read registry file {}", path.display()))?;
+            return Self::from_toml(&text)
+                .with_context(|| format!("invalid registry file {}", path.display()));
+        }
+        match chain.to_lowercase().as_str() {
+            "ethereum" => Ok(Self::ethereum()),
+            other => anyhow::bail!(
+                "no built-in decoder address registry for chain '{other}' (only ethereum); \
+                 pass --registry with that chain's address book"
+            ),
+        }
+    }
 
-pub(crate) fn known_names() -> &'static HashMap<Address, &'static str> {
-    &KNOWN_NAMES
-}
+    /// The built-in Ethereum address book.
+    pub(crate) fn ethereum() -> Self {
+        Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
+    }
 
-/// Resolve an address to its known name, or its hex address if unknown.
-pub(crate) fn label(address: Address, names: &HashMap<Address, &'static str>) -> String {
-    names
-        .get(&address)
-        .map_or_else(|| address.to_string(), |name| (*name).to_string())
+    fn from_toml(text: &str) -> anyhow::Result<Self> {
+        let book: AddressBook =
+            toml::from_str(text).context("failed to parse address book TOML")?;
+
+        // A venue section only carries addresses; its behavior is bound by name in code. An
+        // unbound name (a typo, or a venue with no strategy yet) must fail here — silently
+        // never matching would just drop that venue's trades.
+        for name in book.venues.keys() {
+            if crate::decoder::venues::Venue::from_name(name).is_none() {
+                anyhow::bail!(
+                    "address book venue '{name}' has no decode strategy \
+                     (see venues::Venue for the recognized names)"
+                );
+            }
+        }
+
+        let mut names = book.solvers.clone();
+        for (name, venue) in &book.venues {
+            for &entry_point in &venue.entry_points {
+                names.insert(entry_point, name.clone());
+            }
+        }
+        let solver_names = book.solvers.values().cloned().collect();
+
+        Ok(Self {
+            solver_names,
+            solvers: book.solvers,
+            names,
+            batch_settlers: book.batch_settlers,
+            labels: book.labels,
+            wrapped_native: book.wrapped_native,
+            venues: book.venues,
+        })
+    }
+
+    /// Whether the address is a known venue or solver.
+    pub(crate) fn is_known(&self, address: Address) -> bool {
+        self.names.contains_key(&address)
+    }
+
+    pub(crate) fn is_solver(&self, address: Address) -> bool {
+        self.solvers.contains_key(&address)
+    }
+
+    /// Whether `name` is a registered solver's display name. Bounds the metric label
+    /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
+    /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
+    pub(crate) fn is_solver_name(&self, name: &str) -> bool {
+        self.solver_names.contains(name)
+    }
+
+    /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
+    /// must be decoded by finding the order maker, not by tracking the
+    /// sender: a solver settles many orders at once, so its net flow is not a
+    /// single swap even when it happens to net to one token on each side.
+    pub(crate) fn is_batch_settler(&self, address: Address) -> bool {
+        self.batch_settlers.contains(&address)
+    }
+
+    pub(crate) fn wrapped_native(&self) -> Address {
+        self.wrapped_native
+    }
+
+    /// The named venue's address book section, when the book has one.
+    pub(crate) fn venue(&self, name: &str) -> Option<&VenueAddresses> {
+        self.venues.get(name)
+    }
+
+    /// The venue whose entry point this address is, if any.
+    pub(crate) fn venue_name(&self, address: Address) -> Option<&str> {
+        self.names
+            .get(&address)
+            .filter(|name| self.venues.contains_key(name.as_str()))
+            .map(String::as_str)
+    }
+
+    /// Resolve an address to its known name, or its hex address if unknown.
+    pub(crate) fn label(&self, address: Address) -> String {
+        self.names
+            .get(&address)
+            .or_else(|| self.labels.get(&address))
+            .map_or_else(|| address.to_string(), Clone::clone)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::address;
+
     use super::*;
     use crate::decoder::test_utils::addr;
 
     #[test]
+    fn embedded_ethereum_book_parses() {
+        let registry = Registry::ethereum();
+        assert!(!registry.solvers.is_empty());
+        assert!(!registry
+            .venue("relay")
+            .unwrap()
+            .entry_points
+            .is_empty());
+    }
+
+    #[test]
+    fn load_selects_ethereum() {
+        assert!(Registry::load("ethereum", None).is_ok());
+        assert!(Registry::load("Ethereum", None).is_ok());
+        assert!(Registry::load("base", None).is_err());
+    }
+
+    #[test]
+    fn load_reports_unreadable_and_invalid_files() {
+        let missing = Registry::load("ethereum", Some(Path::new("/nonexistent/book.toml")));
+        assert!(missing
+            .unwrap_err()
+            .to_string()
+            .contains("failed to read registry file"));
+
+        let dir = std::env::temp_dir().join("hindsight_registry_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.toml");
+        std::fs::write(&path, "wrapped_native = \"not an address\"").unwrap();
+        let invalid = Registry::load("ethereum", Some(&path));
+        assert!(invalid
+            .unwrap_err()
+            .to_string()
+            .contains("invalid registry file"));
+    }
+
+    #[test]
+    fn unknown_toml_key_is_rejected() {
+        // A typo'd section must fail loudly, not silently drop addresses.
+        let text = format!("{ETHEREUM_TOML}\n[solverz]\n");
+        assert!(Registry::from_toml(&text).is_err());
+    }
+
+    #[test]
     fn registries_named() {
-        let aggregators = known_aggregators();
-        assert!(aggregators
-            .values()
-            .any(|v| *v == "1inch"));
-        assert!(aggregators.values().any(|v| *v == "0x"));
-        assert!(known_clients()
-            .values()
-            .any(|v| *v == "relay"));
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
+        assert!(registry.is_solver(oneinch));
+        assert!(registry.is_known(relay));
+        assert!(!registry.is_solver(relay));
     }
 
     #[test]
     fn cow_is_a_batch_settler() {
+        let registry = Registry::ethereum();
         let cow = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
-        assert!(is_batch_settler(&cow));
-        assert!(!is_batch_settler(&oneinch));
-        assert!(!is_batch_settler(&addr(123)));
+        assert!(registry.is_batch_settler(cow));
+        assert!(!registry.is_batch_settler(oneinch));
+        assert!(!registry.is_batch_settler(addr(123)));
+    }
+
+    #[test]
+    fn venue_sections_resolve_by_name_and_entry_point() {
+        let registry = Registry::ethereum();
+        let relay = registry.venue("relay").unwrap();
+        let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
+        let router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
+        assert!(relay
+            .fee_collectors
+            .contains(&collector));
+        assert!(!relay.fee_collectors.contains(&router));
+        assert!(relay.entry_points.contains(&router));
+
+        assert_eq!(registry.venue_name(router), Some("relay"));
+        assert_eq!(
+            registry.venue_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
+            Some("metamask")
+        );
+        assert_eq!(registry.venue_name(collector), None);
+        assert!(registry.venue("kyberswap").is_none());
+    }
+
+    #[test]
+    fn venue_without_strategy_is_rejected() {
+        // A venue section whose name has no decode strategy would silently never match, so the
+        // book must fail to load.
+        let text =
+            format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
+        let err = Registry::from_toml(&text)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no decode strategy"), "unexpected error: {err}");
     }
 
     #[test]
     fn label_known_and_unknown() {
-        let names = known_names();
+        let registry = Registry::ethereum();
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
         let unknown = addr(123);
-        assert_eq!(label(relay, names), "relay");
-        assert_eq!(label(unknown, names), unknown.to_string());
+        assert_eq!(registry.label(relay), "relay");
+        assert_eq!(registry.label(unknown), unknown.to_string());
+    }
+
+    #[test]
+    fn display_labels_resolve_without_becoming_known() {
+        // Solver/filler labels are display-only: is_known drives strategy selection, and a
+        // filler-entered tx must keep matching via its solver logs (Maker), not as a
+        // known-venue Sender flow.
+        let registry = Registry::ethereum();
+        let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");
+        assert_eq!(registry.label(rizzolver), "rizzolver");
+        assert!(!registry.is_known(rizzolver));
+        assert!(!registry.is_solver(rizzolver));
     }
 }

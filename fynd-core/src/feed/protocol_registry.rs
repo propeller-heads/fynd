@@ -6,6 +6,7 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
@@ -92,11 +93,7 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
             }
             "vm:curve" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    None,
-                );
+                builder = builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), None);
             }
             "uniswap_v4_hooks" => {
                 builder = builder.exchange::<UniswapV4State>(
@@ -108,6 +105,20 @@ pub(crate) fn register_exchanges(
             "vm:maverick_v2" => {
                 builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:maverick_v2",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "vm:bopamm" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:bopamm",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "vm:fermiswap" => {
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:fermiswap",
                     tvl_filter.clone(),
                     None,
                 );

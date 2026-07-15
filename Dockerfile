@@ -44,7 +44,7 @@ RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "fn main() {}" > tools/hindsight/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \
-    cargo build --release --package fynd --package fynd-swap-cli && \
+    cargo build --release --package fynd --package fynd-swap-cli --package hindsight && \
     rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/erc20-overrides/src tools/fynd-gas-audit/src \
@@ -58,18 +58,19 @@ COPY fynd-rpc-types/src/ fynd-rpc-types/src/
 COPY clients/rust/src/ clients/rust/src/
 COPY tools/fynd-swap-cli/src/ tools/fynd-swap-cli/src/
 COPY tools/erc20-overrides/src/ tools/erc20-overrides/src/
-RUN mkdir -p tools/benchmark/src tools/common/src tools/fynd-gas-audit/src \
-        tools/record-market/src tools/hindsight/src test-fixtures/src && \
+COPY tools/common/src/ tools/common/src/
+COPY tools/hindsight/src/ tools/hindsight/src/
+RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
+        tools/record-market/src test-fixtures/src && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
-    echo "" > tools/common/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
-    echo "fn main() {}" > tools/hindsight/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \
     touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
         fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
-        tools/fynd-swap-cli/src/main.rs tools/erc20-overrides/src/lib.rs && \
-    cargo build --release --package fynd --package fynd-swap-cli
+        tools/fynd-swap-cli/src/main.rs tools/erc20-overrides/src/lib.rs \
+        tools/common/src/lib.rs tools/hindsight/src/main.rs && \
+    cargo build --release --package fynd --package fynd-swap-cli --package hindsight
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -81,6 +82,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
 COPY --from=builder /app/target/release/fynd-swap-cli /usr/local/bin/fynd-swap-cli
+COPY --from=builder /app/target/release/hindsight /usr/local/bin/hindsight
 
 EXPOSE 3000 9898
 

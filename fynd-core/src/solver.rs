@@ -16,6 +16,8 @@ use num_cpus;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+#[cfg(feature = "experimental")]
+use tycho_simulation::evm::stream::BlockStepController;
 #[cfg(feature = "test-utils")]
 use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 use tycho_simulation::{
@@ -301,6 +303,11 @@ pub enum SolverBuildError {
     /// panicked rather than returning an error through the channel.
     #[error("pending processor channel closed before processor was delivered")]
     PendingChannelClosed,
+    /// The step-controller oneshot closed without delivering a value, meaning the feed task
+    /// panicked rather than returning an error through the channel.
+    #[cfg(feature = "experimental")]
+    #[error("step controller channel closed before controller was delivered")]
+    StepControllerChannelClosed,
 }
 
 /// Internal pool entry — either a built-in algorithm (by name) or a custom one.
@@ -913,7 +920,76 @@ impl FyndBuilder {
             pending,
         ))
     }
-}
+
+    /// Assembles and starts all solver components, also returning a [`BlockStepController`]
+    /// that lets the caller control when each buffered block is released for processing.
+    ///
+    /// Intended for deterministic testing: call [`BlockStepController::trigger_next_block`] to
+    /// step through blocks one at a time, and [`BlockStepController::peek_next_block`] to inspect
+    /// a block before it is decoded. Dropping the controller ungates the stream so it runs to its
+    /// natural end.
+    ///
+    /// Only valid when at least one non-RFQ protocol is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are RFQ,
+    /// or the step-controller channel closes before the controller is delivered.
+    #[cfg(feature = "experimental")]
+    pub async fn build_with_step_controller(
+        self,
+    ) -> Result<(Solver, BlockStepController), SolverBuildError> {
+        let mut c = self.assemble_components()?;
+
+        let (controller_tx, controller_rx) =
+            tokio::sync::oneshot::channel::<Result<BlockStepController, String>>();
+
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = c
+                .tycho_feed
+                .run_with_step_controller(controller_tx)
+                .await
+            {
+                tracing::error!(error = %e, "tycho feed error");
+            }
+        });
+        let gas_price_handle = tokio::spawn(async move {
+            c.gas_price_fetcher.run().await;
+        });
+        let router_fee_handle = tokio::spawn(async move {
+            c.router_fee_fetcher.run().await;
+        });
+        let computation_handle = tokio::spawn(async move {
+            c.computation_manager
+                .run(c.computation_event_rx, c.computation_shutdown_rx)
+                .await;
+        });
+
+        let controller = controller_rx
+            .await
+            .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+
+        Ok((
+            Solver {
+                router: c.router,
+                worker_pools: c.worker_pools,
+                market_data: c.market_data,
+                derived_data: c.derived_data,
+                router_fees: c.router_fees,
+                feed_handle,
+                gas_price_handle,
+                router_fee_handle,
+                computation_handle,
+                computation_shutdown_tx: c.computation_shutdown_tx,
+                chain: c.chain,
+                router_address: c.router_address,
+                market_event_tx: c.market_event_tx,
+            },
+            controller,
+        ))
+    }
+} // impl FyndBuilder
 
 /// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
