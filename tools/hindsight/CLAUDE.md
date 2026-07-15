@@ -3,6 +3,9 @@
 Decode solver swaps from on-chain data and live-monitor Fynd's re-solve quality against what
 actually settled.
 
+[README.md](README.md) holds the architecture overview with pipeline diagrams, the
+"where does new code go" table, and the strategy-vs-venue-knowledge placement rules.
+
 ## Commands
 
 Three subcommands via `cargo run -p hindsight --release --`. All of them take `--chain`
@@ -41,7 +44,8 @@ Match → trace → decode → guard → record.
 
 | File/dir | Purpose |
 |---|---|
-| `strategy.rs` | Selects the decode strategy per matched transaction (tier-neutral) |
+| `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
+| `strategies/` | Decode methods behind the `DecodeStrategy` trait, tried in precedence order (`netting` today) |
 | `ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `guards.rs` | Vetoes non-comparable shapes (NFT purchases, mis-paired wrap trades) |
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
@@ -91,7 +95,7 @@ savings aggregates; unsolved states keep their coverage verdicts).
 - `RangeComparison` — a trade re-solved at both block states, including gas-netted settled output.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
 
-## Adding a venue / solver / chain
+## Adding a venue / solver / strategy / chain
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
   enough for matching, attribution, gas isolation, and metric labels. Optional code: an `embedded_quote`
@@ -99,8 +103,14 @@ savings aggregates; unsolved states keep their coverage verdicts).
   match-time veto if some of its orders are not same-chain swaps (see `solvers::match_veto`).
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
   module in `venues/` and its `Venue::from_name` binding. Most venues are sender netting + fee
-  back-out — delegate to `venue_fee_flow` and add only what is specific to the venue. The registry fails to
-  load if an address-book section has no code binding.
+  back-out — delegate to `venue_fee_flow` and add only what is specific to the venue. The
+  registry fails to load if an address-book section has no code binding. All of a venue's
+  knowledge — transfer-based corrections and calldata parsing alike — lives in its one `venues/`
+  module (see README.md).
+- **Decode strategy** (a new method for extracting swaps — calldata decoding, log parsing): a
+  module in `strategies/` implementing `DecodeStrategy`, plus one entry in `default_strategies`
+  placed by trust. Strategies are methods, never venues or solvers; a venue-scoped method still
+  keeps its venue parsing in that venue's module.
 - **Chain**: a new `registry/<chain>.toml` (all sections required) wired into `Registry::load`,
   or passed via `--registry`. Check the monitor's pacing flags (`--max-lag-blocks`) against the
   chain's block time. The `verify` subcommand's saved Allium query is per-chain.

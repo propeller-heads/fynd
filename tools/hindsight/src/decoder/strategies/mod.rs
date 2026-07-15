@@ -18,7 +18,8 @@
 //! Everything around the question is shared and lives outside the strategies: matching and
 //! vetoes in `matching`, and post-processing (guards, solver attribution, gas, embedded
 //! quotes, sandwich detection) in the orchestrator, applied identically to every strategy's
-//! output.
+//! output. What belongs in a strategy versus a venue or solver module is laid out in the
+//! README's placement rules.
 
 pub(crate) mod netting;
 
