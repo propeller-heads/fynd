@@ -10,7 +10,7 @@ use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
-    strategy::Flow,
+    strategies::Flow,
     venues::{venue_fee_flow, VenueContext},
 };
 
@@ -112,7 +112,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        strategy::GasScope,
+        strategies::GasScope,
         test_utils::{addr, make_transfer_log, swap},
     };
 

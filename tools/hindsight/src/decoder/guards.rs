@@ -15,7 +15,7 @@ use alloy::{
 use crate::decoder::{
     ledger::{NetSwap, Transfer},
     registry::Registry,
-    strategy::Flow,
+    strategies::Flow,
 };
 
 /// A decoded flow rejected as not a comparable trade, by the shape that disqualified it.

@@ -11,7 +11,7 @@ use alloy::{sol, sol_types::SolCall};
 
 use crate::decoder::{
     registry::VenueAddresses,
-    strategy::Flow,
+    strategies::Flow,
     venues::{venue_fee_flow, VenueContext},
 };
 
@@ -51,7 +51,7 @@ mod tests {
     use crate::decoder::{
         ledger::TransferLedger,
         registry::Registry,
-        strategy::GasScope,
+        strategies::GasScope,
         test_utils::{addr, make_transfer_log, swap},
     };
 

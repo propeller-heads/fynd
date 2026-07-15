@@ -1,10 +1,35 @@
-//! Venue-specific decoding: the platforms users enter through (Relay, `MetaMask`).
+//! Venue-specific knowledge: the platforms users enter through (Relay, `MetaMask`).
 //!
-//! A venue owns the order flow — it picks a solver and may skim a fee — so decoding one means
-//! sender netting plus the venue's own quirks: backing the fee skim out ([`venue_fee_flow`]),
-//! Relay's solver-rebalance fills, `MetaMask`'s calldata solver declaration. A module here is one
-//! venue; its addresses come from the address book's `[venues.<name>]` section, bound to behavior
-//! by [`Venue::from_name`].
+//! A venue owns the order flow — it picks a solver and may take a fee. A module here is one
+//! venue, and it is the only place for everything hindsight knows about that venue, whichever
+//! decode method consumes it. That knowledge comes in layers:
+//!
+//! - **Address facts** — entry points, fee collectors — are pure data and live in the address
+//!   book's `[venues.<name>]` section, bound to the venue's module by [`Venue::from_name`].
+//! - **Transfer-based knowledge** interprets the venue's value movements: backing the fee out of a
+//!   netted flow ([`venue_fee_flow`]), Relay's solver-rebalance fills.
+//! - **Calldata-based knowledge** interprets the venue's own contract input: `MetaMask`'s router
+//!   ABI and the solver id it declares.
+//!
+//! Decode strategies (see `strategies`) call into the layer relevant to their method. Adding
+//! venue knowledge therefore means extending that venue's module here — never a strategy, and
+//! never a third place.
+//!
+//! # What happens when venue knowledge is missing
+//!
+//! Missing knowledge does not stop decoding — it degrades it, silently:
+//!
+//! - **Venue not in the address book at all**: its transactions only match when a known solver
+//!   emitted a log inside them, and those decode via maker-finding, which excludes the sender — so
+//!   most of the venue's trades are missed or declined. They surface as coverage gaps in `verify`,
+//!   not as wrong records.
+//! - **Venue registered but a fee collector is missing (or a quirk is unmodeled)**: trades decode,
+//!   but wrongly. The fee skim is not backed out, so the recovered amounts include the venue's fee
+//!   — and every comparison then credits Fynd with money better routing cannot recover, inflating
+//!   wins on exactly the trades the venue cares about.
+//!
+//! The second failure mode is why fee collectors are verified against on-chain samples (see the
+//! address book's comments) before a venue is added.
 
 pub(crate) mod metamask;
 pub(crate) mod relay;
@@ -16,7 +41,7 @@ use alloy::primitives::Address;
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
-    strategy::{sender_flow, Flow, GasScope},
+    strategies::{netting::sender_flow, Flow, GasScope},
 };
 
 /// A venue platform with a decode module in this directory.
