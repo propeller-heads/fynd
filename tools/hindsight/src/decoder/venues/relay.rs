@@ -112,6 +112,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::Registry,
+        strategy::GasScope,
         test_utils::{addr, make_transfer_log, swap},
     };
 
@@ -254,7 +255,7 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.venue_fee, Some(U256::from(40)));
         assert_eq!(flow.venue_fee_out, None);
-        assert!(flow.trader_paid_gas);
+        assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
 
     #[test]
@@ -311,6 +312,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.venue_fee, None);
         assert_eq!(flow.venue_fee_out, None);
-        assert!(!flow.trader_paid_gas);
+        assert_eq!(flow.gas_scope, GasScope::NotCharged);
     }
 }

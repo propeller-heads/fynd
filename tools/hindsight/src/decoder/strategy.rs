@@ -78,17 +78,21 @@ impl TraderStrategy {
             }),
         }
     }
+}
 
-    /// Whether the trade runs inside a venue's own contract (see [`TraderStrategy::Venue`]).
-    /// The receipt's gas then includes the venue's overhead — charged whichever solver the
-    /// venue picks — so gas accounting reads the solver call's trace frame instead of the
-    /// whole receipt.
-    pub(crate) fn routes_via_wrapper(&self) -> bool {
-        match self {
-            Self::Venue(_) => true,
-            Self::Sender | Self::Maker => false,
-        }
-    }
+/// How the settled route's gas is charged against the settled output. Decided by whichever code
+/// recovers the flow, since only it knows who sent the transaction and what wraps the route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GasScope {
+    /// The tracked trader sent the transaction, so the whole receipt's gas is the route's cost.
+    Receipt,
+    /// The trade entered through a venue's own contract, so only the solver call's trace frame
+    /// is the route's cost — the venue's overhead is charged whichever solver it picks and must
+    /// stay out of the comparison.
+    SolverFrame,
+    /// Someone other than the tracked trader paid the gas (maker fills, solver rebalances), so
+    /// nothing is deducted.
+    NotCharged,
 }
 
 /// A matched transaction and the strategy to decode it.
@@ -110,10 +114,8 @@ pub(crate) struct Flow {
     /// Solver label asserted by the strategy itself (e.g. `MetaMask` declares its
     /// solver in calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
-    /// Whether the tracked trader sent the transaction and therefore paid its gas. Decides if the
-    /// settled route's gas may be charged against the settled output — a maker or a
-    /// solver-rebalance trader had its gas paid by someone else, so nothing is deducted there.
-    pub trader_paid_gas: bool,
+    /// How the settled route's gas is charged against the settled output.
+    pub gas_scope: GasScope,
 }
 
 impl Flow {
@@ -124,7 +126,7 @@ impl Flow {
             venue_fee: None,
             venue_fee_out: None,
             solver_override: None,
-            trader_paid_gas: false,
+            gas_scope: GasScope::NotCharged,
         }
     }
 }
@@ -194,7 +196,7 @@ pub(crate) fn sender_flow(
 ) -> Option<Flow> {
     ledger
         .net_swap(sender)
-        .map(|swap| Flow { trader_paid_gas: true, ..Flow::without_fees(sender, swap) })
+        .map(|swap| Flow { gas_scope: GasScope::Receipt, ..Flow::without_fees(sender, swap) })
         .or_else(|| {
             ledger
                 .net_swap(entry_point)

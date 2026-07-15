@@ -16,7 +16,7 @@ use alloy::primitives::Address;
 use crate::decoder::{
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
-    strategy::{sender_flow, Flow},
+    strategy::{sender_flow, Flow, GasScope},
 };
 
 /// A venue platform with a decode module in this directory.
@@ -64,16 +64,23 @@ impl Venue {
 /// Net the sender's flow and back the venue's fee skim out of it — the shared shape of every
 /// fee-skimming venue entry (Relay, `MetaMask`).
 ///
-/// One exception: when the tracked trader IS a fee collector, the transaction is a treasury
-/// operation — the collector's receipts are its own output, not a skim, and backing them "out"
-/// would add the output to itself and double it.
+/// A trader-paid flow's gas scope narrows to the solver call's trace frame: inside a venue's
+/// contract the receipt's gas includes the venue's own overhead, which is charged whichever
+/// solver the venue picks and must stay out of the comparison.
+///
+/// One exception to the fee back-out: when the tracked trader IS a fee collector, the
+/// transaction is a treasury operation — the collector's receipts are its own output, not a
+/// fee, and backing them "out" would add the output to itself and double it.
 pub(crate) fn venue_fee_flow(
     ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
 ) -> Option<Flow> {
-    let flow = sender_flow(ledger, sender, entry_point)?;
+    let mut flow = sender_flow(ledger, sender, entry_point)?;
+    if flow.gas_scope == GasScope::Receipt {
+        flow.gas_scope = GasScope::SolverFrame;
+    }
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
@@ -111,7 +118,7 @@ fn back_out_venue_fees(
         venue_fee,
         venue_fee_out,
         solver_override: flow.solver_override,
-        trader_paid_gas: flow.trader_paid_gas,
+        gas_scope: flow.gas_scope,
     }
 }
 

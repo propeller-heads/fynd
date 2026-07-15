@@ -39,7 +39,7 @@ use tracing::{debug, warn};
 
 use crate::decoder::{
     ledger::TransferLedger,
-    strategy::{DecodeContext, Matched},
+    strategy::{DecodeContext, GasScope, Matched},
     trace::{collect_native_transfers, fetch_trace, route_gas},
 };
 pub(crate) use crate::decoder::{
@@ -254,21 +254,14 @@ impl<P: Provider> Decoder<P> {
             registry,
         );
 
-        // Gas the trader paid for the settled route, as a wei cost. Only charged when the
-        // tracked trader sent the transaction; for venue-wrapped entries the route's gas is
-        // read from the solver call's trace frame so the wrapper's overhead stays out of the
-        // comparison on both sides.
-        let settled_gas = flow
-            .trader_paid_gas
-            .then(|| {
-                if strategy.routes_via_wrapper() {
-                    route_gas(root, registry)
-                } else {
-                    Some(U256::from(receipt.gas_used))
-                }
-            })
-            .flatten()
-            .map(|units| units * U256::from(receipt.effective_gas_price));
+        // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
+        // which gas that is — see [`GasScope`].
+        let settled_gas = match flow.gas_scope {
+            GasScope::Receipt => Some(U256::from(receipt.gas_used)),
+            GasScope::SolverFrame => route_gas(root, registry),
+            GasScope::NotCharged => None,
+        }
+        .map(|units| units * U256::from(receipt.effective_gas_price));
 
         // The solver's off-chain quote, when its calldata declares one. Dispatched on the
         // attributed solver so a lookalike blob from another router cannot masquerade as a
