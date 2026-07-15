@@ -16,7 +16,7 @@ pub(crate) use compare::{Deltas, Verdict};
 use serde::Serialize;
 
 use crate::{
-    decoder::{AttributionSource, DecodedTrade, SolverQuote},
+    decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
     usd,
 };
 
@@ -68,6 +68,7 @@ impl StateResult {
 pub(crate) struct RangeComparison {
     pub tx_hash: TxHash,
     pub block_number: u64,
+    pub tx_index: u64,
     pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
@@ -84,6 +85,9 @@ pub(crate) struct RangeComparison {
     pub settled_gas: Option<U256>,
     /// The solver's own off-chain quote from its calldata, when declared (from the decoder).
     pub quote: Option<SolverQuote>,
+    /// Evidence that a front-run and a back-run bracketed this trade (from the decoder). `None`
+    /// when no bracket pair was found.
+    pub sandwich: Option<SandwichEvidence>,
     /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
     pub top: StateResult,
     /// Pessimistic: solved at state N, after the block's swaps moved the pools.
@@ -109,6 +113,13 @@ pub(crate) trait SteppingSolver {
 /// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
 /// deduction) and subtracted from the settled output, so both sides of the net comparison carry
 /// their own gas.
+///
+/// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
+/// [`Verdict::Sandwiched`]: its win or loss measures the MEV that moved the settled output, not
+/// routing quality. Unsolved states keep their verdicts — a sandwich explains the settled price,
+/// not why Fynd had no route, so the coverage buckets (`Unsolvable`, `CoverageMiss`) stay
+/// intact. The bps/USD deltas are left untouched either way, so the size of MEV-inflated deltas
+/// stays studyable offline.
 pub(crate) fn build_range(
     trade: &DecodedTrade,
     prices: &usd::PriceMap,
@@ -119,12 +130,20 @@ pub(crate) fn build_range(
         .settled_gas
         .and_then(|gas| usd::gas_in_token(gas, trade.token_out, prices))
         .map_or(trade.amount_out, |gas_out| trade.amount_out.saturating_sub(gas_out));
-    let top = StateResult::new(top, trade.amount_out, settled_net_gas);
-    let back = StateResult::new(back, trade.amount_out, settled_net_gas);
+    let mut top = StateResult::new(top, trade.amount_out, settled_net_gas);
+    let mut back = StateResult::new(back, trade.amount_out, settled_net_gas);
+    if trade.sandwich.is_some() {
+        for state in [&mut top, &mut back] {
+            if let Outcome::Solved(_) = state.outcome {
+                state.verdict = Verdict::Sandwiched;
+            }
+        }
+    }
     let verdict = top.verdict;
     RangeComparison {
         tx_hash: trade.tx_hash,
         block_number: trade.block_number,
+        tx_index: trade.tx_index,
         venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
@@ -135,6 +154,7 @@ pub(crate) fn build_range(
         settled_amount_out_net_gas: settled_net_gas,
         settled_gas: trade.settled_gas,
         quote: trade.quote.clone(),
+        sandwich: trade.sandwich.clone(),
         top,
         back,
         verdict,
@@ -172,12 +192,15 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::TxHash;
+
     use super::*;
 
     fn trade(settled: u64) -> DecodedTrade {
         DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 21_000_000,
+            tx_index: 0,
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
@@ -190,6 +213,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            sandwich: None,
         }
     }
 
@@ -253,6 +277,53 @@ mod tests {
         assert_eq!(range.verdict, Verdict::CoverageMiss);
         assert_eq!(range.top.deltas, Deltas { raw_bps: None, net_bps: None });
         assert!(matches!(range.top.outcome, Outcome::Partial(_)));
+    }
+
+    #[test]
+    fn build_range_sandwiched_trade_overrides_verdict_but_keeps_deltas() {
+        let mut sandwiched = trade(10_000);
+        sandwiched.sandwich = Some(SandwichEvidence {
+            front_tx: TxHash::repeat_byte(0xaa),
+            back_tx: TxHash::repeat_byte(0xbb),
+            attacker: Address::repeat_byte(0xcc),
+            pools: vec![Address::repeat_byte(0xdd)],
+        });
+        let range = build_range(
+            &sandwiched,
+            &usd::PriceMap::new(),
+            solved(10_200, 10_100),
+            solved(9_800, 9_700),
+        );
+
+        assert_eq!(range.verdict, Verdict::Sandwiched);
+        assert_eq!(range.top.verdict, Verdict::Sandwiched);
+        assert_eq!(range.back.verdict, Verdict::Sandwiched);
+        // Deltas are unaffected by the override: still computed for offline analysis.
+        assert!(range.top.deltas.raw_bps.unwrap() > 0.0);
+        assert!(range.back.deltas.raw_bps.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn build_range_sandwich_override_spares_unsolved_states() {
+        // The sandwich explains the settled price, not why Fynd had no route: an unsolved state
+        // keeps its verdict so the coverage buckets are unaffected by the reclassification.
+        let mut sandwiched = trade(10_000);
+        sandwiched.sandwich = Some(SandwichEvidence {
+            front_tx: TxHash::repeat_byte(0xaa),
+            back_tx: TxHash::repeat_byte(0xbb),
+            attacker: Address::repeat_byte(0xcc),
+            pools: vec![Address::repeat_byte(0xdd)],
+        });
+        let range = build_range(
+            &sandwiched,
+            &usd::PriceMap::new(),
+            solved(10_200, 10_100),
+            Outcome::Unsolvable("missing token in Tycho".into()),
+        );
+
+        assert_eq!(range.top.verdict, Verdict::Sandwiched);
+        assert_eq!(range.back.verdict, Verdict::Unsolvable);
+        assert_eq!(range.verdict, Verdict::Sandwiched); // headline follows top
     }
 
     #[test]

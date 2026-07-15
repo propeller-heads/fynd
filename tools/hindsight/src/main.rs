@@ -220,6 +220,7 @@ fn print_trades(trades: &[decoder::DecodedTrade]) {
     println!("\n{} solver trade(s) found:\n", trades.len());
     for trade in trades {
         println!("  tx:         {}", trade.tx_hash);
+        println!("  tx_index:   {}", trade.tx_index);
         println!("  block:      {}", trade.block_number);
         println!("  venue:      {}", trade.venue);
         println!("  solver:     {}", trade.solver);
@@ -228,6 +229,12 @@ fn print_trades(trades: &[decoder::DecodedTrade]) {
         println!("  amount_in:  {}", trade.amount_in);
         println!("  token_out:  {}", trade.token_out);
         println!("  amount_out: {}", trade.amount_out);
+        if let Some(sandwich) = &trade.sandwich {
+            println!(
+                "  sandwich:   front={} back={} attacker={}",
+                sandwich.front_tx, sandwich.back_tx, sandwich.attacker
+            );
+        }
         println!();
     }
 }

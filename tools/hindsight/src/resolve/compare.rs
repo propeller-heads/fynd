@@ -42,6 +42,11 @@ pub(crate) enum Verdict {
     CoverageMiss,
     /// Fynd could not solve the trade at all.
     Unsolvable,
+    /// The trade's settlement was bracketed by a front-run and a back-run (see
+    /// `decoder::sandwich`): the settled output was moved by MEV, not by inferior routing, so
+    /// this is not a fair win or loss. The bps/USD deltas are still computed and written to
+    /// JSONL for offline analysis; only the classification changes.
+    Sandwiched,
 }
 
 /// Minimum fraction of the settled output Fynd must produce for the result to count as a real
