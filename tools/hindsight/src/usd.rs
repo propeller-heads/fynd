@@ -1,9 +1,9 @@
 //! USD valuation from Fynd's own token prices.
 //!
-//! The in-process solver prices every token it knows relative to the gas token (ETH):
-//! `price[token]` is the token's native-unit amount per 1 ETH-wei (tycho's best-spread
-//! mid-price). Those prices are ETH-denominated, not USD, so ETH itself is anchored to USD via
-//! the stablecoins' own entries in the same price map — a stablecoin is worth ~$1 per
+//! The in-process solver prices every token it knows relative to the chain's gas token (ETH on
+//! mainnet): `price[token]` is the token's native-unit amount per 1 wei of gas token (tycho's
+//! best-spread mid-price). Those prices are not USD, so the gas token itself is anchored to USD
+//! via the stablecoins' own entries in the same price map — a stablecoin is worth ~$1 per
 //! `10^decimals` native units. Which stablecoins anchor, and which wrapped-native token is
 //! interchangeable with the gas token, comes from the chain's address book, so valuation carries
 //! no chain knowledge of its own. Any trade whose output token Fynd has priced can be valued
@@ -17,14 +17,15 @@ use alloy::primitives::{Address, U256};
 use crate::decoder::Registry;
 
 /// Token-price snapshot from the solver's derived data, bundled with the chain's USD anchors:
-/// `price[token]` is the token's native-unit amount per 1 ETH-wei. Native ETH is the zero address.
+/// `price[token]` is the token's native-unit amount per 1 wei of the gas token. The native token
+/// is the zero address.
 pub(crate) struct Prices {
     map: HashMap<Address, f64>,
     /// The chain's wrapped-native token. Interchangeable with native (the zero address) for
     /// pricing, since only one of the two may carry a derived price depending on the solver's
     /// gas-token configuration.
     wrapped_native: Address,
-    /// `(stablecoin, decimals)` anchors for ETH→USD, from the address book.
+    /// `(stablecoin, decimals)` anchors pinning the gas token to USD, from the address book.
     stablecoins: Vec<(Address, u32)>,
 }
 
@@ -47,7 +48,7 @@ impl Prices {
         self.map.get(&token).copied()
     }
 
-    /// Positive, finite price of `token`, treating native ETH and the wrapped-native token as
+    /// Positive, finite price of `token`, treating the native token and its wrapped form as
     /// interchangeable.
     fn price_of(&self, token: Address) -> Option<f64> {
         let direct = self.map.get(&token).copied();
@@ -64,12 +65,13 @@ impl Prices {
             .filter(|p| *p > 0.0 && p.is_finite())
     }
 
-    /// USD value of one ETH-wei, averaged over whichever anchor stablecoins are priced.
+    /// USD value of one wei of the gas token, averaged over whichever anchor stablecoins are
+    /// priced.
     ///
-    /// For a stablecoin with `d` decimals, `price[stable]` is its native-unit amount per ETH-wei,
-    /// so `price[stable] / 10^d` is USD per ETH-wei (one native unit ≈ `1/10^d` USD). Returns
-    /// `None` when no anchor stablecoin is priced.
-    fn usd_per_eth_wei(&self) -> Option<f64> {
+    /// For a stablecoin with `d` decimals, `price[stable]` is its native-unit amount per wei, so
+    /// `price[stable] / 10^d` is USD per wei (one native unit ≈ `1/10^d` USD). Returns `None`
+    /// when no anchor stablecoin is priced.
+    fn usd_per_native_wei(&self) -> Option<f64> {
         let mut sum = 0.0;
         let mut count = 0u32;
         for &(stable, decimals) in &self.stablecoins {
@@ -81,21 +83,22 @@ impl Prices {
         (count > 0).then(|| sum / f64::from(count))
     }
 
-    /// USD value of `amount` native units of `token`: `amount / price[token] * usd_per_eth_wei`.
+    /// USD value of `amount` native units of `token`: `amount / price[token] * usd_per_native_wei`.
     ///
     /// Returns `None` when `token` is not priced, no anchor stablecoin is available, or the result
     /// is not finite (e.g. an amount that overflows f64).
     pub(crate) fn value_usd(&self, token: Address, amount: U256) -> Option<f64> {
-        let usd_per_eth_wei = self.usd_per_eth_wei()?;
+        let usd_per_native_wei = self.usd_per_native_wei()?;
         let price = self.price_of(token)?;
         let amount = u256_to_f64(amount);
-        let usd = amount * usd_per_eth_wei / price;
+        let usd = amount * usd_per_native_wei / price;
         usd.is_finite().then_some(usd)
     }
 
-    /// Convert a native gas cost (ETH-wei) into `token` native units at the snapshot price.
+    /// Convert a native gas cost (wei of the gas token) into `token` native units at the
+    /// snapshot price.
     ///
-    /// `price[token]` is the token's native-unit amount per ETH-wei, so the conversion is one
+    /// `price[token]` is the token's native-unit amount per wei, so the conversion is one
     /// multiplication. Returns `None` when `token` is not priced. The f64 round-trip loses
     /// wei-level precision, which is acceptable for a gas deduction — the cost itself is exact but
     /// its value in the output token is an estimate by nature.

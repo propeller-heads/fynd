@@ -25,7 +25,7 @@ const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
-/// from the ETH-anchored valuation).
+/// from the gas-token-anchored valuation).
 const USD_OUTLIER_THRESHOLD: f64 = 1_000.0;
 
 /// Whether a USD savings value is large enough to log for inspection.
