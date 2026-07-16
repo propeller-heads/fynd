@@ -39,8 +39,8 @@ use std::collections::HashSet;
 use alloy::primitives::Address;
 
 use crate::decoder::{
-    registry::Registry,
-    strategies::{netting::sender_flow, GasScope, TraderFlow},
+    registry::{Registry, VenueAddresses},
+    strategies::{netting::sender_flow, DecodeContext, GasScope, TraderFlow},
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -73,6 +73,9 @@ pub(crate) fn from_name(name: &str) -> Option<&'static dyn VenueKnowledge> {
 /// through the same seam regardless of which inputs it uses — a venue that starts needing
 /// another input extends this struct instead of every venue's signature.
 pub(crate) struct VenueContext<'a> {
+    /// The venue's own address-book section (entry points, fee collectors, solver aliases),
+    /// resolved by the caller so implementations never look themselves up by name.
+    pub addresses: &'a VenueAddresses,
     /// The transaction's flattened value movements.
     pub transfer_ledger: &'a TransferLedger,
     pub sender: Address,
@@ -83,8 +86,22 @@ pub(crate) struct VenueContext<'a> {
     pub registry: &'a Registry,
 }
 
-/// Net the sender's flow and back the venue's fee skim out of it — the shared shape of every
-/// fee-skimming venue entry (Relay, `MetaMask`).
+impl<'a> VenueContext<'a> {
+    /// The venue-relevant slice of a decode context, plus the venue's address-book section.
+    pub(crate) fn new<P>(ctx: &'a DecodeContext<'_, P>, addresses: &'a VenueAddresses) -> Self {
+        Self {
+            addresses,
+            transfer_ledger: ctx.transfer_ledger,
+            sender: ctx.receipt.from,
+            entry_point: ctx.entry_point,
+            input: ctx.input,
+            registry: ctx.registry,
+        }
+    }
+}
+
+/// Net the sender's flow and back the venue's fee out of it — the shared shape of every
+/// fee-taking venue entry (Relay, `MetaMask`).
 ///
 /// A trader-paid flow's gas scope narrows to the solver call's trace frame: inside a venue's
 /// contract the receipt's gas includes the venue's own overhead, which is charged whichever

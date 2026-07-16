@@ -16,10 +16,10 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     intent,
-    registry::Registry,
+    registry::{Registry, VenueAddresses},
     strategies::{DecodeContext, DecodeStrategy, GasScope, TraderFlow},
     transfer_ledger::TransferLedger,
-    venues,
+    venues::{self, VenueContext, VenueKnowledge},
 };
 
 /// Recovers the swap by netting the trader's value movements.
@@ -45,13 +45,7 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
                 )
                 .await
             }
-            TraderRole::Venue(venue) => venue.decode(&venues::VenueContext {
-                transfer_ledger: ctx.transfer_ledger,
-                sender,
-                entry_point: ctx.entry_point,
-                input: ctx.input,
-                registry: ctx.registry,
-            }),
+            TraderRole::Venue(venue, addresses) => venue.decode(&VenueContext::new(ctx, addresses)),
         }
     }
 }
@@ -59,25 +53,24 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
 /// Whose net flow is the trade. Fillers and batch settlers send on a maker's behalf, and
 /// venue routers wrap the trade in their own contract, so netting first picks the address
 /// to net.
-enum TraderRole {
+enum TraderRole<'a> {
     /// The transaction sender (direct solver swaps).
     Sender,
     /// An order maker — the sender is a filler or batch settler acting on its behalf.
     Maker,
     /// The sender, entered through a venue's contract: sender netting plus that venue's
-    /// corrections (fee back-out, gas scoping).
-    Venue(&'static dyn venues::VenueKnowledge),
+    /// corrections (fee back-out, gas scoping), with its address-book section resolved.
+    Venue(&'static dyn VenueKnowledge, &'a VenueAddresses),
 }
 
 /// Classify whose net flow is the trade. Assumes the transaction already matched (see
 /// `matching`): an entry point that is neither a venue nor otherwise known can only have
 /// matched via a solver log, which is a filler-initiated intent fill.
-fn trader_role(entry_point: Address, registry: &Registry) -> TraderRole {
-    if let Some(venue) = registry
-        .venue_name(entry_point)
-        .and_then(venues::from_name)
-    {
-        return TraderRole::Venue(venue);
+fn trader_role(entry_point: Address, registry: &Registry) -> TraderRole<'_> {
+    if let Some(name) = registry.venue_name(entry_point) {
+        if let (Some(venue), Some(addresses)) = (venues::from_name(name), registry.venue(name)) {
+            return TraderRole::Venue(venue, addresses);
+        }
     }
     // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is an
     // order maker's net flow — decoded like a filler-initiated intent fill.

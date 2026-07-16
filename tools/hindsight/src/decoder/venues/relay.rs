@@ -26,7 +26,7 @@ impl VenueKnowledge for Relay {
     /// collector instead (Relay funds the swap from it); the collector is the
     /// funding source there, not a fee recipient, so no fee is backed out.
     fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
-        let relay = ctx.registry.venue("relay")?;
+        let relay = ctx.addresses;
         if let Some(flow) =
             venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
         {
@@ -132,7 +132,8 @@ mod tests {
         entry_point: Address,
         registry: &'a Registry,
     ) -> VenueContext<'a> {
-        VenueContext { transfer_ledger, sender, entry_point, input: &[], registry }
+        let addresses = registry.venue("relay").unwrap();
+        VenueContext { addresses, transfer_ledger, sender, entry_point, input: &[], registry }
     }
 
     #[test]

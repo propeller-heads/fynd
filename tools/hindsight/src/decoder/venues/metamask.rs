@@ -40,7 +40,7 @@ impl VenueKnowledge for Metamask {
     /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of
     /// it, and attribute the solver from the router calldata.
     fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
-        let metamask = ctx.registry.venue("metamask")?;
+        let metamask = ctx.addresses;
         let mut flow = venue_fee_flow(
             ctx.transfer_ledger,
             ctx.sender,
@@ -72,7 +72,8 @@ mod tests {
         input: &'a [u8],
         registry: &'a Registry,
     ) -> VenueContext<'a> {
-        VenueContext { transfer_ledger, sender, entry_point, input, registry }
+        let addresses = registry.venue("metamask").unwrap();
+        VenueContext { addresses, transfer_ledger, sender, entry_point, input, registry }
     }
 
     fn fee_wallet(registry: &Registry) -> Address {
