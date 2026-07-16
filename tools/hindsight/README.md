@@ -36,9 +36,10 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
     eth_getBlockReceipts (one call per block)
                     │
                     ▼
-           ┌─────────────────┐
-           │    matching     │   entry point or a solver log; non-swap orders skipped
-           └────────┬────────┘
+           ┌─────────────────┐    match_veto    ┌─────────────────┐
+           │    matching     │ ───────────────▶ │ SolverKnowledge │
+           └────────┬────────┘  skips non-swaps └─────────────────┘
+                    │  entry point or a solver log
                     │  debug_traceTransaction
                     ▼
            ┌─────────────────┐
@@ -47,9 +48,9 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
                     │
                     ▼
      DecodeStrategy::decode — tried in order, first success wins
-      ┌ 1 ────────────────────────────────┐
-      │ netting — nets the trader's       │
-      │ value movements                   │
+      ┌ 1 ────────────────────────────────┐   tx entered    ┌────────────────┐
+      │ netting — nets the trader's       │ ──────────────▶ │ VenueKnowledge │
+      │ value movements                   │  via a venue    └────────────────┘
       └───────────────────────────────────┘
       ┌ 2 ────────────────────────────────┐
       │ future: calldata decoding,        │
@@ -57,12 +58,16 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
       └───────────────────────────────────┘
                     │  Flow
                     ▼
-           ┌─────────────────┐
-           │ post-processing │   guards → attribution → gas → embedded quote →
-           └────────┬────────┘   sandwich scan
+           ┌─────────────────┐  embedded_quote  ┌─────────────────┐
+           │ post-processing │ ───────────────▶ │ SolverKnowledge │
+           └────────┬────────┘                  └─────────────────┘
+                    │  guards → attribution → gas → quote → sandwich scan
                     ▼
               DecodedTrade
 ```
+
+Horizontal arrows are consultations: the pipeline stage calls the named trait method on the
+protocol's knowledge implementation. The stages themselves are protocol-agnostic.
 
 ### The extension traits
 
@@ -84,18 +89,72 @@ trait DecodeStrategy<P> {
 }
 ```
 
+#### `VenueKnowledge` (`venues/`)
+
+Everything Hindsight knows about one venue, today a single decode method that nets the
+trader's flow and backs the venue's fee out. One implementation per venue, bound to its
+`[venues.<name>]` address-book section — the registry fails at load time when a section has no
+implementation. When venues grow a new kind of knowledge (say, calldata parsing for a calldata
+strategy), it becomes a new trait method whose default means "this venue has nothing special
+here", so only the venues with that behavior override it and every other impl stays unchanged.
+
+```rust
+trait VenueKnowledge {
+    /// Decode a transaction entered through this venue's contract.
+    fn decode(&self, ctx: &VenueContext) -> Option<Flow>;
+}
+
+// venues/mod.rs — one arm per address-book section
+fn from_name(name: &str) -> Option<&'static dyn VenueKnowledge> {
+    match name {
+        "relay" => Some(&relay::Relay),
+        "metamask" => Some(&metamask::Metamask),
+        _ => None,
+    }
+}
+```
+
+#### `SolverKnowledge` (`solvers/`)
+
+What a solver's transactions reveal beyond its address. Both methods default to "nothing to
+add", so most solvers are a single address-book line with no code; the solvers that do have
+code are registered in `solvers::IMPLEMENTATIONS`.
+
+```rust
+trait SolverKnowledge {
+    /// The solver's off-chain quote declared in its calldata, when it embeds one.
+    fn embedded_quote(&self, input: &[u8], amount_in: U256) -> Option<SolverQuote> { None }
+
+    /// The reason this solver's logs mark a matched transaction as not a same-chain swap.
+    fn match_veto(&self, logs: &[Log]) -> Option<&'static str> { None }
+}
+```
+
+The implementations are per protocol, not per chain: a venue or solver deployed on several
+chains behaves the same everywhere, so one implementation serves all of them. Everything that
+does differ per chain — entry points, router addresses, fee collectors, stablecoins — lives in
+the per-chain address book, which is handed to the implementations at run time. A venue or
+solver that genuinely diverges on one chain (a different router contract, a different ABI) is
+registered in that chain's book under its own section name — Relay diverging on Base would
+become `[venues.relay_base]` — and that name is bound to its own `VenueKnowledge` or
+`SolverKnowledge` impl instead of the shared one. A wrong sameness assumption mostly surfaces
+as trades failing to decode or failing `verify` — but not always: a fee scheme that diverged,
+with the fee collector missing from that chain's book, decodes trades with the venue's fee
+still inside the amounts. Those are wrong records, not misses, so a venue's fee collectors
+must be re-verified on every chain it is added on.
+
 ### Where does new code go?
 
 | You want to… | Touch | Without it |
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the quote and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
-| Read a solver's quote from its calldata | A module in `solvers/` plus one match arm in `solvers::embedded_quote` | Records for that solver carry no quote |
-| Skip a solver's non-swap orders | One check in `solvers::match_veto` | Those orders decode as trades that never happened, with absurd rates |
-| Add a venue | A `[venues.<name>]` section in the address book, a module in `venues/`, one arm in `Venue::from_name` | The venue's trades are missed, or decoded with its fee still inside the amounts — see below |
+| Read a solver's quote from its calldata | A `SolverKnowledge` impl in `solvers/`, registered in `solvers::IMPLEMENTATIONS` | Records for that solver carry no quote |
+| Skip a solver's non-swap orders | A `match_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
+| Add a venue | A `[venues.<name>]` section in the address book, a `VenueKnowledge` impl in `venues/`, one arm in `venues::from_name` | The venue's trades are missed, or decoded with its fee still inside the amounts — see below |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently — see below |
 | Add a new way to extract swaps | A module in `strategies/` plus one entry in `default_strategies` | Transactions the existing methods cannot decode stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A guard in `guards.rs` | Records that are not trades enter the comparison |
-| Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus modules in `venues/` and `solvers/` for its venues and solvers that have none yet | Only `ethereum` is built in |
+| Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus `VenueKnowledge`/`SolverKnowledge` impls for its venues and solvers that have none yet | Only `ethereum` is built in |
 
 ### Strategies vs venue knowledge vs solver knowledge
 
@@ -141,9 +200,10 @@ gap visible in `verify`. A registered venue with an unlisted fee collector is wo
 decode with the fee still inside the amounts, and every comparison credits Fynd with the
 venue's own fee, silently inflating wins.
 
-**Solver knowledge is match arms inside the method that reads it.** Each solver's calldata
-format (KyberSwap's `clientData`, ParaSwap's word layout) is one arm in `solvers/`, not a
-strategy of its own.
+**Solver knowledge lives on the solver's `SolverKnowledge` impl.** Each piece — a calldata
+quote format (KyberSwap's `clientData`, ParaSwap's word layout), a match-time veto (LiFi's
+bridge orders) — is a trait method with a default, so a solver implements only what it has and
+most solvers are address-book lines with no code at all.
 
 ### Re-solve monitor (`src/resolve/`)
 

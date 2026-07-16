@@ -10,36 +10,42 @@
 
 use alloy::primitives::U256;
 
-use crate::decoder::solvers::SolverQuote;
+use crate::decoder::solvers::{SolverKnowledge, SolverQuote};
 
-/// Extract `ParaSwap`'s `quotedAmount` from Augustus calldata.
-///
-/// Scans word-aligned calldata for `amount_in` and reads the two words after it as
-/// `(toAmount, quotedAmount)`. A false positive would need a word that equals the exact input
-/// amount *and* is followed by a plausible floor/quote pair (`0 < toAmount <= quotedAmount <=
-/// 2 * toAmount`) — and the caller's settled-amount plausibility guard still applies after.
-/// Returns `None` when no such triple exists (e.g. a partner fee made the decoded input differ
-/// from `fromAmount`), which just leaves the record without a quote.
-pub(crate) fn embedded_quote(input: &[u8], amount_in: U256) -> Option<SolverQuote> {
-    if amount_in.is_zero() || input.len() < 4 {
-        return None;
-    }
-    let words: Vec<U256> = input[4..]
-        .as_chunks::<32>()
-        .0
-        .iter()
-        .map(|word| U256::from_be_slice(word))
-        .collect();
-    for window in words.windows(3) {
-        let (from_amount, to_amount, quoted) = (window[0], window[1], window[2]);
-        if from_amount != amount_in || to_amount.is_zero() {
-            continue;
+/// The `ParaSwap` solver.
+pub(crate) struct Paraswap;
+
+impl SolverKnowledge for Paraswap {
+    /// Extract `ParaSwap`'s `quotedAmount` from Augustus calldata.
+    ///
+    /// Scans word-aligned calldata for `amount_in` and reads the two words after it as
+    /// `(toAmount, quotedAmount)`. A false positive would need a word that equals the exact
+    /// input amount *and* is followed by a plausible floor/quote pair (`0 < toAmount <=
+    /// quotedAmount <= 2 * toAmount`) — and the caller's settled-amount plausibility guard
+    /// still applies after. Returns `None` when no such triple exists (e.g. a partner fee made
+    /// the decoded input differ from `fromAmount`), which just leaves the record without a
+    /// quote.
+    fn embedded_quote(&self, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
+        if amount_in.is_zero() || input.len() < 4 {
+            return None;
         }
-        if quoted >= to_amount && quoted <= to_amount.saturating_mul(U256::from(2)) {
-            return Some(SolverQuote { amount_out: quoted, source: None, timestamp: None });
+        let words: Vec<U256> = input[4..]
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|word| U256::from_be_slice(word))
+            .collect();
+        for window in words.windows(3) {
+            let (from_amount, to_amount, quoted) = (window[0], window[1], window[2]);
+            if from_amount != amount_in || to_amount.is_zero() {
+                continue;
+            }
+            if quoted >= to_amount && quoted <= to_amount.saturating_mul(U256::from(2)) {
+                return Some(SolverQuote { amount_out: quoted, source: None, timestamp: None });
+            }
         }
+        None
     }
-    None
 }
 
 #[cfg(test)]
@@ -68,7 +74,9 @@ mod tests {
             U256::from(171_602_266u64),
             U256::ZERO, // metadata
         ];
-        let quote = embedded_quote(&calldata(&words), U256::from(171_521_496u64)).unwrap();
+        let quote = Paraswap
+            .embedded_quote(&calldata(&words), U256::from(171_521_496u64))
+            .unwrap();
         assert_eq!(quote.amount_out, U256::from(171_602_266u64));
         assert_eq!(quote.source, None);
         assert_eq!(quote.timestamp, None);
@@ -79,9 +87,15 @@ mod tests {
         // A partner fee (or any decode difference) means no word equals the decoded input.
         let words =
             [U256::from(171_521_496u64), U256::from(171_430_663u64), U256::from(171_602_266u64)];
-        assert!(embedded_quote(&calldata(&words), U256::from(999u64)).is_none());
-        assert!(embedded_quote(&[], U256::from(1u64)).is_none());
-        assert!(embedded_quote(&calldata(&words), U256::ZERO).is_none());
+        assert!(Paraswap
+            .embedded_quote(&calldata(&words), U256::from(999u64))
+            .is_none());
+        assert!(Paraswap
+            .embedded_quote(&[], U256::from(1u64))
+            .is_none());
+        assert!(Paraswap
+            .embedded_quote(&calldata(&words), U256::ZERO)
+            .is_none());
     }
 
     #[test]
@@ -90,8 +104,12 @@ mod tests {
         // wildly above it (different units).
         let amount_in = U256::from(1_000_000u64);
         let below = [amount_in, U256::from(990_000u64), U256::from(400_000u64)];
-        assert!(embedded_quote(&calldata(&below), amount_in).is_none());
+        assert!(Paraswap
+            .embedded_quote(&calldata(&below), amount_in)
+            .is_none());
         let far_above = [amount_in, U256::from(990_000u64), U256::from(10_000_000u64)];
-        assert!(embedded_quote(&calldata(&far_above), amount_in).is_none());
+        assert!(Paraswap
+            .embedded_quote(&calldata(&far_above), amount_in)
+            .is_none());
     }
 }

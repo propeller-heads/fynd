@@ -5,6 +5,24 @@
 
 use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
+use crate::decoder::solvers::SolverKnowledge;
+
+/// The `LiFi` solver.
+pub(crate) struct Lifi;
+
+impl SolverKnowledge for Lifi {
+    /// Veto transactions that started a cross-chain bridge order.
+    ///
+    /// A bridge deposit is not a same-chain swap: the real output lands on the destination
+    /// chain, and the trader's only same-chain receipt is a leftover refund. Netting that as a
+    /// swap pairs the full input with the refund — a trade that never happened, at an absurd rate.
+    fn match_veto(&self, logs: &[Log]) -> Option<&'static str> {
+        logs.iter()
+            .any(|log| log.topics().first() == Some(&LiFiTransferStarted::SIGNATURE_HASH))
+            .then_some("cross-chain bridge order")
+    }
+}
+
 sol! {
     /// Emitted by the `LiFi` Diamond only when an order bridges to another chain (the tuple is
     /// `LiFi`'s `BridgeData`); same-chain `LiFi` swaps emit `LiFiGenericSwapCompleted` instead.
@@ -12,17 +30,6 @@ sol! {
         (bytes32, string, string, address, address, address, uint256, uint256, bool, bool)
             bridgeData
     );
-}
-
-/// Whether the transaction started a cross-chain bridge order.
-///
-/// A bridge deposit is not a same-chain swap: the real output lands on the destination chain,
-/// and the trader's only same-chain receipt is a leftover refund. Netting that as a swap pairs
-/// the full input with the refund — a phantom trade with an absurd rate. This runs as a
-/// matching-time veto (see [`super::match_veto`]), so rejected transactions never cost a trace.
-pub(crate) fn started_bridge_order(logs: &[Log]) -> bool {
-    logs.iter()
-        .any(|log| log.topics().first() == Some(&LiFiTransferStarted::SIGNATURE_HASH))
 }
 
 #[cfg(test)]
@@ -43,9 +50,9 @@ mod tests {
             Bytes::default(),
         );
         let logs = vec![Log { inner: primitive, ..Default::default() }];
-        assert!(started_bridge_order(&logs));
+        assert_eq!(Lifi.match_veto(&logs), Some("cross-chain bridge order"));
 
         let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
-        assert!(!started_bridge_order(&swap_logs));
+        assert_eq!(Lifi.match_veto(&swap_logs), None);
     }
 }

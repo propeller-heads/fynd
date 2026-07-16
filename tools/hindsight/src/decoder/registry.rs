@@ -37,7 +37,7 @@ struct AddressBook {
 /// A venue's address-book section on one chain: the contracts users enter through, the
 /// collectors its fee skims land on, and its calldata solver vocabulary. Keyed by venue name in
 /// the address book; the name binds to a decode strategy at load time (see
-/// [`crate::decoder::venues::Venue::from_name`]).
+/// [`crate::decoder::venues::from_name`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
@@ -129,10 +129,10 @@ impl Registry {
         // unbound name (a typo, or a venue with no strategy yet) must fail here — silently
         // never matching would just drop that venue's trades.
         for name in book.venues.keys() {
-            if crate::decoder::venues::Venue::from_name(name).is_none() {
+            if crate::decoder::venues::from_name(name).is_none() {
                 anyhow::bail!(
                     "address book venue '{name}' has no decode strategy \
-                     (see venues::Venue for the recognized names)"
+                     (see venues::from_name for the recognized names)"
                 );
             }
         }
@@ -178,6 +178,13 @@ impl Registry {
 
     pub(crate) fn is_solver(&self, address: Address) -> bool {
         self.solvers.contains_key(&address)
+    }
+
+    /// The registered solver name for `address`, if any.
+    pub(crate) fn solver_name(&self, address: Address) -> Option<&str> {
+        self.solvers
+            .get(&address)
+            .map(String::as_str)
     }
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label

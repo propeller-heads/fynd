@@ -1,15 +1,22 @@
-//! Solver-specific calldata knowledge: the routers Fynd competes with.
+//! Solver-specific knowledge: the routers Fynd competes with.
 //!
-//! A module here holds one solver's quirks — the off-chain quote it embeds in calldata
-//! (kyberswap, paraswap) or a matching veto for order shapes that are not same-chain swaps
-//! (lifi's bridge orders). Solver addresses live in the address book's `[solvers]` section.
+//! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
+//! line is all that is needed: matching, attribution, and gas isolation work from the address
+//! alone. A solver whose transactions carry more information than that gets a module here with a
+//! [`SolverKnowledge`] impl registered in [`IMPLEMENTATIONS`]: an off-chain quote embedded in
+//! calldata, or a matching veto for order shapes that are not same-chain swaps.
 
 pub(crate) mod attribution;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
 
-use alloy::{primitives::U256, rpc::types::Log};
+use alloy::{
+    primitives::{Address, U256},
+    rpc::types::Log,
+};
+
+use crate::decoder::registry::Registry;
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
@@ -30,27 +37,63 @@ pub(crate) struct SolverQuote {
     pub timestamp: Option<u64>,
 }
 
+/// Solver-specific knowledge beyond the address-book entry.
+///
+/// Every method has a default meaning "this solver has nothing to add", so a solver only
+/// implements the capabilities it has; most solvers need no code at all.
+pub(crate) trait SolverKnowledge: Send + Sync {
+    /// The solver's off-chain quote declared in the transaction's calldata, when it embeds one.
+    fn embedded_quote(&self, _input: &[u8], _amount_in: U256) -> Option<SolverQuote> {
+        None
+    }
+
+    /// The reason this solver's logs mark a matched transaction as not decodable as a swap.
+    /// Checked at match time — before attribution names the solver, and before the transaction
+    /// costs a trace.
+    fn match_veto(&self, _logs: &[Log]) -> Option<&'static str> {
+        None
+    }
+}
+
+/// The solvers with a [`SolverKnowledge`] implementation, by address-book name. A solver absent
+/// here needs none — its address-book entry alone is complete.
+const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
+    ("kyberswap", &kyberswap::Kyberswap),
+    ("lifi", &lifi::Lifi),
+    ("paraswap", &paraswap::Paraswap),
+];
+
 /// The reason a matched transaction must be skipped instead of decoded, if any.
 ///
 /// Some solver routers also settle orders that are not same-chain swaps; decoding those would
-/// fabricate phantom trades, so they are vetoed from their logs before the transaction costs a
-/// trace. Each solver contributes one check here, keeping the matching in `strategy`
-/// solver-agnostic.
-pub(crate) fn match_veto(logs: &[Log]) -> Option<&'static str> {
-    if lifi::started_bridge_order(logs) {
-        return Some("cross-chain bridge order");
+/// record trades that never happened. A solver's veto is consulted only when that solver is
+/// part of the transaction — as its entry point or as a log emitter — so a veto can never
+/// affect another solver's trades.
+pub(crate) fn match_veto(
+    logs: &[Log],
+    entry_point: Address,
+    registry: &Registry,
+) -> Option<&'static str> {
+    for (name, knowledge) in IMPLEMENTATIONS {
+        let present = registry.solver_name(entry_point) == Some(name) ||
+            logs.iter()
+                .any(|log| registry.solver_name(log.address()) == Some(name));
+        if present {
+            if let Some(reason) = knowledge.match_veto(logs) {
+                return Some(reason);
+            }
+        }
     }
     None
 }
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
-/// solver is known to embed one. Adding a solver is one match arm.
+/// solver is known to embed one.
 pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
-    match solver {
-        "kyberswap" => kyberswap::embedded_quote(input),
-        "paraswap" => paraswap::embedded_quote(input, amount_in),
-        _ => None,
-    }
+    let (_, knowledge) = IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)?;
+    knowledge.embedded_quote(input, amount_in)
 }
 
 /// Whether a quoted output is in the same units as the settled one.
@@ -77,18 +120,36 @@ mod tests {
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log};
 
-    #[test]
-    fn match_veto_flags_bridge_orders_only() {
+    /// A bridge-shaped log emitted by the registered `LiFi` router.
+    fn bridge_log(emitter: Address) -> Log {
         let primitive = PrimitiveLog::new_unchecked(
-            addr(70),
+            emitter,
             vec![lifi::LiFiTransferStarted::SIGNATURE_HASH],
             Bytes::default(),
         );
-        let bridge_logs = vec![Log { inner: primitive, ..Default::default() }];
-        assert_eq!(match_veto(&bridge_logs), Some("cross-chain bridge order"));
+        Log { inner: primitive, ..Default::default() }
+    }
+
+    #[test]
+    fn match_veto_bridge_orders() {
+        let registry = Registry::ethereum();
+        let lifi_router: Address = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+            .parse()
+            .unwrap();
+        let bridge_logs = vec![bridge_log(lifi_router)];
+        assert_eq!(match_veto(&bridge_logs, addr(1), &registry), Some("cross-chain bridge order"));
 
         let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
-        assert_eq!(match_veto(&swap_logs), None);
+        assert_eq!(match_veto(&swap_logs, lifi_router, &registry), None);
+    }
+
+    #[test]
+    fn match_veto_scoped_to_the_solver_present() {
+        // The same bridge-shaped log from an address that is not the LiFi router: LiFi is not
+        // part of the transaction, so its veto is never consulted.
+        let registry = Registry::ethereum();
+        let bridge_logs = vec![bridge_log(addr(70))];
+        assert_eq!(match_veto(&bridge_logs, addr(1), &registry), None);
     }
 
     #[test]

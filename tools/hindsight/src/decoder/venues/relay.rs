@@ -11,30 +11,35 @@ use alloy::primitives::{Address, U256};
 use crate::decoder::{
     strategies::Flow,
     transfer_ledger::{NetSwap, TransferLedger},
-    venues::{venue_fee_flow, VenueContext},
+    venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
 
-/// Decode a Relay-entered transaction.
-///
-/// The common case is a user swap: net the sender's flow, then back the
-/// venue fee out of it. When the sender has no net flow the transaction is a
-/// solver-initiated rebalancing fill, decoded by anchoring on the fee
-/// collector instead (Relay funds the swap from it); the collector is the
-/// funding source there, not a skim, so no fee is backed out.
-pub(crate) fn decode(ctx: &VenueContext<'_>) -> Option<Flow> {
-    let relay = ctx.registry.venue("relay")?;
-    if let Some(flow) =
-        venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
-    {
-        return Some(flow);
+/// The Relay venue.
+pub(crate) struct Relay;
+
+impl VenueKnowledge for Relay {
+    /// Decode a Relay-entered transaction.
+    ///
+    /// The common case is a user swap: net the sender's flow, then back the
+    /// venue fee out of it. When the sender has no net flow the transaction is a
+    /// solver-initiated rebalancing fill, decoded by anchoring on the fee
+    /// collector instead (Relay funds the swap from it); the collector is the
+    /// funding source there, not a fee recipient, so no fee is backed out.
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
+        let relay = ctx.registry.venue("relay")?;
+        if let Some(flow) =
+            venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
+        {
+            return Some(flow);
+        }
+        decode_rebalance(
+            ctx.transfer_ledger,
+            &relay.fee_collectors,
+            &relay.entry_points,
+            ctx.registry.wrapped_native(),
+        )
+        .map(|swap| Flow::without_fees(ctx.sender, swap))
     }
-    decode_rebalance(
-        ctx.transfer_ledger,
-        &relay.fee_collectors,
-        &relay.entry_points,
-        ctx.registry.wrapped_native(),
-    )
-    .map(|swap| Flow::without_fees(ctx.sender, swap))
 }
 
 /// Decode a Relay solver-initiated rebalancing fill, where `tx.from` is a rotating solver EOA with
@@ -259,7 +264,9 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
 
-        let flow = decode(&ctx(&transfer_ledger(&logs, &[]), user, router, &registry)).unwrap();
+        let flow = Relay
+            .decode(&ctx(&transfer_ledger(&logs, &[]), user, router, &registry))
+            .unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
@@ -286,8 +293,9 @@ mod tests {
         let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
         let native = vec![(router, collector, U256::from(1000))];
 
-        let flow =
-            decode(&ctx(&transfer_ledger(&logs, &native), collector, router, &registry)).unwrap();
+        let flow = Relay
+            .decode(&ctx(&transfer_ledger(&logs, &native), collector, router, &registry))
+            .unwrap();
         assert_eq!(flow.tracked, collector);
         assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
         assert_eq!(flow.venue_fee_in, None);
@@ -317,7 +325,9 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
 
-        let flow = decode(&ctx(&transfer_ledger(&logs, &[]), solver, router, &registry)).unwrap();
+        let flow = Relay
+            .decode(&ctx(&transfer_ledger(&logs, &[]), solver, router, &registry))
+            .unwrap();
         assert_eq!(flow.tracked, solver);
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.venue_fee_in, None);

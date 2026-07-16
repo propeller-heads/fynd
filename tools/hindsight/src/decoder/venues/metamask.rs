@@ -12,7 +12,7 @@ use alloy::{sol, sol_types::SolCall};
 use crate::decoder::{
     registry::VenueAddresses,
     strategies::Flow,
-    venues::{venue_fee_flow, VenueContext},
+    venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
 
 sol! {
@@ -33,14 +33,23 @@ fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<Strin
     Some(metamask.normalize_solver(&call.aggregatorId))
 }
 
-/// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of it,
-/// and attribute the solver from the router calldata.
-pub(crate) fn decode(ctx: &VenueContext<'_>) -> Option<Flow> {
-    let metamask = ctx.registry.venue("metamask")?;
-    let mut flow =
-        venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &metamask.fee_collectors)?;
-    flow.solver_override = solver_from_calldata(ctx.input, metamask);
-    Some(flow)
+/// The `MetaMask` venue.
+pub(crate) struct Metamask;
+
+impl VenueKnowledge for Metamask {
+    /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of
+    /// it, and attribute the solver from the router calldata.
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
+        let metamask = ctx.registry.venue("metamask")?;
+        let mut flow = venue_fee_flow(
+            ctx.transfer_ledger,
+            ctx.sender,
+            ctx.entry_point,
+            &metamask.fee_collectors,
+        )?;
+        flow.solver_override = solver_from_calldata(ctx.input, metamask);
+        Some(flow)
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +148,9 @@ mod tests {
         ];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ctx(&transfer_ledger, user, router, &[], &registry)).unwrap();
+        let flow = Metamask
+            .decode(&ctx(&transfer_ledger, user, router, &[], &registry))
+            .unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.venue_fee_in, None);
@@ -166,7 +177,9 @@ mod tests {
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ctx(&transfer_ledger, user, router, &[], &registry)).unwrap();
+        let flow = Metamask
+            .decode(&ctx(&transfer_ledger, user, router, &[], &registry))
+            .unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(9)));
         assert_eq!(flow.venue_fee_out, None);
@@ -191,9 +204,9 @@ mod tests {
         };
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow =
-            decode(&ctx(&transfer_ledger, user, router(&registry), &call.abi_encode(), &registry))
-                .unwrap();
+        let flow = Metamask
+            .decode(&ctx(&transfer_ledger, user, router(&registry), &call.abi_encode(), &registry))
+            .unwrap();
         assert_eq!(flow.solver_override.as_deref(), Some("1inch"));
     }
 
@@ -211,7 +224,9 @@ mod tests {
         ];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ctx(&transfer_ledger, user, router(&registry), &[], &registry)).unwrap();
+        let flow = Metamask
+            .decode(&ctx(&transfer_ledger, user, router(&registry), &[], &registry))
+            .unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);

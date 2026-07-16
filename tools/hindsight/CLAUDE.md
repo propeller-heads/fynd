@@ -98,15 +98,16 @@ savings aggregates; unsolved states keep their coverage verdicts).
 ## Adding a venue / solver / strategy / chain
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
-  enough for matching, attribution, gas isolation, and metric labels. Optional code: an `embedded_quote`
-  parser in `solvers/` if its calldata declares an off-chain quote (one match arm), or a
-  match-time veto if some of its orders are not same-chain swaps (see `solvers::match_veto`).
+  enough for matching, attribution, gas isolation, and metric labels. Optional code: a
+  `SolverKnowledge` impl in `solvers/` (registered in `solvers::IMPLEMENTATIONS`) with an
+  `embedded_quote` method if its calldata declares an off-chain quote, or a `match_veto` method
+  if some of its orders are not same-chain swaps.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
-  module in `venues/` and its `Venue::from_name` binding. Most venues are sender netting + fee
-  back-out — delegate to `venue_fee_flow` and add only what is specific to the venue. The
-  registry fails to load if an address-book section has no code binding. All of a venue's
-  knowledge — transfer-based corrections and calldata parsing alike — lives in its one `venues/`
-  module (see README.md).
+  `VenueKnowledge` impl in `venues/` and its `venues::from_name` binding. Most venues are sender
+  netting + fee back-out — delegate to `venue_fee_flow` and add only what is specific to the
+  venue. The registry fails to load if an address-book section has no code binding. All of a
+  venue's knowledge — transfer-based corrections and calldata parsing alike — lives in its one
+  `venues/` module (see README.md).
 - **Decode strategy** (a new method for extracting swaps — calldata decoding, log parsing): a
   module in `strategies/` implementing `DecodeStrategy`, plus one entry in `default_strategies`
   placed by trust. Strategies are methods, never venues or solvers; a venue-scoped method still

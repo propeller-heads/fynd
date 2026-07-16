@@ -28,7 +28,8 @@ pub(crate) fn select<'a>(
     registry: &Registry,
 ) -> Option<MatchedSolverTrade<'a>> {
     let matched = match_entry(receipt, registry)?;
-    if let Some(reason) = solvers::match_veto(matched.receipt.logs()) {
+    if let Some(reason) = solvers::match_veto(matched.receipt.logs(), matched.entry_point, registry)
+    {
         debug!(
             tx = %matched.receipt.transaction_hash,
             venue = %registry.label(matched.entry_point),

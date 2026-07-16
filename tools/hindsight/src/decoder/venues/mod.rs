@@ -5,7 +5,7 @@
 //! decode method consumes it. That knowledge comes in layers:
 //!
 //! - **Address facts** — entry points, fee collectors — are pure data and live in the address
-//!   book's `[venues.<name>]` section, bound to the venue's module by [`Venue::from_name`].
+//!   book's `[venues.<name>]` section, bound to the venue's module by [`from_name`].
 //! - **Transfer-based knowledge** interprets the venue's value movements: backing the fee out of a
 //!   netted flow ([`venue_fee_flow`]), Relay's solver-rebalance fills.
 //! - **Calldata-based knowledge** interprets the venue's own contract input: `MetaMask`'s router
@@ -44,10 +44,29 @@ use crate::decoder::{
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
-/// A venue platform with a decode module in this directory.
-pub(crate) enum Venue {
-    Relay,
-    Metamask,
+/// A venue's decode behavior: one implementation per module in this directory, bound to its
+/// address-book section by [`from_name`].
+///
+/// A venue's capabilities are not fixed — some take fees, some declare their solver in
+/// calldata, some submit rebalancing fills. Future capabilities (e.g. calldata-based knowledge
+/// for a calldata strategy) become methods with default implementations, so a venue only
+/// implements the layers it has.
+pub(crate) trait VenueKnowledge: Send + Sync {
+    /// Decode a transaction entered through this venue's contract.
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow>;
+}
+
+/// The venue implementation bound to a name from the address book.
+///
+/// A `[venues.<name>]` section in the address book only carries addresses; this is where its
+/// name gets behavior. The registry validates every configured venue name against this binding
+/// at load time, so a typo'd section fails fast instead of silently never matching.
+pub(crate) fn from_name(name: &str) -> Option<&'static dyn VenueKnowledge> {
+    match name {
+        "relay" => Some(&relay::Relay),
+        "metamask" => Some(&metamask::Metamask),
+        _ => None,
+    }
 }
 
 /// Everything a venue decoder may read from one matched transaction, so every venue is called
@@ -61,29 +80,6 @@ pub(crate) struct VenueContext<'a> {
     /// Root calldata of the transaction (venue declarations, e.g. `MetaMask`'s `aggregatorId`).
     pub input: &'a [u8],
     pub registry: &'a Registry,
-}
-
-impl Venue {
-    /// The venue bound to a name from the address book.
-    ///
-    /// A `[venues.<name>]` section in the address book only carries addresses; this is where
-    /// its name gets behavior. The registry validates every configured venue name against this
-    /// binding at load time, so a typo'd section fails fast instead of silently never matching.
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "relay" => Some(Self::Relay),
-            "metamask" => Some(Self::Metamask),
-            _ => None,
-        }
-    }
-
-    /// Decode a transaction entered through this venue's contract.
-    pub(crate) fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
-        match self {
-            Self::Relay => relay::decode(ctx),
-            Self::Metamask => metamask::decode(ctx),
-        }
-    }
 }
 
 /// Net the sender's flow and back the venue's fee skim out of it — the shared shape of every

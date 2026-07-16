@@ -71,7 +71,7 @@ enum TraderShape {
     /// transaction. Decoding is still sender netting, plus that venue's corrections — its fee
     /// skim is backed out, and its contract overhead is excluded from gas accounting — so the
     /// recovered swap is what the venue actually asked the solver for.
-    Venue(venues::Venue),
+    Venue(&'static dyn venues::VenueKnowledge),
 }
 
 /// Classify whose net flow is the trade. Assumes the transaction already matched (see
@@ -80,7 +80,7 @@ enum TraderShape {
 fn trader_shape(entry_point: Address, registry: &Registry) -> TraderShape {
     if let Some(venue) = registry
         .venue_name(entry_point)
-        .and_then(venues::Venue::from_name)
+        .and_then(venues::from_name)
     {
         return TraderShape::Venue(venue);
     }
