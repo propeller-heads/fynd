@@ -1,3 +1,11 @@
+## [0.90.2](https://github.com/propeller-heads/fynd/compare/0.90.1...0.90.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* correct vm:curve revert rationale comment ([fd367f4](https://github.com/propeller-heads/fynd/commit/fd367f4c3f59fcb1b12d717d83b93c5bd80e7f9a))
+* revert vm:curve to EVMPoolState VM simulation ([38f54bf](https://github.com/propeller-heads/fynd/commit/38f54bf09ee3d264c2ec858ff5100707c50fb66f))
+
 ## [0.90.1](https://github.com/propeller-heads/fynd/compare/0.90.0...0.90.1) (2026-07-16)
 
 ## [0.90.0](https://github.com/propeller-heads/fynd/compare/0.89.2...0.90.0) (2026-07-14)
