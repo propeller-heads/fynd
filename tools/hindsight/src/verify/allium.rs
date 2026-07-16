@@ -1,3 +1,9 @@
+//! Allium API client for the `verify` subcommand.
+//!
+//! A saved query (`query_id`) parameterized by `block_number` is run per block: kick off an async
+//! run, poll until it succeeds, then fetch results. The API rate-limits aggressively, so requests
+//! retry on HTTP 429 with a linear backoff.
+
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -11,40 +17,34 @@ const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(10);
 const MAX_RETRIES: u32 = 5;
 const ROW_LIMIT: u64 = 10_000;
 
-/// One row of Allium's `aggregator_trades` table — our ground truth for a
-/// single settled swap leg. Extra columns in the response are ignored.
+/// One row of Allium's `aggregator_trades` table — the ground truth for a single settled swap leg.
 ///
-/// Every field is optional: Allium rows can carry nulls (e.g. an unresolved
-/// token address), and one patchy row must not abort a whole verify run.
+/// Every field is optional: Allium rows can carry nulls (e.g. an unresolved token address), and
+/// one patchy row must not abort a whole verify run.
 #[derive(serde::Deserialize, Debug, Clone)]
-pub struct AlliumRow {
-    pub project: Option<String>,
-    pub token_sold_address: Option<String>,
-    pub token_sold_amount: Option<f64>,
-    pub token_bought_address: Option<String>,
-    pub token_bought_amount: Option<f64>,
-    pub transaction_hash: Option<String>,
+pub(crate) struct AlliumRow {
+    pub(crate) project: Option<String>,
+    pub(crate) token_sold_address: Option<String>,
+    pub(crate) token_sold_amount: Option<f64>,
+    pub(crate) token_bought_address: Option<String>,
+    pub(crate) token_bought_amount: Option<f64>,
+    pub(crate) transaction_hash: Option<String>,
 }
 
 /// Client for Allium's async Explorer API.
-///
-/// A saved query (`query_id`) parameterized by `block_number` is run per
-/// block: kick off an async run, poll until it succeeds, then fetch results.
-/// The API rate-limits aggressively, so requests retry on HTTP 429 with a
-/// linear backoff.
-pub struct AlliumClient {
+pub(crate) struct AlliumClient {
     http: reqwest::Client,
     api_key: String,
     query_id: String,
 }
 
 impl AlliumClient {
-    pub fn new(api_key: String, query_id: String) -> Self {
+    pub(crate) fn new(api_key: String, query_id: String) -> Self {
         Self { http: reqwest::Client::new(), api_key, query_id }
     }
 
     /// Fetch every `aggregator_trades` row for a block.
-    pub async fn fetch_block(&self, block_number: u64) -> anyhow::Result<Vec<AlliumRow>> {
+    pub(crate) async fn fetch_block(&self, block_number: u64) -> anyhow::Result<Vec<AlliumRow>> {
         let run_id = self.start_run(block_number).await?;
         self.await_success(&run_id).await?;
         self.results(&run_id).await
@@ -79,14 +79,7 @@ impl AlliumClient {
 
     async fn status(&self, url: &str) -> anyhow::Result<String> {
         let value = self.get(url).await?;
-        value
-            .as_str()
-            .or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string)
+        parse_status_value(&value)
             .with_context(|| format!("unexpected Allium status response: {value}"))
     }
 
@@ -138,5 +131,43 @@ impl AlliumClient {
                 .context("failed to decode Allium response");
         }
         bail!("Allium rate limit: exhausted {MAX_RETRIES} retries")
+    }
+}
+
+/// Parse a status value from the Allium API, which returns either a bare JSON string
+/// (`"success"`) or an object (`{"status": "running"}`).
+fn parse_status_value(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .or_else(|| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_parses_bare_string() {
+        // The API sometimes returns a bare JSON string "success" instead of {"status": "success"}.
+        let value: Value = serde_json::from_str("\"success\"").unwrap();
+        assert_eq!(parse_status_value(&value), Some("success".to_string()));
+    }
+
+    #[test]
+    fn status_parses_object_form() {
+        // The API can also return {"status": "running"}.
+        let value: Value = serde_json::from_str(r#"{"status": "running"}"#).unwrap();
+        assert_eq!(parse_status_value(&value), Some("running".to_string()));
+    }
+
+    #[test]
+    fn status_returns_none_for_unexpected_shape() {
+        let value: Value = serde_json::from_str(r#"{"other_key": "val"}"#).unwrap();
+        assert_eq!(parse_status_value(&value), None);
     }
 }

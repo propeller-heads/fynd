@@ -1,3 +1,25 @@
+## [0.90.0](https://github.com/propeller-heads/fynd/compare/0.89.2...0.90.0) (2026-07-14)
+
+
+### Features
+
+* **hindsight:** detect sandwich attacks around decoded trades ([b8d4974](https://github.com/propeller-heads/fynd/commit/b8d4974e8e1a9353e26d5a008106b5c220978032))
+* **hindsight:** require sandwich direction in the attacker's token flow ([0de2065](https://github.com/propeller-heads/fynd/commit/0de20651fa212fa52163fa5a2522e9801c695554))
+
+
+### Bug Fixes
+
+* **hindsight:** drop token and plumbing logs from sandwich pool overlap ([0faa6f8](https://github.com/propeller-heads/fynd/commit/0faa6f8d01731daaba79b7af04154ee083919a6c))
+* **hindsight:** keep coverage verdicts on sandwiched unsolved states ([3eb36e2](https://github.com/propeller-heads/fynd/commit/3eb36e2700927cf34f3a7e7554ddf29b4ce7f938))
+
+## [0.89.2](https://github.com/propeller-heads/fynd/compare/0.89.1...0.89.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **hindsight:** add outcome label to savings_bps histogram ([e8b149f](https://github.com/propeller-heads/fynd/commit/e8b149f3d3d4af57ef9eb9ed3940aece9be9e8ef))
+* **hindsight:** replace U256→f64 string round-trips with u256_to_f64 ([d27de8c](https://github.com/propeller-heads/fynd/commit/d27de8c7498e118877215f4f37249b6434954889))
+
 ## [0.89.1](https://github.com/propeller-heads/fynd/compare/0.89.0...0.89.1) (2026-07-12)
 
 
