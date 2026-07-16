@@ -41,7 +41,7 @@ use tracing::{debug, warn};
 
 use crate::decoder::{
     matching::MatchedSolverTrade,
-    strategies::{default_strategies, DecodeContext, DecodeStrategy, GasScope},
+    strategies::{default_strategies, recover_flow, DecodeContext, DecodeStrategy, GasScope},
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
 };
@@ -234,15 +234,7 @@ impl<P: Provider> Decoder<P> {
             transfer_ledger: &transfer_ledger,
             input: &root.input,
         };
-        let mut flow = None;
-        for decode_strategy in strategies.iter() {
-            if let Some(decoded) = decode_strategy.decode(&mut ctx).await {
-                flow = Some((decode_strategy.name(), decoded));
-                break;
-            }
-        }
-
-        let Some((decode_strategy, mut flow)) = flow else {
+        let Some((decode_strategy, mut flow)) = recover_flow(strategies, &mut ctx).await else {
             warn!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),

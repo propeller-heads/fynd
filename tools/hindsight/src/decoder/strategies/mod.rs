@@ -56,6 +56,22 @@ pub(crate) fn default_strategies<P: Provider>() -> Vec<Box<dyn DecodeStrategy<P>
     vec![Box::new(netting::TransferNetting)]
 }
 
+/// Ask each strategy in precedence order for the trader's flow. The first that answers wins
+/// and later strategies are not consulted; a strategy later in the list therefore only ever
+/// sees transactions the earlier ones declined. Returns the winning strategy's name with the
+/// flow.
+pub(crate) async fn recover_flow<P: Provider>(
+    strategies: &[Box<dyn DecodeStrategy<P>>],
+    ctx: &mut DecodeContext<'_, P>,
+) -> Option<(&'static str, TraderFlow)> {
+    for strategy in strategies {
+        if let Some(flow) = strategy.decode(ctx).await {
+            return Some((strategy.name(), flow));
+        }
+    }
+    None
+}
+
 /// Everything a decode strategy may read from one matched transaction.
 ///
 /// The decoder gathers every kind of evidence up front, for every matched transaction,
@@ -120,5 +136,108 @@ impl TraderFlow {
             solver_override: None,
             gas_scope: GasScope::NotCharged,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use alloy::{providers::RootProvider, rpc::client::RpcClient, transports::mock::Asserter};
+
+    use super::*;
+    use crate::decoder::test_utils::{addr, receipt, swap, tx_hash};
+
+    /// Always declines.
+    struct Declines;
+
+    #[async_trait]
+    impl<P: Provider> DecodeStrategy<P> for Declines {
+        fn name(&self) -> &'static str {
+            "declines"
+        }
+
+        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+            None
+        }
+    }
+
+    /// Always decodes a fixed flow.
+    struct Wins;
+
+    #[async_trait]
+    impl<P: Provider> DecodeStrategy<P> for Wins {
+        fn name(&self) -> &'static str {
+            "wins"
+        }
+
+        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+            Some(TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2)))
+        }
+    }
+
+    /// Declines, counting how often it was consulted.
+    struct CountsCalls(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl<P: Provider> DecodeStrategy<P> for CountsCalls {
+        fn name(&self) -> &'static str {
+            "counts"
+        }
+
+        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            None
+        }
+    }
+
+    async fn recover_with(
+        strategies: Vec<Box<dyn DecodeStrategy<RootProvider>>>,
+    ) -> Option<(&'static str, TraderFlow)> {
+        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
+        let registry = Registry::ethereum();
+        let mut code_cache = HashMap::new();
+        let receipt = receipt(tx_hash(1), addr(1), Some(addr(2)), vec![]);
+        let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
+        let mut ctx = DecodeContext {
+            provider: &provider,
+            registry: &registry,
+            code_cache: &mut code_cache,
+            receipt: &receipt,
+            entry_point: addr(2),
+            transfer_ledger: &transfer_ledger,
+            input: &[],
+        };
+        recover_flow(&strategies, &mut ctx).await
+    }
+
+    #[tokio::test]
+    async fn later_strategy_is_the_fallback() {
+        let (name, flow) = recover_with(vec![Box::new(Declines), Box::new(Wins)])
+            .await
+            .unwrap();
+        assert_eq!(name, "wins");
+        assert_eq!(flow.tracked, addr(1));
+    }
+
+    #[tokio::test]
+    async fn first_success_stops_the_scan() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (name, _) =
+            recover_with(vec![Box::new(Wins), Box::new(CountsCalls(Arc::clone(&calls)))])
+                .await
+                .unwrap();
+        assert_eq!(name, "wins");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn no_strategy_answers() {
+        assert!(recover_with(vec![Box::new(Declines)])
+            .await
+            .is_none());
     }
 }
