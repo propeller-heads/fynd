@@ -29,7 +29,8 @@ use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
     resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
-    telemetry, usd,
+    telemetry,
+    usd::Prices,
 };
 
 /// How often to warn while the solver has not applied the next block.
@@ -512,11 +513,11 @@ async fn run_session<P: Provider>(
     }
 }
 
-/// Snapshot the solver's current token prices as [`usd::Prices`] (token native-units per wei of
+/// Snapshot the solver's current token prices as [`Prices`] (token native-units per wei of
 /// the gas token), anchored by `registry`'s USD anchor tokens. Empty until the first
 /// derived-data computation completes; tokens with an unconvertible price are skipped.
-async fn snapshot_prices(solver: &Solver, registry: &Registry) -> usd::Prices {
-    let mut prices = usd::Prices::new(registry);
+async fn snapshot_prices(solver: &Solver, registry: &Registry) -> Prices {
+    let mut prices = Prices::new(registry);
     let derived = solver.derived_data();
     let guard = derived.read().await;
     let Some(token_prices) = guard.token_prices() else {

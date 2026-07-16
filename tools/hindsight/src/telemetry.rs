@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::{
     decoder::Registry,
     resolve::{Outcome, RangeComparison, StateResult, Verdict},
-    usd,
+    usd::Prices,
 };
 
 const TRADES_TOTAL: &str = "hindsight_trades_total";
@@ -125,8 +125,8 @@ pub(crate) fn describe() {
 pub(crate) fn record_range(
     range: &RangeComparison,
     chain: &str,
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
     registry: &Registry,
 ) {
     let labels = MetricLabels {
@@ -203,7 +203,7 @@ fn record_state(
     state: &StateResult,
     state_label: &'static str,
     labels: &MetricLabels<'_>,
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
@@ -371,8 +371,8 @@ mod tests {
         resolve::{build_range, SolvedAmount},
     };
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     fn trade(token_out: Address, settled: u64) -> DecodedTrade {

@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::{
     decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
-    usd,
+    usd::Prices,
 };
 
 /// A Fynd quote for the re-solved order.
@@ -125,7 +125,7 @@ pub(crate) trait SteppingSolver {
 /// stays studyable offline.
 pub(crate) fn build_range(
     trade: &DecodedTrade,
-    prices: &usd::Prices,
+    prices: &Prices,
     top: Outcome,
     back: Outcome,
 ) -> RangeComparison {
@@ -171,7 +171,7 @@ pub(crate) fn build_range(
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> anyhow::Result<Vec<RangeComparison>> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
@@ -201,8 +201,8 @@ mod tests {
     use super::*;
     use crate::decoder::Registry;
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     fn trade(settled: u64) -> DecodedTrade {

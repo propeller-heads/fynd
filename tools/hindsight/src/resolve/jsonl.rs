@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::{
     resolve::{Outcome, RangeComparison, StateResult},
-    usd,
+    usd::Prices,
 };
 
 /// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
@@ -121,8 +121,8 @@ fn date_from_unix(secs: u64) -> String {
 pub(super) fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
 ) {
     for range in ranges {
         let Ok(line) = serde_json::to_string(&comparison_record(range, prices_top, prices_back))
@@ -144,8 +144,8 @@ pub(super) fn write_comparisons<W: std::io::Write>(
 /// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
 fn comparison_record(
     range: &RangeComparison,
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
 ) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
@@ -177,7 +177,7 @@ fn comparison_record(
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> serde_json::Value {
     let token_out = range.token_out;
     let solved = match &state.outcome {
@@ -267,8 +267,8 @@ mod tests {
         resolve::{build_range, SolvedAmount},
     };
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     #[test]
