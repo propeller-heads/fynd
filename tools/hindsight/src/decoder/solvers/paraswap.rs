@@ -1,11 +1,12 @@
 //! ParaSwap-specific calldata extraction.
 //!
-//! Augustus v6 swap methods carry the trade parameters as consecutive 32-byte words —
-//! `…, fromAmount, toAmount, quotedAmount, …` — where `toAmount` is the slippage floor and
+//! Augustus v6 swap methods carry the trade parameters as consecutive 32-byte words:
+//! `…, fromAmount, toAmount, quotedAmount, …`. `toAmount` is the slippage floor and
 //! `quotedAmount` the off-chain quoted output, kept on-chain for `ParaSwap`'s surplus accounting
-//! (the user is capped at the quote, so settled often equals it exactly). The triple's offset
-//! differs per method selector, so it is located by value rather than per-selector ABI: the word
-//! equal to the trade's decoded input amount, followed by a floor-and-quote pair.
+//! (the user is capped at the quote, so settled often equals it exactly). The triple sits at a
+//! different offset per method selector, so instead of per-selector ABI decoding it is located
+//! by value: find the word equal to the trade's decoded input amount, then read the
+//! floor-and-quote pair that follows it.
 
 use alloy::primitives::U256;
 

@@ -9,11 +9,11 @@ pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
 
-use alloy::primitives::U256;
+use alloy::{primitives::U256, rpc::types::Log};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
-/// This is the number the client compared against at decision time — what the solver's API
+/// This is the number the venue compared against at decision time — what the solver's API
 /// promised — as opposed to the settled amount, which is what execution delivered. The fields
 /// carry no solver name (the record's `solver` column already says who); see
 /// [`embedded_quote`] for which solvers declare one and how.
@@ -28,6 +28,19 @@ pub(crate) struct SolverQuote {
     /// Unix timestamp of the quote, when present. Joined against block time downstream to
     /// separate stale-quote slippage from routing quality.
     pub timestamp: Option<u64>,
+}
+
+/// The reason a matched transaction must be skipped instead of decoded, if any.
+///
+/// Some solver routers also settle orders that are not same-chain swaps; decoding those would
+/// fabricate phantom trades, so they are vetoed from their logs before the transaction costs a
+/// trace. Each solver contributes one check here, keeping the matching in `strategy`
+/// solver-agnostic.
+pub(crate) fn match_veto(logs: &[Log]) -> Option<&'static str> {
+    if lifi::started_bridge_order(logs) {
+        return Some("cross-chain bridge order");
+    }
+    None
 }
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
@@ -56,7 +69,27 @@ pub(crate) fn plausible_quote(quote: &SolverQuote, settled_amount_out: U256) -> 
 
 #[cfg(test)]
 mod tests {
+    use alloy::{
+        primitives::{Bytes, Log as PrimitiveLog},
+        sol_types::SolEvent,
+    };
+
     use super::*;
+    use crate::decoder::test_utils::{addr, make_transfer_log};
+
+    #[test]
+    fn match_veto_flags_bridge_orders_only() {
+        let primitive = PrimitiveLog::new_unchecked(
+            addr(70),
+            vec![lifi::LiFiTransferStarted::SIGNATURE_HASH],
+            Bytes::default(),
+        );
+        let bridge_logs = vec![Log { inner: primitive, ..Default::default() }];
+        assert_eq!(match_veto(&bridge_logs), Some("cross-chain bridge order"));
+
+        let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
+        assert_eq!(match_veto(&swap_logs), None);
+    }
 
     #[test]
     fn plausible_quote_accepts_slippage_and_rejects_unit_mismatch() {
