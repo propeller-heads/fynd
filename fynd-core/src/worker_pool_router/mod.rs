@@ -688,7 +688,7 @@ fn combine_with_surplus(
                 .map(|max| q.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|(_, q)| has_valid_exclusive_layout(q, policy))
+        .filter(|(_, q)| has_valid_exclusive_route(q, policy))
         .max_by(|(_, a), (_, b)| {
             a.amount_out_net_gas()
                 .cmp(b.amount_out_net_gas())
@@ -766,7 +766,7 @@ fn combine_with_surplus(
 /// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
 /// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
 /// representation but would need revisiting if routes gain explicit path-boundary markers.
-fn has_valid_exclusive_layout(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
+fn has_valid_exclusive_route(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
@@ -1630,5 +1630,90 @@ mod tests {
 
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].surplus_amount(), None);
+    }
+
+    /// Builds a Success quote whose route has one swap per `(protocol_system, token_in, token_out)`
+    /// leg, for exercising `has_valid_exclusive_route` on multi-leg and multi-path route shapes.
+    fn make_route_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
+        let make_token = |addr: &Address| Token {
+            address: addr.clone(),
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let mut tokens = HashMap::new();
+        let mut swaps = Vec::new();
+        for (protocol_system, tin_byte, tout_byte) in legs {
+            let tin = make_address(*tin_byte);
+            let tout = make_address(*tout_byte);
+            let tin_token = make_token(&tin);
+            let tout_token = make_token(&tout);
+            let mut comp = component(
+                "0x0000000000000000000000000000000000000002",
+                &[tin_token.clone(), tout_token.clone()],
+            );
+            comp.protocol_system = protocol_system.to_string();
+            swaps.push(Swap::new(
+                format!("pool-{tin_byte}-{tout_byte}"),
+                protocol_system.to_string(),
+                tin.clone(),
+                tout.clone(),
+                BigUint::from(1000u64),
+                BigUint::from(1000u64),
+                BigUint::from(50_000u64),
+                comp,
+                Box::new(MockProtocolSim::default()),
+            ));
+            tokens.insert(tin, tin_token);
+            tokens.insert(tout, tout_token);
+        }
+        OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(1000u64),
+            BigUint::from(100_000u64),
+            BigUint::from(1000u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(Route::new(swaps, tokens).expect("non-empty route"))
+    }
+
+    #[test]
+    fn exclusive_route_accepts_terminal_exclusive_leg() {
+        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)]);
+        assert!(has_valid_exclusive_route(&quote, &exclusive_policy()));
+    }
+
+    #[test]
+    fn exclusive_route_rejects_mid_route_exclusive_leg() {
+        let quote = make_route_quote(&[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]);
+        assert!(!has_valid_exclusive_route(&quote, &exclusive_policy()));
+    }
+
+    #[test]
+    fn exclusive_route_accepts_exclusive_leg_ending_its_path() {
+        // Split route in sequential representation: path 1 is a single exclusive hop 0x01→0x02;
+        // path 2 is 0x01→0x03→0x02. The exclusive leg is terminal for its path because the next
+        // swap starts over from 0x01.
+        let quote = make_route_quote(&[
+            ("vm:exclusive", 0x01, 0x02),
+            ("uniswap_v2", 0x01, 0x03),
+            ("uniswap_v2", 0x03, 0x02),
+        ]);
+        assert!(has_valid_exclusive_route(&quote, &exclusive_policy()));
+    }
+
+    #[test]
+    fn exclusive_route_rejects_route_without_exclusive_leg() {
+        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]);
+        assert!(!has_valid_exclusive_route(&quote, &exclusive_policy()));
     }
 }
