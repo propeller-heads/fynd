@@ -72,8 +72,8 @@ where
     /// Permission scoping for this worker's local graph.
     ///
     /// `IncludeAll` (the default) preserves the original non-filtered behaviour. A public worker
-    /// A public worker is configured with `PublicOnly(policy)` so exclusive components never enter
-    /// its graph; a surplus worker uses `IncludeAll`.
+    /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; a
+    /// surplus worker uses `IncludeAll`.
     permission: PermissionContext,
 }
 

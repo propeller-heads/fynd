@@ -150,8 +150,8 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
-    /// Predicate identifying exclusive components, used by `combine_with_surplus` to locate the
-    /// exclusive leg(s) in a surplus route. `None` when no exclusive pools are configured.
+    /// Predicate identifying the exclusive pools in a route. `None` when no exclusive
+    /// pools are configured.
     permission_policy: Option<PermissionPolicy>,
 }
 
@@ -637,13 +637,21 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
     }
 }
 
-/// Overlays the surplus winner onto the ranked public fallback list for one order.
+/// Builds the final ranked quote list for one order by deciding whether the surplus route should
+/// execute instead of the best public route.
 ///
-/// `public_ranked` is the public-only ranking from `rank_quotes` — both the committed reference and
-/// the price-guard fallback chain. If the best surplus candidate beats the committed reference
-/// net-of-gas, the executed surplus quote is returned at the head of the list (its `amount_out`
-/// pinned to the committed reference, an order-level `SurplusInfo` attached, and each exclusive
-/// leg's `Swap::committed_amount_out` set), preserving the public candidates as fallbacks.
+/// Inputs: `public_ranked` is the ranking of public-pool quotes from `rank_quotes`; its head is
+/// the committed reference — the output the user is quoted no matter which route executes.
+/// `responses` additionally holds the candidates from `All`-role pools (routes that may use
+/// exclusive components).
+///
+/// If the best surplus candidate beats the committed reference net-of-gas, this returns a new
+/// list whose head is the executed surplus quote, followed by every public candidate as
+/// price-guard fallbacks. The executed quote is the surplus candidate with:
+/// - `amount_out` pinned to the committed reference (the user is quoted the public output),
+/// - `Swap::committed_amount_out` set on each exclusive leg (consumed by the encoder), and
+/// - an order-level [`SurplusInfo`] attached (observability).
+///
 /// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
 /// public market.
 ///
@@ -667,7 +675,8 @@ fn combine_with_surplus(
         _ => return public_ranked,
     };
 
-    // Find best surplus candidate from All-role pools, respecting max_gas and layout constraints.
+    // Find best surplus candidate from All-role pools, respecting max_gas and route shape
+    // constraints.
     let best_surplus = responses
         .quotes
         .iter()
