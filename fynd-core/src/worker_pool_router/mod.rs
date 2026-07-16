@@ -236,7 +236,7 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| (p.name().to_string(), p.role()))
             .collect();
-        let has_all_pool = pool_roles
+        let has_surplus_pool = pool_roles
             .values()
             .any(|r| *r == PoolRole::All);
 
@@ -248,7 +248,7 @@ impl WorkerPoolRouter {
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
-                if has_all_pool {
+                if has_surplus_pool {
                     let public_ranked =
                         self.rank_quotes(&responses.public_only(&pool_roles), request.options());
                     combine_with_surplus(
