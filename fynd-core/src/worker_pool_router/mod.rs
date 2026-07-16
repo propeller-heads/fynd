@@ -127,13 +127,7 @@ impl OrderResponses {
         let quotes = self
             .quotes
             .iter()
-            .filter(|(pool, _)| {
-                pool_roles
-                    .get(pool)
-                    .copied()
-                    .unwrap_or(PoolRole::Public) ==
-                    PoolRole::Public
-            })
+            .filter(|(pool, _)| pool_roles.get(pool) != Some(&PoolRole::All))
             .cloned()
             .collect();
         OrderResponses {
@@ -676,13 +670,7 @@ fn combine_with_surplus(
     let best_surplus = responses
         .quotes
         .iter()
-        .filter(|(pool, _)| {
-            pool_roles
-                .get(pool)
-                .copied()
-                .unwrap_or(PoolRole::Public) ==
-                PoolRole::All
-        })
+        .filter(|(pool, _)| pool_roles.get(pool) == Some(&PoolRole::All))
         .filter(|(_, q)| q.status() == QuoteStatus::Success)
         .filter(|(_, q)| {
             options
