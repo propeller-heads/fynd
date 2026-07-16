@@ -6,7 +6,6 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
-            curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
@@ -93,7 +92,15 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
             }
             "vm:curve" => {
-                builder = builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), None);
+                // Deliberately the VM adapter, not the native CurveState: the hybrid CurveState
+                // (tycho-simulation 0.324.0) produces wrong quotes on live state — hindsight's
+                // top/back comparisons show thousands-of-bps artifacts on curve-routed solutions
+                // since the switch (fba3c223). Full-EVM simulation until that is fixed upstream.
+                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:curve",
+                    tvl_filter.clone(),
+                    None,
+                );
             }
             "uniswap_v4_hooks" => {
                 builder = builder.exchange::<UniswapV4State>(
