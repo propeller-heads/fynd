@@ -82,7 +82,8 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, role: PoolRole::Public }
     }
 
-    /// Sets the pool's role (e.g. [`PoolRole::All`] for the pool that includes exclusive liquidity).
+    /// Sets the pool's role (e.g. [`PoolRole::All`] for the pool that includes exclusive
+    /// liquidity).
     pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self

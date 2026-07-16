@@ -7,10 +7,7 @@
 //! filtering each worker's local graph topology/events through its `PermissionContext` — the
 //! shared `MarketState` is never duplicated.
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
