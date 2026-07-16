@@ -749,8 +749,9 @@ fn combine_with_surplus(
     result
 }
 
-/// Returns `true` if the quote has a valid exclusive layout for v1: at least one exclusive
-/// leg, all positioned as terminal legs of their respective paths (no mid-route exclusive legs).
+/// v1 constraint: rejects surplus routes unless every exclusive leg is the terminal leg of its
+/// path. This keeps per-leg surplus attribution exact (no inverse simulation needed). Mid-route
+/// exclusive legs and multiple exclusive legs per path are deferred to a future version.
 ///
 /// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
 /// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
