@@ -1,13 +1,14 @@
 //! Bracket-pair sandwich detection.
 //!
-//! For a victim trade, scans the receipts immediately around it — already fetched by
-//! [`super::Decoder::decode_block`] in one `eth_getBlockReceipts` call, so detection makes no
-//! extra RPC calls — for a front-run/back-run pair that links to one attacker, touches a pool
-//! the victim's swap touched, and moves the victim's output token in sandwich direction
-//! (accumulate before the victim, dispose after). See
-//! `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the heuristic
-//! and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool overlap to
-//! per-protocol).
+//! For each victim trade, scan the transactions immediately around it in the block for a
+//! front-run/back-run pair that satisfies three conditions: both legs link to one attacker,
+//! both touch a pool the victim's swap touched, and the attacker accumulates the victim's
+//! output token before the victim trades and disposes of it after. The block's receipts were
+//! already fetched for decoding, so detection costs no extra RPC calls.
+//!
+//! See `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the
+//! heuristic and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool
+//! overlap to per-protocol).
 
 use std::collections::HashSet;
 
@@ -21,7 +22,6 @@ use alloy::{
 use crate::decoder::{
     ledger::{to_primitive_log, Transfer},
     registry::Registry,
-    trace::PERMIT2,
     DecodedTrade,
 };
 
@@ -94,11 +94,12 @@ pub(crate) fn detect(
 }
 
 /// Whether `front` and `back` share a link that plausibly identifies one attacker running both
-/// legs: the same sender, or the same target contract that is not a registry-known venue or
-/// solver. The registry exclusion keeps two unrelated users entering the same popular router
-/// (Universal Router, 1inch) from tripping the same-`to` check — real sandwich bots settle
-/// through private contracts. A link matching the victim's own sender is excluded: a trader on
-/// both sides of their own trade is not a sandwich.
+/// legs: the same sender, or the same target contract.
+///
+/// A shared target only counts when it is not a known venue or solver — otherwise two unrelated
+/// users entering the same popular router (Universal Router, 1inch) would look linked, while
+/// real sandwich bots settle through private contracts. A link matching the victim's own sender
+/// is also excluded: a trader on both sides of their own trade is not a sandwich.
 fn shared_attacker(
     front: &TransactionReceipt,
     back: &TransactionReceipt,
@@ -148,10 +149,10 @@ fn overlapping_pools(
 /// The addresses that emitted a log in a transaction, minus everything known not to be a pool —
 /// candidate pool contracts.
 ///
-/// `Transfer` and `Approval` emitters are token contracts, and the wrapped-native token
-/// (`Deposit`/`Withdrawal`) and Permit2 (its own permit events) log on most swaps without being
-/// pools: counting any of them would give two transactions that merely share a token or its
-/// plumbing a trivial "pool" overlap.
+/// `Transfer` and `Approval` emitters are token contracts, and the registry's infrastructure
+/// addresses (the wrapped-native token's `Deposit`/`Withdrawal`, Permit2's permit events) log on
+/// most swaps without being pools: counting any of them would give two transactions that merely
+/// share a token or its plumbing a trivial "pool" overlap.
 fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {
@@ -161,7 +162,7 @@ fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<
             .is_some_and(|topic| {
                 *topic == Transfer::SIGNATURE_HASH || *topic == Approval::SIGNATURE_HASH
             });
-        if token_event || log.address() == registry.wrapped_native() || log.address() == PERMIT2 {
+        if token_event || registry.is_infrastructure(log.address()) {
             continue;
         }
         pools.insert(log.address());

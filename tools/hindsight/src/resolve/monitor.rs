@@ -63,15 +63,11 @@ const MAX_LAG_BLOCKS: u64 = 100;
 #[derive(clap::Args)]
 pub(crate) struct MonitorArgs {
     #[command(flatten)]
-    pub rpc: crate::RpcArgs,
+    pub chain: crate::ChainArgs,
 
     /// Tycho WebSocket URL feeding the in-process solver
     #[arg(long, env = "TYCHO_URL")]
     pub tycho_url: String,
-
-    /// Chain to monitor (the decoder is Ethereum-only for now)
-    #[arg(long, default_value = "ethereum")]
-    pub chain: String,
 
     /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
     /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
@@ -291,12 +287,17 @@ async fn build_solver(
     pools_config: &fynd_rpc::config::WorkerPoolsConfig,
 ) -> anyhow::Result<(Solver, BlockStepController)> {
     info!(
-        chain = cfg.chain,
+        chain = cfg.chain.name,
         protocols = protocols.len(),
         "building in-process solver (loading tokens may take minutes)…"
     );
-    let mut builder =
-        FyndBuilder::new(chain, &cfg.tycho_url, &cfg.rpc.rpc_url, protocols.to_vec(), cfg.min_tvl);
+    let mut builder = FyndBuilder::new(
+        chain,
+        &cfg.tycho_url,
+        &cfg.chain.rpc_url,
+        protocols.to_vec(),
+        cfg.min_tvl,
+    );
     if let Some(key) = cfg.tycho_api_key.as_deref() {
         builder = builder.tycho_api_key(key);
     }
@@ -316,8 +317,8 @@ async fn build_solver(
 /// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = parse_chain(&cfg.chain)
-        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain))?;
+    let chain = parse_chain(&cfg.chain.name)
+        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain.name))?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
@@ -349,8 +350,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         };
 
     let mut decoder = Decoder::new(
-        provider_from(&cfg.rpc.rpc_url)?,
-        Registry::load(&cfg.chain, cfg.rpc.registry.as_deref())?,
+        provider_from(&cfg.chain.rpc_url)?,
+        Registry::load(&cfg.chain.name, cfg.chain.registry.as_deref())?,
     );
 
     if let Some(port) = cfg.metrics_port {
@@ -462,14 +463,14 @@ async fn run_session<P: Provider>(
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
-        let prices_top = snapshot_prices(adapter.solver).await;
+        let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
         let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
             Ok(ranges) => ranges,
             Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
-        let prices_back = snapshot_prices(adapter.solver).await;
+        let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
         // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
@@ -485,7 +486,7 @@ async fn run_session<P: Provider>(
         for range in &ranges {
             telemetry::record_range(
                 range,
-                &cfg.chain,
+                &cfg.chain.name,
                 &prices_top,
                 &prices_back,
                 decoder.registry(),
@@ -510,16 +511,16 @@ async fn run_session<P: Provider>(
     }
 }
 
-/// Snapshot the solver's current token prices as a [`usd::PriceMap`] (token native-units per
-/// ETH-wei). Empty until the first derived-data computation completes; tokens with an
-/// unconvertible price are skipped.
-async fn snapshot_prices(solver: &Solver) -> usd::PriceMap {
+/// Snapshot the solver's current token prices as [`usd::Prices`] (token native-units per wei of
+/// the gas token), anchored by `registry`'s USD anchor tokens. Empty until the first
+/// derived-data computation completes; tokens with an unconvertible price are skipped.
+async fn snapshot_prices(solver: &Solver, registry: &Registry) -> usd::Prices {
+    let mut prices = usd::Prices::new(registry);
     let derived = solver.derived_data();
     let guard = derived.read().await;
     let Some(token_prices) = guard.token_prices() else {
-        return usd::PriceMap::new();
+        return prices;
     };
-    let mut prices = usd::PriceMap::with_capacity(token_prices.len());
     for (token, price) in token_prices {
         let (Ok(numerator), Ok(denominator)) = (
             price
@@ -565,9 +566,8 @@ mod tests {
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
-            rpc: crate::RpcArgs { rpc_url, registry: None },
+            chain: crate::ChainArgs { name: "ethereum".to_string(), rpc_url, registry: None },
             tycho_url,
-            chain: "ethereum".to_string(),
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
             min_tvl: 10_000.0,
