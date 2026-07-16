@@ -11,18 +11,18 @@
 //!
 //! The pipeline is match → trace → decode → guard → record: `matching` filters a block down to
 //! solver trades, `strategies` recovers each trade's swap (trying decode methods in precedence
-//! order), `ledger` answers all value-flow questions, `guards` vetoes shapes that are not
+//! order), `transfer_ledger` answers all value-flow questions, `guards` vetoes shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
 mod guards;
 mod intent;
-mod ledger;
 mod matching;
 mod registry;
 mod sandwich;
 mod solvers;
 mod strategies;
 mod trace;
+mod transfer_ledger;
 pub(crate) mod venues;
 
 #[cfg(test)]
@@ -40,10 +40,10 @@ use futures::stream::{StreamExt, TryStreamExt};
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    ledger::TransferLedger,
     matching::MatchedSolverTrade,
     strategies::{default_strategies, DecodeContext, DecodeStrategy, GasScope},
     trace::{collect_native_transfers, fetch_trace, route_gas},
+    transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
     registry::Registry,
@@ -73,8 +73,8 @@ pub(crate) struct DecodedTrade {
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
-    /// Input amount that actually entered the swap — a venue fee skimmed from the input (see
-    /// `venue_fee`) is already subtracted, so a re-solve compares like-for-like.
+    /// Input amount that actually entered the swap — a venue fee taken from the input (see
+    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
     /// Gross swap output — a venue fee skimmed from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
@@ -83,8 +83,8 @@ pub(crate) struct DecodedTrade {
     /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee: Option<U256>,
-    /// Venue fee skimmed from the output token after swapping, in `token_out` units. `None` when
+    pub venue_fee_in: Option<U256>,
+    /// Venue fee taken from the output token after swapping, in `token_out` units. `None` when
     /// no known fee collector took a cut. Recorded for transparency; it is already added back into
     /// `amount_out`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,7 +207,7 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the ledger, try the decode
+    /// Decode one matched transaction from its trace: build the transfer ledger, try the decode
     /// strategies in order, guard the result, attribute the solver, and account gas and quote.
     async fn decode_transaction(
         &mut self,
@@ -223,7 +223,7 @@ impl<P: Provider> Decoder<P> {
 
         let mut native = Vec::new();
         collect_native_transfers(root, &mut native);
-        let ledger = TransferLedger::from_transaction(logs, &native);
+        let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
         let mut ctx = DecodeContext {
             provider,
@@ -231,7 +231,7 @@ impl<P: Provider> Decoder<P> {
             code_cache,
             receipt,
             entry_point,
-            ledger: &ledger,
+            transfer_ledger: &transfer_ledger,
             input: &root.input,
         };
         let mut flow = None;
@@ -297,7 +297,7 @@ impl<P: Provider> Decoder<P> {
             token_out: flow.swap.token_out,
             amount_in: flow.swap.amount_in,
             amount_out: flow.swap.amount_out,
-            venue_fee: flow.venue_fee,
+            venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
             quote,

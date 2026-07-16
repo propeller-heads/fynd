@@ -23,10 +23,10 @@
 //!   emitted a log inside them, and those decode via maker-finding, which excludes the sender — so
 //!   most of the venue's trades are missed or declined. They surface as coverage gaps in `verify`,
 //!   not as wrong records.
-//! - **Venue registered but a fee collector is missing (or a quirk is unmodeled)**: trades decode,
-//!   but wrongly. The fee skim is not backed out, so the recovered amounts include the venue's fee
-//!   — and every comparison then credits Fynd with money better routing cannot recover, inflating
-//!   wins on exactly the trades the venue cares about.
+//! - **Venue registered but a fee collector is missing (or some behavior of the venue is not
+//!   modeled)**: trades decode, but wrongly. The fee is not backed out, so the recovered amounts
+//!   include the venue's fee — and every comparison then credits Fynd with money better routing
+//!   cannot recover, inflating wins on exactly the trades the venue cares about.
 //!
 //! The second failure mode is why fee collectors are verified against on-chain samples (see the
 //! address book's comments) before a venue is added.
@@ -39,9 +39,9 @@ use std::collections::HashSet;
 use alloy::primitives::Address;
 
 use crate::decoder::{
-    ledger::{NetSwap, TransferLedger},
     registry::Registry,
     strategies::{netting::sender_flow, Flow, GasScope},
+    transfer_ledger::{NetSwap, TransferLedger},
 };
 
 /// A venue platform with a decode module in this directory.
@@ -55,7 +55,7 @@ pub(crate) enum Venue {
 /// another input extends this struct instead of every venue's signature.
 pub(crate) struct VenueContext<'a> {
     /// The transaction's flattened value movements.
-    pub ledger: &'a TransferLedger,
+    pub transfer_ledger: &'a TransferLedger,
     pub sender: Address,
     pub entry_point: Address,
     /// Root calldata of the transaction (venue declarations, e.g. `MetaMask`'s `aggregatorId`).
@@ -97,19 +97,19 @@ impl Venue {
 /// transaction is a treasury operation — the collector's receipts are its own output, not a
 /// fee, and backing them "out" would add the output to itself and double it.
 pub(crate) fn venue_fee_flow(
-    ledger: &TransferLedger,
+    transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
 ) -> Option<Flow> {
-    let mut flow = sender_flow(ledger, sender, entry_point)?;
+    let mut flow = sender_flow(transfer_ledger, sender, entry_point)?;
     if flow.gas_scope == GasScope::Receipt {
         flow.gas_scope = GasScope::SolverFrame;
     }
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
-    Some(back_out_venue_fees(flow, ledger, fee_collectors))
+    Some(back_out_venue_fees(flow, transfer_ledger, fee_collectors))
 }
 
 /// Back a venue-fee skim out of a decoded user flow.
@@ -121,16 +121,16 @@ pub(crate) fn venue_fee_flow(
 /// actually swapped — the like-for-like basis vs Fynd.
 fn back_out_venue_fees(
     flow: Flow,
-    ledger: &TransferLedger,
+    transfer_ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
 ) -> Flow {
-    let fees = ledger.received_by(fee_collectors);
-    let venue_fee = fees
+    let fees = transfer_ledger.received_by(fee_collectors);
+    let venue_fee_in = fees
         .get(&flow.swap.token_in)
         .copied()
         .filter(|fee| !fee.is_zero());
     let amount_in =
-        venue_fee.map_or(flow.swap.amount_in, |fee| flow.swap.amount_in.saturating_sub(fee));
+        venue_fee_in.map_or(flow.swap.amount_in, |fee| flow.swap.amount_in.saturating_sub(fee));
     let venue_fee_out = fees
         .get(&flow.swap.token_out)
         .copied()
@@ -140,7 +140,7 @@ fn back_out_venue_fees(
     Flow {
         tracked: flow.tracked,
         swap: NetSwap { amount_in, amount_out, ..flow.swap },
-        venue_fee,
+        venue_fee_in,
         venue_fee_out,
         solver_override: flow.solver_override,
         gas_scope: flow.gas_scope,
@@ -171,11 +171,11 @@ mod tests {
             make_transfer_log(token_in, router, pool, U256::from(960)),
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = venue_fee_flow(&ledger, user, router, &collectors).unwrap();
+        let flow = venue_fee_flow(&transfer_ledger, user, router, &collectors).unwrap();
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
-        assert_eq!(flow.venue_fee, Some(U256::from(40)));
+        assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
         assert_eq!(flow.venue_fee_out, None);
     }
 
@@ -190,11 +190,11 @@ mod tests {
             make_transfer_log(addr(10), user, pool, U256::from(1000)),
             make_transfer_log(addr(11), pool, user, U256::from(2000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = venue_fee_flow(&ledger, user, pool, &collectors).unwrap();
+        let flow = venue_fee_flow(&transfer_ledger, user, pool, &collectors).unwrap();
         assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
-        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);
     }
 }

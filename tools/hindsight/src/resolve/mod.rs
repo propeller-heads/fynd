@@ -219,7 +219,7 @@ mod tests {
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,

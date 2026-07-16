@@ -1,23 +1,24 @@
 //! The transfer-netting strategy: recover the swap from the transaction's value movements.
 //!
 //! Its evidence is the ERC-20 `Transfer` events plus the native transfers recovered from the
-//! trace (see `ledger`) — what actually moved, not what any contract or calldata declared. It
-//! needs no knowledge of any router's format. Its one transaction-shape question is whose net
-//! flow is the trade ([`TraderShape`]): the sender's, an order maker's, or a venue-entered
-//! sender's with that venue's corrections applied.
+//! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
+//! declared. It needs no knowledge of any router's format. Its one transaction-shape question
+//! is whose net flow is the trade ([`TraderShape`]): the sender's, an order maker's, or a
+//! venue-entered sender's with that venue's corrections applied.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to
 //! a different receiver, nothing nets against the trader's input and the transaction is
-//! declined — a coverage miss, never wrong amounts (see `ledger` for the model's assumptions).
+//! declined — a coverage miss, never wrong amounts (see `transfer_ledger` for the model's
+//! assumptions).
 
 use alloy::{primitives::Address, providers::Provider};
 use async_trait::async_trait;
 
 use crate::decoder::{
     intent,
-    ledger::TransferLedger,
     registry::Registry,
     strategies::{DecodeContext, DecodeStrategy, Flow, GasScope},
+    transfer_ledger::TransferLedger,
     venues,
 };
 
@@ -33,11 +34,11 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<Flow> {
         let sender = ctx.receipt.from;
         match trader_shape(ctx.entry_point, ctx.registry) {
-            TraderShape::Sender => sender_flow(ctx.ledger, sender, ctx.entry_point),
+            TraderShape::Sender => sender_flow(ctx.transfer_ledger, sender, ctx.entry_point),
             TraderShape::Maker => {
                 intent::find_maker_trade(
                     ctx.provider,
-                    ctx.ledger,
+                    ctx.transfer_ledger,
                     &[ctx.entry_point, sender],
                     ctx.registry,
                     ctx.code_cache,
@@ -45,7 +46,7 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
                 .await
             }
             TraderShape::Venue(venue) => venue.decode(&venues::VenueContext {
-                ledger: ctx.ledger,
+                transfer_ledger: ctx.transfer_ledger,
                 sender,
                 entry_point: ctx.entry_point,
                 input: ctx.input,
@@ -101,15 +102,15 @@ fn trader_shape(entry_point: Address, registry: &Registry) -> TraderShape {
 /// A sender-tracked flow charges the whole receipt's gas (the trader sent the transaction);
 /// the fallback charges nothing, since the tracked contract and the gas-paying sender differ.
 pub(crate) fn sender_flow(
-    ledger: &TransferLedger,
+    transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
 ) -> Option<Flow> {
-    ledger
+    transfer_ledger
         .net_swap(sender)
         .map(|swap| Flow { gas_scope: GasScope::Receipt, ..Flow::without_fees(sender, swap) })
         .or_else(|| {
-            ledger
+            transfer_ledger
                 .net_swap(entry_point)
                 .map(|swap| Flow::without_fees(entry_point, swap))
         })

@@ -38,7 +38,7 @@ fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<Strin
 pub(crate) fn decode(ctx: &VenueContext<'_>) -> Option<Flow> {
     let metamask = ctx.registry.venue("metamask")?;
     let mut flow =
-        venue_fee_flow(ctx.ledger, ctx.sender, ctx.entry_point, &metamask.fee_collectors)?;
+        venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &metamask.fee_collectors)?;
     flow.solver_override = solver_from_calldata(ctx.input, metamask);
     Some(flow)
 }
@@ -49,21 +49,21 @@ mod tests {
 
     use super::*;
     use crate::decoder::{
-        ledger::TransferLedger,
         registry::Registry,
         strategies::GasScope,
         test_utils::{addr, make_transfer_log, swap},
+        transfer_ledger::TransferLedger,
     };
 
     /// A [`VenueContext`] over the given transaction pieces, for concise decode calls.
     fn ctx<'a>(
-        ledger: &'a TransferLedger,
+        transfer_ledger: &'a TransferLedger,
         sender: Address,
         entry_point: Address,
         input: &'a [u8],
         registry: &'a Registry,
     ) -> VenueContext<'a> {
-        VenueContext { ledger, sender, entry_point, input, registry }
+        VenueContext { transfer_ledger, sender, entry_point, input, registry }
     }
 
     fn fee_wallet(registry: &Registry) -> Address {
@@ -137,12 +137,12 @@ mod tests {
             (router, collector, U256::from(883)),
             (router, user, U256::from(7_525)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &native);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ctx(&ledger, user, router, &[], &registry)).unwrap();
+        let flow = decode(&ctx(&transfer_ledger, user, router, &[], &registry)).unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
-        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, Some(U256::from(883)));
         assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
@@ -164,11 +164,11 @@ mod tests {
             (router, pool, U256::from(991)),
         ];
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
-        let ledger = TransferLedger::from_transaction(&logs, &native);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = decode(&ctx(&ledger, user, router, &[], &registry)).unwrap();
+        let flow = decode(&ctx(&transfer_ledger, user, router, &[], &registry)).unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
-        assert_eq!(flow.venue_fee, Some(U256::from(9)));
+        assert_eq!(flow.venue_fee_in, Some(U256::from(9)));
         assert_eq!(flow.venue_fee_out, None);
     }
 
@@ -189,10 +189,11 @@ mod tests {
             amount: U256::from(1_000),
             data: Bytes::default(),
         };
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
         let flow =
-            decode(&ctx(&ledger, user, router(&registry), &call.abi_encode(), &registry)).unwrap();
+            decode(&ctx(&transfer_ledger, user, router(&registry), &call.abi_encode(), &registry))
+                .unwrap();
         assert_eq!(flow.solver_override.as_deref(), Some("1inch"));
     }
 
@@ -208,11 +209,11 @@ mod tests {
             make_transfer_log(token_in, user, pool, U256::from(1_000)),
             make_transfer_log(token_out, pool, user, U256::from(2_000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = decode(&ctx(&ledger, user, router(&registry), &[], &registry)).unwrap();
+        let flow = decode(&ctx(&transfer_ledger, user, router(&registry), &[], &registry)).unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
-        assert_eq!(flow.venue_fee, None);
+        assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);
     }
 }

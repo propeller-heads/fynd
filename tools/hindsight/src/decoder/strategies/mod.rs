@@ -33,8 +33,8 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    ledger::{NetSwap, TransferLedger},
     registry::Registry,
+    transfer_ledger::{NetSwap, TransferLedger},
 };
 
 /// A method for recovering the trader's flow from one matched, traced transaction.
@@ -73,7 +73,7 @@ pub(crate) struct DecodeContext<'a, P> {
     /// The contract the transaction entered through (`tx.to`).
     pub entry_point: Address,
     /// The transaction's flattened value movements.
-    pub ledger: &'a TransferLedger,
+    pub transfer_ledger: &'a TransferLedger,
     /// Root calldata of the transaction (venue declarations, embedded quotes).
     pub input: &'a [u8],
 }
@@ -99,7 +99,7 @@ pub(crate) struct Flow {
     pub tracked: Address,
     pub swap: NetSwap,
     /// Venue fee taken from the input token, already backed out of `swap.amount_in`.
-    pub venue_fee: Option<U256>,
+    pub venue_fee_in: Option<U256>,
     /// Venue fee taken from the output token, already added back into `swap.amount_out`.
     pub venue_fee_out: Option<U256>,
     /// Solver label asserted by the strategy itself (e.g. `MetaMask` declares its
@@ -114,7 +114,7 @@ impl Flow {
         Self {
             tracked,
             swap,
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             solver_override: None,
             gas_scope: GasScope::NotCharged,

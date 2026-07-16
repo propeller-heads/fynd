@@ -84,7 +84,7 @@ pub(crate) struct TransferLedger {
 
 impl TransferLedger {
     /// Flatten a transaction's ERC-20 `Transfer` logs and trace-recovered native ETH transfers
-    /// into one ledger.
+    /// into one transfer ledger.
     pub(crate) fn from_transaction(
         logs: &[Log],
         native_transfers: &[(Address, Address, U256)],
@@ -153,9 +153,8 @@ impl TransferLedger {
         participants
     }
 
-    /// Gross total received per token by any of `recipients` (native ETH keyed by
-    /// [`Address::ZERO`]). Used for venue-fee accounting: what reached the fee collectors,
-    /// regardless of sender.
+    /// Gross total received per token by any of `recipients`, regardless of sender (native ETH
+    /// keyed by [`Address::ZERO`]).
     pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
         let mut totals: HashMap<Address, U256> = HashMap::new();
         if recipients.is_empty() {
@@ -170,7 +169,7 @@ impl TransferLedger {
     }
 
     /// Per-token net outflow of the address group: what the group sent minus what it got back,
-    /// where positive. Used to anchor on Relay's fee collectors as a funding source.
+    /// where positive.
     pub(crate) fn group_net_sent(&self, group: &HashSet<Address>) -> HashMap<Address, U256> {
         let (sent, received) = self.group_totals(group);
         net_positive(&sent, &received)
@@ -518,8 +517,8 @@ mod tests {
     fn participants_cover_both_sides_and_native() {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1))];
         let native = vec![(addr(3), addr(4), U256::from(1))];
-        let ledger = TransferLedger::from_transaction(&logs, &native);
-        let participants = ledger.participants();
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
+        let participants = transfer_ledger.participants();
         assert_eq!(participants, [addr(1), addr(2), addr(3), addr(4)].into());
     }
 
@@ -532,11 +531,11 @@ mod tests {
             make_transfer_log(addr(10), addr(2), collector, U256::from(2)),
         ];
         let native = vec![(addr(1), collector, U256::from(7))];
-        let ledger = TransferLedger::from_transaction(&logs, &native);
-        let totals = ledger.received_by(&collectors);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
+        let totals = transfer_ledger.received_by(&collectors);
         assert_eq!(totals.get(&addr(10)).copied(), Some(U256::from(42)));
         assert_eq!(totals.get(&Address::ZERO).copied(), Some(U256::from(7)));
-        assert!(ledger
+        assert!(transfer_ledger
             .received_by(&HashSet::new())
             .is_empty());
     }
@@ -550,9 +549,15 @@ mod tests {
             make_transfer_log(addr(10), addr(50), addr(99), U256::from(300)),
             make_transfer_log(addr(11), addr(50), addr(99), U256::from(200)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
-        assert_eq!(ledger.group_net_sent(&group), HashMap::from([(addr(10), U256::from(700))]));
-        assert_eq!(ledger.group_net_received(&group), HashMap::from([(addr(11), U256::from(200))]));
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        assert_eq!(
+            transfer_ledger.group_net_sent(&group),
+            HashMap::from([(addr(10), U256::from(700))])
+        );
+        assert_eq!(
+            transfer_ledger.group_net_received(&group),
+            HashMap::from([(addr(11), U256::from(200))])
+        );
     }
 
     #[test]
@@ -562,7 +567,7 @@ mod tests {
             make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000)),
             make_transfer_log(addr(11), addr(50), addr(7), U256::from(2000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
-        assert_eq!(ledger.sink_receipts(), vec![(addr(7), addr(11), U256::from(2000))]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        assert_eq!(transfer_ledger.sink_receipts(), vec![(addr(7), addr(11), U256::from(2000))]);
     }
 }

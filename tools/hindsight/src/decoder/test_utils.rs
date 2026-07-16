@@ -5,7 +5,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 
-use crate::decoder::ledger::{NetSwap, Transfer};
+use crate::decoder::transfer_ledger::{NetSwap, Transfer};
 
 /// The canonical Permit2 deployment, for fixtures exercising the registry's infrastructure set.
 pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");

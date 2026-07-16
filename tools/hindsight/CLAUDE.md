@@ -46,7 +46,7 @@ Match → trace → decode → guard → record.
 |---|---|
 | `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
 | `strategies/` | Decode methods behind the `DecodeStrategy` trait, tried in precedence order (`netting` today) |
-| `ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
+| `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `guards.rs` | Vetoes non-comparable shapes (NFT purchases, mis-paired wrap trades) |
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |

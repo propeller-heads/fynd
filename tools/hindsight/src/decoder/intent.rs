@@ -10,9 +10,9 @@ use alloy::{primitives::Address, providers::Provider};
 use tracing::warn;
 
 use crate::decoder::{
-    ledger::{NetSwap, TransferLedger},
     registry::Registry,
     strategies::Flow,
+    transfer_ledger::{NetSwap, TransferLedger},
 };
 
 /// Find the order maker's trade in a filler-initiated intent fill.
@@ -36,12 +36,12 @@ use crate::decoder::{
 ///   EIP-7702 delegation) is indistinguishable from a pool here, so its fills are dropped.
 pub(crate) async fn find_maker_trade<P: Provider>(
     provider: &P,
-    ledger: &TransferLedger,
+    transfer_ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
 ) -> Option<Flow> {
-    for (candidate, trade) in maker_candidates(ledger, exclude, registry) {
+    for (candidate, trade) in maker_candidates(transfer_ledger, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
             return Some(Flow::without_fees(candidate, trade));
         }
@@ -53,17 +53,17 @@ pub(crate) async fn find_maker_trade<P: Provider>(
 /// excluded addresses, and known registry contracts. Ordered by address for
 /// deterministic selection.
 fn maker_candidates(
-    ledger: &TransferLedger,
+    transfer_ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
 ) -> Vec<(Address, NetSwap)> {
-    let mut candidates = ledger.participants();
+    let mut candidates = transfer_ledger.participants();
     candidates.remove(&Address::ZERO);
     candidates.retain(|address| !exclude.contains(address) && !registry.is_known(*address));
 
     let mut swaps = Vec::new();
     for candidate in candidates {
-        if let Some(trade) = ledger.net_swap(candidate) {
+        if let Some(trade) = transfer_ledger.net_swap(candidate) {
             swaps.push((candidate, trade));
         }
     }
@@ -168,9 +168,9 @@ mod tests {
             make_transfer_log(token_a, maker, pool, U256::from(1000)),
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let found: HashMap<Address, _> = maker_candidates(&ledger, &[filler], &registry)
+        let found: HashMap<Address, _> = maker_candidates(&transfer_ledger, &[filler], &registry)
             .into_iter()
             .collect();
         assert_eq!(found.len(), 2);
@@ -191,10 +191,10 @@ mod tests {
             make_transfer_log(token_a, maker, pool, U256::from(1000)),
             make_transfer_log(token_b, pool, maker, U256::from(2000)),
         ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
         // Excluding the maker leaves only the pool.
-        let candidates = maker_candidates(&ledger, &[maker], &registry);
+        let candidates = maker_candidates(&transfer_ledger, &[maker], &registry);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, pool);
     }
