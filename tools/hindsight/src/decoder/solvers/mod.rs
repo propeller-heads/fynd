@@ -118,7 +118,23 @@ mod tests {
     };
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log};
+    use crate::decoder::{
+        registry::Registry,
+        test_utils::{addr, make_transfer_log},
+    };
+
+    #[test]
+    fn implementation_names_are_solvers_in_the_address_book() {
+        // A typo'd name here would compile and silently never match, so the registration list
+        // gets the same validation as venue bindings: every name must exist in the book.
+        let registry = Registry::ethereum();
+        for (name, _) in IMPLEMENTATIONS {
+            assert!(
+                registry.is_solver_name(name),
+                "IMPLEMENTATIONS entry '{name}' is not a solver name in the address book"
+            );
+        }
+    }
 
     /// A bridge-shaped log emitted by the registered `LiFi` router.
     fn bridge_log(emitter: Address) -> Log {
