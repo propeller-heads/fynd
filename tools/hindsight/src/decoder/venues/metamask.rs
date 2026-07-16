@@ -97,13 +97,13 @@ mod tests {
     }
 
     #[test]
-    fn swap_selector_matches_deployed_router() {
+    fn swap_selector_against_deployed_router() {
         // The sol! declaration must match the on-chain function (verified against live calldata).
         assert_eq!(swapCall::SELECTOR, [0x5f, 0x57, 0x55, 0x29]);
     }
 
     #[test]
-    fn solver_from_calldata_normalizes_known_ids() {
+    fn solver_from_calldata_known_ids() {
         let registry = Registry::ethereum();
         let metamask = registry.venue("metamask").unwrap();
         for (id, want) in [
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_from_calldata_declines_other_selectors() {
+    fn solver_from_calldata_other_selectors() {
         let registry = Registry::ethereum();
         let metamask = registry.venue("metamask").unwrap();
         assert_eq!(solver_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00], metamask), None);
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_backs_out_output_side_fee() {
+    fn decode_output_side_fee() {
         // Live tx 0x142de458… shape: token in, ETH out; the router takes the fee from the native
         // output before forwarding the rest to the trader. amount_out is grossed back up.
         let registry = Registry::ethereum();
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_backs_out_input_side_fee() {
+    fn decode_input_side_fee() {
         // ETH in, token out: the router takes the fee from the native input before forwarding
         // the rest to the solver. amount_in shrinks to what actually entered the swap.
         let registry = Registry::ethereum();
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_asserts_solver_from_calldata() {
+    fn decode_solver_declaration() {
         // The declared aggregatorId lands on the flow as the solver override, so the orchestrator
         // needs no MetaMask-specific attribution branch.
         let registry = Registry::ethereum();
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_keeps_fee_free_trade_unchanged() {
+    fn decode_fee_free_trade() {
         let registry = Registry::ethereum();
         let user = addr(1);
         let pool = addr(50);

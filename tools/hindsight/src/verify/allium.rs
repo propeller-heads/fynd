@@ -152,21 +152,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_parses_bare_string() {
+    fn status_bare_string() {
         // The API sometimes returns a bare JSON string "success" instead of {"status": "success"}.
         let value: Value = serde_json::from_str("\"success\"").unwrap();
         assert_eq!(parse_status_value(&value), Some("success".to_string()));
     }
 
     #[test]
-    fn status_parses_object_form() {
+    fn status_object_form() {
         // The API can also return {"status": "running"}.
         let value: Value = serde_json::from_str(r#"{"status": "running"}"#).unwrap();
         assert_eq!(parse_status_value(&value), Some("running".to_string()));
     }
 
     #[test]
-    fn status_returns_none_for_unexpected_shape() {
+    fn status_unexpected_shape() {
         let value: Value = serde_json::from_str(r#"{"other_key": "val"}"#).unwrap();
         assert_eq!(parse_status_value(&value), None);
     }

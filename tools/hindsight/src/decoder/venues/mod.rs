@@ -169,7 +169,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
-    fn venue_fee_flow_backs_out_input_fee() {
+    fn venue_fee_flow_input_fee() {
         // The router sends part of the input token to the collector; the rest goes to the pool.
         let user = addr(1);
         let router = addr(2);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn venue_fee_flow_keeps_fee_free_trade_unchanged() {
+    fn venue_fee_flow_fee_free_trade() {
         // Nothing reached a fee wallet, nothing is backed out.
         let user = addr(1);
         let pool = addr(50);

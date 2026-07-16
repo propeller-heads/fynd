@@ -40,7 +40,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_transfer_log};
 
     #[test]
-    fn bridge_order_detected() {
+    fn bridge_order() {
         // The LiFi bridge shape (tx 0x72b71802…): 7.2 ETH in, swapped to USDT, 99.5% bridged out,
         // and only the leftover refunded to the trader — flagged by LiFiTransferStarted.
         let diamond = addr(70);

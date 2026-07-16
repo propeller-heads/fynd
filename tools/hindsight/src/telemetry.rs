@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_labels_both_states() {
+    fn record_range_both_states() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_registry_bounded() {
+    fn label_values_against_the_registry() {
         // Every metric label value must come from the registry: registered venue and
         // solver names pass through; raw addresses, unregistered names, and calldata-declared
         // aggregator ids collapse — venues to "other", solvers to "unknown".
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_address_labels_collapse() {
+    fn raw_address_labels() {
         // Unknown venues/solvers carry raw 0x… addresses; every distinct address would mint a
         // fresh series set, unbounded over a long run. Venues outside the registry's
         // [venues.*] sections collapse to "other", solvers outside [solvers] to "unknown".
@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_solver_label_collapses_to_unknown() {
+    fn fallback_solver_label() {
         // The Fallback tier labels the solver with the entry point — a venue name like "relay",
         // not a solver — which would pollute the dashboard's solver dropdown. The metric label
         // must collapse to "unknown"; the JSONL keeps the entry-point detail.
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_falls_back_to_input_leg_when_output_unpriced() {
+    fn volume_with_unpriced_output() {
         // Swap into a long-tail token: the output leg is unpriced — which is exactly why the
         // trade is unsolvable — so volume must be valued from the input leg instead, or
         // unsolvable volume would be systematically undercounted.
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_skips_savings_when_unsolvable() {
+    fn record_range_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_skips_savings_when_sandwiched() {
+    fn record_range_sandwiched() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let mut sandwiched = trade(usdc, 1_000_000_000);
         sandwiched.sandwich = Some(SandwichEvidence {

@@ -123,7 +123,7 @@ mod tests {
     };
 
     #[test]
-    fn implementation_names_are_solvers_in_the_address_book() {
+    fn implementation_names_against_the_address_book() {
         // A typo'd name here would compile and silently never match, so the registration list
         // gets the same validation as venue bindings: every name must exist in the book.
         let registry = Registry::ethereum();
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn plausible_quote_accepts_slippage_and_rejects_unit_mismatch() {
+    fn plausible_quote_slippage_and_unit_mismatch() {
         let quote = |amount: u128| SolverQuote {
             amount_out: U256::from(amount),
             source: None,
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_quote_dispatches_by_solver() {
+    fn embedded_quote_dispatch() {
         // A ParaSwap-shaped word triple only parses when the attributed solver is paraswap;
         // an unlisted solver never yields a quote from the same bytes.
         let amount_in = U256::from(171_521_496u64);

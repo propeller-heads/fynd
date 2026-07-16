@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_hop_nets_correctly() {
+    fn multi_hop_swap() {
         let sender = addr(1);
         let token_a = addr(10);
         let token_b = addr(11);
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn rfq_surplus_residue_dropped() {
+    fn rfq_surplus_residue() {
         // USDC -> WETH -> DAI where the second hop is an RFQ consuming an exact WETH amount: the
         // surplus WETH lands on the user as a second net-in token. WETH routed third-party
         // (pool -> router) and the surplus is <1% of its gross flow, so it is provably residue.
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn residue_needs_one_directional_flow() {
+    fn residue_two_directional_flow() {
         // Regression: MEV bundle 0x280b9939… (block 25487629). The tracked wallet nets three
         // tokens: WETH out, native ETH in, and a +51 USDC position from sending 510 and
         // receiving 561 — while the bundle's own $10k USDC wash loops inflate the token's gross
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn residue_needs_third_party_flow() {
+    fn residue_without_third_party_flow() {
         // A small extra token received straight from the pool never routed third-party, so it
         // cannot be proven residue — the trade stays declined.
         let user = addr(1);
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn residue_needs_small_share_of_gross() {
+    fn residue_large_share_of_gross() {
         // An extra leg that routed third-party but is a large share of its token's gross flow is
         // a real leg, not residue — the trade stays declined.
         let user = addr(1);
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_token_batch_settlement_declined() {
+    fn multi_token_batch_settlement() {
         // A batch settler (e.g. a CoW solver) nets two distinct tokens in and two out across
         // several orders. That is not one swap, so picking a "dominant" leg by raw amount would
         // pair unrelated tokens. Decline instead of guessing.
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn one_in_many_out_declined() {
+    fn one_in_many_out() {
         // One token in but two distinct tokens out (a split/batch fill) is also ambiguous.
         let settler = addr(1);
         let token_a = addr(10);
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn participants_cover_both_sides_and_native() {
+    fn participants_both_sides_and_native() {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1))];
         let native = vec![(addr(3), addr(4), U256::from(1))];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn received_by_totals_per_token() {
+    fn received_by_multiple_recipients() {
         let collector = addr(99);
         let collectors = HashSet::from([collector]);
         let logs = vec![
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn group_nets_offset_round_trips() {
+    fn group_round_trips() {
         // The group sends 1000 of token A and gets 300 back: net sent 700, no net receipt.
         let group = HashSet::from([addr(99)]);
         let logs = vec![
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn sink_receipts_exclude_anyone_who_sent() {
+    fn sink_receipts_when_recipient_also_sent() {
         // The pool receives and sends (a conversion), the recipient only receives (a sink).
         let logs = vec![
             make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000)),

@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_declines_multi_recipient() {
+    fn rebalance_multi_recipient() {
         let fee = addr(99);
         let pool = addr(50);
         let token_in = addr(10);
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_declines_unconverted_payout() {
+    fn rebalance_unconverted_payout() {
         // Live tx 0x455f5202…: the collector pays out its token unconverted to an external
         // recipient (cross-chain order settled from same-token inventory) plus a tiny native gas
         // top-up. Pairing the top-up as "the output" fabricated a 10-million-bps win — a payout
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_declines_without_collector_outflow() {
+    fn rebalance_without_collector_outflow() {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000))];
         let collectors = HashSet::from([addr(99)]);
         let routers = HashSet::from([addr(2)]);
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_backs_fee_out_of_user_flow() {
+    fn decode_user_flow_with_fee() {
         // User swap through Relay: sender nets token_in -> token_out, with an input-side fee to
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_skips_fee_back_out_for_collector_trader() {
+    fn decode_collector_trader() {
         // Treasury op (live tx 0x80a4c0…): the fee collector itself unwraps WETH via the router.
         // Its 1:1 native receipt must not be treated as a fee and added back — that doubled the
         // output.
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_falls_back_to_rebalance() {
+    fn decode_rebalance_fill() {
         // Solver fill: the sender has no net flow; the collector funds the swap. No fee back-out.
         let registry = Registry::ethereum();
         let collector = *registry

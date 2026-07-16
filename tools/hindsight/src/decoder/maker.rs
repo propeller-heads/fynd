@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_maker_trade_picks_eoa_maker() {
+    async fn find_maker_trade_eoa_candidate() {
         let asserter = Asserter::new();
         // Candidates in address order: addr(100) first — an EOA (empty code).
         asserter.push_success(&Bytes::default());
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_maker_trade_declines_when_all_candidates_are_contracts() {
+    async fn find_maker_trade_all_candidates_contracts() {
         let asserter = Asserter::new();
         // Both candidates carry code: a routing intermediary and a pool. Guessing one would net
         // residue dust as an absurd swap, so the fill must be declined.
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn maker_candidates_finds_swap_sides_excluding_filler() {
+    fn maker_candidates_swap_sides() {
         // Intent fill: the maker sells token_a for token_b; the pool is the
         // counterparty. The filler is excluded.
         let registry = Registry::ethereum();
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn maker_candidates_drops_excluded_and_known() {
+    fn maker_candidates_excluded_and_known() {
         let registry = Registry::ethereum();
         let maker = addr(100);
         let pool = addr(101);

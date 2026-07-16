@@ -112,7 +112,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_nft_transfer_log, make_transfer_log, swap};
 
     #[test]
-    fn received_nft_detects_erc721() {
+    fn received_nft_erc721() {
         // The NFT purchase shape: buyer pays a token and receives an ERC-721, not a token amount.
         let buyer = addr(1);
         let seller = addr(2);
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn received_nft_detects_erc1155_single() {
+    fn received_nft_erc1155_single() {
         let buyer = addr(1);
         let operator = addr(3);
         let seller = addr(2);
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn received_nft_ignores_erc20_transfers() {
+    fn received_nft_erc20_only() {
         // A plain ERC-20 Transfer (three topics, amount in data) must not read as an NFT even
         // though it shares the event signature.
         let user = addr(1);
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_pair_mispaired_flags_dust_refund() {
+    fn wrap_pair_dust_refund() {
         // Relay cross-chain deposit shape (tx 0xc9de04eb…): 0.02 WETH in, a billionth of it
         // refunded back as native ETH — not an unwrap.
         let weth = addr(20);
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_pair_near_parity_kept() {
+    fn wrap_pair_near_parity() {
         let weth = addr(20);
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 1000), weth));
         // An unwrap with a fee taken stays within the 2x band.
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn non_wrap_pair_never_flagged() {
+    fn non_wrap_pair() {
         // Ordinary token pairs legitimately trade at any rate (decimals differ), and a
         // token <-> wrapped-native trade without the native side is a real swap too.
         let weth = addr(20);

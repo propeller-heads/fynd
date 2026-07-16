@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn tokens_agree_when_present() {
+    fn token_match_both_present() {
         let ours = trade(addr(10), addr(11), "1inch");
         let allium = row(addr(10), addr(11), "1inch");
         let mut detail = Vec::new();
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn tokens_disagree_flags_detail() {
+    fn token_match_mismatched_tokens() {
         let ours = trade(addr(10), addr(99), "1inch");
         let allium = row(addr(10), addr(11), "1inch");
         let mut detail = Vec::new();
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_matches_on_prefix() {
+    fn solver_match_prefix() {
         let ours = trade(addr(10), addr(11), "uniswap");
         let allium = row(addr(10), addr(11), "uniswap_x");
         let mut detail = Vec::new();
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_matches_zeroex_alias() {
+    fn solver_match_zeroex_alias() {
         let ours = trade(addr(10), addr(11), "0x");
         let allium = row(addr(10), addr(11), "zeroex");
         let mut detail = Vec::new();
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_disagrees_on_different_venue() {
+    fn solver_match_different_venue() {
         let ours = trade(addr(10), addr(11), "tycho");
         let allium = row(addr(10), addr(11), "1inch");
         let mut detail = Vec::new();
@@ -489,17 +489,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_amount_applies_decimals() {
+    fn normalize_amount_decimals() {
         assert!((normalize_amount(U256::from(1_000_000u64), 6) - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn bps_diff_zero_for_equal() {
+    fn bps_diff_equal_amounts() {
         assert!(bps_diff(1.0, 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn bps_diff_scales() {
+    fn bps_diff_unequal_amounts() {
         assert!((bps_diff(1.01, 1.0) - 100.0).abs() < 1e-6);
     }
 }

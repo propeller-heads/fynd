@@ -149,7 +149,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, frame};
 
     #[test]
-    fn native_transfers_skip_delegatecall_and_staticcall() {
+    fn native_transfers_delegatecall_and_staticcall() {
         let from = addr(1);
         let to = addr(2);
 
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn reverted_frame_and_subtree_ignored() {
+    fn reverted_frame_and_subtree() {
         let from = addr(1);
         let to = addr(2);
 
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_reads_known_venue_frame() {
+    fn route_gas_known_venue() {
         // Mirrors the audited Relay tx 0xf25ceafd…: two small wrapper self-calls around the
         // KyberSwap router call, whose frame carries the full routing cost.
         //
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_falls_back_to_largest_child() {
+    fn route_gas_unknown_venue() {
         // Unknown venue: no registry match, so the most gas-consuming child is the route.
         let registry = Registry::ethereum();
         let client = addr(2);
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_skips_reverted_and_declines_empty() {
+    fn route_gas_reverted_and_empty() {
         let registry = Registry::ethereum();
         let client = addr(2);
 
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn find_solver_frame_skips_reverted() {
+    fn find_solver_frame_reverted_frames() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 

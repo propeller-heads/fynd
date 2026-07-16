@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn later_strategy_is_the_fallback() {
+    async fn first_strategy_declines() {
         let (name, flow) = recover_with(vec![Box::new(Declines), Box::new(Wins)])
             .await
             .unwrap();
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_success_stops_the_scan() {
+    async fn first_strategy_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let (name, _) =
             recover_with(vec![Box::new(Wins), Box::new(CountsCalls(Arc::clone(&calls)))])

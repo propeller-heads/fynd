@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_same_from_bracket() {
+    fn same_from_bracket() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_same_to_when_not_registry_known() {
+    fn same_to_bracket_not_registry_known() {
         let victim_sender = addr(1);
         let shared_to = addr(77);
         let pool = addr(50);
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn same_to_registry_known_is_not_flagged() {
+    fn same_to_bracket_registry_known() {
         // 1inch is a registered solver: two unrelated traders entering it must not read as a
         // shared-attacker link, even when the token flows happen to line up.
         let victim_sender = addr(1);
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn attacker_link_without_pool_overlap_is_not_flagged() {
+    fn attacker_link_without_pool_overlap() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn front_only_pool_overlap_is_not_flagged() {
+    fn front_only_pool_overlap() {
         // Both legs must re-touch a victim pool: an attacker-linked pair where only the front
         // leg overlaps is not a bracket.
         let attacker = addr(90);
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn back_only_pool_overlap_is_not_flagged() {
+    fn back_only_pool_overlap() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_overlap_without_attacker_link_is_not_flagged() {
+    fn pool_overlap_without_attacker_link() {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_pair_without_token_flow_is_not_flagged() {
+    fn linked_pair_without_token_flow() {
         // Attacker link and pool overlap hold, but neither leg moves the victim's output token
         // for any linked entity — repeat activity on a busy pool, not a bracket.
         let attacker = addr(90);
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn same_direction_both_legs_is_not_flagged() {
+    fn same_direction_both_legs() {
         // An arbitrage bot buying the same token on the same pool twice around an unrelated
         // victim accumulates on both legs — no dispose leg, no sandwich.
         let attacker = addr(90);
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_in_shared_contract_confirms_direction() {
+    fn inventory_in_shared_contract() {
         // Typical bot shape: one EOA signs both legs (the link), but the token inventory moves
         // through its private contract — the shared `to` — not the EOA itself.
         let attacker_eoa = addr(90);
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn native_output_checks_wrapped_flow() {
+    fn native_output_wrapped_flow() {
         // The victim receives native ETH, which emits no log: the attacker's legs show as WETH
         // transfers instead, so direction is confirmed on the wrapped form.
         let registry = Registry::ethereum();
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn pairs_outside_window_are_ignored() {
+    fn pairs_outside_window() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn closest_bracket_pair_wins() {
+    fn competing_bracket_pairs() {
         let close_attacker = addr(90);
         let far_attacker = addr(91);
         let victim_sender = addr(1);
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn self_sandwich_by_shared_sender_excluded() {
+    fn self_sandwich_by_shared_sender() {
         // The victim's own address appears on both sides — not a sandwich.
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn self_sandwich_by_shared_target_excluded() {
+    fn self_sandwich_by_shared_target() {
         // The victim's own address is the shared `to` — also not a sandwich.
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn transfer_only_victim_logs_yield_no_pools() {
+    fn pool_addresses_transfer_only_logs() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let token = addr(60);
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_native_logs_are_not_pools() {
+    fn pool_addresses_wrapped_native_logs() {
         // Every ETH-wrapping transaction logs from the WETH contract (Deposit/Withdrawal are not
         // Transfer events), so WETH alone must never count as a shared pool.
         let registry = Registry::ethereum();
@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_logs_are_not_pools() {
+    fn pool_addresses_approval_logs() {
         // ERC-20 Approval is emitted by token contracts; a shared token approval is not a
         // shared pool.
         let attacker = addr(90);
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn victim_at_block_edge_does_not_panic() {
+    fn victim_at_block_edge() {
         let victim_sender = addr(1);
         let receipts =
             vec![receipt(tx_hash(0), victim_sender, Some(addr(9)), vec![make_pool_log(addr(50))])];
