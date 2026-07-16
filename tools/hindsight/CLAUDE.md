@@ -52,7 +52,7 @@ Match → trace → decode → guard → record.
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
 | `venues/` | Per-venue decoders (Relay, MetaMask), called through one `VenueContext` seam |
 | `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution |
-| `intent.rs` | Maker-finding for intent fills and batch settlements |
+| `maker.rs` | Maker-finding for intent fills and batch settlements |
 | `trace.rs` | Transaction trace fetching and processing |
 
 `src/verify/` contains the Allium integration:

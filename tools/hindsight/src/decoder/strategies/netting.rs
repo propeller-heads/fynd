@@ -15,7 +15,7 @@ use alloy::{primitives::Address, providers::Provider};
 use async_trait::async_trait;
 
 use crate::decoder::{
-    intent,
+    maker,
     registry::{Registry, VenueAddresses},
     strategies::{DecodeContext, DecodeStrategy, GasScope, TraderFlow},
     transfer_ledger::TransferLedger,
@@ -36,7 +36,7 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
         match trader_role(ctx.entry_point, ctx.registry) {
             TraderRole::Sender => sender_flow(ctx.transfer_ledger, sender, ctx.entry_point),
             TraderRole::Maker => {
-                intent::find_maker_trade(
+                maker::find_maker_trade(
                     ctx.provider,
                     ctx.transfer_ledger,
                     &[ctx.entry_point, sender],

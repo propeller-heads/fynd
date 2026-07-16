@@ -15,7 +15,7 @@
 //! comparable trades, and `registry` is the address book behind matching.
 
 mod guards;
-mod intent;
+mod maker;
 mod matching;
 mod registry;
 mod sandwich;
