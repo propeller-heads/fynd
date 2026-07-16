@@ -92,10 +92,11 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
             }
             "vm:curve" => {
-                // Deliberately the VM adapter, not the native CurveState: the hybrid CurveState
-                // (tycho-simulation 0.324.0) produces wrong quotes on live state — hindsight's
-                // top/back comparisons show thousands-of-bps artifacts on curve-routed solutions
-                // since the switch (fba3c223). Full-EVM simulation until that is fixed upstream.
+                // Deliberately the VM adapter, not the native CurveState (tycho-simulation
+                // 0.324.0, switched in fba3c223): under CurveState, hindsight shows curve-routed
+                // quotes systematically overestimating output vs settlement (median +43 bps,
+                // 93% "win" rate vs 53% elsewhere). Full-EVM simulation until the mispricing —
+                // in CurveState's math or in the indexed curve state — is found and fixed.
                 builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:curve",
                     tvl_filter.clone(),
