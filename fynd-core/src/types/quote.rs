@@ -710,15 +710,12 @@ impl SingleOrderQuote {
 ///
 /// Informational only (observability). The value the encoder acts on is the per-leg
 /// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SurplusInfo {
     /// Surplus captured by the protocol: realized surplus-route output minus the committed
     /// (public-reference) output.
-    #[serde_as(as = "DisplayFromStr")]
     surplus_amount: BigUint,
     /// The best public-market output the user is committed to (the quoted `amount_out`).
-    #[serde_as(as = "DisplayFromStr")]
     committed_amount_out: BigUint,
 }
 
