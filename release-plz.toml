@@ -1,20 +1,66 @@
-# fynd is a unified-version Cargo workspace. release-plz maintains a release PR (bumps the
-# shared workspace version + Cargo.lock + CHANGELOG) and, on merge, creates a single tag +
-# GitHub Release. Crate and npm publishing stay in release.yaml (triggered by the release).
+# fynd publishes to crates.io, so release-plz runs in registry mode (no git_only): it detects
+# versions from the registry and compares per crate. One shared bare tag + one GitHub Release
+# (on `fynd`); crates + npm are published by release.yaml on the release event.
 #
-# git_only: derive versions from git tags (the source of truth), not crates.io, and skip
-# cargo publish here. Single tag: tags/releases are disabled for every crate and enabled
-# only on `fynd`, so the workspace ships one bare tag per release.
-
+# Single root CHANGELOG.md: changelogs are disabled for every crate and enabled only on `fynd`,
+# which aggregates the published crates' commits (changelog_include) into one section per
+# release, in the conventional-changelog format. Internal tool crates are release=false: still
+# version-bumped via the shared workspace version, but excluded from changelog/tag/publish.
 [workspace]
-git_only = true
-git_tag_enable = false
+changelog_update = false
+git_tag_name = "{{ version }}"
 git_release_enable = false
-semver_check = false        # keep the release-pr job to metadata/lockfile (no build)
+semver_check = false
+publish = false
 pr_labels = ["release"]
 
 [[package]]
 name = "fynd"
-git_tag_enable = true
+changelog_update = true
 git_release_enable = true
-git_tag_name = "{{ version }}"  # bare tag, matching history (e.g. 0.90.0)
+changelog_include = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "fynd-client"]
+
+[[package]]
+name = "fynd-benchmark"
+release = false
+[[package]]
+name = "fynd-tools-common"
+release = false
+[[package]]
+name = "erc20-overrides"
+release = false
+[[package]]
+name = "fynd-swap-cli"
+release = false
+[[package]]
+name = "fynd-gas-audit"
+release = false
+[[package]]
+name = "hindsight"
+release = false
+[[package]]
+name = "record-market"
+release = false
+[[package]]
+name = "fynd-test-fixtures"
+release = false
+
+[changelog]
+header = ""
+body = """
+## [{{ version }}]{% if release_link %}({{ release_link }}){% endif %} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits %}{% if commit.scope %}* **{{ commit.scope }}:** {{ commit.message }} ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))
+{% else %}* {{ commit.message }} ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))
+{% endif %}{% endfor %}{% endfor %}
+
+"""
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance Improvements" },
+  { message = "^revert", group = "<!-- 3 -->Reverts" },
+  { message = ".*", skip = true },
+]
