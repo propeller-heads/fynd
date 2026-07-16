@@ -28,9 +28,9 @@ pub(crate) enum Venue {
 impl Venue {
     /// The venue bound to a name from the address book.
     ///
-    /// A `[venues.<name>]` section in the book only carries addresses; this is where its name
-    /// gets behavior. The registry validates every configured venue name against this binding
-    /// at load time, so a typo'd section fails fast instead of silently never matching.
+    /// A `[venues.<name>]` section in the address book only carries addresses; this is where
+    /// its name gets behavior. The registry validates every configured venue name against this
+    /// binding at load time, so a typo'd section fails fast instead of silently never matching.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "relay" => Some(Self::Relay),

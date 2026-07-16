@@ -1,15 +1,11 @@
 use alloy::{
-    primitives::{address, Address, TxHash, U256},
+    primitives::{Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
     rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
 };
 use anyhow::Context;
 
 use crate::decoder::registry::Registry;
-
-/// The canonical Permit2 deployment (same address on every chain) — token-pull infrastructure
-/// that routers call first, never the venue settling a swap.
-pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
 
 /// Fetch the callTracer root frame for a transaction.
 ///
@@ -61,15 +57,16 @@ fn transfers_value(call_type: &str) -> bool {
     matches!(call_type, "CALL" | "CALLCODE" | "CREATE" | "CREATE2" | "SELFDESTRUCT")
 }
 
-/// Gas consumed by the settled route inside a client-wrapped transaction (Relay, `MetaMask`), in
+/// Gas consumed by the settled route inside a venue-wrapped transaction (Relay, `MetaMask`), in
 /// gas units.
 ///
-/// The wrapper's own gas — fee skim, forwarding, the base transaction cost — is charged whichever
-/// router the client picks, so like the client fee it is excluded from the comparison. Each trace
-/// frame's `gas_used` includes its whole subtree, so the call into the venue carries the full
+/// The venue's own gas — fee skim, forwarding, the base transaction cost — is charged whichever
+/// router the venue picks, so like the venue fee it is excluded from the comparison. Each trace
+/// frame's `gas_used` includes its whole subtree, so the call into the solver carries the full
 /// routing cost. Prefers the first call into a known solver; falls back to the most
-/// gas-consuming direct child (in a wrapper transaction the routing work dwarfs the bookkeeping
-/// calls). `None` when no usable frame exists — the caller skips the deduction rather than guess.
+/// gas-consuming direct child, since in a wrapped transaction the routing work dwarfs the
+/// bookkeeping calls. `None` when no usable frame exists — the caller then skips the gas
+/// deduction rather than guess.
 pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
     if let Some(frame) = find_solver_frame(root, registry) {
         return Some(frame.gas_used);
@@ -107,9 +104,9 @@ pub(crate) fn find_solver_frame<'a>(
         .find_map(|child| find_solver_frame(child, registry))
 }
 
-/// The client's direct child call that moved the most native value, excluding
-/// self-calls, refunds to the sender, Permit2, and the wrapped-native contract. Best guess at
-/// an unknown router.
+/// Best guess at an unknown router: the entry point's direct child call that moved the most
+/// native value, excluding self-calls, refunds to the sender, and the registry's infrastructure
+/// addresses (Permit2, the wrapped-native contract).
 ///
 /// The wrapped-native exclusion matters most: on an ETH-input swap through an unknown router,
 /// the highest-value call is typically the `WETH.deposit()` wrapping the input — infrastructure,
@@ -130,7 +127,7 @@ pub(crate) fn largest_external_call(
             continue;
         }
         let Some(to) = child.to else { continue };
-        if to == entry_point || to == sender || to == PERMIT2 || to == registry.wrapped_native() {
+        if to == entry_point || to == sender || registry.is_infrastructure(to) {
             continue;
         }
         let value = child.value.unwrap_or_default();
