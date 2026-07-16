@@ -11,7 +11,7 @@ use alloy::{sol, sol_types::SolCall};
 
 use crate::decoder::{
     registry::VenueAddresses,
-    strategies::Flow,
+    strategies::TraderFlow,
     venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
 
@@ -39,7 +39,7 @@ pub(crate) struct Metamask;
 impl VenueKnowledge for Metamask {
     /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of
     /// it, and attribute the solver from the router calldata.
-    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
         let metamask = ctx.registry.venue("metamask")?;
         let mut flow = venue_fee_flow(
             ctx.transfer_ledger,

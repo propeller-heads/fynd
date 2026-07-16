@@ -56,7 +56,7 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
       │ future: calldata decoding,        │
       │ log parsing                       │
       └───────────────────────────────────┘
-                    │  Flow
+                    │  TraderFlow
                     ▼
            ┌─────────────────┐  embedded_quote  ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
@@ -85,7 +85,7 @@ trait DecodeStrategy<P> {
     /// Label recorded on the trades this strategy decoded.
     fn name(&self) -> &'static str;
     /// The trader's flow, or `None` when this method cannot decode the transaction.
-    async fn decode(&self, ctx: &mut DecodeContext<P>) -> Option<Flow>;
+    async fn decode(&self, ctx: &mut DecodeContext<P>) -> Option<TraderFlow>;
 }
 ```
 
@@ -101,7 +101,7 @@ here", so only the venues with that behavior override it and every other impl st
 ```rust
 trait VenueKnowledge {
     /// Decode a transaction entered through this venue's contract.
-    fn decode(&self, ctx: &VenueContext) -> Option<Flow>;
+    fn decode(&self, ctx: &VenueContext) -> Option<TraderFlow>;
 }
 
 // venues/mod.rs — one arm per address-book section

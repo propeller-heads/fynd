@@ -263,7 +263,7 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
     drop_residue_legs(&mut net_received, amounts_by_token, |amounts| amounts.sent);
 
     if net_sent.len() != 1 || net_received.len() != 1 {
-        // Flow on both sides but more than one significant token on one of them: a real batch
+        // TraderFlow on both sides but more than one significant token on one of them: a real batch
         // settlement, or a residue leg the pruning rules cannot prove (see the docstring).
         if !net_sent.is_empty() && !net_received.is_empty() {
             debug!(?net_sent, ?net_received, "declining multi-token net flow");

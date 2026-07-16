@@ -40,7 +40,7 @@ use alloy::primitives::Address;
 
 use crate::decoder::{
     registry::Registry,
-    strategies::{netting::sender_flow, Flow, GasScope},
+    strategies::{netting::sender_flow, GasScope, TraderFlow},
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -53,7 +53,7 @@ use crate::decoder::{
 /// implements the layers it has.
 pub(crate) trait VenueKnowledge: Send + Sync {
     /// Decode a transaction entered through this venue's contract.
-    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow>;
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow>;
 }
 
 /// The venue implementation bound to a name from the address book.
@@ -77,7 +77,8 @@ pub(crate) struct VenueContext<'a> {
     pub transfer_ledger: &'a TransferLedger,
     pub sender: Address,
     pub entry_point: Address,
-    /// Root calldata of the transaction (venue declarations, e.g. `MetaMask`'s `aggregatorId`).
+    /// The transaction's root calldata, where a venue may declare its solver
+    /// (`MetaMask`'s `aggregatorId`).
     pub input: &'a [u8],
     pub registry: &'a Registry,
 }
@@ -97,9 +98,9 @@ pub(crate) fn venue_fee_flow(
     sender: Address,
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
-) -> Option<Flow> {
+) -> Option<TraderFlow> {
     let mut flow = sender_flow(transfer_ledger, sender, entry_point)?;
-    if flow.gas_scope == GasScope::Receipt {
+    if flow.gas_scope == GasScope::WholeTransaction {
         flow.gas_scope = GasScope::SolverFrame;
     }
     if fee_collectors.contains(&flow.tracked) {
@@ -116,10 +117,10 @@ pub(crate) fn venue_fee_flow(
 /// swap produced more than the user kept), so both sides are the amounts
 /// actually swapped — the like-for-like basis vs Fynd.
 fn back_out_venue_fees(
-    flow: Flow,
+    flow: TraderFlow,
     transfer_ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
-) -> Flow {
+) -> TraderFlow {
     let fees = transfer_ledger.received_by(fee_collectors);
     let venue_fee_in = fees
         .get(&flow.swap.token_in)
@@ -133,7 +134,7 @@ fn back_out_venue_fees(
         .filter(|fee| !fee.is_zero());
     let amount_out =
         venue_fee_out.map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
-    Flow {
+    TraderFlow {
         tracked: flow.tracked,
         swap: NetSwap { amount_in, amount_out, ..flow.swap },
         venue_fee_in,

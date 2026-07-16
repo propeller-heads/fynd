@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use alloy::primitives::{Address, U256};
 
 use crate::decoder::{
-    strategies::Flow,
+    strategies::TraderFlow,
     transfer_ledger::{NetSwap, TransferLedger},
     venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
@@ -25,7 +25,7 @@ impl VenueKnowledge for Relay {
     /// solver-initiated rebalancing fill, decoded by anchoring on the fee
     /// collector instead (Relay funds the swap from it); the collector is the
     /// funding source there, not a fee recipient, so no fee is backed out.
-    fn decode(&self, ctx: &VenueContext<'_>) -> Option<Flow> {
+    fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
         let relay = ctx.registry.venue("relay")?;
         if let Some(flow) =
             venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
@@ -38,7 +38,7 @@ impl VenueKnowledge for Relay {
             &relay.entry_points,
             ctx.registry.wrapped_native(),
         )
-        .map(|swap| Flow::without_fees(ctx.sender, swap))
+        .map(|swap| TraderFlow::without_fees(ctx.sender, swap))
     }
 }
 

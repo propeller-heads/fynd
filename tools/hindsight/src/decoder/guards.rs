@@ -14,7 +14,7 @@ use alloy::{
 
 use crate::decoder::{
     registry::Registry,
-    strategies::Flow,
+    strategies::TraderFlow,
     transfer_ledger::{NetSwap, Transfer},
 };
 
@@ -31,7 +31,7 @@ pub(crate) enum Veto {
 }
 
 /// Check a decoded flow against every guard, returning the first veto.
-pub(crate) fn veto(flow: &Flow, logs: &[Log], registry: &Registry) -> Option<Veto> {
+pub(crate) fn veto(flow: &TraderFlow, logs: &[Log], registry: &Registry) -> Option<Veto> {
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }

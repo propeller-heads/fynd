@@ -48,7 +48,7 @@ pub(crate) trait DecodeStrategy<P: Provider>: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Recover the trader's flow, or `None` when this method cannot decode the transaction.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<Flow>;
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow>;
 }
 
 /// The strategies the decoder tries, in precedence order (most trusted first).
@@ -74,27 +74,28 @@ pub(crate) struct DecodeContext<'a, P> {
     pub entry_point: Address,
     /// The transaction's flattened value movements.
     pub transfer_ledger: &'a TransferLedger,
-    /// Root calldata of the transaction (venue declarations, embedded quotes).
+    /// The transaction's root calldata. Venues declare their solver in it; some solvers embed
+    /// their quote.
     pub input: &'a [u8],
 }
 
-/// How the settled route's gas is charged against the settled output. Decided by whichever code
-/// recovers the flow, since only it knows who sent the transaction and what wraps the route.
+/// Which part of the transaction's gas counts as the settled route's cost. Decided by the code
+/// that recovers the flow — only it knows who sent the transaction and what wraps the route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GasScope {
-    /// The tracked trader sent the transaction, so the whole receipt's gas is the route's cost.
-    Receipt,
-    /// The trade entered through a venue's own contract, so only the solver call's trace frame
-    /// is the route's cost — the venue's overhead is charged whichever solver it picks and must
-    /// stay out of the comparison.
+    /// The trader sent the transaction: all of its gas is the route's cost.
+    WholeTransaction,
+    /// The trade runs inside a venue's contract: only the solver call's trace frame counts,
+    /// keeping the venue's own overhead out of the comparison.
     SolverFrame,
-    /// Someone other than the tracked trader paid the gas (maker fills, solver rebalances), so
-    /// nothing is deducted.
+    /// Someone other than the trader paid the gas (maker fills, solver rebalances): none of it
+    /// is charged.
     NotCharged,
 }
 
-/// The decoded user flow of a matched transaction.
-pub(crate) struct Flow {
+/// The trader's side of a matched transaction: the swap, plus the corrections that make it
+/// comparable (venue fees backed out, gas scope).
+pub(crate) struct TraderFlow {
     /// The address whose net flow the swap was read from.
     pub tracked: Address,
     pub swap: NetSwap,
@@ -109,7 +110,7 @@ pub(crate) struct Flow {
     pub gas_scope: GasScope,
 }
 
-impl Flow {
+impl TraderFlow {
     pub(crate) fn without_fees(tracked: Address, swap: NetSwap) -> Self {
         Self {
             tracked,

@@ -11,7 +11,7 @@ use tracing::warn;
 
 use crate::decoder::{
     registry::Registry,
-    strategies::Flow,
+    strategies::TraderFlow,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -40,10 +40,10 @@ pub(crate) async fn find_maker_trade<P: Provider>(
     exclude: &[Address],
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
-) -> Option<Flow> {
+) -> Option<TraderFlow> {
     for (candidate, trade) in maker_candidates(transfer_ledger, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
-            return Some(Flow::without_fees(candidate, trade));
+            return Some(TraderFlow::without_fees(candidate, trade));
         }
     }
     None

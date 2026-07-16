@@ -3,7 +3,7 @@
 //! Its evidence is the ERC-20 `Transfer` events plus the native transfers recovered from the
 //! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
 //! declared. It needs no knowledge of any router's format. Its one transaction-shape question
-//! is whose net flow is the trade ([`TraderShape`]): the sender's, an order maker's, or a
+//! is whose net flow is the trade ([`TraderRole`]): the sender's, an order maker's, or a
 //! venue-entered sender's with that venue's corrections applied.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to
@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use crate::decoder::{
     intent,
     registry::Registry,
-    strategies::{DecodeContext, DecodeStrategy, Flow, GasScope},
+    strategies::{DecodeContext, DecodeStrategy, GasScope, TraderFlow},
     transfer_ledger::TransferLedger,
     venues,
 };
@@ -31,11 +31,11 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
         "netting"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<Flow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
         let sender = ctx.receipt.from;
-        match trader_shape(ctx.entry_point, ctx.registry) {
-            TraderShape::Sender => sender_flow(ctx.transfer_ledger, sender, ctx.entry_point),
-            TraderShape::Maker => {
+        match trader_role(ctx.entry_point, ctx.registry) {
+            TraderRole::Sender => sender_flow(ctx.transfer_ledger, sender, ctx.entry_point),
+            TraderRole::Maker => {
                 intent::find_maker_trade(
                     ctx.provider,
                     ctx.transfer_ledger,
@@ -45,7 +45,7 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
                 )
                 .await
             }
-            TraderShape::Venue(venue) => venue.decode(&venues::VenueContext {
+            TraderRole::Venue(venue) => venue.decode(&venues::VenueContext {
                 transfer_ledger: ctx.transfer_ledger,
                 sender,
                 entry_point: ctx.entry_point,
@@ -56,43 +56,38 @@ impl<P: Provider> DecodeStrategy<P> for TransferNetting {
     }
 }
 
-/// Which address's net flow is the trade. A matched transaction is not always sent by the
-/// trader — fillers and batch settlers send on an order maker's behalf, and venue routers wrap
-/// the trade in their own contract — so netting must first decide whose flow to read.
-enum TraderShape {
-    /// The transaction sender is the trader: net its flow (direct solver swaps).
+/// Whose net flow is the trade. Fillers and batch settlers send on a maker's behalf, and
+/// venue routers wrap the trade in their own contract, so netting first picks the address
+/// to net.
+enum TraderRole {
+    /// The transaction sender (direct solver swaps).
     Sender,
-    /// The trader is an order maker, not the sender: either the tx was
-    /// discovered via a known solver log (`tx.to` is a rotating filler) or
-    /// `tx.to` is a batch settler entered by a solver.
+    /// An order maker — the sender is a filler or batch settler acting on its behalf.
     Maker,
-    /// The sender is the trader, but it entered through a venue platform's own contract
-    /// (Relay's router, `MetaMask`'s Swap Router) which then calls the solver inside the same
-    /// transaction. Decoding is still sender netting, plus that venue's corrections — its fee
-    /// skim is backed out, and its contract overhead is excluded from gas accounting — so the
-    /// recovered swap is what the venue actually asked the solver for.
+    /// The sender, entered through a venue's contract: sender netting plus that venue's
+    /// corrections (fee back-out, gas scoping).
     Venue(&'static dyn venues::VenueKnowledge),
 }
 
 /// Classify whose net flow is the trade. Assumes the transaction already matched (see
 /// `matching`): an entry point that is neither a venue nor otherwise known can only have
 /// matched via a solver log, which is a filler-initiated intent fill.
-fn trader_shape(entry_point: Address, registry: &Registry) -> TraderShape {
+fn trader_role(entry_point: Address, registry: &Registry) -> TraderRole {
     if let Some(venue) = registry
         .venue_name(entry_point)
         .and_then(venues::from_name)
     {
-        return TraderShape::Venue(venue);
+        return TraderRole::Venue(venue);
     }
     // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is an
     // order maker's net flow — decoded like a filler-initiated intent fill.
     if registry.is_batch_settler(entry_point) {
-        return TraderShape::Maker;
+        return TraderRole::Maker;
     }
     if registry.is_known(entry_point) {
-        return TraderShape::Sender;
+        return TraderRole::Sender;
     }
-    TraderShape::Maker
+    TraderRole::Maker
 }
 
 /// Net the sender's flow. When the sender nets nothing, fall back to the contract the
@@ -105,13 +100,16 @@ pub(crate) fn sender_flow(
     transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
-) -> Option<Flow> {
+) -> Option<TraderFlow> {
     transfer_ledger
         .net_swap(sender)
-        .map(|swap| Flow { gas_scope: GasScope::Receipt, ..Flow::without_fees(sender, swap) })
+        .map(|swap| TraderFlow {
+            gas_scope: GasScope::WholeTransaction,
+            ..TraderFlow::without_fees(sender, swap)
+        })
         .or_else(|| {
             transfer_ledger
                 .net_swap(entry_point)
-                .map(|swap| Flow::without_fees(entry_point, swap))
+                .map(|swap| TraderFlow::without_fees(entry_point, swap))
         })
 }

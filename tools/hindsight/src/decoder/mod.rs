@@ -272,7 +272,7 @@ impl<P: Provider> Decoder<P> {
         // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
         // which gas that is — see [`GasScope`].
         let settled_gas = match flow.gas_scope {
-            GasScope::Receipt => Some(U256::from(receipt.gas_used)),
+            GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
             GasScope::SolverFrame => route_gas(root, registry),
             GasScope::NotCharged => None,
         }
