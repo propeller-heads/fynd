@@ -64,8 +64,10 @@ accepted, the result never scores below the water-fill allocation.
 
 Discovery unions two sources so no useful route is dropped:
 
-1. **Exhaustive BFS** enumeration of paths between the input and output tokens (the Most Liquid path
-   finder), ranked by a spot-price × depth heuristic.
+1. **Exhaustive BFS** enumeration of paths between the input and output tokens, ranked by a
+   spot-price × depth heuristic. This reuses [Most Liquid](most-liquid.md): `find_paths` for
+   enumeration, `try_score_path` for the ranking heuristic, and `simulate_path` for the full-amount
+   single-path simulation. Water-fill also runs on the same `DepthAndPrice` weighted graph.
 2. **Bounded amount-aware search** — a Penumbra-inspired frontier search (the discovery section of
    `water_fill.rs`), expanding from the sell token with the full amount and preferring edges into the
    output token, configured `connector_tokens`, or a default anchor set. Its anchors include the
@@ -75,6 +77,10 @@ Discovery unions two sources so no useful route is dropped:
 The bounded set is unioned ahead of the heuristic-ranked set, so connector and anchor routes survive
 the spot × depth truncation. Discovery failure in the bounded search is not fatal: the exhaustive
 set already guarantees a route.
+
+> **Dependency:** water-fill's discovery and single-path ranking are built on Most Liquid's
+> `find_paths`, `try_score_path`, and `simulate_path`. Changing those Most Liquid internals changes
+> water-fill's candidate set and ranking — keep both in mind when editing either algorithm.
 
 ## Route assembly
 
@@ -119,5 +125,6 @@ in the search even if they are not part of the default anchor set.
 | File | Purpose |
 | --- | --- |
 | `fynd-core/src/algorithm/water_fill.rs` | `WaterFillAlgorithm`: portfolio allocation (floor, refined disjoint, fill-and-spill) and bounded candidate discovery |
+| `fynd-core/src/algorithm/most_liquid.rs` | [Most Liquid](most-liquid.md) path finder reused for discovery and ranking: `find_paths`, `try_score_path`, `simulate_path`, and the `DepthAndPrice` graph weight |
 | `fynd-core/src/algorithm/split_primitives.rs` | Shared-hop merging and executable route assembly |
 | `fynd-core/src/worker_pool/registry.rs` | Maps `"water_fill"` to `WaterFillAlgorithm` |
