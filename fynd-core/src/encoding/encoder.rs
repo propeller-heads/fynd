@@ -59,11 +59,11 @@ impl TryFrom<&OrderQuote> for Solution {
             SolveError::FailedEncoding("successful quote must have a route".to_string())
         })?;
 
-        // TODO: when a swap in this route is exclusive, read its `Swap::committed_amount_out`
-        // and carry it into the encoded `Solution` so the on-chain exclusive hook can be
-        // parameterised — the user is committed to that amount while the executed route yields the
-        // surplus. Hook calldata/signature encoding is a separate later extension, out of scope
-        // here.
+        // TODO(ENG-6134): when a swap in this route is exclusive, read its
+        // `Swap::committed_amount_out` and carry it into the encoded `Solution` so the
+        // on-chain exclusive hook can be parameterised — the user is committed to that
+        // amount while the executed route yields the surplus. Hook calldata/signature
+        // encoding is a separate later extension, out of scope here.
 
         let token_in = route
             .input_token()

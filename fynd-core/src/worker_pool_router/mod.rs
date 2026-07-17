@@ -678,10 +678,12 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
 /// public market.
 ///
-/// Each exclusive leg's `committed_amount_out` is its realized output reduced by the same
-/// proportion as the order-level reduction; the protocol captures the difference. The per-leg
-/// attribution formula and the bound that keeps the user at or above the committed reference are
-/// derived in the design plan.
+/// Per-leg attribution: each exclusive leg's `committed_amount_out` is its realized output scaled
+/// by `committed_reference / realized_route_output` — the same ratio by which the order-level
+/// output is pinned down. The protocol captures the difference between each leg's realized and
+/// committed output. Because the pinned `amount_out` equals the committed reference and only wins
+/// when the exclusive route's realized output strictly exceeds it, the user is always quoted at
+/// least the public-market output.
 fn combine_with_surplus(
     responses: &OrderResponses,
     pool_roles: &HashMap<String, PoolRole>,
@@ -781,13 +783,17 @@ fn combine_with_surplus(
     result
 }
 
-/// v1 constraint: rejects exclusive-access routes unless every exclusive leg is the terminal leg of
-/// its path. This keeps per-leg surplus attribution exact (no inverse simulation needed). Mid-route
-/// exclusive legs and multiple exclusive legs per path are deferred to a future version.
+/// Returns `true` only for routes carrying at least one exclusive leg where every exclusive leg is
+/// the terminal leg of its path.
 ///
-/// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
-/// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
-/// representation but would need revisiting if routes gain explicit path-boundary markers.
+/// Returns `false` for routes with no exclusive leg, an empty route, no route at all, or any
+/// exclusive leg that sits mid-path.
+///
+/// The terminal-only constraint is a v1 restriction: it keeps per-leg surplus attribution exact
+/// (no inverse simulation needed). Mid-route exclusive legs and multiple exclusive legs per path
+/// are deferred to a future version. Path boundaries are detected by checking whether the next
+/// swap's `token_in` differs from the current swap's `token_out` — correct for Fynd's sequential
+/// route representation, but would need revisiting if routes gain explicit path-boundary markers.
 fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
