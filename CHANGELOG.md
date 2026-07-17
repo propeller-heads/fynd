@@ -1,3 +1,10 @@
+## [0.91.0](https://github.com/propeller-heads/fynd/compare/0.90.3...0.91.0) (2026-07-17)
+
+
+### Features
+
+* record per-pool queue wait and depth metrics at task pickup ([bef8139](https://github.com/propeller-heads/fynd/commit/bef8139b527e6b0db3094ac95032775bc9902ebf))
+
 ## [0.90.3](https://github.com/propeller-heads/fynd/compare/0.90.2...0.90.3) (2026-07-17)
 
 
