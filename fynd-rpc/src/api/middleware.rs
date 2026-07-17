@@ -5,9 +5,9 @@
 //! `http_requests_total{endpoint, status, user_identity, user_plan, client_version}`
 //! (counter carrying the per-client dimensions).
 //!
-//! `User-Identity` and `X-User-Plan` are injected by the ph-nginx-auth proxy
-//! (`fynd-api-auth` release) in hosted deployments; direct traffic (kube probes, staging
-//! without the proxy) falls back to bounded sentinel values.
+//! `User-Identity` and `X-User-Plan` are injected by an upstream auth proxy in hosted
+//! deployments; direct traffic (health probes, deployments without the proxy) falls back
+//! to bounded sentinel values.
 
 use std::time::Instant;
 
