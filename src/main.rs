@@ -56,7 +56,9 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tycho_simulation::{tycho_common::models::TvlThresholdTier, utils::default_blocklist};
+use tycho_simulation::{
+    tycho_common::models::chain_config::TvlThresholdTier, utils::default_blocklist,
+};
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();

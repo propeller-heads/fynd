@@ -8,7 +8,7 @@ use fynd_core::{
 };
 use fynd_rpc::parse_chain;
 use tracing::info;
-use tycho_simulation::tycho_common::models::{Address, TvlThresholdTier};
+use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Address};
 
 /// Derives recommended connector tokens from live Tycho market data.
 ///
