@@ -41,6 +41,7 @@ use std::{
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use tracing::{debug, instrument};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
 };
@@ -244,6 +245,7 @@ impl WaterFillAlgorithm {
 
     /// Shared setup: enumerate + rank candidates, simulate at full amount, pick best single path.
     #[allow(clippy::type_complexity)]
+    #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
         &self,
         graph: &'a StableDiGraph<DepthAndPrice>,
@@ -398,6 +400,11 @@ impl WaterFillAlgorithm {
             .map(|(idx, _)| paths[idx].clone())
             .collect();
 
+        debug!(
+            candidate_paths = ordered.len(),
+            elapsed_ms = start.elapsed().as_millis(),
+            "water-fill discovery + full-amount ranking"
+        );
         Ok((ordered, market, gas_price, best_single, token_prices))
     }
 }
@@ -410,6 +417,7 @@ impl Algorithm for WaterFillAlgorithm {
         "water_fill"
     }
 
+    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
     async fn find_best_route(
         &self,
         graph: &Self::GraphType,
@@ -461,6 +469,7 @@ impl Algorithm for WaterFillAlgorithm {
         }
 
         // Return the best candidate if it beats the single path, else the single path.
+        let candidate_count = candidates.len();
         let mut best_net = best_single.net_amount_out().clone();
         let mut best_candidate: Option<SplitCandidate> = None;
         for cand in candidates {
@@ -470,6 +479,14 @@ impl Algorithm for WaterFillAlgorithm {
                 best_candidate = Some(cand);
             }
         }
+        let split_won = best_candidate.is_some();
+        debug!(
+            candidate_count,
+            split_won,
+            elapsed_ms = start.elapsed().as_millis(),
+            "water-fill portfolio selected {}",
+            if split_won { "split candidate" } else { "single path" }
+        );
         match best_candidate {
             Some(cand) => Ok(RouteResult::new(cand.route, best_net, gas_price)),
             None => Ok(best_single),
