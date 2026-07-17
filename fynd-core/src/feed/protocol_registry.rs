@@ -6,10 +6,13 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
-            filters::{balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter},
+            filters::{
+                balancer_v2_pool_filter, curve_filter, erc4626_filter, fluid_v1_paused_pools_filter,
+            },
             fluid::FluidV1,
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
@@ -92,15 +95,14 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
             }
             "vm:curve" => {
-                // Deliberately the VM adapter, not the native CurveState (tycho-simulation
-                // 0.324.0, switched in fba3c223): under CurveState, hindsight shows curve-routed
-                // quotes systematically overestimating output vs settlement (median +43 bps,
-                // 93% "win" rate vs 53% elsewhere). Full-EVM simulation until the mispricing —
-                // in CurveState's math or in the indexed curve state — is found and fixed.
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
+                // The hybrid CurveState with tycho-simulation's own curve_filter, which drops
+                // the pools CurveState cannot quote correctly (oracle/rate-bearing/rebasing
+                // coins) — the source of the overestimation that forced the temporary
+                // full-EVM fallback (see #318); fixed upstream in tycho-simulation 0.338.0.
+                builder = builder.exchange::<CurveState>(
                     "vm:curve",
                     tvl_filter.clone(),
-                    None,
+                    Some(curve_filter),
                 );
             }
             "uniswap_v4_hooks" => {
