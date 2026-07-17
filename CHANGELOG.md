@@ -1,3 +1,10 @@
+## [0.90.3](https://github.com/propeller-heads/fynd/compare/0.90.2...0.90.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* restore native CurveState using upstream curve_filter ([79c616b](https://github.com/propeller-heads/fynd/commit/79c616b03afed2261ccee74f9f28205da1b969d2)), closes [#318](https://github.com/propeller-heads/fynd/issues/318)
+
 ## [0.90.2](https://github.com/propeller-heads/fynd/compare/0.90.1...0.90.2) (2026-07-16)
 
 
