@@ -19,7 +19,7 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::MarketData,
-        permission::PermissionContext,
+        scope::LiquidityScope,
     },
     graph::EdgeWeightUpdaterWithDerived,
     types::internal::SolveTask,
@@ -46,14 +46,14 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// Permission scoping for this pool's workers (default: include all, no filtering).
+    /// Liquidity scope for this pool's workers (default: all liquidity, no filtering).
     ///
-    /// `IncludeAll` is safe as the default because it only applies when no `PermissionPolicy` is
+    /// `All` is safe as the default because it only applies when no `ExclusivityPolicy` is
     /// configured — meaning no exclusive components exist to exclude. When a policy is set,
     /// `FyndBuilder::assemble_components` always constructs
     /// `PublicOnly(policy)` for `Public`-role pools, so this default is never relied on in
     /// that path.
-    permission: PermissionContext,
+    scope: LiquidityScope,
 }
 
 impl WorkerPoolConfig {
@@ -71,7 +71,7 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
-            permission: PermissionContext::IncludeAll,
+            scope: LiquidityScope::All,
         }
     }
 }
@@ -122,7 +122,7 @@ impl WorkerPool {
             .to_string();
 
         // Spawn workers
-        let permission = config.permission.clone();
+        let scope = config.scope.clone();
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
             pool_name: name.clone(),
@@ -134,7 +134,7 @@ impl WorkerPool {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            permission,
+            scope,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -266,12 +266,12 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the permission scoping for this pool's workers.
+    /// Sets the liquidity scope for this pool's workers.
     ///
     /// `PublicOnly(policy)` filters exclusive components from each
-    /// worker's graph; `IncludeAll` (surplus pools, the default) keeps every component.
-    pub fn permission(mut self, permission: PermissionContext) -> Self {
-        self.config.permission = permission;
+    /// worker's graph; `All` (exclusive-access pools, the default) keeps every component.
+    pub fn scope(mut self, scope: LiquidityScope) -> Self {
+        self.config.scope = scope;
         self
     }
 

@@ -36,7 +36,7 @@ use crate::{
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
-        permission::{PermissionContext, PermissionPolicy},
+        scope::{ExclusivityPolicy, LiquidityScope},
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -159,7 +159,8 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool role: `public` (default) or `all` (includes exclusive liquidity).
+    /// Pool role: `public` (default) or `exclusive_access` (routes through exclusive
+    /// liquidity as well).
     #[serde(default)]
     role: PoolRole,
 }
@@ -190,7 +191,7 @@ impl PoolConfig {
         self.role
     }
 
-    /// Sets the pool role (public or all).
+    /// Sets the pool role (public or exclusive-access).
     pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self
@@ -367,7 +368,7 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
-    /// Pool role: public (default) or all.
+    /// Pool role: public (default) or exclusive-access.
     role: PoolRole,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
@@ -422,8 +423,9 @@ pub struct FyndBuilder {
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     /// Predicate identifying exclusive components. Shared by all pools: public pools exclude
-    /// matching components, the surplus pool includes them. `None` ⇒ no pool filters anything.
-    permission_policy: Option<PermissionPolicy>,
+    /// matching components, exclusive-access pools include them. `None` ⇒ no pool filters
+    /// anything.
+    exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl FyndBuilder {
@@ -457,7 +459,7 @@ impl FyndBuilder {
             price_guard_enabled: false,
             price_providers: Vec::new(),
             pending_indexers: Vec::new(),
-            permission_policy: None,
+            exclusivity_policy: None,
         }
     }
 
@@ -646,16 +648,16 @@ impl FyndBuilder {
 
     /// Sets the predicate that classifies components as exclusive.
     ///
-    /// Public pools exclude matching components from their graphs; the surplus pool includes them.
-    /// Without a policy, no pool performs any permission filtering.
-    pub fn permission_policy<F>(mut self, predicate: F) -> Self
+    /// Public pools exclude matching components from their graphs; exclusive-access pools
+    /// include them. Without a policy, no pool filters anything.
+    pub fn exclusivity_policy<F>(mut self, predicate: F) -> Self
     where
         F: Fn(&tycho_simulation::tycho_common::models::protocol::ProtocolComponent) -> bool
             + Send
             + Sync
             + 'static,
     {
-        self.permission_policy = Some(PermissionPolicy::new(predicate));
+        self.exclusivity_policy = Some(ExclusivityPolicy::new(predicate));
         self
     }
 
@@ -744,9 +746,9 @@ impl FyndBuilder {
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
 
-        // Shared across all pools: public pools exclude exclusive components, the surplus pool
-        // includes them. `None` ⇒ no pool filters anything (original behaviour).
-        let permission_policy = self.permission_policy.take();
+        // Shared across all pools: public pools exclude exclusive components, exclusive-access
+        // pools include them. `None` ⇒ no pool filters anything (original behaviour).
+        let exclusivity_policy = self.exclusivity_policy.take();
         let pools = std::mem::take(&mut self.pools);
 
         for pool_entry in pools {
@@ -754,11 +756,12 @@ impl FyndBuilder {
             let derived_rx = derived_event_tx.subscribe();
 
             // The router-facing role doubles as the per-worker scope: only a public pool with a
-            // policy filters; the surplus pool (and any pool without a policy) includes everything.
+            // policy filters; an exclusive-access pool (and any pool without a policy) includes
+            // everything.
             let pool_role = pool_entry.role();
-            let permission = match (pool_role, permission_policy.clone()) {
-                (PoolRole::Public, Some(policy)) => PermissionContext::PublicOnly(policy),
-                _ => PermissionContext::IncludeAll,
+            let scope = match (pool_role, exclusivity_policy.clone()) {
+                (PoolRole::Public, Some(policy)) => LiquidityScope::PublicOnly(policy),
+                _ => LiquidityScope::All,
             };
 
             let (worker_pool, task_handle) = match pool_entry {
@@ -789,7 +792,7 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .permission(permission);
+                        .scope(scope);
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -809,7 +812,7 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .permission(permission);
+                        .scope(scope);
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -866,8 +869,8 @@ impl FyndBuilder {
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
 
-        if let Some(ref policy) = permission_policy {
-            router = router.with_permission_policy(policy.clone());
+        if let Some(ref policy) = exclusivity_policy {
+            router = router.with_exclusivity_policy(policy.clone());
         }
 
         if self.price_guard_enabled {

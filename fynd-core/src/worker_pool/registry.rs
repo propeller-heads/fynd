@@ -25,7 +25,7 @@ use crate::{
         MostLiquidAlgorithm, PathFrankWolfeAlgorithm, WaterFillAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::MarketData, permission::PermissionContext},
+    feed::{events::MarketEvent, market_data::MarketData, scope::LiquidityScope},
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
 };
@@ -59,11 +59,13 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
-    /// Permission scoping applied to every worker in this pool.
+    /// Liquidity scope applied to every worker in this pool.
     ///
-    /// Cloned per worker so each gets its own [`PermissionContext`]. Defaults to "include all"
-    /// (no filtering) for public pools without permission configuration.
-    pub permission: PermissionContext,
+    /// Cloned per worker so each gets its own [`LiquidityScope`]. Defaults to all liquidity
+    /// (no filtering) for public pools without an [`ExclusivityPolicy`] configured.
+    ///
+    /// [`ExclusivityPolicy`]: crate::feed::scope::ExclusivityPolicy
+    pub scope: LiquidityScope,
 }
 
 /// Error returned when algorithm registration fails.
@@ -169,7 +171,7 @@ where
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
-        let permission = params.permission.clone();
+        let scope = params.scope.clone();
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -189,7 +191,7 @@ where
                         worker_id,
                         pool_name,
                     )
-                    .with_permission(permission);
+                    .with_scope(scope);
 
                     worker.initialize_graph().await;
                     worker
@@ -268,7 +270,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
-            permission: PermissionContext::IncludeAll,
+            scope: LiquidityScope::All,
         }
     }
 
@@ -307,7 +309,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            permission: PermissionContext::IncludeAll,
+            scope: LiquidityScope::All,
         };
 
         let workers =
@@ -349,7 +351,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                permission: PermissionContext::IncludeAll,
+                scope: LiquidityScope::All,
             });
         assert!(registry_err.is_err());
 
@@ -377,7 +379,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                permission: PermissionContext::IncludeAll,
+                scope: LiquidityScope::All,
             });
 
         assert!(workers.is_ok());
@@ -406,7 +408,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            permission: PermissionContext::IncludeAll,
+            scope: LiquidityScope::All,
         };
 
         let workers =

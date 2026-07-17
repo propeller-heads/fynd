@@ -26,7 +26,7 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         market_data::MarketData,
-        permission::PermissionContext,
+        scope::LiquidityScope,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
@@ -69,12 +69,12 @@ where
     worker_id: usize,
     /// Pool name (used as the `pool` metric label).
     pool_name: String,
-    /// Permission scoping for this worker's local graph.
+    /// Liquidity scope for this worker's local graph.
     ///
-    /// `IncludeAll` (the default) preserves the original non-filtered behaviour. A public worker
-    /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; a
-    /// surplus worker uses `IncludeAll`.
-    permission: PermissionContext,
+    /// `All` (the default) preserves the original non-filtered behaviour. A public worker
+    /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; an
+    /// exclusive-access worker uses `All`.
+    scope: LiquidityScope,
 }
 
 impl<A> SolverWorker<A>
@@ -112,15 +112,15 @@ where
             initialized: false,
             worker_id,
             pool_name,
-            permission: PermissionContext::IncludeAll,
+            scope: LiquidityScope::All,
         }
     }
 
-    /// Configures this worker's permission scoping.
+    /// Configures this worker's liquidity scope.
     ///
-    /// Public workers use `PublicOnly(policy)`; surplus workers use `IncludeAll`.
-    pub(crate) fn with_permission(mut self, permission: PermissionContext) -> Self {
-        self.permission = permission;
+    /// Public workers use `PublicOnly(policy)`; exclusive-access workers use `All`.
+    pub(crate) fn with_scope(mut self, scope: LiquidityScope) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -133,7 +133,7 @@ where
             // read lock on market data
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
-            self.permission
+            self.scope
                 .filter_topology(market.base_market_state(), topology)
         };
 
@@ -146,7 +146,7 @@ where
     pub async fn process_event(&mut self, event: MarketEvent) {
         let event = {
             let market = self.market_data.read().await;
-            self.permission
+            self.scope
                 .scope_event(market.base_market_state(), event)
         };
         match event {

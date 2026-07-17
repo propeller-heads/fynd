@@ -41,7 +41,7 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, feed::permission::PermissionPolicy, price_guard::guard::PriceGuard,
+    encoding::encoder::Encoder, feed::scope::ExclusivityPolicy, price_guard::guard::PriceGuard,
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
     QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams, SurplusInfo,
 };
@@ -49,10 +49,12 @@ use crate::{
 /// The role a solver pool (a group of workers) plays in a quote.
 ///
 /// A `Public` worker routes only through public liquidity and provides the committed (quoted)
-/// reference output. An `All` worker also routes through exclusive components and may beat that
-/// reference, in which case the protocol captures the surplus.
+/// reference output. An `ExclusiveAccess` worker routes through all liquidity, public included,
+/// plus exclusive components, and may beat that reference — in which case the protocol captures
+/// the surplus.
 ///
-/// Serialized in lowercase (`"public"` / `"all"`) in `worker_pools.toml` via [`PoolConfig`].
+/// Serialized in snake_case (`"public"` / `"exclusive_access"`) in `worker_pools.toml` via
+/// [`PoolConfig`].
 ///
 /// [`PoolConfig`]: crate::PoolConfig
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,8 +63,9 @@ pub enum PoolRole {
     /// Routes through public liquidity only. Establishes the committed reference output. Default.
     #[default]
     Public,
-    /// Routes through all liquidity, including exclusive components; source of surplus quotes.
-    All,
+    /// Routes through all liquidity, public and exclusive components alike; candidates from
+    /// this role may capture surplus above the public reference.
+    ExclusiveAccess,
 }
 
 /// Handle to a solver pool for dispatching orders.
@@ -82,8 +85,8 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, role: PoolRole::Public }
     }
 
-    /// Sets the pool's role (e.g. [`PoolRole::All`] for the pool that includes exclusive
-    /// liquidity).
+    /// Sets the pool's role (e.g. [`PoolRole::ExclusiveAccess`] for a pool that routes through
+    /// exclusive liquidity as well).
     pub fn with_role(mut self, role: PoolRole) -> Self {
         self.role = role;
         self
@@ -121,14 +124,14 @@ impl OrderResponses {
     /// Returns a copy keeping only candidates from public-role pools.
     ///
     /// These form the committed reference and the ranked fallback chain (ranked by `rank_quotes`,
-    /// consumed by the price guard); surplus-pool candidates are overlaid separately by
+    /// consumed by the price guard); exclusive-access candidates are overlaid separately by
     /// `combine_with_surplus`. `failed_solvers` is retained so placeholder construction is
     /// unchanged.
     fn public_only(&self, pool_roles: &HashMap<String, PoolRole>) -> OrderResponses {
         let quotes = self
             .quotes
             .iter()
-            .filter(|(pool, _)| pool_roles.get(pool) != Some(&PoolRole::All))
+            .filter(|(pool, _)| pool_roles.get(pool) != Some(&PoolRole::ExclusiveAccess))
             .cloned()
             .collect();
         OrderResponses {
@@ -150,9 +153,9 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
-    /// Predicate identifying the exclusive pools in a route. `None` when no exclusive
-    /// pools are configured.
-    permission_policy: Option<PermissionPolicy>,
+    /// Predicate identifying the exclusive legs in exclusive-access routes. `None` when no
+    /// exclusive components are configured.
+    exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl WorkerPoolRouter {
@@ -162,12 +165,12 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None, permission_policy: None }
+        Self { solver_pools, config, encoder, price_guard: None, exclusivity_policy: None }
     }
 
-    /// Attaches the permission policy used to identify exclusive legs in surplus routes.
-    pub fn with_permission_policy(mut self, policy: PermissionPolicy) -> Self {
-        self.permission_policy = Some(policy);
+    /// Attaches the policy used to identify exclusive legs in exclusive-access routes.
+    pub fn with_exclusivity_policy(mut self, policy: ExclusivityPolicy) -> Self {
+        self.exclusivity_policy = Some(policy);
         self
     }
 
@@ -225,25 +228,27 @@ impl WorkerPoolRouter {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
         }
 
-        // Map each pool name to its role so candidate quotes can be split into public vs surplus.
+        // Map each pool name to its role so candidate quotes can be split into public vs
+        // exclusive-access.
         let pool_roles: HashMap<String, PoolRole> = self
             .solver_pools
             .iter()
             .map(|p| (p.name().to_string(), p.role()))
             .collect();
-        let has_surplus_pool = pool_roles
+        let has_exclusive_access_pool = pool_roles
             .values()
-            .any(|r| *r == PoolRole::All);
+            .any(|r| *r == PoolRole::ExclusiveAccess);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When an `All`-role pool is configured, the surplus winner is overlaid
+        // fallback chain. When an `ExclusiveAccess`-role pool is configured, the winning
+        // exclusive-access candidate is overlaid
         // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
         // preserved.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
-                if has_surplus_pool {
+                if has_exclusive_access_pool {
                     let public_ranked =
                         self.rank_quotes(&responses.public_only(&pool_roles), request.options());
                     combine_with_surplus(
@@ -251,7 +256,7 @@ impl WorkerPoolRouter {
                         &pool_roles,
                         request.options(),
                         public_ranked,
-                        self.permission_policy.as_ref(),
+                        self.exclusivity_policy.as_ref(),
                     )
                 } else {
                     self.rank_quotes(&responses, request.options())
@@ -346,13 +351,13 @@ impl WorkerPoolRouter {
             .collect();
 
         // Pre-compute which pool names have role All, for role-aware early return gating.
-        let surplus_pool_names: HashSet<String> = self
+        let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
-            .filter(|p| p.role() == PoolRole::All)
+            .filter(|p| p.role() == PoolRole::ExclusiveAccess)
             .map(|p| p.name().to_string())
             .collect();
-        let has_surplus_pool = !surplus_pool_names.is_empty();
+        let has_exclusive_access_pool = !exclusive_access_pool_names.is_empty();
 
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
@@ -362,7 +367,7 @@ impl WorkerPoolRouter {
             .map(|p| p.name().to_string())
             .collect();
         let mut has_public_response = false;
-        let mut has_surplus_response = false;
+        let mut has_exclusive_access_response = false;
 
         // Collect responses with timeout
         loop {
@@ -393,8 +398,8 @@ impl WorkerPoolRouter {
                             // Remove from remaining
                             remaining_pools.remove(&pool_name);
 
-                            if surplus_pool_names.contains(&pool_name) {
-                                has_surplus_response = true;
+                            if exclusive_access_pool_names.contains(&pool_name) {
+                                has_exclusive_access_response = true;
                             } else {
                                 has_public_response = true;
                             }
@@ -402,12 +407,13 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // Role-aware early return: when a surplus pool is configured, only
-                            // fire once we have ≥1 public AND the surplus pool (so the surplus
-                            // overlay has both inputs). Without a surplus pool, use pure
+                            // Role-aware early return: when an exclusive-access pool is
+                            // configured, only fire once we have ≥1 public AND the
+                            // exclusive-access pool (so the surplus overlay has both inputs).
+                            // Without an exclusive-access pool, use pure
                             // count-based gating (original behaviour).
-                            let role_ready = if has_surplus_pool {
-                                has_public_response && has_surplus_response
+                            let role_ready = if has_exclusive_access_pool {
+                                has_public_response && has_exclusive_access_response
                             } else {
                                 true
                             };
@@ -427,11 +433,12 @@ impl WorkerPoolRouter {
                         }
                         Some((pool_name, Err(e))) => {
                             remaining_pools.remove(&pool_name);
-                            // A failed surplus pool still counts as "responded" for gating — we
-                            // know it won't produce a surplus quote, so the public pool can
+                            // A failed exclusive-access pool still counts as "responded" for
+                            // gating — we know it won't produce a surplus quote, so the public
+                            // pool can
                             // early-return without waiting for a result that will never come.
-                            if surplus_pool_names.contains(&pool_name) {
-                                has_surplus_response = true;
+                            if exclusive_access_pool_names.contains(&pool_name) {
+                                has_exclusive_access_response = true;
                             }
                             debug!(
                                 pool = %pool_name,
@@ -637,17 +644,17 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
     }
 }
 
-/// Builds the final ranked quote list for one order by deciding whether the surplus route should
-/// execute instead of the best public route.
+/// Builds the final ranked quote list for one order by deciding whether an exclusive-access
+/// route should execute instead of the best public route.
 ///
 /// Inputs: `public_ranked` is the ranking of public-pool quotes from `rank_quotes`; its head is
 /// the committed reference — the output the user is quoted no matter which route executes.
-/// `responses` additionally holds the candidates from `All`-role pools (routes that may use
-/// exclusive components).
+/// `responses` additionally holds the candidates from `ExclusiveAccess`-role pools (routes that
+/// may use exclusive components).
 ///
-/// If the best surplus candidate beats the committed reference net-of-gas, this returns a new
-/// list whose head is the executed surplus quote, followed by every public candidate as
-/// price-guard fallbacks. The executed quote is the surplus candidate with:
+/// If the best exclusive-access candidate beats the committed reference net-of-gas, this returns
+/// a new list whose head is the pinned surplus quote, followed by every public candidate as
+/// price-guard fallbacks. The pinned quote is the winning candidate with:
 /// - `amount_out` pinned to the committed reference (the user is quoted the public output),
 /// - `Swap::committed_amount_out` set on each exclusive leg (consumed by the encoder), and
 /// - an order-level [`SurplusInfo`] attached (observability).
@@ -664,9 +671,9 @@ fn combine_with_surplus(
     pool_roles: &HashMap<String, PoolRole>,
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
-    permission_policy: Option<&PermissionPolicy>,
+    exclusivity_policy: Option<&ExclusivityPolicy>,
 ) -> Vec<OrderQuote> {
-    let Some(policy) = permission_policy else {
+    let Some(policy) = exclusivity_policy else {
         return public_ranked;
     };
 
@@ -675,12 +682,11 @@ fn combine_with_surplus(
         _ => return public_ranked,
     };
 
-    // Find best surplus candidate from All-role pools, respecting max_gas and route shape
-    // constraints.
-    let best_surplus = responses
+    // Find the best exclusive-access candidate, respecting max_gas and route shape constraints.
+    let best_exclusive_access = responses
         .quotes
         .iter()
-        .filter(|(pool, _)| pool_roles.get(pool) == Some(&PoolRole::All))
+        .filter(|(pool, _)| pool_roles.get(pool) == Some(&PoolRole::ExclusiveAccess))
         .filter(|(_, q)| q.status() == QuoteStatus::Success)
         .filter(|(_, q)| {
             options
@@ -695,16 +701,16 @@ fn combine_with_surplus(
         })
         .map(|(_, q)| q);
 
-    let Some(surplus_quote) = best_surplus else {
+    let Some(candidate) = best_exclusive_access else {
         return public_ranked;
     };
 
-    // The surplus route must beat the committed reference net-of-gas.
-    if surplus_quote.amount_out_net_gas() <= committed.amount_out_net_gas() {
+    // The candidate route must beat the committed reference net-of-gas.
+    if candidate.amount_out_net_gas() <= committed.amount_out_net_gas() {
         return public_ranked;
     }
 
-    let realized_route_out = surplus_quote.amount_out();
+    let realized_route_out = candidate.amount_out();
     let committed_route_out = committed.amount_out();
 
     if realized_route_out <= committed_route_out {
@@ -713,11 +719,11 @@ fn combine_with_surplus(
 
     let surplus_amount = realized_route_out - committed_route_out;
 
-    // Build the executed quote: clone the surplus candidate, stamp per-leg committed amounts,
-    // pin amount_out to committed, attach SurplusInfo.
-    let mut executed = surplus_quote.clone();
+    // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
+    // attach SurplusInfo.
+    let mut pinned_surplus = candidate.clone();
 
-    if let Some(route) = executed.route_mut() {
+    if let Some(route) = pinned_surplus.route_mut() {
         for swap in route.swaps_mut() {
             if policy.is_exclusive(swap.protocol_component()) {
                 // Proportional reduction: committed_leg = leg.amount_out * committed / realized
@@ -728,11 +734,11 @@ fn combine_with_surplus(
         }
     }
 
-    executed.set_amount_out(committed_route_out.clone());
+    pinned_surplus.set_amount_out(committed_route_out.clone());
 
     // Recompute amount_out_net_gas relative to committed output.
-    let gas_cost = if *surplus_quote.amount_out() >= *surplus_quote.amount_out_net_gas() {
-        surplus_quote.amount_out() - surplus_quote.amount_out_net_gas()
+    let gas_cost = if *candidate.amount_out() >= *candidate.amount_out_net_gas() {
+        candidate.amount_out() - candidate.amount_out_net_gas()
     } else {
         BigUint::ZERO
     };
@@ -741,32 +747,32 @@ fn combine_with_surplus(
     } else {
         BigUint::ZERO
     };
-    executed.set_amount_out_net_gas(committed_net_gas);
+    pinned_surplus.set_amount_out_net_gas(committed_net_gas);
 
     let surplus_info = SurplusInfo::new(surplus_amount, committed_route_out.clone());
-    executed = executed.with_surplus(surplus_info);
+    pinned_surplus = pinned_surplus.with_surplus(surplus_info);
 
     debug_assert!(
-        executed.amount_out() >= committed.amount_out(),
+        pinned_surplus.amount_out() >= committed.amount_out(),
         "user output ({}) must be >= committed reference ({})",
-        executed.amount_out(),
+        pinned_surplus.amount_out(),
         committed.amount_out(),
     );
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
-    result.push(executed);
+    result.push(pinned_surplus);
     result.extend(public_ranked);
     result
 }
 
-/// v1 constraint: rejects surplus routes unless every exclusive leg is the terminal leg of its
-/// path. This keeps per-leg surplus attribution exact (no inverse simulation needed). Mid-route
+/// v1 constraint: rejects exclusive-access routes unless every exclusive leg is the terminal leg of
+/// its path. This keeps per-leg surplus attribution exact (no inverse simulation needed). Mid-route
 /// exclusive legs and multiple exclusive legs per path are deferred to a future version.
 ///
 /// Path boundaries are detected by checking whether the next swap's `token_in` differs from the
 /// current swap's `token_out`. This heuristic is correct for Fynd's sequential route
 /// representation but would need revisiting if routes gain explicit path-boundary markers.
-fn has_valid_exclusive_route(quote: &OrderQuote, policy: &PermissionPolicy) -> bool {
+fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
@@ -1366,8 +1372,8 @@ mod tests {
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
     }
 
-    fn exclusive_policy() -> PermissionPolicy {
-        PermissionPolicy::new(|c| c.protocol_system == "vm:exclusive")
+    fn exclusive_policy() -> ExclusivityPolicy {
+        ExclusivityPolicy::new(|c| c.protocol_system == "vm:exclusive")
     }
 
     /// Like `make_single_quote` but the swap uses an exclusive protocol component.
@@ -1473,41 +1479,42 @@ mod tests {
         SingleOrderQuote::new(quote, 5)
     }
 
-    /// Builds an `OrderResponses` with a public quote and a surplus quote (zero gas cost).
-    fn surplus_responses(public_out: u64, surplus_out: u64) -> OrderResponses {
+    /// Builds an `OrderResponses` with a public quote and an exclusive-access quote (zero gas
+    /// cost).
+    fn exclusive_access_responses(public_out: u64, exclusive_out: u64) -> OrderResponses {
         let public = make_public_quote_zero_gas(public_out)
             .order()
             .clone();
-        let surplus = make_exclusive_quote(surplus_out)
+        let exclusive_access = make_exclusive_quote(exclusive_out)
             .order()
             .clone();
         OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
                 ("public_pool".to_string(), public),
-                ("surplus_pool".to_string(), surplus),
+                ("exclusive_access_pool".to_string(), exclusive_access),
             ],
             failed_solvers: vec![],
         }
     }
 
-    fn surplus_pool_roles() -> HashMap<String, PoolRole> {
+    fn exclusive_access_pool_roles() -> HashMap<String, PoolRole> {
         HashMap::from([
             ("public_pool".to_string(), PoolRole::Public),
-            ("surplus_pool".to_string(), PoolRole::All),
+            ("exclusive_access_pool".to_string(), PoolRole::ExclusiveAccess),
         ])
     }
 
     #[test]
     fn combine_prefers_surplus_when_it_beats_public() {
-        let responses = surplus_responses(900, 950);
+        let responses = exclusive_access_responses(900, 950);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1523,14 +1530,14 @@ mod tests {
 
     #[test]
     fn combine_falls_back_to_public_when_surplus_does_not_beat_it() {
-        let responses = surplus_responses(950, 900);
+        let responses = exclusive_access_responses(950, 900);
         let public_ranked = vec![make_public_quote_zero_gas(950)
             .order()
             .clone()];
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1543,14 +1550,14 @@ mod tests {
 
     #[test]
     fn combine_stamps_per_leg_committed_amount_out() {
-        let responses = surplus_responses(900, 1000);
+        let responses = exclusive_access_responses(900, 1000);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1574,14 +1581,14 @@ mod tests {
     #[test]
     fn combine_user_never_short_changed() {
         // Surplus is only slightly better — verify the invariant holds.
-        let responses = surplus_responses(999, 1000);
+        let responses = exclusive_access_responses(999, 1000);
         let public_ranked = vec![make_public_quote_zero_gas(999)
             .order()
             .clone()];
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1596,13 +1603,13 @@ mod tests {
 
     #[test]
     fn combine_no_policy_returns_public_unchanged() {
-        let responses = surplus_responses(900, 950);
+        let responses = exclusive_access_responses(900, 950);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked.clone(),
             None,
@@ -1615,14 +1622,14 @@ mod tests {
     #[test]
     fn combine_equal_net_gas_falls_back_to_public() {
         // Equal net-of-gas does NOT count as "beats" — no surplus captured.
-        let responses = surplus_responses(900, 900);
+        let responses = exclusive_access_responses(900, 900);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &surplus_pool_roles(),
+            &exclusive_access_pool_roles(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),

@@ -12,15 +12,15 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: a surplus pool that includes exclusive liquidity. `role = "all"` lets this pool route
-# through exclusive components to capture surplus above the best public rate.
-# Public pools (role omitted; defaults to "public") never see exclusive components.
-# [pools.surplus]
+# Example: an exclusive-access pool. `role = "exclusive_access"` lets this pool route through
+# exclusive components (in addition to all public liquidity) to capture surplus above the best
+# public rate. Public pools (role omitted; defaults to "public") never see exclusive components.
+# [pools.exclusive_access]
 # algorithm = "bellman_ford"
 # num_workers = 3
 # max_hops = 2
 # timeout_ms = 500
-# role = "all"
+# role = "exclusive_access"
 
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).
