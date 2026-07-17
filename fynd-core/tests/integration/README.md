@@ -39,7 +39,7 @@ Same recording + same code = same derived data. A mismatch means code changed ho
 derived data is computed. Re-record if the change is intentional.
 
 **Timing violations**:
-Timing depends on hardware. The threshold derives from `worker_pools.toml` max timeout.
+Timing depends on hardware. The threshold derives from the `fynd.toml` pools' max timeout.
 CI runners may be slower — timing tests use a 3x multiplier.
 
 ## Fixtures

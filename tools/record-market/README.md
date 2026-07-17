@@ -46,7 +46,7 @@ can compute gas cost deductions without a live RPC connection.
 ## When to Re-record
 
 Re-run the recording tool when:
-- Algorithm or pool configuration changes (`worker_pools.toml`)
+- Algorithm or pool configuration changes (`fynd.toml` pools)
 - Solver code changes that intentionally improve quote quality
 - Fixtures are stale (the tool stores a timestamp; tests warn if > 7 days old)
 

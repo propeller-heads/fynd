@@ -1,12 +1,20 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use fynd_rpc::config::defaults;
+use fynd_core::config::{embedded_default, PartialConfig};
+use fynd_rpc::config::{defaults, WorkerPoolsConfig};
 
 #[cfg(feature = "metrics")]
 pub(crate) const METRICS_PORT: u16 = 9898;
 
 use crate::commands::derive_connector_tokens::DeriveConnectorTokensArgs;
+
+/// Builds help text for a config-layered flag, appending the real default value pulled
+/// from the embedded default config (used when neither the CLI nor a config file sets the
+/// field).
+fn cfg_help(text: &str, default: impl std::fmt::Display) -> String {
+    format!("{text} [default: {default}]")
+}
 
 /// Fynd - High-performance DEX solver built on Tycho
 ///
@@ -30,11 +38,21 @@ pub enum Commands {
 }
 
 /// Arguments for the `serve` subcommand.
+///
+/// Solver-tuning flags resolve field-by-field through three layers, highest priority first:
+/// explicit CLI flags, the local config file (`--config-file`, default `fynd.toml` if
+/// present), and the default config embedded in the binary.
 #[derive(clap::Args, PartialEq, Debug)]
 pub struct ServeArgs {
     /// Target chain (e.g. Ethereum)
     #[arg(short, long, default_value = "Ethereum")]
     pub chain: String,
+
+    /// Path to a local TOML config file overriding the embedded defaults. Any subset of
+    /// the config fields, same schema as the embedded default config.
+    /// When omitted, ./fynd.toml is used if present.
+    #[arg(long, env)]
+    pub config_file: Option<PathBuf>,
 
     /// HTTP host (e.g. 0.0.0.0)
     #[arg(long, default_value = defaults::HTTP_HOST, env)]
@@ -61,51 +79,64 @@ pub struct ServeArgs {
     pub rpc_url: Option<String>,
 
     /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3).
-    /// If omitted, all on-chain protocols are fetched from Tycho RPC.
-    /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
-    /// e.g., --protocols all_onchain,rfq:bebop.
-    #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
+    #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2",
+        help = cfg_help(
+            "List of protocols to index (comma-separated). \"all_onchain\" expands to all \
+             on-chain protocols fetched from Tycho RPC and can be combined with explicit \
+             entries, e.g. all_onchain,rfq:bebop",
+            embedded_default().protocols.join(","),
+        ))]
     pub protocols: Vec<String>,
 
-    /// Minimum TVL threshold in native token (e.g. ETH). Components below this threshold will be
-    /// removed from the market data. Defaults to a chain-specific value if not set.
+    /// Minimum TVL threshold in native token (e.g. ETH). Components below this threshold
+    /// will be removed from the market data. Defaults to a chain-specific value when no
+    /// config layer sets it.
     #[arg(long)]
     pub min_tvl: Option<f64>,
 
     /// TVL buffer ratio.
-    /// Used to avoid fluctuations caused by components hovering around a single threshold.
-    /// Default is 1.1 (10% buffer). For example, if the minimum TVL is 10 ETH, components are
-    /// added when TVL >= 10 ETH and removed when TVL drops below 10 / 1.1 ≈ 9.09 ETH.
-    #[arg(long, default_value_t = defaults::TVL_BUFFER_RATIO)]
-    pub tvl_buffer_ratio: f64,
+    #[arg(long,
+        help = cfg_help(
+            "TVL buffer ratio: avoids fluctuations from components hovering around a single \
+             threshold. With ratio 1.1 and minimum TVL 10 ETH, components are added when \
+             TVL >= 10 ETH and removed below 10 / 1.1 ≈ 9.09 ETH",
+            embedded_default().tvl_buffer_ratio,
+        ))]
+    pub tvl_buffer_ratio: Option<f64>,
 
     /// Minimum token quality filter.
-    #[arg(long, default_value_t = defaults::MIN_TOKEN_QUALITY)]
-    pub min_token_quality: i32,
+    #[arg(long, help = cfg_help("Minimum token quality filter", embedded_default().min_token_quality))]
+    pub min_token_quality: Option<i32>,
 
     /// Only include tokens traded within this many days.
-    #[arg(long, default_value_t = defaults::TRADED_N_DAYS_AGO)]
-    pub traded_n_days_ago: u64,
+    #[arg(long, help = cfg_help("Only include tokens traded within this many days", embedded_default().traded_n_days_ago))]
+    pub traded_n_days_ago: Option<u64>,
 
-    /// Gas price refresh interval in seconds
-    #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL.as_secs())]
-    pub gas_refresh_interval_secs: u64,
+    /// Gas price refresh interval in seconds.
+    #[arg(long, help = cfg_help("Gas price refresh interval in seconds", embedded_default().gas_refresh_interval_secs))]
+    pub gas_refresh_interval_secs: Option<u64>,
 
-    /// Reconnect delay on connection failure in seconds
-    #[arg(long, default_value_t = defaults::RECONNECT_DELAY.as_secs())]
-    pub reconnect_delay_secs: u64,
+    /// Reconnect delay on connection failure in seconds.
+    #[arg(long, help = cfg_help("Reconnect delay on connection failure in seconds", embedded_default().reconnect_delay_secs))]
+    pub reconnect_delay_secs: Option<u64>,
 
-    /// Worker router timeout in milliseconds
-    #[arg(long, default_value_t = defaults::WORKER_ROUTER_TIMEOUT_MS)]
-    pub worker_router_timeout_ms: u64,
+    /// Worker router timeout in milliseconds.
+    #[arg(long, help = cfg_help("Worker router timeout in milliseconds", embedded_default().worker_router_timeout_ms))]
+    pub worker_router_timeout_ms: Option<u64>,
 
-    /// Minimum solver responses before early return (0 = wait for all)
-    #[arg(long, default_value_t = defaults::ROUTER_MIN_RESPONSES)]
-    pub worker_router_min_responses: usize,
+    /// Minimum solver responses before early return (0 = wait for all).
+    #[arg(long,
+        help = cfg_help(
+            "Minimum solver responses before early return (0 = wait for all)",
+            embedded_default().worker_router_min_responses,
+        ))]
+    pub worker_router_min_responses: Option<usize>,
 
-    /// Path to worker pools TOML config file
-    #[arg(short, long, env, default_value = "worker_pools.toml")]
-    pub worker_pools_config: PathBuf,
+    /// Path to a legacy worker pools TOML config file; overrides the pools defined by
+    /// every other config layer. When omitted, ./worker_pools.toml is used if present and
+    /// no other layer sets pools.
+    #[arg(short, long, env)]
+    pub worker_pools_config: Option<PathBuf>,
 
     /// Path to blocklist TOML config file. Components listed here are excluded from the
     /// Tycho stream.
@@ -118,9 +149,13 @@ pub struct ServeArgs {
     pub gas_price_stale_threshold_secs: Option<u64>,
 
     /// Enable partial block (flashblock) updates from the Tycho stream.
-    /// When enabled, pool state updates arrive mid-block rather than only at finalization,
-    /// reducing latency. Only applies to on-chain protocols.
-    #[arg(long)]
+    #[arg(long,
+        help = cfg_help(
+            "Enable partial block (flashblock) updates from the Tycho stream: pool state \
+             updates arrive mid-block rather than only at finalization, reducing latency. \
+             Only applies to on-chain protocols",
+            embedded_default().partial_blocks,
+        ))]
     pub partial_blocks: bool,
 
     /// Enable price guard validation against external price sources.
@@ -132,6 +167,40 @@ pub struct ServeArgs {
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
     pub metrics_port: u16,
+}
+
+impl ServeArgs {
+    /// Builds the explicit-overrides config layer from the flags the user actually set;
+    /// unset flags stay `None` so the lower config layers supply them.
+    ///
+    /// A worker pools file passed via `--worker-pools-config` is an explicit override for
+    /// the whole `pools` section.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the worker pools file cannot be read or parsed.
+    pub fn explicit_config(&self) -> anyhow::Result<PartialConfig> {
+        let pools = self
+            .worker_pools_config
+            .as_deref()
+            .map(WorkerPoolsConfig::load_from_file)
+            .transpose()?
+            .map(WorkerPoolsConfig::into_pools);
+        Ok(PartialConfig {
+            min_tvl: self.min_tvl,
+            tvl_buffer_ratio: self.tvl_buffer_ratio,
+            min_token_quality: self.min_token_quality,
+            traded_n_days_ago: self.traded_n_days_ago,
+            gas_refresh_interval_secs: self.gas_refresh_interval_secs,
+            reconnect_delay_secs: self.reconnect_delay_secs,
+            worker_router_timeout_ms: self.worker_router_timeout_ms,
+            worker_router_min_responses: self.worker_router_min_responses,
+            partial_blocks: self.partial_blocks.then_some(true),
+            // An empty --protocols means "not set"; the lower config layers supply the list.
+            protocols: (!self.protocols.is_empty()).then(|| self.protocols.clone()),
+            pools,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +244,7 @@ mod cli_tests {
         assert_eq!(args.tycho_url, Some("wss://custom.tycho.url".to_string()));
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, Some(20.0));
-        assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
+        assert_eq!(args.worker_pools_config, Some(PathBuf::from("new_worker_pools.toml")));
         assert_eq!(args.blocklist_config, None);
     }
 
@@ -187,6 +256,8 @@ mod cli_tests {
         std::env::remove_var("TYCHO_URL");
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
+        std::env::remove_var("CONFIG_FILE");
+        std::env::remove_var("WORKER_POOLS_CONFIG");
         let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
@@ -199,12 +270,15 @@ mod cli_tests {
         assert_eq!(args.rpc_url, None);
         assert_eq!(args.tycho_url, None);
         assert!(args.protocols.is_empty());
+        // Solver-tuning flags default to None: the config layers supply the values.
+        assert_eq!(args.config_file, None);
         assert_eq!(args.min_tvl, None);
-        assert_eq!(args.tvl_buffer_ratio, 1.1);
-        assert_eq!(args.gas_refresh_interval_secs, 30);
-        assert_eq!(args.reconnect_delay_secs, 5);
-        assert_eq!(args.worker_router_timeout_ms, 100);
-        assert_eq!(args.worker_router_min_responses, 0);
+        assert_eq!(args.tvl_buffer_ratio, None);
+        assert_eq!(args.gas_refresh_interval_secs, None);
+        assert_eq!(args.reconnect_delay_secs, None);
+        assert_eq!(args.worker_router_timeout_ms, None);
+        assert_eq!(args.worker_router_min_responses, None);
+        assert_eq!(args.worker_pools_config, None);
         assert_eq!(args.blocklist_config, None);
         assert!(!args.partial_blocks);
         #[cfg(feature = "metrics")]
@@ -212,14 +286,29 @@ mod cli_tests {
     }
 
     #[test]
-    fn test_arg_parsing_default_worker_pools() {
-        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--tycho-api-key", "test-key"])
-            .expect("parse errored");
-
+    fn test_explicit_config_only_set_flags() {
+        let cli = Cli::try_parse_from(vec![
+            "fynd",
+            "serve",
+            "--worker-router-timeout-ms",
+            "42",
+            "--partial-blocks",
+            "--protocols",
+            "uniswap_v2",
+        ])
+        .expect("parse errored");
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");
         };
-        assert_eq!(args.worker_pools_config, PathBuf::from("worker_pools.toml"));
+        let overrides = args
+            .explicit_config()
+            .expect("explicit config errored");
+        assert_eq!(overrides.worker_router_timeout_ms, Some(42));
+        assert_eq!(overrides.partial_blocks, Some(true));
+        assert_eq!(overrides.protocols, Some(vec!["uniswap_v2".to_string()]));
+        assert_eq!(overrides.min_tvl, None);
+        assert_eq!(overrides.pools, None);
+        assert_eq!(overrides.tvl_buffer_ratio, None);
     }
 
     #[test]

@@ -172,7 +172,7 @@ Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 * A bounded `TaskQueue` (via `async_channel`)
 * N `SolverWorker` instances on separate threads
 
-Pools can use either a built-in algorithm by name (e.g., `"most_liquid"`) or a custom `Algorithm` implementation via `WorkerPoolBuilder::with_algorithm`. Pools are configured via `worker_pools.toml` for built-in algorithms, or programmatically via the builder for custom algorithms. Multiple pools can use the same algorithm with different parameters (e.g., fast 2-hop vs deep 3-hop).
+Pools can use either a built-in algorithm by name (e.g., `"most_liquid"`) or a custom `Algorithm` implementation via `WorkerPoolBuilder::with_algorithm`. Pools are configured via the `[pools]` section of the config file (`fynd.toml`) for built-in algorithms, or programmatically via the builder for custom algorithms. Multiple pools can use the same algorithm with different parameters (e.g., fast 2-hop vs deep 3-hop).
 
 ***
 

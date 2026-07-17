@@ -51,29 +51,17 @@ use crate::{
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
-/// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
+/// Default values for [`PoolConfig`] deserialization and non-config-managed intervals.
 ///
-/// These are the single source of truth for all tunable defaults. Downstream
-/// crates (e.g. `fynd-rpc`) should re-export or reference these rather than
-/// redeclaring their own copies.
+/// Solver-tuning defaults (TVL filters, refresh intervals, router responses, …) are NOT
+/// defined here: their single source of truth is the embedded default config
+/// (`config/default_config.toml`), which [`FyndBuilder::new`] resolves for its initial
+/// values.
 pub mod defaults {
     use std::time::Duration;
 
-    /// Minimum token quality score required for a token to be included in routing.
-    pub const MIN_TOKEN_QUALITY: i32 = 100;
-    /// Maximum age (in days) of trading history required for a token to be considered liquid.
-    pub const TRADED_N_DAYS_AGO: u64 = 3;
-    /// Multiplier applied to a pool's TVL when estimating available liquidity.
-    pub const TVL_BUFFER_RATIO: f64 = 1.1;
-    /// How often the gas price is refreshed from the RPC node.
-    pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-    /// Delay before reconnecting to the Tycho feed after a disconnect.
-    pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
-    /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
-    /// all).
-    pub const ROUTER_MIN_RESPONSES: usize = 0;
     /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
@@ -127,7 +115,7 @@ fn parse_connector_tokens(
 
 /// Per-pool configuration for [`FyndBuilder::add_pool`].
 #[must_use]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoolConfig {
     /// Algorithm name for this pool (e.g., `"most_liquid"`).
     algorithm: String,
@@ -283,6 +271,9 @@ pub enum SolverBuildError {
     /// A pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
+    /// The configuration passed to [`FyndBuilder::apply_config`] failed validation.
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
     /// No native gas token is defined for the requested chain.
     #[error("gas token not configured for chain")]
     GasToken,
@@ -391,6 +382,11 @@ pub struct FyndBuilder {
 
 impl FyndBuilder {
     /// Creates a new builder with the required parameters.
+    ///
+    /// Solver-tuning defaults come from the embedded default config
+    /// (`config/default_config.toml`) — the single source of truth. Exception: the worker
+    /// router timeout defaults to a generous standalone value rather than the embedded
+    /// HTTP-service-oriented one.
     pub fn new(
         chain: Chain,
         tycho_url: impl Into<String>,
@@ -398,6 +394,7 @@ impl FyndBuilder {
         protocols: Vec<String>,
         min_tvl: f64,
     ) -> Self {
+        let embedded = crate::config::embedded_default();
         Self {
             chain,
             tycho_url: tycho_url.into(),
@@ -406,21 +403,56 @@ impl FyndBuilder {
             min_tvl,
             tycho_api_key: None,
             tycho_use_tls: DEFAULT_TYCHO_USE_TLS,
-            min_token_quality: defaults::MIN_TOKEN_QUALITY,
-            traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
-            tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
-            gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
-            reconnect_delay: defaults::RECONNECT_DELAY,
+            min_token_quality: embedded.min_token_quality,
+            traded_n_days_ago: embedded.traded_n_days_ago,
+            tvl_buffer_ratio: embedded.tvl_buffer_ratio,
+            gas_refresh_interval: Duration::from_secs(embedded.gas_refresh_interval_secs),
+            reconnect_delay: Duration::from_secs(embedded.reconnect_delay_secs),
             blocklisted_components: HashSet::new(),
-            partial_blocks: false,
+            partial_blocks: embedded.partial_blocks,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
-            router_min_responses: defaults::ROUTER_MIN_RESPONSES,
+            router_min_responses: embedded.worker_router_min_responses,
             encoder: None,
             pools: Vec::new(),
             price_guard_enabled: false,
             price_providers: Vec::new(),
             pending_indexers: Vec::new(),
         }
+    }
+
+    /// Applies a resolved [`Config`](crate::config::Config) to this builder, validating it
+    /// first.
+    ///
+    /// Sets every solver-tuning field (including the protocol list) and adds the config's
+    /// worker pools (in addition to any pools already registered). Setter calls after this
+    /// override the config's values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError::Config`] if the config fails validation, or
+    /// [`SolverBuildError::AlgorithmConfig`] if a pool's `connector_tokens` contains a
+    /// malformed hex address.
+    pub fn apply_config(
+        mut self,
+        config: &crate::config::Config,
+    ) -> Result<Self, SolverBuildError> {
+        config.validate()?;
+        let chain = self.chain;
+        self = self
+            .min_tvl(config.min_tvl_or_chain_default(chain))
+            .tvl_buffer_ratio(config.tvl_buffer_ratio)
+            .min_token_quality(config.min_token_quality)
+            .traded_n_days_ago(config.traded_n_days_ago)
+            .gas_refresh_interval(Duration::from_secs(config.gas_refresh_interval_secs))
+            .reconnect_delay(Duration::from_secs(config.reconnect_delay_secs))
+            .worker_router_timeout(Duration::from_millis(config.worker_router_timeout_ms))
+            .worker_router_min_responses(config.worker_router_min_responses)
+            .partial_blocks(config.partial_blocks)
+            .protocols(config.protocols.clone());
+        for (name, pool_config) in &config.pools {
+            self = self.add_pool(name, pool_config)?;
+        }
+        Ok(self)
     }
 
     /// The blockchain this builder is configured for.
@@ -437,6 +469,12 @@ impl FyndBuilder {
     /// Overrides the minimum TVL filter set in [`FyndBuilder::new`].
     pub fn min_tvl(mut self, min_tvl: f64) -> Self {
         self.min_tvl = min_tvl;
+        self
+    }
+
+    /// Overrides the protocol list set in [`FyndBuilder::new`].
+    pub fn protocols(mut self, protocols: Vec<String>) -> Self {
+        self.protocols = protocols;
         self
     }
 
@@ -1216,7 +1254,8 @@ impl Solver {
         ));
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
-            .with_min_responses(defaults::ROUTER_MIN_RESPONSES);
+            // Replay waits for every pool before answering (deterministic tests).
+            .with_min_responses(0);
         let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
 
         // Trigger derived data computation

@@ -120,7 +120,7 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
     let actual_duration = start.elapsed().as_secs();
     tracing::info!(updates = updates.len(), actual_duration, "recording complete");
 
-    let pools_toml = include_str!("../../../worker_pools.toml");
+    let pools_toml = include_str!("../../../fynd.toml");
     let worker_pools_hash = fynd_test_fixtures::recording::sha256_hex(pools_toml.as_bytes());
 
     Ok(MarketRecording {

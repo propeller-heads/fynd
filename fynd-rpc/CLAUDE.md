@@ -49,8 +49,9 @@ The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps th
 
 ## Defaults
 
-The `config::defaults` module re-exports `fynd-core::solver::defaults::*` and adds HTTP-specific
-constants:
+Solver-tuning defaults live in fynd-core's embedded default config
+(`fynd-core/src/config/default_config.toml`); `WorkerPoolsConfig::builtin_default()` returns its
+pools. The `config::defaults` module holds only HTTP-specific values:
 - `HTTP_HOST = "0.0.0.0"`, `HTTP_PORT = 3000`
 - `WORKER_ROUTER_TIMEOUT_MS = 100` (tighter than fynd-core's 10s standalone default)
 - `default_tycho_url(chain)` maps chain names to hosted endpoints

@@ -86,4 +86,4 @@ The path with the highest `net_output` wins.
 | `fynd-core/src/algorithm/mod.rs`         | `Algorithm` trait definition                   |
 | `fynd-core/src/graph/petgraph.rs`        | Graph implementation (petgraph::StableDiGraph) |
 | `fynd-core/src/worker_pool/registry.rs`  | Maps `"most_liquid"` to `MostLiquidAlgorithm`  |
-| `worker_pools.toml`                      | Worker pool configuration                      |
+| `fynd.toml`                      | Worker pool configuration                      |
