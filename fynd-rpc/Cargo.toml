@@ -35,3 +35,4 @@ experimental = []
 
 [dev-dependencies]
 rstest.workspace = true
+metrics-util.workspace = true
