@@ -9,6 +9,7 @@ applications.
 |-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `algorithm/`          | `Algorithm` trait + built-in `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`. Pluggable via associated graph types. `AlgorithmConfig` shared by all         |
 | `solver.rs`           | `FyndBuilder` assembles the full pipeline (feed + gas + computations + pools + encoder + router). `Solver` runs it                                                                 |
+| `config/`             | Layered solver config: `embedded_default()` parses `default_config.toml` (single source of truth for all tuning defaults) into a complete `Config`; `PartialConfig` layers overlay via `Config::apply` (CLI/file > embedded); `Config::validate` range-checks the result |
 | `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based |
 | `worker_pool_router/` | `WorkerPoolRouter` fans out orders to all pools, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes          |
 | `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`                                                                           |
@@ -54,6 +55,10 @@ pub trait EdgeWeightUpdaterWithDerived {
 
 **`FyndBuilder`** (`solver.rs`): Assembles feed + gas + computations + pools + encoder + router.
 Returns a `Solver` that can `quote()` directly. For standalone (non-HTTP) use.
+
+Defaults come from the embedded default config (`config/default_config.toml`); apply a resolved
+`config::Config` in one call with `apply_config(&config)` (validates internally). Exception: the
+worker router timeout defaults to a generous 10s standalone value.
 
 Price guard methods: `price_guard_enabled(bool)`, `register_price_provider(Box<dyn PriceProvider>)`,
 `add_default_price_providers()` (registers Binance WS + Hyperliquid providers).

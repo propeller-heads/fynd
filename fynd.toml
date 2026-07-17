@@ -1,10 +1,32 @@
-# Worker pools configuration file
+# Fynd solver configuration file (user-facing example).
 #
-# NOTE: This file is also inlined as the built-in default in fynd-rpc/src/config.rs
-# (DEFAULT_WORKER_POOLS_TOML). That constant is used as a fallback when this file is
-# not found at runtime (e.g. `cargo install`, Docker). Keep the two in sync.
+# Loaded automatically from ./fynd.toml, or from the path given via --config-file /
+# CONFIG_FILE. Any subset of the fields may be set; every field resolves independently:
+# CLI flags > this file > the embedded default config
+# (fynd-core/src/config/default_config.toml — the single source of truth for defaults).
+#
+# The legacy pools-only worker_pools.toml is still honored for backward compatibility
+# (via --worker-pools-config / WORKER_POOLS_CONFIG, or ./worker_pools.toml when no other
+# layer sets pools).
 
-# Worker pools
+# --- Solver tuning (defaults shown; uncomment to override) ---
+#
+# Minimum TVL threshold in native token units (e.g. ETH); defaults to a chain-specific
+# value when unset.
+#min_tvl = 10.0
+#tvl_buffer_ratio = 1.1
+#min_token_quality = 100
+#traded_n_days_ago = 3
+#gas_refresh_interval_secs = 30
+#reconnect_delay_secs = 5
+#worker_router_timeout_ms = 100
+#worker_router_min_responses = 0
+#partial_blocks = false
+# "all_onchain" expands to every on-chain protocol available from Tycho RPC and can be
+# combined with explicit entries, e.g. ["all_onchain", "rfq:bebop"].
+#protocols = ["all_onchain"]
+
+# --- Worker pools (setting any pool replaces the embedded default pools entirely) ---
 [pools.bellman_ford_2_hops]
 algorithm = "bellman_ford"
 num_workers = 3

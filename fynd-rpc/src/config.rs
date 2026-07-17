@@ -8,23 +8,6 @@ use anyhow::{Context, Result};
 pub use fynd_core::PoolConfig;
 use serde::{Deserialize, Serialize};
 
-/// The default worker pools configuration embedded at compile time.
-///
-/// Used as a fallback when the default `worker_pools.toml` path is not found at runtime,
-/// so the binary works out-of-the-box without a config file (e.g. `cargo install`, Docker).
-///
-/// Keep in sync with the repo-root `worker_pools.toml` (the user-facing example config).
-/// Cannot use `include_str!` here because `cargo publish` verifies the crate in isolation,
-/// and the file lives outside the `fynd-rpc` package directory.
-const DEFAULT_WORKER_POOLS_TOML: &str = r#"
-[pools.bellman_ford_2_hops]
-algorithm = "bellman_ford"
-num_workers = 3
-task_queue_capacity = 1000
-max_hops = 2
-timeout_ms = 500
-"#;
-
 /// Worker pools configuration loaded from TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPoolsConfig {
@@ -48,11 +31,15 @@ impl WorkerPoolsConfig {
         self.pools
     }
 
-    /// Returns the built-in default configuration embedded in the binary.
-    ///
-    /// This is the repo-root `worker_pools.toml` baked in at compile time.
+    /// Returns the built-in default configuration embedded in the binary: the pools of the
+    /// embedded default config (`fynd-core`'s `default_config.toml`), the single source of
+    /// truth for solver-tuning defaults.
     pub fn builtin_default() -> Self {
-        toml::from_str(DEFAULT_WORKER_POOLS_TOML).expect("built-in worker_pools.toml is valid TOML")
+        Self {
+            pools: fynd_core::config::embedded_default()
+                .pools
+                .clone(),
+        }
     }
 
     /// Load worker pools configuration from a TOML file.
@@ -155,13 +142,10 @@ mod tests {
 }
 
 /// Default values for all `fynd-rpc` configuration parameters.
+///
+/// Solver-tuning defaults live in `fynd-core`'s embedded default config
+/// (`config/default_config.toml`); this module only holds HTTP-specific values.
 pub mod defaults {
-    // Re-export shared defaults from fynd-core as the single source of truth.
-    pub use fynd_core::solver::defaults::{
-        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
-        TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
-    };
-
     /// Default HTTP bind host (`"0.0.0.0"` — all interfaces).
     pub const HTTP_HOST: &str = "0.0.0.0";
     /// Default HTTP port (`3000`).

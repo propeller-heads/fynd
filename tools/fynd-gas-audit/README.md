@@ -33,7 +33,7 @@ tool quantifies the bias.
    sampled trade resolves to a single-hop swap. Use it when you want to
    isolate per-protocol gas accuracy without multi-hop overhead confounding the
    numbers. Drop the `-w` flag to fall back to Fynd's default
-   `worker_pools.toml`, which allows multi-hop routing.
+   the default pool config (`fynd.toml`), which allows multi-hop routing.
 2. Run the audit in a second terminal:
    ```bash
    RPC_URL=https://reth-ethereum.ithaca.xyz/rpc \
@@ -58,7 +58,7 @@ each time you want a fresh, independent draw from the 10k dataset.
 
 ## Findings from the 2026-05-27 run (default routing, n=1000)
 
-This run used Fynd's default `worker_pools.toml` (multi-hop enabled), so the
+This run used Fynd's default pool config (multi-hop enabled), so the
 sample includes both single-hop and sequential routes. Mainnet gas price at
 the time was 0.10 gwei. Absolute ETH numbers scale linearly with gas price —
 the **relative** figures are the ones that matter.

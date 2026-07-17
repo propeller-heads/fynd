@@ -29,12 +29,13 @@
 //!
 //! See `fynd --help` for all available options.
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 #[cfg(feature = "metrics")]
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
+use fynd_core::config::{embedded_default, PartialConfig};
 use fynd_rpc::{
     builder::FyndRPCBuilder,
     config::{defaults, BlocklistConfig, WorkerPoolsConfig},
@@ -56,7 +57,7 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tycho_simulation::{tycho_common::models::TvlThresholdTier, utils::default_blocklist};
+use tycho_simulation::utils::default_blocklist;
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
@@ -217,61 +218,114 @@ fn resolve_rpc_url(chain: &str, override_url: Option<&str>) -> Result<String, So
     }
 }
 
-/// Sets up the solver (loads config, parses chain, builds solver).
+/// Default local config file probed in the working directory when `--config-file` is not
+/// passed.
+const DEFAULT_CONFIG_PATH: &str = "fynd.toml";
+
+/// Legacy pools-only config file, still honored: it supplies the `pools` section at
+/// local-file priority when no higher layer sets pools.
+const LEGACY_WORKER_POOLS_PATH: &str = "worker_pools.toml";
+
+/// Resolves the layered solver config: CLI flags > local config file > embedded default.
+///
+/// Local files fail fast when explicitly passed or malformed — a broken local setup should
+/// not start silently misconfigured.
+fn resolve_solver_config(args: &cli::ServeArgs) -> Result<fynd_core::config::Config, SolverError> {
+    if args.worker_pools_config.is_some() {
+        warn!(
+            "--worker-pools-config is deprecated and will be removed soon; move the [pools] \
+             section into a config file passed via --config-file"
+        );
+    }
+    let overrides = args
+        .explicit_config()
+        .map_err(|e| SolverError::SetupError(format!("failed to build config overrides: {e:#}")))?;
+
+    let mut local_file = match &args.config_file {
+        Some(path) => Some(
+            PartialConfig::from_file(path)
+                .map_err(|e| SolverError::SetupError(format!("failed to load config file: {e}")))?,
+        ),
+        None => {
+            let default_path = Path::new(DEFAULT_CONFIG_PATH);
+            if default_path.exists() {
+                info!("{DEFAULT_CONFIG_PATH} found; using it as the local config file layer");
+                Some(PartialConfig::from_file(default_path).map_err(|e| {
+                    SolverError::SetupError(format!("failed to load config file: {e}"))
+                })?)
+            } else {
+                None
+            }
+        }
+    };
+
+    // The legacy worker_pools.toml keeps working and, to not break existing clients, its
+    // pools take priority over the config file's (only explicit CLI overrides beat it).
+    let legacy_pools_path = Path::new(LEGACY_WORKER_POOLS_PATH);
+    if overrides.pools.is_none() && legacy_pools_path.exists() {
+        warn!(
+            "{LEGACY_WORKER_POOLS_PATH} is deprecated and will be removed soon; move its \
+             [pools] section into {DEFAULT_CONFIG_PATH}. For now its pools override the \
+             config file's"
+        );
+        let pools = WorkerPoolsConfig::load_from_file(legacy_pools_path)
+            .map_err(|e| {
+                SolverError::SetupError(format!("failed to load worker pools config: {e:#}"))
+            })?
+            .into_pools();
+        local_file
+            .get_or_insert_with(PartialConfig::default)
+            .pools = Some(pools);
+    }
+
+    // Ascending priority: embedded default, then the local config file, then CLI overrides.
+    let config = embedded_default()
+        .clone()
+        .apply(&local_file.unwrap_or_default())
+        .apply(&overrides);
+    config
+        .validate()
+        .map_err(|e| SolverError::SetupError(format!("failed to resolve solver config: {e}")))?;
+    Ok(config)
+}
+
+/// Sets up the solver (resolves config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
 async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
-    // Load worker pools config, falling back to the built-in defaults when the default path is
-    // absent (e.g. `cargo install`, Docker). Custom paths that don't exist still fail fast.
-    let default_path = std::path::Path::new("worker_pools.toml");
-    let pools_config =
-        if args.worker_pools_config == default_path && !args.worker_pools_config.exists() {
-            warn!(
-                "worker_pools.toml not found; using built-in defaults. \
-             Set --worker-pools-config or WORKER_POOLS_CONFIG to use a custom config."
-            );
-            WorkerPoolsConfig::builtin_default()
-        } else {
-            WorkerPoolsConfig::load_from_file(&args.worker_pools_config).map_err(|e| {
-                SolverError::SetupError(format!("failed to load worker pools config: {}", e))
-            })?
-        };
-
-    // Parse chain
     let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
 
+    let config = resolve_solver_config(args)?;
+    info!(?config, "solver config resolved");
+
     let tycho_url = resolve_tycho_url(&args.chain, args.tycho_url.as_deref())?;
     let rpc_url = resolve_rpc_url(&args.chain, args.rpc_url.as_deref())?;
-    let min_tvl = args
-        .min_tvl
-        .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Low));
 
     let protocols = resolve_protocols(
         &tycho_url,
         args.tycho_api_key.as_deref(),
         !args.disable_tls,
         chain,
-        &args.protocols,
+        &config.protocols,
     )
     .await
     .map_err(|e| SolverError::SetupError(format!("failed to resolve protocols: {e}")))?;
 
     info!(?protocols, "starting with {} protocol(s)", protocols.len());
 
-    // Build solver with all fields from CLI
     let mut builder =
-        FyndRPCBuilder::new(chain, pools_config.into_pools(), tycho_url, rpc_url, protocols)
+        FyndRPCBuilder::new(chain, config.pools.clone(), tycho_url, rpc_url, protocols)
             .map_err(|e| SolverError::SetupError(format!("invalid pool configuration: {e}")))?
             .http_host(args.http_host.clone())
             .http_port(args.http_port)
-            .min_tvl(min_tvl)
-            .min_token_quality(args.min_token_quality)
-            .traded_n_days_ago(args.traded_n_days_ago)
-            .tvl_buffer_ratio(args.tvl_buffer_ratio)
-            .gas_refresh_interval(Duration::from_secs(args.gas_refresh_interval_secs))
-            .reconnect_delay(Duration::from_secs(args.reconnect_delay_secs))
-            .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
-            .worker_router_min_responses(args.worker_router_min_responses)
+            .min_tvl(config.min_tvl_or_chain_default(chain))
+            .min_token_quality(config.min_token_quality)
+            .traded_n_days_ago(config.traded_n_days_ago)
+            .tvl_buffer_ratio(config.tvl_buffer_ratio)
+            .gas_refresh_interval(Duration::from_secs(config.gas_refresh_interval_secs))
+            .reconnect_delay(Duration::from_secs(config.reconnect_delay_secs))
+            .worker_router_timeout(Duration::from_millis(config.worker_router_timeout_ms))
+            .worker_router_min_responses(config.worker_router_min_responses)
             .gas_price_stale_threshold(
                 args.gas_price_stale_threshold_secs
                     .map(Duration::from_secs),
@@ -293,7 +347,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
     };
 
     builder = builder.blocklist(blocklist);
-    builder = builder.partial_blocks(args.partial_blocks);
+    builder = builder.partial_blocks(config.partial_blocks);
     builder = builder.price_guard_enabled(args.enable_price_guard);
 
     // Build and start solver

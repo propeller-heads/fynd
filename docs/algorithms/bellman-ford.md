@@ -349,4 +349,4 @@ The Bellman-Ford routing approach in Fynd was inspired by the work of [János Ta
 | `fynd-core/src/algorithm/mod.rs`          | `Algorithm` trait definition                    |
 | `fynd-core/src/graph/petgraph.rs`         | Graph implementation (petgraph::StableDiGraph)  |
 | `fynd-core/src/worker_pool/registry.rs`   | Maps `"bellman_ford"` to `BellmanFordAlgorithm` |
-| `worker_pools.toml`                       | Worker pool configuration                       |
+| `fynd.toml`                       | Worker pool configuration                       |

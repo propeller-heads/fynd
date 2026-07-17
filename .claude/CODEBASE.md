@@ -25,7 +25,7 @@ Key properties:
 | Crate | Location | Description |
 |---|---|---|
 | `fynd` | root (`src/`) | CLI binary and library crate: parses args, sets up observability, runs `FyndRPCBuilder`. `lib.rs` re-exports `fynd_core` and `fynd_rpc` as a single dependency |
-| [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding. No HTTP deps |
+| [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding, layered config. No HTTP deps |
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
 | `fynd-test-fixtures` | `test-fixtures/` | Shared types for recorded-market test fixtures: `MarketRecording`, expected outputs, test scenarios. Not published |
@@ -102,7 +102,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `TYCHO_URL` | Tycho endpoint (chain-specific default) |
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
-| `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
+| `CONFIG_FILE` | Solver config file (default: `fynd.toml` if present) |
+| `WORKER_POOLS_CONFIG` | Deprecated legacy pools-only config file; its pools override the config file's |
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
@@ -111,7 +112,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` (default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--config-file` (default `fynd.toml`), `--enable-price-guard` (default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
 | `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 
@@ -119,7 +120,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | File | Purpose |
 |---|---|
-| `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout. Optional — binary falls back to embedded defaults if not found |
+| `fynd.toml` | Full solver config: any subset of tuning fields + `[pools]`. Resolved field-by-field: CLI > file > embedded default (`fynd-core/src/config/default_config.toml`) |
+| `worker_pools.toml` | Deprecated legacy pools-only file, still honored (its pools override the config file's) |
 | `blocklist.toml` | Component IDs to exclude from the Tycho stream. Optional — falls back to tycho-simulation defaults if not found |
 
 ## Testing

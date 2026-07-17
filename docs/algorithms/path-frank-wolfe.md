@@ -111,7 +111,7 @@ max_hops = 3
 timeout_ms = 500
 ```
 
-The PFW-specific tuning parameters are not currently exposed in `worker_pools.toml`; they use defaults:
+The PFW-specific tuning parameters are not currently exposed in `fynd.toml`; they use defaults:
 
 | Parameter | Default | Description |
 | --- | --- | --- |
@@ -149,4 +149,4 @@ The Frank-Wolfe loop checks elapsed time at the start of each iteration. If the 
 | `fynd-core/src/algorithm/bellman_ford.rs` | Inner BF solver used for path discovery |
 | `fynd-core/src/algorithm/mod.rs` | `Algorithm` trait definition |
 | `fynd-core/src/worker_pool/registry.rs` | Maps `"path_frank_wolfe"` to `PathFrankWolfeAlgorithm` |
-| `worker_pools.toml` | Worker pool configuration (add a `path_frank_wolfe` pool to enable) |
+| `fynd.toml` | Worker pool configuration (add a `path_frank_wolfe` pool to enable) |

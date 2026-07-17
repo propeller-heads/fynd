@@ -7,9 +7,9 @@ fn expected_path() -> std::path::PathBuf {
 }
 
 fn max_pool_timeout_ms() -> u64 {
-    let toml_content = include_str!("../../../worker_pools.toml");
+    let toml_content = include_str!("../../../fynd.toml");
     let pools = fynd_test_fixtures::parse_pools_toml(toml_content)
-        .expect("failed to parse worker_pools.toml");
+        .expect("failed to parse fynd.toml pools");
     pools
         .values()
         .map(|p| p.timeout_ms())

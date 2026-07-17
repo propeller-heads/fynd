@@ -14,7 +14,8 @@ pub use expected::{
 pub use recording::{read_recording, write_recording, MarketRecording, RecordingMetadata};
 pub use scenarios::{load_test_scenarios, TestScenario};
 
-/// Parse a `worker_pools.toml` string into a pool name → config map.
+/// Parse the `[pools]` section of a config TOML string into a pool name → config map.
+/// Extra top-level keys (e.g. the solver-tuning fields of a full config file) are ignored.
 pub fn parse_pools_toml(
     toml_content: &str,
 ) -> anyhow::Result<std::collections::HashMap<String, fynd_core::PoolConfig>> {
