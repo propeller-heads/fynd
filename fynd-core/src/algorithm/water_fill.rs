@@ -679,6 +679,9 @@ impl WaterFillAlgorithm {
 
             let mut best: Option<ExchangeMove> = None;
             for donor in 0..k {
+                if sims >= EXCHANGE_MAX_SIMS {
+                    break;
+                }
                 if cum[donor] < delta {
                     continue;
                 }
