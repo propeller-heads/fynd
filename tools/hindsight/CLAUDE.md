@@ -28,6 +28,7 @@ Three subcommands via `cargo run -p hindsight --release --`:
 | `ALLIUM_API_KEY` | Allium API key (`verify` only) |
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
+| `BLOCKLIST_CONFIG` | Blocklist TOML of component IDs excluded from the Tycho stream (`monitor` only; falls back to tycho-simulation's default blocklist) |
 
 ## Architecture
 
