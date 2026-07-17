@@ -28,19 +28,19 @@ pub(crate) struct ClientLabels {
 
 impl ClientLabels {
     pub(crate) fn from_headers(headers: &HeaderMap) -> Self {
-        let header_or = |name: &str, default: &str| {
+        let header_value = |name: &str| {
             headers
                 .get(name)
                 .and_then(|value| value.to_str().ok())
-                .unwrap_or(default)
-                .to_string()
         };
         Self {
-            user_identity: header_or("user-identity", "unknown"),
-            user_plan: header_or("x-user-plan", "none"),
-            client_version: headers
-                .get("user-agent")
-                .and_then(|value| value.to_str().ok())
+            user_identity: header_value("user-identity")
+                .map(|value| sanitize_label(value, "invalid").to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            user_plan: header_value("x-user-plan")
+                .map(|value| sanitize_label(value, "invalid").to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            client_version: header_value("user-agent")
                 .map(sanitize_client_version)
                 .unwrap_or("unknown")
                 .to_string(),
@@ -48,23 +48,30 @@ impl ClientLabels {
     }
 }
 
+/// Accepts bounded, printable-ASCII label values (`[A-Za-z0-9._/-]`, ≤64 chars); anything
+/// else — including a misconfigured or bypassed proxy forwarding attacker-controlled
+/// input — collapses to `fallback`. Keeping label cardinality bounded is what keeps
+/// Prometheus scraping cheap.
+fn sanitize_label<'a>(value: &'a str, fallback: &'static str) -> &'a str {
+    let is_label_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/');
+    let well_formed = value.len() <= 64 && !value.is_empty() && value.chars().all(is_label_char);
+    if well_formed {
+        value
+    } else {
+        fallback
+    }
+}
+
 /// Accepts only `product/version` tokens (e.g. `fynd-client/0.9.0`) as label values;
 /// anything else collapses to `other`. Raw User-Agents are client-controlled and would
 /// mint unbounded Prometheus series.
 fn sanitize_client_version(user_agent: &str) -> &str {
-    let is_token_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     let mut parts = user_agent.splitn(2, '/');
     let (Some(product), Some(version)) = (parts.next(), parts.next()) else { return "other" };
-    let well_formed = user_agent.len() <= 64 &&
-        !product.is_empty() &&
-        !version.is_empty() &&
-        product.chars().all(is_token_char) &&
-        version.chars().all(is_token_char);
-    if well_formed {
-        user_agent
-    } else {
-        "other"
+    if product.is_empty() || version.is_empty() {
+        return "other";
     }
+    sanitize_label(user_agent, "other")
 }
 
 /// Emits both HTTP metrics for one completed request.
@@ -205,6 +212,31 @@ mod tests {
         );
         let labels = ClientLabels::from_headers(&headers);
         assert_eq!(labels.client_version, "other");
+    }
+
+    #[test]
+    fn client_labels_sanitizes_oversized_user_identity() {
+        let mut headers = HeaderMap::new();
+        let oversized = "a".repeat(65);
+        headers.insert(
+            HeaderName::from_static("user-identity"),
+            HeaderValue::from_str(&oversized).unwrap(),
+        );
+        let labels = ClientLabels::from_headers(&headers);
+        // Distinct from the "unknown" sentinel used when the header is absent: this value
+        // was present but failed sanitization, which signals a misbehaving upstream.
+        assert_eq!(labels.user_identity, "invalid");
+    }
+
+    #[test]
+    fn client_labels_sanitizes_garbage_user_plan() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-user-plan"),
+            HeaderValue::from_static("scale; DROP TABLE users"),
+        );
+        let labels = ClientLabels::from_headers(&headers);
+        assert_eq!(labels.user_plan, "invalid");
     }
 
     #[test]
