@@ -25,6 +25,7 @@
 //! address book's comments) before a venue is added.
 
 pub(crate) mod metamask;
+pub(crate) mod rabby;
 pub(crate) mod relay;
 
 use alloy::providers::{Provider, RootProvider};
@@ -38,6 +39,7 @@ pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<
     match name {
         "relay" => vec![Box::new(relay::RelayNetting)],
         "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
+        "rabby" => vec![Box::new(rabby::RabbyNetting)],
         _ => vec![],
     }
 }

@@ -121,3 +121,16 @@ paraswap = "paraswap"
 airswap = "airswap"
 openocean = "openocean"
 hashflow = "hashflow"
+
+[venues.rabby]
+# Rabby SwapProxy — the app-owned router `tx.to` for its Uniswap-routed swaps. Rabby also routes
+# through shared solver routers (0x, 1inch, Sushi), where `tx.to` is the solver's own contract and
+# the only Rabby fingerprint is the fee leg below; those are not keyed here (see rabby.rs).
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+# Rabby fee wallets: a flat 0.25% of the output token. Current wallet confirmed 2026-07-17 via two
+# decoded live swaps through different venues; the historical wallet took the fee through ~Sep 2025
+# before rotating. Both are listed so trades in either window decode with the fee backed out.
+fee_collectors = [
+    "0xcd6b980029e6e6e0733ac8ec3e02be9410d09799",
+    "0x39041f1b366fe33f9a5a79de5120f2aee2577ebc",
+]
