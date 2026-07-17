@@ -6,6 +6,7 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
@@ -92,16 +93,7 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
             }
             "vm:curve" => {
-                // Deliberately the VM adapter, not the native CurveState (tycho-simulation
-                // 0.324.0, switched in fba3c223): under CurveState, hindsight shows curve-routed
-                // quotes systematically overestimating output vs settlement (median +43 bps,
-                // 93% "win" rate vs 53% elsewhere). Full-EVM simulation until the mispricing —
-                // in CurveState's math or in the indexed curve state — is found and fixed.
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    None,
-                );
+                builder = builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), None);
             }
             "uniswap_v4_hooks" => {
                 builder = builder.exchange::<UniswapV4State>(
