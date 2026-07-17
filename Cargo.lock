@@ -3495,6 +3495,7 @@ dependencies = [
  "fynd-rpc-types",
  "hex",
  "metrics",
+ "metrics-util 0.20.4",
  "num-bigint",
  "num-traits",
  "num_cpus",

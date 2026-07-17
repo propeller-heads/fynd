@@ -45,7 +45,7 @@ mod cli;
 mod commands;
 use cli::{Cli, Commands};
 #[cfg(feature = "metrics")]
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider;
@@ -153,12 +153,29 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
 ///
-/// Exposes `/metrics` on a dedicated HTTP server bound to `port`.
+/// Exposes `/metrics` on a dedicated HTTP server bound to `port`. Every metric carries a
+/// global `chain` label so multi-chain fleets can aggregate without pod-name regexes.
+/// All `*_seconds` histograms render as bucketed Prometheus histograms (aggregatable
+/// across pods, unlike summary quantiles); `worker_router_solver_responses` is a count
+/// distribution and gets its own 0..=6 buckets.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
-fn create_metrics_exporter(port: u16) -> tokio::task::JoinHandle<()> {
-    let exporter_builder = PrometheusBuilder::new();
-    let handle = exporter_builder
+fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
+    const LATENCY_BUCKETS_SECONDS: &[f64] =
+        &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+    const SOLVER_RESPONSE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+    let handle = PrometheusBuilder::new()
+        // Normalize: `--chain` is free-form ("Ethereum" == "ethereum" after parse_chain),
+        // but differing label case would fragment the per-chain series.
+        .add_global_label("chain", chain.to_lowercase())
+        .set_buckets_for_metric(Matcher::Suffix("_seconds".to_string()), LATENCY_BUCKETS_SECONDS)
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
+            Matcher::Full("worker_router_solver_responses".to_string()),
+            SOLVER_RESPONSE_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
 
@@ -312,7 +329,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     info!("Starting Fynd");
 
     #[cfg(feature = "metrics")]
-    let _metrics_task = create_metrics_exporter(args.metrics_port);
+    let _metrics_task = create_metrics_exporter(args.metrics_port, &args.chain);
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {

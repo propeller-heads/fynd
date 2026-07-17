@@ -194,10 +194,19 @@ impl WorkerPoolRouter {
 
         // Encode solutions if encoding_options is set
         if let Some(encoding_options) = request.options().encoding_options() {
-            order_quotes = self
+            let encode_start = Instant::now();
+            let encoded = self
                 .encoder
                 .encode(order_quotes, encoding_options.clone())
-                .await?;
+                .await;
+            histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
+            order_quotes = match encoded {
+                Ok(quotes) => quotes,
+                Err(e) => {
+                    counter!("encoding_failures_total").increment(1);
+                    return Err(e);
+                }
+            };
         }
 
         // Calculate totals

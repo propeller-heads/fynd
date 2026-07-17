@@ -137,6 +137,7 @@ tracing-opentelemetry = "0.28"
 tracing-actix-web = "0.7"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+metrics-util = "0.20"
 
 # Tycho
 tycho-execution = ">=0.338.0"
