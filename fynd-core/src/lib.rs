@@ -22,7 +22,7 @@
 
 /// Route-finding algorithms. Includes [`MostLiquidAlgorithm`],
 /// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
-/// [`algorithm::SplitAlgorithm`], and the pluggable [`Algorithm`] trait.
+/// [`algorithm::WaterFillAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
 /// Derived data computations: spot prices, pool depths, and gas prices.
 pub mod derived;

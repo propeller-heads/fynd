@@ -25,7 +25,7 @@
 * [Most Liquid](algorithms/most-liquid.md)
 * [Bellman-Ford](algorithms/bellman-ford.md)
 * [Path Frank-Wolfe](algorithms/path-frank-wolfe.md)
-* [Split](algorithms/split.md)
+* [Water-fill](algorithms/water_fill.md)
 
 ## Reference
 

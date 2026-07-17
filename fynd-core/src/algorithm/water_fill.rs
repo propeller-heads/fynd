@@ -1,9 +1,9 @@
-//! Split-routing algorithm (`split`).
+//! Water-fill split-routing algorithm (`water_fill`).
 //!
 //! For large orders, price impact makes it better to split the order across several parallel routes
-//! so the marginal price stays low. `SplitAlgorithm` is a portfolio router: it builds up to four
-//! split candidates and returns the one with the best net-of-gas output, never worse than the best
-//! single path.
+//! so the marginal price stays low. `WaterFillAlgorithm` is a portfolio router: it builds up to
+//! four split candidates and returns the one with the best net-of-gas output, never worse than the
+//! best single path.
 //!
 //! The candidates are the best single path, a coarse pool-disjoint floor, a refined pool-disjoint
 //! split, and a shared-pool fill-and-spill:
@@ -106,7 +106,8 @@ impl SplitCandidate {
         token_prices: Option<&TokenGasPrices>,
         token_out: &Address,
     ) -> BigInt {
-        let cost = SplitAlgorithm::gas_cost_in_token(&self.gas, gas_price, token_prices, token_out);
+        let cost =
+            WaterFillAlgorithm::gas_cost_in_token(&self.gas, gas_price, token_prices, token_out);
         match cost {
             Some(c) => BigInt::from(self.gross.clone()) - BigInt::from(c),
             None => BigInt::from(self.gross.clone()),
@@ -117,7 +118,7 @@ impl SplitCandidate {
 /// Portfolio split router: splits orders across pool-disjoint (and, via fill-and-spill,
 /// pool-sharing) paths to minimize price impact, returning the best net of the single path and
 /// several split allocations.
-pub struct SplitAlgorithm {
+pub struct WaterFillAlgorithm {
     min_hops: usize,
     max_hops: usize,
     timeout: Duration,
@@ -144,8 +145,8 @@ struct StepResult {
     new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
-impl SplitAlgorithm {
-    /// Creates a new `SplitAlgorithm` from an [`AlgorithmConfig`].
+impl WaterFillAlgorithm {
+    /// Creates a new `WaterFillAlgorithm` from an [`AlgorithmConfig`].
     pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
         Ok(Self {
             min_hops: config.min_hops(),
@@ -401,12 +402,12 @@ impl SplitAlgorithm {
     }
 }
 
-impl Algorithm for SplitAlgorithm {
+impl Algorithm for WaterFillAlgorithm {
     type GraphType = StableDiGraph<DepthAndPrice>;
     type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
-        "split"
+        "water_fill"
     }
 
     async fn find_best_route(
@@ -486,9 +487,9 @@ impl Algorithm for SplitAlgorithm {
     }
 }
 
-impl SplitAlgorithm {
+impl WaterFillAlgorithm {
     /// Incumbent-equivalent floor split: a single gated coarse water-fill over the disjoint set,
-    /// same chunk grid and cost as [`SplitAlgorithm`](super::split::SplitAlgorithm). Because it
+    /// same chunk grid and cost as the incumbent split allocation. Because it
     /// does exactly the incumbent's allocation work on the shared clock, it cannot be starved
     /// by a tighter timeout when the incumbent would still produce a split — this is what makes
     /// the portfolio's never-lose guarantee hold under time pressure, not just in the untimed
@@ -1614,7 +1615,7 @@ mod tests {
         let m = two_equal_weth_usdc(1);
         let order = whole_weth_order(&m.weth, &m.usdc, 500);
 
-        let split = SplitAlgorithm::with_config(config())
+        let split = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(
                 m.weighted.graph(),
@@ -1656,7 +1657,7 @@ mod tests {
             addr(0xFF),
         );
 
-        let split = SplitAlgorithm::with_config(config())
+        let split = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(
                 m.weighted.graph(),
@@ -1696,7 +1697,7 @@ mod tests {
         let trade = 500u64;
         let order = whole_weth_order(&m.weth, &m.usdc, trade);
 
-        let result = SplitAlgorithm::with_config(config())
+        let result = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(
                 m.weighted.graph(),
@@ -1733,7 +1734,7 @@ mod tests {
             let m = two_equal_weth_usdc(1_000_000_000);
             let order = whole_weth_order(&m.weth, &m.usdc, 500);
 
-            let split = SplitAlgorithm::with_config(config_ms(ms))
+            let split = WaterFillAlgorithm::with_config(config_ms(ms))
                 .unwrap()
                 .find_best_route(
                     m.weighted.graph(),
@@ -1771,7 +1772,7 @@ mod tests {
         let m = two_equal_weth_usdc(1);
         let order = whole_weth_order(&m.weth, &m.usdc, 100);
 
-        let result = SplitAlgorithm::with_config(config())
+        let result = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(
                 m.weighted.graph(),

@@ -2,9 +2,9 @@
 icon: route
 ---
 
-# Split
+# Water-fill
 
-`split` is Fynd's production split-routing algorithm: it splits one order across multiple parallel
+`water_fill` is Fynd's production split-routing algorithm: it splits one order across multiple parallel
 paths to reduce price impact on large trades. It is a portfolio router — it evaluates several
 allocation strategies and returns the best net-of-gas result, never worse than the best single
 path.
@@ -67,7 +67,7 @@ Discovery unions two sources so no useful route is dropped:
 1. **Exhaustive BFS** enumeration of paths between the input and output tokens (the Most Liquid path
    finder), ranked by a spot-price × depth heuristic.
 2. **Bounded amount-aware search** — a Penumbra-inspired frontier search (the discovery section of
-   `split.rs`), expanding from the sell token with the full amount and preferring edges into the
+   `water_fill.rs`), expanding from the sell token with the full amount and preferring edges into the
    output token, configured `connector_tokens`, or a default anchor set. Its anchors include the
    native ETH sentinel `0x0000000000000000000000000000000000000000`, so WETH → ETH → token routes
    survive on full Fynd setups where Tycho models native ETH as the zero address.
@@ -90,7 +90,7 @@ router encodes on-chain, so every route the portfolio returns encodes.
 
 The portfolio's guarantee is that it never returns less net than the best single path, and it holds
 under time pressure because the coarse disjoint floor does exactly the incumbent's work on the
-shared clock. Because `split` always returns at least the best single path, it can run as the only
+shared clock. Because `water_fill` always returns at least the best single path, it can run as the only
 pool for a chain — a split router that returned nothing whenever it declined to split would need a
 single-path pool running alongside it to answer those orders.
 
@@ -101,8 +101,8 @@ The property is enforced by unit tests: `small_order_does_not_lose_to_single_pat
 ## Configuration
 
 ```toml
-[pools.split_4_hops]
-algorithm = "split"
+[pools.water_fill_4_hops]
+algorithm = "water_fill"
 num_workers = 1
 task_queue_capacity = 1000
 min_hops = 1
@@ -118,6 +118,6 @@ in the search even if they are not part of the default anchor set.
 
 | File | Purpose |
 | --- | --- |
-| `fynd-core/src/algorithm/split.rs` | `SplitAlgorithm`: portfolio allocation (floor, refined disjoint, fill-and-spill) and bounded candidate discovery |
+| `fynd-core/src/algorithm/water_fill.rs` | `WaterFillAlgorithm`: portfolio allocation (floor, refined disjoint, fill-and-spill) and bounded candidate discovery |
 | `fynd-core/src/algorithm/split_primitives.rs` | Shared-hop merging and executable route assembly |
-| `fynd-core/src/worker_pool/registry.rs` | Maps `"split"` to `SplitAlgorithm` |
+| `fynd-core/src/worker_pool/registry.rs` | Maps `"water_fill"` to `WaterFillAlgorithm` |

@@ -5,7 +5,7 @@ icon: compass
 # Overview
 
 Fynd ships four built-in routing algorithms: three single-route finders (Most Liquid, Bellman-Ford,
-Path Frank-Wolfe) and the [Split](split.md) portfolio router. This section explains the problem they
+Path Frank-Wolfe) and the [Water-fill](water_fill.md) portfolio router. This section explains the problem they
 solve and how each one works.
 
 ## The routing problem
@@ -32,7 +32,7 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 
 ## Built-in algorithms
 
-|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Split (portfolio)](split.md)                                   |
+|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Water-fill (portfolio)](water_fill.md)                                   |
 | ---------------------- | ------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Portfolio: best net of best single path, coarse disjoint floor, refined 256-chunk disjoint split, and shared-pool fill-and-spill; exhaustive plus bounded candidate discovery |
 | **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Never loses to the single path; covers every order (can run as the only pool); captures the large-trade gains |
