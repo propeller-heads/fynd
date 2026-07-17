@@ -8,6 +8,7 @@
 //! its [`LiquidityScope`] — the shared `MarketState` is never duplicated.
 //!
 //! [`PoolRole::ExclusiveAccess`]: crate::PoolRole::ExclusiveAccess
+//! [`LiquidityScope`]: crate::feed::scope::LiquidityScope
 
 use std::{collections::HashMap, sync::Arc};
 
