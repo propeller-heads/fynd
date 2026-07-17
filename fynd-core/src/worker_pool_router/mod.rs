@@ -41,9 +41,12 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, feed::scope::ExclusivityPolicy, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
-    QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams, SurplusInfo,
+    encoding::encoder::Encoder,
+    feed::scope::{ExclusivityPolicy, LiquidityScope},
+    price_guard::guard::PriceGuard,
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
+    SolveError, SolveParams, SurplusInfo,
 };
 
 /// The role a solver pool (a group of workers) plays in a quote.
@@ -66,6 +69,19 @@ pub enum PoolRole {
     /// Routes through all liquidity, public and exclusive components alike; candidates from
     /// this role may capture surplus above the public reference.
     ExclusiveAccess,
+}
+
+impl PoolRole {
+    /// The per-worker liquidity scope for a pool of this role.
+    ///
+    /// Only a `Public` pool with a policy filters; an `ExclusiveAccess` pool (and any pool
+    /// without a policy) sees everything.
+    pub(crate) fn liquidity_scope(self, policy: Option<ExclusivityPolicy>) -> LiquidityScope {
+        match (self, policy) {
+            (PoolRole::Public, Some(policy)) => LiquidityScope::PublicOnly(policy),
+            (PoolRole::Public, None) | (PoolRole::ExclusiveAccess, _) => LiquidityScope::All,
+        }
+    }
 }
 
 /// Handle to a solver pool for dispatching orders.

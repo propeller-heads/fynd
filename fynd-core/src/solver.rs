@@ -36,7 +36,7 @@ use crate::{
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
-        scope::{ExclusivityPolicy, LiquidityScope},
+        scope::ExclusivityPolicy,
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -755,14 +755,8 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            // The router-facing role doubles as the per-worker scope: only a public pool with a
-            // policy filters; an exclusive-access pool (and any pool without a policy) includes
-            // everything.
             let pool_role = pool_entry.role();
-            let scope = match (pool_role, exclusivity_policy.clone()) {
-                (PoolRole::Public, Some(policy)) => LiquidityScope::PublicOnly(policy),
-                _ => LiquidityScope::All,
-            };
+            let scope = pool_role.liquidity_scope(exclusivity_policy.clone());
 
             let (worker_pool, task_handle) = match pool_entry {
                 PoolEntry::BuiltIn {
