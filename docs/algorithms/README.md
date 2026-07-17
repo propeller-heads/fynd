@@ -28,6 +28,12 @@ Each algorithm runs inside a **worker pool**: a group of dedicated OS threads th
 
 This competition design means algorithms don't need to be perfect in isolation. A fast heuristic algorithm can win on common pairs while a thorough algorithm catches the routes the heuristic misses.
 
+The simulation-heavy algorithms (Path Frank-Wolfe and Water-fill) simulate many candidate swaps per
+request, and that cost scales with per-pool simulation time — higher for VM-simulated protocols than
+for native ones. Run them in a worker pool alongside a Bellman-Ford pool: the WorkerPoolRouter
+returns whichever pool answers best within the timeout, so the fast baseline still covers a request
+even when the heavier pool is slow on VM-heavy routes.
+
 See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Algorithm](../guides/custom-algorithm.md) for how to plug in your own.
 
 ## Built-in algorithms
@@ -36,6 +42,6 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 | ---------------------- | ------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Portfolio: best net of best single path, coarse disjoint floor, refined 256-chunk disjoint split, and shared-pool fill-and-spill; exhaustive plus bounded candidate discovery |
 | **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Never loses to the single path; covers every order (can run as the only pool); captures the large-trade gains |
-| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Pays the full candidate-simulation cost on every order (offline 10k p50 ~15 ms vs bounded's ~2 ms) |
+| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Pays the full candidate-simulation cost on every order (offline 10k p50 ~15 ms vs bounded's ~2 ms), higher for VM-simulated protocols; pair with a Bellman-Ford pool |
 | **Default config**     | _(not in default `worker_pools.toml`)_                              | 2 hops, 3 workers (see `worker_pools.toml`)        | _(not in default `worker_pools.toml`)_                                      | _(not in default `worker_pools.toml`)_                          |
 | **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode)    | Token gas prices + spot prices (price impact, probe amount, gas cost)       | Spot prices + pool depths (candidate ranking), token gas prices (optional, gas-aware net) |
