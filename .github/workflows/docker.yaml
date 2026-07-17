@@ -108,7 +108,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            # Pre-releases (e.g. 0.90.0-rc.1) must not move the floating tag.
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
             type=sha,prefix=sha-
 
       - name: Create and push manifest
@@ -134,7 +135,9 @@ jobs:
   promote-staging:
     name: Promote to staging
     needs: merge
-    if: github.event_name == 'release'
+    # Pre-releases build and push the image but are deployed deliberately,
+    # not auto-promoted to the staging environment.
+    if: github.event_name == 'release' && !github.event.release.prerelease
     concurrency:
       group: promote-staging
       cancel-in-progress: false
