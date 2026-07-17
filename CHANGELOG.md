@@ -1,3 +1,20 @@
+## [0.92.0](https://github.com/propeller-heads/fynd/compare/0.91.0...0.92.0) (2026-07-17)
+
+
+### Features
+
+* add chain label and histogram buckets to metrics exporter ([0bcbf29](https://github.com/propeller-heads/fynd/commit/0bcbf29b7ab1ffd5a044650857813443654d6272))
+* add component and token count getters to MarketState ([3825175](https://github.com/propeller-heads/fynd/commit/3825175a231ef5f3ee62b3ef6d847637539738f7))
+* add HTTP metrics middleware with per-client labels ([3f30279](https://github.com/propeller-heads/fynd/commit/3f30279dd645e7af7c7560e04522092c15403d28))
+* record derived computation duration, failure, freshness metrics ([60080fc](https://github.com/propeller-heads/fynd/commit/60080fc99c51741e37320914dd0fe69d7041ef7f))
+* record encoding duration and failure metrics ([b601716](https://github.com/propeller-heads/fynd/commit/b601716f15fda4280b52a2326ef498acb1f2d5bf))
+* record feed freshness, update duration, and size metrics ([1c42bc3](https://github.com/propeller-heads/fynd/commit/1c42bc399fd90d69ce1d222e5ba21c2004c1f3ae))
+
+
+### Bug Fixes
+
+* bound per-client metric label values ([a9f5063](https://github.com/propeller-heads/fynd/commit/a9f50633f5b2c5a068f5b51c3dd4b8b25b99dcc0))
+
 ## [0.91.0](https://github.com/propeller-heads/fynd/compare/0.90.3...0.91.0) (2026-07-17)
 
 
