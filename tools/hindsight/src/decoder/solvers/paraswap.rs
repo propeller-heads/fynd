@@ -21,7 +21,7 @@ impl SolverKnowledge for Paraswap {
     /// Scans word-aligned calldata for `amount_in` and reads the two words after it as
     /// `(toAmount, quotedAmount)`. A false positive would need a word that equals the exact
     /// input amount *and* is followed by a plausible floor/quote pair (`0 < toAmount <=
-    /// quotedAmount <= 2 * toAmount`) — and the caller's settled-amount plausibility guard
+    /// quotedAmount <= 2 * toAmount`) — and the caller's settled-amount plausibility check
     /// still applies after. Returns `None` when no such triple exists (e.g. a partner fee made
     /// the decoded input differ from `fromAmount`), which just leaves the record without a
     /// quote.

@@ -1,9 +1,13 @@
-//! Post-decode vetoes: netted "swaps" that are not comparable trades.
+//! Vetoes: rejections that keep non-trades out of the records, and the [`Veto`] type they all
+//! share.
 //!
-//! Netting can pair value legs that were never a swap — the payment side of an NFT purchase, or
-//! a cross-chain deposit's dust refund. Each guard recognizes one such shape from the
-//! transaction itself (no prices, no external data); [`veto`] is the single check the decoder
-//! runs on every decoded flow, so adding a guard never touches the orchestrator.
+//! There are two veto points. Solver-specific vetoes run at match time on logs alone (see
+//! `solvers::solver_veto`), before a transaction costs a trace. The checks in this module run
+//! after decoding: netting can pair value legs that were never a swap — the payment side of an
+//! NFT purchase, or a cross-chain deposit's dust refund. Each check recognizes one such shape
+//! from the transaction itself (no prices, no external data); [`check`] is the single entry
+//! point the decoder runs on every decoded flow, so adding a check never touches the
+//! orchestrator.
 
 use alloy::{
     primitives::{Address, U256},
@@ -18,8 +22,8 @@ use crate::decoder::{
     transfer_ledger::{NetSwap, Transfer},
 };
 
-/// A decoded flow rejected as not a comparable trade, by the shape that disqualified it.
-#[derive(Debug, Clone, Copy)]
+/// A transaction rejected as not a comparable trade, by the shape that disqualified it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Veto {
     /// The trader received an NFT: the netted token flow is the payment side of a purchase
     /// (e.g. an NFT sweep through Relay + Seaport), and the real consideration is invisible to
@@ -29,10 +33,14 @@ pub(crate) enum Veto {
     /// A native <-> wrapped-native "swap" far off 1:1, which a wrap or unwrap cannot produce: a
     /// mis-paired cross-chain deposit whose only same-chain receipt is a dust remainder refund.
     MispairedWrapPair,
+    /// A cross-chain bridge order settled by a solver router: the real output lands on the
+    /// destination chain, so there is no same-chain swap to record. Placed at match time by
+    /// `solvers::solver_veto`, never by [`check`].
+    BridgeOrder,
 }
 
-/// Check a decoded flow against every guard, returning the first veto.
-pub(crate) fn veto(flow: &TraderFlow, logs: &[Log], registry: &Registry) -> Option<Veto> {
+/// Check a decoded flow against every post-decode veto, returning the first.
+pub(crate) fn check(flow: &TraderFlow, logs: &[Log], registry: &Registry) -> Option<Veto> {
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }

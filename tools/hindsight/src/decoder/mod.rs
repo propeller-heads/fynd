@@ -9,12 +9,11 @@
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
-//! The pipeline is match → trace → decode → guard → record: `matching` filters a block down to
+//! The pipeline is match → trace → decode → veto → record: `matching` filters a block down to
 //! solver trades, `strategies` recovers each trade's swap (trying decode methods in precedence
-//! order), `transfer_ledger` answers all value-flow questions, `guards` vetoes shapes that are not
+//! order), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
-mod guards;
 mod maker;
 mod matching;
 mod registry;
@@ -24,6 +23,7 @@ mod strategies;
 mod trace;
 mod transfer_ledger;
 pub(crate) mod venues;
+mod veto;
 
 #[cfg(test)]
 mod test_utils;
@@ -208,7 +208,7 @@ impl<P: Provider> Decoder<P> {
     }
 
     /// Decode one matched transaction from its trace: build the transfer ledger, try the decode
-    /// strategies in order, guard the result, attribute the solver, and account gas and quote.
+    /// strategies in order, veto non-trades, attribute the solver, and account gas and quote.
     async fn decode_transaction(
         &mut self,
         matched: MatchedSolverTrade<'_>,
@@ -243,7 +243,7 @@ impl<P: Provider> Decoder<P> {
             return None;
         };
 
-        if let Some(veto) = guards::veto(&flow, logs, registry) {
+        if let Some(veto) = veto::check(&flow, logs, registry) {
             debug!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),

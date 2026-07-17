@@ -16,7 +16,7 @@ use alloy::{
     rpc::types::Log,
 };
 
-use crate::decoder::registry::Registry;
+use crate::decoder::{registry::Registry, veto::Veto};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
@@ -46,10 +46,10 @@ pub(crate) trait SolverKnowledge: Send + Sync {
         None
     }
 
-    /// The reason this solver's logs mark a matched transaction as not decodable as a swap.
-    /// Checked at match time — before attribution names the solver, and before the transaction
-    /// costs a trace.
-    fn match_veto(&self, _logs: &[Log]) -> Option<&'static str> {
+    /// The veto this solver's logs place on a matched transaction that is not decodable as a
+    /// swap. Checked at match time — before attribution names the solver, and before the
+    /// transaction costs a trace.
+    fn solver_veto(&self, _logs: &[Log]) -> Option<Veto> {
         None
     }
 }
@@ -62,24 +62,21 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
     ("paraswap", &paraswap::Paraswap),
 ];
 
-/// The reason a matched transaction must be skipped instead of decoded, if any.
+/// The veto a solver places on a matched transaction that must be skipped instead of decoded,
+/// if any.
 ///
 /// Some solver routers also settle orders that are not same-chain swaps; decoding those would
 /// record trades that never happened. A solver's veto is consulted only when that solver is
 /// part of the transaction — as its entry point or as a log emitter — so a veto can never
 /// affect another solver's trades.
-pub(crate) fn match_veto(
-    logs: &[Log],
-    entry_point: Address,
-    registry: &Registry,
-) -> Option<&'static str> {
+pub(crate) fn solver_veto(logs: &[Log], entry_point: Address, registry: &Registry) -> Option<Veto> {
     for (name, knowledge) in IMPLEMENTATIONS {
         let present = registry.solver_name(entry_point) == Some(name) ||
             logs.iter()
                 .any(|log| registry.solver_name(log.address()) == Some(name));
         if present {
-            if let Some(reason) = knowledge.match_veto(logs) {
-                return Some(reason);
+            if let Some(veto) = knowledge.solver_veto(logs) {
+                return Some(veto);
             }
         }
     }
@@ -146,25 +143,25 @@ mod tests {
     }
 
     #[test]
-    fn match_veto_bridge_orders() {
+    fn solver_veto_bridge_orders() {
         let registry = Registry::ethereum();
         let lifi_router: Address = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
             .parse()
             .unwrap();
         let bridge_logs = vec![bridge_log(lifi_router)];
-        assert_eq!(match_veto(&bridge_logs, addr(1), &registry), Some("cross-chain bridge order"));
+        assert_eq!(solver_veto(&bridge_logs, addr(1), &registry), Some(Veto::BridgeOrder));
 
         let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
-        assert_eq!(match_veto(&swap_logs, lifi_router, &registry), None);
+        assert_eq!(solver_veto(&swap_logs, lifi_router, &registry), None);
     }
 
     #[test]
-    fn match_veto_scoped_to_the_solver_present() {
+    fn solver_veto_scoped_to_the_solver_present() {
         // The same bridge-shaped log from an address that is not the LiFi router: LiFi is not
         // part of the transaction, so its veto is never consulted.
         let registry = Registry::ethereum();
         let bridge_logs = vec![bridge_log(addr(70))];
-        assert_eq!(match_veto(&bridge_logs, addr(1), &registry), None);
+        assert_eq!(solver_veto(&bridge_logs, addr(1), &registry), None);
     }
 
     #[test]

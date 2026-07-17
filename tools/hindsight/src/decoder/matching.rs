@@ -22,18 +22,18 @@ pub(crate) struct MatchedSolverTrade<'a> {
 /// venue or solver, or one of its logs was emitted by a known solver
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
 /// Matched transactions whose logs mark a non-swap order shape are vetoed
-/// here (see [`solvers::match_veto`]), before they cost a trace.
+/// here (see [`solvers::solver_veto`]), before they cost a trace.
 pub(crate) fn select<'a>(
     receipt: &'a TransactionReceipt,
     registry: &Registry,
 ) -> Option<MatchedSolverTrade<'a>> {
     let matched = match_entry(receipt, registry)?;
-    if let Some(reason) = solvers::match_veto(matched.receipt.logs(), matched.entry_point, registry)
+    if let Some(veto) = solvers::solver_veto(matched.receipt.logs(), matched.entry_point, registry)
     {
         debug!(
             tx = %matched.receipt.transaction_hash,
             venue = %registry.label(matched.entry_point),
-            reason,
+            ?veto,
             "matched transaction is not a same-chain swap; skipping"
         );
         return None;

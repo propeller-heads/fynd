@@ -16,7 +16,7 @@
 //! earlier ones cannot decode.
 //!
 //! Everything around the question is shared and lives outside the strategies: matching and
-//! vetoes in `matching`, and post-processing (guards, solver attribution, gas, embedded
+//! solver vetoes in `matching`, and post-processing (vetoes, solver attribution, gas, embedded
 //! quotes, sandwich detection) in the orchestrator, applied identically to every strategy's
 //! output. What belongs in a strategy versus a venue or solver module is laid out in the
 //! README's placement rules.

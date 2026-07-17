@@ -40,14 +40,14 @@ Three subcommands via `cargo run -p hindsight --release --`. All of them take `-
 
 ### Decode pipeline (`src/decoder/`)
 
-Match → trace → decode → guard → record.
+Match → trace → decode → veto → record.
 
 | File/dir | Purpose |
 |---|---|
 | `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
 | `strategies/` | Decode methods behind the `DecodeStrategy` trait, tried in precedence order (`netting` today) |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
-| `guards.rs` | Vetoes non-comparable shapes (NFT purchases, mis-paired wrap trades) |
+| `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades) |
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
 | `venues/` | Per-venue decoders (Relay, MetaMask), called through one `VenueContext` seam |
@@ -100,7 +100,7 @@ savings aggregates; unsolved states keep their coverage verdicts).
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
   enough for matching, attribution, gas isolation, and metric labels. Optional code: a
   `SolverKnowledge` impl in `solvers/` (registered in `solvers::IMPLEMENTATIONS`) with an
-  `embedded_quote` method if its calldata declares an off-chain quote, or a `match_veto` method
+  `embedded_quote` method if its calldata declares an off-chain quote, or a `solver_veto` method
   if some of its orders are not same-chain swaps.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
   `VenueKnowledge` impl in `venues/` and its `venues::from_name` binding. Most venues are sender

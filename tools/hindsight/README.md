@@ -36,7 +36,7 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
     eth_getBlockReceipts (one call per block)
                     │
                     ▼
-           ┌─────────────────┐    match_veto    ┌─────────────────┐
+           ┌─────────────────┐   solver_veto    ┌─────────────────┐
            │    matching     │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘  skips non-swaps └─────────────────┘
                     │  entry point or a solver log
@@ -61,7 +61,7 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
            ┌─────────────────┐  embedded_quote  ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  guards → attribution → gas → quote → sandwich scan
+                    │  veto → attribution → gas → quote → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -125,8 +125,8 @@ trait SolverKnowledge {
     /// The solver's off-chain quote declared in its calldata, when it embeds one.
     fn embedded_quote(&self, input: &[u8], amount_in: U256) -> Option<SolverQuote> { None }
 
-    /// The reason this solver's logs mark a matched transaction as not a same-chain swap.
-    fn match_veto(&self, logs: &[Log]) -> Option<&'static str> { None }
+    /// The veto this solver's logs place on a matched transaction that is not a swap.
+    fn solver_veto(&self, logs: &[Log]) -> Option<Veto> { None }
 }
 ```
 
@@ -149,11 +149,11 @@ must be re-verified on every chain it is added on.
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the quote and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
 | Read a solver's quote from its calldata | A `SolverKnowledge` impl in `solvers/`, registered in `solvers::IMPLEMENTATIONS` | Records for that solver carry no quote |
-| Skip a solver's non-swap orders | A `match_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
+| Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book, a `VenueKnowledge` impl in `venues/`, one arm in `venues::from_name` | The venue's trades are missed, or decoded with its fee still inside the amounts — see below |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently — see below |
 | Add a new way to extract swaps | A module in `strategies/` plus one entry in `default_strategies` | Transactions the existing methods cannot decode stay undecoded |
-| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A guard in `guards.rs` | Records that are not trades enter the comparison |
+| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus `VenueKnowledge`/`SolverKnowledge` impls for its venues and solvers that have none yet | Only `ethereum` is built in |
 
 ### Strategies vs venue knowledge vs solver knowledge

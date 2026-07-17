@@ -53,7 +53,7 @@ impl VenueKnowledge for Relay {
 ///
 /// Declines (returns `None`) when the shape is ambiguous: not exactly one input token, a
 /// same-token "swap", more than one token back to the collector, or more than one external
-/// recipient or output (a batched multi-order fill, like the multi-leg netting guard).
+/// recipient or output (a batched multi-order fill, like netting's multi-leg decline).
 fn decode_rebalance(
     transfer_ledger: &TransferLedger,
     fee_collectors: &HashSet<Address>,
