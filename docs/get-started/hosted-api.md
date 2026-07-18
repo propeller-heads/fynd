@@ -483,8 +483,8 @@ Your API key belongs to a **plan** that sets your rate limit. Limits are enforce
 | Plan | Requests / second | Burst | How to get |
 | --- | ---: | ---: | --- |
 | **fynd-basic** (default) | 10 | 2× (20) | Self-service via [@FyndPortalBot](https://t.me/fynd_portal_bot) |
+| **basic** (tycho) | 10 | 2× (20) | Request via [@tanay_j](https://t.me/tanay_j) or [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl) |
 | **scale** | 25 | 2× (50) | Request via [@tanay_j](https://t.me/tanay_j) or [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl) |
-| **transition** | 50 | 4× (200) | Request via [@tanay_j](https://t.me/tanay_j) or [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl) |
 
 {% hint style="info" %}
 **Burst** is the bucket capacity = `rps × burst_multiplier`. A `fynd-basic` key can briefly sustain 20 requests in one second before being throttled back to the steady-state 10 rps. **All requests count against the bucket** — `/health`, `/info`, and `/quote` alike. The bucket is **per key, shared across all chains**.
