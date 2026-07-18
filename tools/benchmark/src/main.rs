@@ -97,6 +97,9 @@ mod tests {
         assert!(args.requests_file.is_none());
         assert!(args.output_file.is_none());
         assert!(!args.encoding);
+        assert!(args.api_key.is_none());
+        assert_eq!(args.quote_path, "/v1/quote");
+        assert_eq!(args.health_path, "/v1/health");
     }
 
     #[test]
@@ -194,6 +197,33 @@ mod tests {
         assert_eq!(args.timeout_ms, 5000);
         assert!(!args.encoding);
         assert_eq!(args.seed, 42);
+        assert!(args.api_key.is_none());
+        assert_eq!(args.quote_path, "/v1/quote");
+        assert_eq!(args.health_path, "/v1/health");
+    }
+
+    #[test]
+    fn capacity_gateway_args() {
+        let cli = Cli::try_parse_from([
+            "bin",
+            "capacity",
+            "--solver-url",
+            "https://fynd-api.propellerheads.xyz/v1/base",
+            "--api-key",
+            "secret-token",
+            "--quote-path",
+            "/quote",
+            "--health-path",
+            "/health",
+        ])
+        .unwrap();
+        let Command::Capacity(args) = cli.command else {
+            panic!("expected Capacity");
+        };
+        assert_eq!(args.solver_url, "https://fynd-api.propellerheads.xyz/v1/base");
+        assert_eq!(args.api_key.as_deref(), Some("secret-token"));
+        assert_eq!(args.quote_path, "/quote");
+        assert_eq!(args.health_path, "/health");
     }
 
     #[test]

@@ -41,6 +41,21 @@ pub struct Args {
     #[arg(long, env = "SOLVER_URL", default_value = "http://localhost:3000")]
     pub solver_url: String,
 
+    /// API key sent verbatim as the `Authorization` header (for an auth gateway).
+    /// When unset, requests are sent without an `Authorization` header.
+    #[arg(long, env = "FYND_API_KEY")]
+    pub api_key: Option<String>,
+
+    /// Request path appended to `--solver-url` for quotes. Use `/quote` when `--solver-url`
+    /// is a chain-scoped gateway base such as `https://host/v1/base`.
+    #[arg(long, env = "QUOTE_PATH", default_value = "/v1/quote")]
+    pub quote_path: String,
+
+    /// Request path appended to `--solver-url` for health checks. Use `/health` with a
+    /// chain-scoped gateway base.
+    #[arg(long, env = "HEALTH_PATH", default_value = "/v1/health")]
+    pub health_path: String,
+
     /// JSON file of request templates; defaults to the embedded 50-trade sample
     #[arg(long, env = "REQUESTS_FILE")]
     pub requests_file: Option<String>,
@@ -114,11 +129,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     fastrand::seed(args.seed);
     let output_file = args.output_file.clone();
 
-    let client = Arc::new(
-        FyndClientBuilder::new(&args.solver_url)
-            .build_quote_only()
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-    );
+    let client = Arc::new(build_client(&args).map_err(|e| anyhow::anyhow!("{e}"))?);
     check_solver_health(&client).await?;
 
     let (templates, requests_sha256) = load_templates(&args)?;
@@ -172,6 +183,18 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("{REPORT_MARKER}");
     println!("{json}");
     Ok(())
+}
+
+/// Build a quote-only client, wiring the optional gateway API key and quote/health path
+/// overrides from the CLI args.
+fn build_client(args: &Args) -> Result<FyndClient, fynd_client::FyndError> {
+    let mut builder = FyndClientBuilder::new(&args.solver_url)
+        .with_quote_path(args.quote_path.as_str())
+        .with_health_path(args.health_path.as_str());
+    if let Some(key) = &args.api_key {
+        builder = builder.with_api_key(key.as_str());
+    }
+    builder.build_quote_only()
 }
 
 fn load_templates(args: &Args) -> anyhow::Result<(Vec<SwapRequest>, Option<String>)> {
