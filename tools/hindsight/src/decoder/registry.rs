@@ -3,7 +3,7 @@
 //!
 //! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
 //! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
-//! address book without recompiling. This module only holds the lookups the decode strategies ask
+//! address book without recompiling. This module only holds the lookups the decoders ask
 //! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
 use std::{
@@ -36,8 +36,8 @@ struct AddressBook {
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
 /// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
-/// the address book; the name binds to a decode strategy at load time (see
-/// [`crate::decoder::venues::from_name`]).
+/// the address book; the name binds to a decoder at load time (see
+/// [`crate::decoder::venues::decoders_for`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
@@ -125,14 +125,14 @@ impl Registry {
         let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
-        // A venue section only carries addresses; its behavior is bound by name in code. An
-        // unbound name (a typo, or a venue with no strategy yet) must fail here — silently
-        // never matching would just drop that venue's trades.
+        // A venue section only carries addresses; its decoders are bound by name in code. An
+        // unbound name (a typo, or a venue with no decoder yet) must fail here — silently never
+        // decoding would just drop that venue's trades.
         for name in book.venues.keys() {
-            if crate::decoder::venues::from_name(name).is_none() {
+            if !crate::decoder::venues::has_decoder(name) {
                 anyhow::bail!(
-                    "address book venue '{name}' has no decode strategy \
-                     (see venues::from_name for the recognized names)"
+                    "address book venue '{name}' has no decoder \
+                     (see venues::decoders_for for the recognized names)"
                 );
             }
         }
@@ -374,15 +374,15 @@ mod tests {
     }
 
     #[test]
-    fn venue_without_strategy() {
-        // A venue section whose name has no decode strategy would silently never match, so the
+    fn venue_without_decoder() {
+        // A venue section whose name has no decoder would silently never decode, so the
         // address book must fail to load.
         let text =
             format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
         let err = Registry::from_toml(&text)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no decode strategy"), "unexpected error: {err}");
+        assert!(err.contains("no decoder"), "unexpected error: {err}");
     }
 
     #[test]

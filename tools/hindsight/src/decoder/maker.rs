@@ -10,8 +10,8 @@ use alloy::{primitives::Address, providers::Provider};
 use tracing::warn;
 
 use crate::decoder::{
+    decode::TraderFlow,
     registry::Registry,
-    strategies::TraderFlow,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 

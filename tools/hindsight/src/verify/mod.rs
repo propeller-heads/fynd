@@ -421,7 +421,7 @@ mod tests {
             venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
-            decode_strategy: "netting",
+            decoder: "sender-netting",
             sender: addr(1),
             token_in,
             token_out,

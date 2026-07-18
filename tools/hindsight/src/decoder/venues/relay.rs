@@ -1,44 +1,53 @@
-//! Relay-specific decoding.
+//! Relay decoding.
 //!
-//! Relay differs from direct solver swaps in two ways: its router sends a
-//! venue fee to a collector address on either side of the swap, and its
-//! solvers submit rebalancing fills whose transaction sender has no net flow.
+//! Relay differs from direct solver swaps in two ways: its router sends a venue fee to a collector
+//! address on either side of the swap, and its solvers submit rebalancing fills whose transaction
+//! sender has no net flow.
 
 use std::collections::HashSet;
 
-use alloy::primitives::{Address, U256};
+use alloy::{
+    primitives::{Address, U256},
+    providers::Provider,
+};
+use async_trait::async_trait;
 
 use crate::decoder::{
-    strategies::TraderFlow,
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
+    netting::venue_flow,
     transfer_ledger::{NetSwap, TransferLedger},
-    venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
 
-/// The Relay venue.
-pub(crate) struct Relay;
+/// Relay's netting decoder.
+pub(crate) struct RelayNetting;
 
-impl VenueKnowledge for Relay {
-    /// Decode a Relay-entered transaction.
-    ///
-    /// The common case is a user swap: net the sender's flow, then back the
-    /// venue fee out of it. When the sender has no net flow the transaction is a
-    /// solver-initiated rebalancing fill, decoded by anchoring on the fee
-    /// collector instead (Relay funds the swap from it); the collector is the
-    /// funding source there, not a fee recipient, so no fee is backed out.
-    fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
-        let relay = ctx.addresses;
-        if let Some(flow) =
-            venue_fee_flow(ctx.transfer_ledger, ctx.sender, ctx.entry_point, &relay.fee_collectors)
-        {
+#[async_trait]
+impl<P: Provider> TradeDecoder<P> for RelayNetting {
+    fn name(&self) -> &'static str {
+        "relay-netting"
+    }
+
+    /// The common case is a user swap: net the sender's flow, then back the venue fee out of it.
+    /// When the sender has no net flow the transaction is a solver-initiated rebalancing fill,
+    /// decoded by anchoring on the fee collector instead (Relay funds the swap from it); the
+    /// collector is the funding source there, not a fee recipient, so no fee is backed out.
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        let addresses = ctx.venue?;
+        if let Some(flow) = venue_flow(
+            ctx.transfer_ledger,
+            ctx.receipt.from,
+            ctx.entry_point,
+            &addresses.fee_collectors,
+        ) {
             return Some(flow);
         }
         decode_rebalance(
             ctx.transfer_ledger,
-            &relay.fee_collectors,
-            &relay.entry_points,
+            &addresses.fee_collectors,
+            &addresses.entry_points,
             ctx.registry.wrapped_native(),
         )
-        .map(|swap| TraderFlow::without_fees(ctx.sender, swap))
+        .map(|swap| TraderFlow::without_fees(ctx.receipt.from, swap))
     }
 }
 
@@ -112,28 +121,56 @@ fn decode_rebalance(
 
 #[cfg(test)]
 mod tests {
-    use alloy::rpc::types::Log;
+    use std::collections::HashMap;
+
+    use alloy::{
+        providers::RootProvider,
+        rpc::{client::RpcClient, types::Log},
+        transports::mock::Asserter,
+    };
 
     use super::*;
     use crate::decoder::{
+        decode::GasScope,
         registry::Registry,
-        strategies::GasScope,
-        test_utils::{addr, make_transfer_log, swap},
+        test_utils::{addr, make_transfer_log, receipt, swap, tx_hash},
     };
 
     fn transfer_ledger(logs: &[Log], native: &[(Address, Address, U256)]) -> TransferLedger {
         TransferLedger::from_transaction(logs, native)
     }
 
-    /// A [`VenueContext`] over the given transaction pieces, for concise decode calls.
-    fn ctx<'a>(
-        transfer_ledger: &'a TransferLedger,
+    fn relay_collector(registry: &Registry) -> Address {
+        *registry
+            .venue("relay")
+            .unwrap()
+            .fee_collectors
+            .iter()
+            .next()
+            .unwrap()
+    }
+
+    /// Decode a Relay transaction through the full [`RelayNetting`] decoder.
+    async fn decode(
+        registry: &Registry,
+        ledger: &TransferLedger,
         sender: Address,
         entry_point: Address,
-        registry: &'a Registry,
-    ) -> VenueContext<'a> {
-        let addresses = registry.venue("relay").unwrap();
-        VenueContext { addresses, transfer_ledger, sender, entry_point, input: &[], registry }
+    ) -> Option<TraderFlow> {
+        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
+        let mut code_cache = HashMap::new();
+        let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
+        let mut ctx = DecodeContext {
+            provider: &provider,
+            registry,
+            code_cache: &mut code_cache,
+            receipt: &receipt,
+            entry_point,
+            transfer_ledger: ledger,
+            input: &[],
+            venue: registry.venue("relay"),
+        };
+        RelayNetting.decode(&mut ctx).await
     }
 
     #[test]
@@ -240,18 +277,12 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn decode_user_flow_with_fee() {
+    #[tokio::test]
+    async fn user_flow_with_fee() {
         // User swap through Relay: sender nets token_in -> token_out, with an input-side fee to
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
-        let collector = *registry
-            .venue("relay")
-            .unwrap()
-            .fee_collectors
-            .iter()
-            .next()
-            .unwrap();
+        let collector = relay_collector(&registry);
         let user = addr(1);
         let router = addr(2);
         let pool = addr(50);
@@ -264,9 +295,8 @@ mod tests {
             make_transfer_log(token_in, router, pool, U256::from(960)),
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
-
-        let flow = Relay
-            .decode(&ctx(&transfer_ledger(&logs, &[]), user, router, &registry))
+        let flow = decode(&registry, &transfer_ledger(&logs, &[]), user, router)
+            .await
             .unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
@@ -275,27 +305,21 @@ mod tests {
         assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
 
-    #[test]
-    fn decode_collector_trader() {
+    #[tokio::test]
+    async fn collector_is_the_trader() {
         // Treasury op (live tx 0x80a4c0…): the fee collector itself unwraps WETH via the router.
         // Its 1:1 native receipt must not be treated as a fee and added back — that doubled the
         // output.
         let registry = Registry::ethereum();
-        let collector = *registry
-            .venue("relay")
-            .unwrap()
-            .fee_collectors
-            .iter()
-            .next()
-            .unwrap();
+        let collector = relay_collector(&registry);
         let router = addr(2);
         let weth = addr(10);
 
         let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
         let native = vec![(router, collector, U256::from(1000))];
 
-        let flow = Relay
-            .decode(&ctx(&transfer_ledger(&logs, &native), collector, router, &registry))
+        let flow = decode(&registry, &transfer_ledger(&logs, &native), collector, router)
+            .await
             .unwrap();
         assert_eq!(flow.tracked, collector);
         assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
@@ -303,17 +327,11 @@ mod tests {
         assert_eq!(flow.venue_fee_out, None);
     }
 
-    #[test]
-    fn decode_rebalance_fill() {
+    #[tokio::test]
+    async fn rebalance_fill() {
         // Solver fill: the sender has no net flow; the collector funds the swap. No fee back-out.
         let registry = Registry::ethereum();
-        let collector = *registry
-            .venue("relay")
-            .unwrap()
-            .fee_collectors
-            .iter()
-            .next()
-            .unwrap();
+        let collector = relay_collector(&registry);
         let solver = addr(1);
         let router = addr(2);
         let pool = addr(50);
@@ -326,8 +344,8 @@ mod tests {
             make_transfer_log(token_out, pool, recipient, U256::from(2000)),
         ];
 
-        let flow = Relay
-            .decode(&ctx(&transfer_ledger(&logs, &[]), solver, router, &registry))
+        let flow = decode(&registry, &transfer_ledger(&logs, &[]), solver, router)
+            .await
             .unwrap();
         assert_eq!(flow.tracked, solver);
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));

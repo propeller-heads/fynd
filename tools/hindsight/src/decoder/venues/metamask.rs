@@ -1,4 +1,4 @@
-//! MetaMask-specific decoding.
+//! `MetaMask` decoding.
 //!
 //! `MetaMask`'s Swap Router routes through a real solver and takes its fee (~87.5 bps, plus a gas
 //! recoup on gasless "smart swaps") to a fee wallet — from the input token before swapping or
@@ -7,18 +7,43 @@
 //! `MetaMask`'s own fee, and on dust trades — where the fee dominates — that fabricates extreme
 //! "wins".
 
-use alloy::{sol, sol_types::SolCall};
+use alloy::{providers::Provider, sol, sol_types::SolCall};
+use async_trait::async_trait;
 
 use crate::decoder::{
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
+    netting::venue_flow,
     registry::VenueAddresses,
-    strategies::TraderFlow,
-    venues::{venue_fee_flow, VenueContext, VenueKnowledge},
 };
 
 sol! {
     /// The `MetaMask` Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
     /// solver API that produced the route.
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
+}
+
+/// `MetaMask`'s netting decoder.
+pub(crate) struct MetaMaskNetting;
+
+#[async_trait]
+impl<P: Provider> TradeDecoder<P> for MetaMaskNetting {
+    fn name(&self) -> &'static str {
+        "metamask-netting"
+    }
+
+    /// Net the sender's flow, back the venue fee out of it, and attribute the solver from the
+    /// router calldata.
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        let addresses = ctx.venue?;
+        let mut flow = venue_flow(
+            ctx.transfer_ledger,
+            ctx.receipt.from,
+            ctx.entry_point,
+            &addresses.fee_collectors,
+        )?;
+        flow.solver_override = solver_from_calldata(ctx.input, addresses);
+        Some(flow)
+    }
 }
 
 /// The solver label declared in the router calldata's `aggregatorId`, normalized to the address
@@ -33,53 +58,31 @@ fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<Strin
     Some(metamask.normalize_solver(&call.aggregatorId))
 }
 
-/// The `MetaMask` venue.
-pub(crate) struct Metamask;
-
-impl VenueKnowledge for Metamask {
-    /// Decode a MetaMask-entered transaction: net the sender's flow, back the venue fee out of
-    /// it, and attribute the solver from the router calldata.
-    fn decode(&self, ctx: &VenueContext<'_>) -> Option<TraderFlow> {
-        let metamask = ctx.addresses;
-        let mut flow = venue_fee_flow(
-            ctx.transfer_ledger,
-            ctx.sender,
-            ctx.entry_point,
-            &metamask.fee_collectors,
-        )?;
-        flow.solver_override = solver_from_calldata(ctx.input, metamask);
-        Some(flow)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, Bytes, U256};
+    use std::collections::HashMap;
+
+    use alloy::{
+        primitives::{Address, Bytes, U256},
+        providers::RootProvider,
+        rpc::client::RpcClient,
+        transports::mock::Asserter,
+    };
 
     use super::*;
     use crate::decoder::{
+        decode::GasScope,
         registry::Registry,
-        strategies::GasScope,
-        test_utils::{addr, make_transfer_log, swap},
+        test_utils::{addr, make_transfer_log, receipt, swap, tx_hash},
         transfer_ledger::TransferLedger,
     };
 
-    /// A [`VenueContext`] over the given transaction pieces, for concise decode calls.
-    fn ctx<'a>(
-        transfer_ledger: &'a TransferLedger,
-        sender: Address,
-        entry_point: Address,
-        input: &'a [u8],
-        registry: &'a Registry,
-    ) -> VenueContext<'a> {
-        let addresses = registry.venue("metamask").unwrap();
-        VenueContext { addresses, transfer_ledger, sender, entry_point, input, registry }
+    fn metamask_addresses(registry: &Registry) -> &VenueAddresses {
+        registry.venue("metamask").unwrap()
     }
 
     fn fee_wallet(registry: &Registry) -> Address {
-        *registry
-            .venue("metamask")
-            .unwrap()
+        *metamask_addresses(registry)
             .fee_collectors
             .iter()
             .next()
@@ -87,13 +90,35 @@ mod tests {
     }
 
     fn router(registry: &Registry) -> Address {
-        *registry
-            .venue("metamask")
-            .unwrap()
+        *metamask_addresses(registry)
             .entry_points
             .iter()
             .next()
             .unwrap()
+    }
+
+    /// Decode a `MetaMask` transaction through the full [`MetaMaskNetting`] decoder.
+    async fn decode(
+        registry: &Registry,
+        ledger: &TransferLedger,
+        sender: Address,
+        entry_point: Address,
+        input: &[u8],
+    ) -> Option<TraderFlow> {
+        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
+        let mut code_cache = HashMap::new();
+        let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
+        let mut ctx = DecodeContext {
+            provider: &provider,
+            registry,
+            code_cache: &mut code_cache,
+            receipt: &receipt,
+            entry_point,
+            transfer_ledger: ledger,
+            input,
+            venue: registry.venue("metamask"),
+        };
+        MetaMaskNetting.decode(&mut ctx).await
     }
 
     #[test]
@@ -105,7 +130,7 @@ mod tests {
     #[test]
     fn solver_from_calldata_known_ids() {
         let registry = Registry::ethereum();
-        let metamask = registry.venue("metamask").unwrap();
+        let metamask = metamask_addresses(&registry);
         for (id, want) in [
             ("oneInchV6FeeDynamic", "1inch"),
             ("uniswapPermit2FeeDynamic", "uniswap"),
@@ -125,13 +150,13 @@ mod tests {
     #[test]
     fn solver_from_calldata_other_selectors() {
         let registry = Registry::ethereum();
-        let metamask = registry.venue("metamask").unwrap();
+        let metamask = metamask_addresses(&registry);
         assert_eq!(solver_from_calldata(&[0xde, 0xad, 0xbe, 0xef, 0x00], metamask), None);
         assert_eq!(solver_from_calldata(&[], metamask), None);
     }
 
-    #[test]
-    fn decode_output_side_fee() {
+    #[tokio::test]
+    async fn output_side_fee() {
         // Live tx 0x142de458… shape: token in, ETH out; the router takes the fee from the native
         // output before forwarding the rest to the trader. amount_out is grossed back up.
         let registry = Registry::ethereum();
@@ -149,8 +174,8 @@ mod tests {
         ];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = Metamask
-            .decode(&ctx(&transfer_ledger, user, router, &[], &registry))
+        let flow = decode(&registry, &transfer_ledger, user, router, &[])
+            .await
             .unwrap();
         assert_eq!(flow.tracked, user);
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
@@ -159,8 +184,8 @@ mod tests {
         assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
 
-    #[test]
-    fn decode_input_side_fee() {
+    #[tokio::test]
+    async fn input_side_fee() {
         // ETH in, token out: the router takes the fee from the native input before forwarding
         // the rest to the solver. amount_in shrinks to what actually entered the swap.
         let registry = Registry::ethereum();
@@ -178,16 +203,16 @@ mod tests {
         let logs = vec![make_transfer_log(token_out, pool, user, U256::from(2_000))];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let flow = Metamask
-            .decode(&ctx(&transfer_ledger, user, router, &[], &registry))
+        let flow = decode(&registry, &transfer_ledger, user, router, &[])
+            .await
             .unwrap();
         assert_eq!(flow.swap, swap(Address::ZERO, 991, token_out, 2_000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(9)));
         assert_eq!(flow.venue_fee_out, None);
     }
 
-    #[test]
-    fn decode_solver_declaration() {
+    #[tokio::test]
+    async fn solver_declaration() {
         // The declared aggregatorId lands on the flow as the solver override, so the orchestrator
         // needs no MetaMask-specific attribution branch.
         let registry = Registry::ethereum();
@@ -205,14 +230,14 @@ mod tests {
         };
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = Metamask
-            .decode(&ctx(&transfer_ledger, user, router(&registry), &call.abi_encode(), &registry))
+        let flow = decode(&registry, &transfer_ledger, user, router(&registry), &call.abi_encode())
+            .await
             .unwrap();
         assert_eq!(flow.solver_override.as_deref(), Some("1inch"));
     }
 
-    #[test]
-    fn decode_fee_free_trade() {
+    #[tokio::test]
+    async fn fee_free_trade() {
         let registry = Registry::ethereum();
         let user = addr(1);
         let pool = addr(50);
@@ -225,8 +250,8 @@ mod tests {
         ];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        let flow = Metamask
-            .decode(&ctx(&transfer_ledger, user, router(&registry), &[], &registry))
+        let flow = decode(&registry, &transfer_ledger, user, router(&registry), &[])
+            .await
             .unwrap();
         assert_eq!(flow.swap, swap(token_in, 1_000, token_out, 2_000));
         assert_eq!(flow.venue_fee_in, None);

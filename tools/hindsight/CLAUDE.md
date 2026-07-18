@@ -45,12 +45,13 @@ Match → trace → decode → veto → record.
 | File/dir | Purpose |
 |---|---|
 | `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
-| `strategies/` | Decode methods behind the `DecodeStrategy` trait, tried in precedence order (`netting` today) |
+| `decode.rs` | The `TradeDecoder` trait, the matched entity → decoders mapping, `DecodeContext`, `TraderFlow` |
+| `netting.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting`/`MakerNetting` decoders |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades) |
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `venues/` | Per-venue decoders (Relay, MetaMask), called through one `VenueContext` seam |
+| `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask), listed in `venues::decoders_for` |
 | `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution |
 | `maker.rs` | Maker-finding for intent fills and batch settlements |
 | `trace.rs` | Transaction trace fetching and processing |
@@ -95,7 +96,7 @@ savings aggregates; unsolved states keep their coverage verdicts).
 - `RangeComparison` — a trade re-solved at both block states, including gas-netted settled output.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
 
-## Adding a venue / solver / strategy / chain
+## Adding a venue / solver / decoder / chain
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
   enough for matching, attribution, gas isolation, and metric labels. Optional code: a
@@ -103,15 +104,14 @@ savings aggregates; unsolved states keep their coverage verdicts).
   `embedded_quote` method if its calldata declares an off-chain quote, or a `solver_veto` method
   if some of its orders are not same-chain swaps.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
-  `VenueKnowledge` impl in `venues/` and its `venues::from_name` binding. Most venues are sender
-  netting + fee back-out — delegate to `venue_fee_flow` and add only what is specific to the
-  venue. The registry fails to load if an address-book section has no code binding. All of a
-  venue's knowledge — transfer-based corrections and calldata parsing alike — lives in its one
-  `venues/` module (see README.md).
-- **Decode strategy** (a new method for extracting swaps — calldata decoding, log parsing): a
-  module in `strategies/` implementing `DecodeStrategy`, plus one entry in `default_strategies`
-  placed by trust. Strategies are methods, never venues or solvers; a venue-scoped method still
-  keeps its venue parsing in that venue's module.
+  `TradeDecoder` in `venues/`, registered in the one `venues::decoders_for` arm (its `mod`
+  declaration is the only other line). Most venues are sender netting + fee back-out — call
+  `netting::venue_flow` and add only what is specific to the venue. The registry fails to load if
+  an address-book venue has no decoder.
+- **Decoder** (a new way to read a swap — calldata decoding, log parsing): a `TradeDecoder`, with
+  its extraction toolkit in `netting`/`calldata`, listed in the mapping for the entities that use
+  it. Netting is one shared engine; calldata is per-router, so a calldata decoder is a standalone
+  parser.
 - **Chain**: a new `registry/<chain>.toml` (all sections required) wired into `Registry::load`,
   or passed via `--registry`. Check the monitor's pacing flags (`--max-lag-blocks`) against the
   chain's block time. The `verify` subcommand's saved Allium query is per-chain.

@@ -383,7 +383,7 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
-            decode_strategy: "netting",
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,

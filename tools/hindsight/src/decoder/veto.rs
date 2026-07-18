@@ -17,8 +17,8 @@ use alloy::{
 };
 
 use crate::decoder::{
+    decode::TraderFlow,
     registry::Registry,
-    strategies::TraderFlow,
     transfer_ledger::{NetSwap, Transfer},
 };
 

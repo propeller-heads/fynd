@@ -2,7 +2,7 @@
 //!
 //! [`select`] is the cheap, receipt-only filter the decoder runs on every transaction before
 //! anything costs a trace. It answers only "is this a solver trade at all" — how the trade is
-//! then decoded is the strategies' job (see `strategies`).
+//! then decoded is the decoders' job (see `decode`).
 
 use alloy::{primitives::Address, rpc::types::TransactionReceipt};
 use tracing::debug;

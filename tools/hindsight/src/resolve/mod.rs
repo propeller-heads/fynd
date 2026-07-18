@@ -73,8 +73,8 @@ pub(crate) struct RangeComparison {
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
-    /// Which decode strategy recovered the settled trade (from the decoder).
-    pub decode_strategy: &'static str,
+    /// Which decoder recovered the settled trade.
+    pub decoder: &'static str,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -150,7 +150,7 @@ pub(crate) fn build_range(
         venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
-        decode_strategy: trade.decode_strategy,
+        decoder: trade.decoder,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
@@ -213,7 +213,7 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
-            decode_strategy: "netting",
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),

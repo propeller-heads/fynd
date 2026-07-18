@@ -10,16 +10,17 @@
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
 //! The pipeline is match → trace → decode → veto → record: `matching` filters a block down to
-//! solver trades, `strategies` recovers each trade's swap (trying decode methods in precedence
-//! order), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
+//! solver trades, `decode` recovers each trade's swap (picking the decoders for the matched
+//! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
+mod decode;
 mod maker;
 mod matching;
+mod netting;
 mod registry;
 mod sandwich;
 mod solvers;
-mod strategies;
 mod trace;
 mod transfer_ledger;
 pub(crate) mod venues;
@@ -40,8 +41,8 @@ use futures::stream::{StreamExt, TryStreamExt};
 use tracing::{debug, warn};
 
 use crate::decoder::{
+    decode::{recover, DecodeContext, GasScope},
     matching::MatchedSolverTrade,
-    strategies::{default_strategies, recover_flow, DecodeContext, DecodeStrategy, GasScope},
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
 };
@@ -67,9 +68,9 @@ pub(crate) struct DecodedTrade {
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
-    /// Which decode strategy recovered this trade (see `strategies`). Once several strategies
-    /// exist this measures how often each one carries a trade the others could not.
-    pub decode_strategy: &'static str,
+    /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
+    /// venue's trades this measures how often each one carries a trade the others could not.
+    pub decoder: &'static str,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -114,14 +115,10 @@ pub(crate) struct DecodedTrade {
 const TRACE_CONCURRENCY: usize = 10;
 
 /// Stateful trade decoder: owns the RPC provider, the chain's address
-/// registry, the decode strategies, and the caches that are worth keeping
-/// across blocks.
+/// registry, and the caches that are worth keeping across blocks.
 pub(crate) struct Decoder<P> {
     provider: P,
     registry: Registry,
-    /// The decode strategies, tried in order per transaction; the first one that returns a flow
-    /// wins (see `strategies`).
-    strategies: Vec<Box<dyn DecodeStrategy<P>>>,
     /// Whether an address had contract code when first checked, kept for the
     /// life of the decoder. An address gaining code mid-run (a deploy or an
     /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
@@ -131,7 +128,7 @@ pub(crate) struct Decoder<P> {
 
 impl<P: Provider> Decoder<P> {
     pub(crate) fn new(provider: P, registry: Registry) -> Self {
-        Self { provider, registry, strategies: default_strategies(), code_cache: HashMap::new() }
+        Self { provider, registry, code_cache: HashMap::new() }
     }
 
     /// The decoder's RPC provider, for adjacent lookups (chain head, token
@@ -207,8 +204,8 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the transfer ledger, try the decode
-    /// strategies in order, veto non-trades, attribute the solver, and account gas and quote.
+    /// Decode one matched transaction from its trace: build the transfer ledger, run the decoders
+    /// for its entity, veto non-trades, attribute the solver, and account gas and quote.
     async fn decode_transaction(
         &mut self,
         matched: MatchedSolverTrade<'_>,
@@ -216,7 +213,7 @@ impl<P: Provider> Decoder<P> {
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
-        let Self { provider, registry, strategies, code_cache } = self;
+        let Self { provider, registry, code_cache } = self;
         let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
@@ -233,12 +230,13 @@ impl<P: Provider> Decoder<P> {
             entry_point,
             transfer_ledger: &transfer_ledger,
             input: &root.input,
+            venue: None,
         };
-        let Some((decode_strategy, mut flow)) = recover_flow(strategies, &mut ctx).await else {
+        let Some((decoder, mut flow)) = recover(&mut ctx).await else {
             warn!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
-                "no strategy decoded a trade from this transaction"
+                "no decoder recovered a trade from this transaction"
             );
             return None;
         };
@@ -283,7 +281,7 @@ impl<P: Provider> Decoder<P> {
             venue: registry.label(entry_point),
             solver: attribution.solver,
             solver_source: attribution.source,
-            decode_strategy,
+            decoder,
             sender: flow.tracked,
             token_in: flow.swap.token_in,
             token_out: flow.swap.token_out,

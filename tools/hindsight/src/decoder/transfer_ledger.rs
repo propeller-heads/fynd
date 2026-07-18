@@ -4,7 +4,7 @@
 //! ERC-20 `Transfer` logs and the native ETH transfers recovered from its call trace (native ETH
 //! moves emit no log). A [`TransferLedger`] flattens both into one list of
 //! `(token, from, to, value)` entries — native ETH is token [`Address::ZERO`] — and every flow
-//! question a decode strategy asks is answered from that list, so all strategies share one model
+//! question a decoder asks is answered from that list, so all decoders share one model
 //! of "what moved".
 //!
 //! # The netting model
@@ -75,7 +75,7 @@ struct TokenAmounts {
 
 /// Every value movement in one transaction, flattened for flow queries.
 ///
-/// Built once per transaction and shared by all decode strategies (see the module docs for the
+/// Built once per transaction and shared by all decoders (see the module docs for the
 /// model and its assumptions).
 pub(crate) struct TransferLedger {
     /// `(token, from, to, value)` for every transfer; native ETH is token [`Address::ZERO`].
