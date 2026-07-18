@@ -10,6 +10,7 @@ pub(crate) mod attribution;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
+pub(crate) mod zeroex;
 
 use alloy::{
     primitives::{Address, U256},
@@ -57,6 +58,7 @@ pub(crate) trait SolverKnowledge: Send + Sync {
 /// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
 /// here needs none — its address-book entry alone is complete.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
+    ("0x", &zeroex::ZeroEx),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
     ("paraswap", &paraswap::Paraswap),

@@ -156,9 +156,10 @@ the swap. `MetaMaskNetting` backs the fee out to 991.
 ### Solver knowledge (`solvers/`)
 
 What a solver's transactions reveal beyond its address — a calldata quote (KyberSwap's
-`clientData`, ParaSwap's word layout), a match-time veto (LiFi's bridge orders). Both methods
-default to "nothing to add", so most solvers are a single address-book line with no code; those
-with code are registered in `solvers::IMPLEMENTATIONS`.
+`clientData`, ParaSwap's word layout, 0x's `POSITIVE_SLIPPAGE` `expectedAmount`), a match-time
+veto (LiFi's bridge orders). Both methods default to "nothing to add", so most solvers are a
+single address-book line with no code; those with code are registered in
+`solvers::IMPLEMENTATIONS`.
 
 ```rust
 trait SolverKnowledge {
