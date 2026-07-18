@@ -359,6 +359,51 @@ mod erc20 {
 }
 
 // ============================================================================
+// HOSTED GATEWAY CONFIG
+// ============================================================================
+
+/// Chain slugs accepted by the hosted Fynd gateway, paired with their EVM chain ID.
+const SUPPORTED_CHAINS: [(&str, u64); 6] = [
+    ("ethereum", 1),
+    ("base", 8453),
+    ("arbitrum", 42161),
+    ("bsc", 56),
+    ("polygon", 137),
+    ("unichain", 130),
+];
+
+/// Resolve a chain slug to its EVM chain ID.
+///
+/// Returns [`FyndError::Config`] listing the supported slugs if `chain` is not recognised.
+fn chain_id_for_slug(chain: &str) -> Result<u64, FyndError> {
+    for (slug, id) in SUPPORTED_CHAINS {
+        if slug == chain {
+            return Ok(id);
+        }
+    }
+    let supported: Vec<&str> = SUPPORTED_CHAINS
+        .iter()
+        .map(|(slug, _)| *slug)
+        .collect();
+    Err(FyndError::Config(format!(
+        "unsupported chain '{chain}'; expected one of: {}",
+        supported.join(", ")
+    )))
+}
+
+/// Settings for talking to the hosted Fynd gateway at `fynd-api.propellerheads.xyz`.
+///
+/// Both fields are opt-in. Leaving them unset keeps the legacy self-hosted behaviour:
+/// unauthenticated requests against `{base_url}/v1/…`.
+#[derive(Clone, Default)]
+pub struct HostedConfig {
+    /// API key sent as `Authorization: Bearer <key>` on every Fynd API request.
+    pub api_key: Option<String>,
+    /// Chain slug that scopes the request path to `{base_url}/v1/{chain}/…`.
+    pub chain: Option<String>,
+}
+
+// ============================================================================
 // CLIENT BUILDER
 // ============================================================================
 
@@ -376,6 +421,7 @@ pub struct FyndClientBuilder {
     rpc_url: Option<String>,
     submit_url: Option<String>,
     sender: Option<Address>,
+    hosted: HostedConfig,
 }
 
 impl FyndClientBuilder {
@@ -395,7 +441,29 @@ impl FyndClientBuilder {
             rpc_url: None,
             submit_url: None,
             sender: None,
+            hosted: HostedConfig::default(),
         }
+    }
+
+    /// Authenticate against the hosted Fynd gateway.
+    ///
+    /// The key is sent as `Authorization: Bearer <key>` on every Fynd API request. The Tycho
+    /// API key issued by the keygen bot also authenticates Fynd. Not needed for self-hosted
+    /// instances.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.hosted.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Route requests through the hosted gateway's per-chain paths, e.g. `/v1/base/quote`.
+    ///
+    /// Accepts `ethereum`, `base`, `arbitrum`, `bsc`, `polygon`, or `unichain`; an unknown
+    /// slug fails at [`build`](Self::build) / [`build_quote_only`](Self::build_quote_only)
+    /// time. When unset, requests go to `{base_url}/v1/…` without a chain segment, which is
+    /// what self-hosted Fynd expects.
+    pub fn with_chain(mut self, chain: impl Into<String>) -> Self {
+        self.hosted.chain = Some(chain.into());
+        self
     }
 
     /// Set the Ethereum JSON-RPC endpoint for nonce/fee queries and receipt polling.
@@ -439,7 +507,10 @@ impl FyndClientBuilder {
     /// [`FyndClient::swap_payload`] and [`FyndClient::execute_swap`] require a live RPC URL and
     /// will fail if called on a client built this way.
     ///
-    /// Returns [`FyndError::Config`] if `base_url` is invalid.
+    /// The chain ID used to sign transactions is derived from
+    /// [`with_chain`](Self::with_chain); without it, it defaults to Ethereum mainnet (1).
+    ///
+    /// Returns [`FyndError::Config`] if `base_url` is invalid or the chain slug is unknown.
     pub fn build_quote_only(self) -> Result<FyndClient, FyndError> {
         let parsed_base = self
             .base_url
@@ -451,6 +522,14 @@ impl FyndClientBuilder {
                 "base URL must use http or https scheme, got '{scheme}'"
             )));
         }
+
+        // Without an RPC node to ask, the chain ID has to come from the configured chain slug.
+        // Signing a transaction with the wrong chain ID would make it invalid on the target
+        // chain, so this must not silently fall back to mainnet when a chain is configured.
+        let chain_id = match &self.hosted.chain {
+            Some(chain) => chain_id_for_slug(chain)?,
+            None => 1,
+        };
 
         // Use dummy providers pointing at the base URL.
         // These are never invoked for quote/health operations.
@@ -466,10 +545,11 @@ impl FyndClientBuilder {
             http,
             base_url: self.base_url,
             retry: self.retry,
-            chain_id: 1,
+            chain_id,
             default_sender: self.sender,
             provider,
             submit_provider,
+            hosted: self.hosted,
             info_cache: tokio::sync::OnceCell::new(),
         })
     }
@@ -478,8 +558,17 @@ impl FyndClientBuilder {
     ///
     /// Requires [`with_rpc_url`](Self::with_rpc_url) to have been called.
     /// Validates the URLs and fetches the chain ID. Returns [`FyndError::Config`] if any URL is
-    /// invalid, `rpc_url` was not set, or the chain ID cannot be fetched.
+    /// invalid, `rpc_url` was not set, the chain ID cannot be fetched, or the chain set via
+    /// [`with_chain`](Self::with_chain) disagrees with the chain the RPC node is on.
     pub async fn build(self) -> Result<FyndClient, FyndError> {
+        // Reject an unknown chain slug before doing any network work.
+        let expected_chain_id = self
+            .hosted
+            .chain
+            .as_deref()
+            .map(chain_id_for_slug)
+            .transpose()?;
+
         // Validate base_url scheme.
         let parsed_base = self
             .base_url
@@ -516,6 +605,17 @@ impl FyndClientBuilder {
             .await
             .map_err(|e| FyndError::Config(format!("failed to fetch chain_id from RPC: {e}")))?;
 
+        // A gateway chain that disagrees with the RPC node means quotes and the transactions
+        // signed against them would target different chains.
+        if let Some(expected) = expected_chain_id {
+            if expected != chain_id {
+                return Err(FyndError::Config(format!(
+                    "chain mismatch: with_chain() implies chain_id {expected}, but the RPC node \
+                     reports {chain_id}"
+                )));
+            }
+        }
+
         // Build HTTP client.
         let http = HttpClient::builder()
             .timeout(self.timeout)
@@ -530,6 +630,7 @@ impl FyndClientBuilder {
             default_sender: self.sender,
             provider,
             submit_provider,
+            hosted: self.hosted,
             info_cache: tokio::sync::OnceCell::new(),
         })
     }
@@ -556,6 +657,7 @@ where
     default_sender: Option<Address>,
     provider: P,
     submit_provider: P,
+    hosted: HostedConfig,
     info_cache: tokio::sync::OnceCell<InstanceInfo>,
 }
 
@@ -576,6 +678,7 @@ where
         default_sender: Option<Address>,
         provider: P,
         submit_provider: P,
+        hosted: HostedConfig,
     ) -> Self {
         Self {
             http,
@@ -585,7 +688,24 @@ where
             default_sender,
             provider,
             submit_provider,
+            hosted,
             info_cache: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Build the URL for a Fynd API endpoint, inserting the chain segment when configured.
+    fn endpoint(&self, path: &str) -> String {
+        match &self.hosted.chain {
+            Some(chain) => format!("{}/v1/{chain}/{path}", self.base_url),
+            None => format!("{}/v1/{path}", self.base_url),
+        }
+    }
+
+    /// Attach the hosted-gateway bearer token when an API key is configured.
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.hosted.api_key {
+            Some(api_key) => request.bearer_auth(api_key),
+            None => request,
         }
     }
 
@@ -628,10 +748,9 @@ where
         token_out: Bytes,
         receiver: Bytes,
     ) -> Result<Quote, FyndError> {
-        let url = format!("{}/v1/quote", self.base_url);
+        let url = self.endpoint("quote");
         let response = self
-            .http
-            .post(&url)
+            .authorized(self.http.post(&url))
             .json(dto_request)
             .send()
             .await?;
@@ -679,10 +798,9 @@ where
         dto_request: &fynd_rpc_types::QuoteRequest,
         order_meta: Vec<(Bytes, Bytes)>,
     ) -> Result<Vec<Quote>, FyndError> {
-        let url = format!("{}/v1/quote", self.base_url);
+        let url = self.endpoint("quote");
         let response = self
-            .http
-            .post(&url)
+            .authorized(self.http.post(&url))
             .json(dto_request)
             .send()
             .await?;
@@ -696,8 +814,11 @@ where
 
     /// Get the health status of the Fynd RPC server.
     pub async fn health(&self) -> Result<HealthStatus, FyndError> {
-        let url = format!("{}/v1/health", self.base_url);
-        let response = self.http.get(&url).send().await?;
+        let url = self.endpoint("health");
+        let response = self
+            .authorized(self.http.get(&url))
+            .send()
+            .await?;
         let status = response.status();
         let body = response.text().await?;
         // The server returns HealthStatus JSON for both 200 and 503 (not-ready).
@@ -954,8 +1075,11 @@ where
     }
 
     async fn fetch_info(&self) -> Result<InstanceInfo, FyndError> {
-        let url = format!("{}/v1/info", self.base_url);
-        let response = self.http.get(&url).send().await?;
+        let url = self.endpoint("info");
+        let response = self
+            .authorized(self.http.get(&url))
+            .send()
+            .await?;
         if !response.status().is_success() {
             let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::dto_error_to_fynd(dto_err));
@@ -1287,6 +1411,18 @@ mod tests {
         default_sender: Option<Address>,
     ) -> (FyndClient<alloy::providers::RootProvider<Ethereum>>, alloy::providers::mock::Asserter)
     {
+        make_hosted_test_client(base_url, retry, default_sender, HostedConfig::default())
+    }
+
+    /// Same as [`make_test_client`], but with an explicit [`HostedConfig`] so tests can exercise
+    /// the API key and per-chain routing paths.
+    fn make_hosted_test_client(
+        base_url: String,
+        retry: RetryConfig,
+        default_sender: Option<Address>,
+        hosted: HostedConfig,
+    ) -> (FyndClient<alloy::providers::RootProvider<Ethereum>>, alloy::providers::mock::Asserter)
+    {
         use alloy::providers::{mock::Asserter, ProviderBuilder};
 
         let asserter = Asserter::new();
@@ -1306,6 +1442,7 @@ mod tests {
             default_sender,
             provider,
             submit_provider,
+            hosted,
         );
 
         (client, asserter)
@@ -2245,5 +2382,270 @@ mod tests {
         let expected_cost =
             num_bigint::BigUint::from(45_000u64) * num_bigint::BigUint::from(1_500_000_000u64);
         assert_eq!(mined.gas_cost(), &expected_cost);
+    }
+
+    // ========================================================================
+    // Hosted gateway: API key + per-chain routing
+    // ========================================================================
+
+    fn hosted(api_key: Option<&str>, chain: Option<&str>) -> HostedConfig {
+        HostedConfig { api_key: api_key.map(str::to_owned), chain: chain.map(str::to_owned) }
+    }
+
+    #[test]
+    fn chain_id_for_slug_resolves_supported_chains() {
+        assert_eq!(chain_id_for_slug("ethereum").unwrap(), 1);
+        assert_eq!(chain_id_for_slug("base").unwrap(), 8453);
+        assert_eq!(chain_id_for_slug("arbitrum").unwrap(), 42161);
+        assert_eq!(chain_id_for_slug("bsc").unwrap(), 56);
+        assert_eq!(chain_id_for_slug("polygon").unwrap(), 137);
+        assert_eq!(chain_id_for_slug("unichain").unwrap(), 130);
+    }
+
+    #[test]
+    fn chain_id_for_slug_rejects_unknown_chain() {
+        let err = chain_id_for_slug("sepolia").unwrap_err();
+        let FyndError::Config(msg) = err else {
+            panic!("expected Config error, got {err:?}");
+        };
+        assert!(msg.contains("sepolia"), "error should name the bad slug: {msg}");
+        assert!(msg.contains("ethereum"), "error should list supported slugs: {msg}");
+    }
+
+    #[test]
+    fn build_quote_only_derives_chain_id_from_chain() {
+        let client = FyndClientBuilder::new("http://localhost:8080")
+            .with_chain("base")
+            .build_quote_only()
+            .expect("build_quote_only should succeed");
+        assert_eq!(client.chain_id, 8453);
+    }
+
+    #[test]
+    fn build_quote_only_defaults_to_mainnet_without_chain() {
+        let client = FyndClientBuilder::new("http://localhost:8080")
+            .build_quote_only()
+            .expect("build_quote_only should succeed");
+        assert_eq!(client.chain_id, 1);
+    }
+
+    #[test]
+    fn build_quote_only_rejects_unknown_chain() {
+        let result = FyndClientBuilder::new("http://localhost:8080")
+            .with_chain("not-a-chain")
+            .build_quote_only();
+        let Err(err) = result else {
+            panic!("expected an unknown chain slug to be rejected");
+        };
+        assert!(matches!(err, FyndError::Config(_)), "expected Config error, got {err:?}");
+    }
+
+    #[test]
+    fn endpoint_inserts_chain_segment_only_when_configured() {
+        let legacy = FyndClientBuilder::new("http://localhost:8080")
+            .build_quote_only()
+            .expect("build");
+        assert_eq!(legacy.endpoint("quote"), "http://localhost:8080/v1/quote");
+
+        let scoped = FyndClientBuilder::new("http://localhost:8080")
+            .with_chain("base")
+            .build_quote_only()
+            .expect("build");
+        assert_eq!(scoped.endpoint("quote"), "http://localhost:8080/v1/base/quote");
+    }
+
+    #[tokio::test]
+    async fn quote_sends_bearer_token_to_chain_scoped_path() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "orders": [{
+                "order_id": "hosted-1",
+                "status": "success",
+                "amount_in": "1000000",
+                "amount_out": "990000",
+                "gas_estimate": "50000",
+                "amount_out_net_gas": "940000",
+                "price_impact_bps": null,
+                "block": { "number": 1, "hash": "0xabc", "timestamp": 1 }
+            }],
+            "total_gas_estimate": "50000",
+            "solve_time_ms": 1
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/base/quote"))
+            .and(header("authorization", "Bearer secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_hosted_test_client(
+            server.uri(),
+            RetryConfig::default(),
+            None,
+            hosted(Some("secret-key"), Some("base")),
+        );
+
+        let quote = client
+            .quote(make_quote_params())
+            .await
+            .expect("quote should succeed");
+        assert_eq!(quote.order_id(), "hosted-1");
+    }
+
+    #[tokio::test]
+    async fn quote_omits_authorization_header_without_api_key() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "orders": [{
+                "order_id": "legacy-1",
+                "status": "success",
+                "amount_in": "1000000",
+                "amount_out": "990000",
+                "gas_estimate": "50000",
+                "amount_out_net_gas": "940000",
+                "price_impact_bps": null,
+                "block": { "number": 1, "hash": "0xabc", "timestamp": 1 }
+            }],
+            "total_gas_estimate": "50000",
+            "solve_time_ms": 1
+        });
+
+        // Legacy path: no chain segment.
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_test_client(server.uri(), RetryConfig::default(), None);
+        client
+            .quote(make_quote_params())
+            .await
+            .expect("quote should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        let request = requests.first().expect("one request");
+        assert!(
+            !request
+                .headers
+                .contains_key("authorization"),
+            "no API key configured, so no Authorization header should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_uses_chain_scoped_path_with_api_key() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/arbitrum/health"))
+            .and(header("authorization", "Bearer secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "healthy": true,
+                "last_update_ms": 100,
+                "num_solver_pools": 5
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_hosted_test_client(
+            server.uri(),
+            RetryConfig::default(),
+            None,
+            hosted(Some("secret-key"), Some("arbitrum")),
+        );
+
+        let status = client
+            .health()
+            .await
+            .expect("health should succeed");
+        assert!(status.healthy());
+    }
+
+    #[tokio::test]
+    async fn info_uses_chain_scoped_path_with_api_key() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/unichain/info"))
+            .and(header("authorization", "Bearer secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_info_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_hosted_test_client(
+            server.uri(),
+            RetryConfig::default(),
+            None,
+            hosted(Some("secret-key"), Some("unichain")),
+        );
+
+        let info = client
+            .info()
+            .await
+            .expect("info should succeed");
+        assert_eq!(info.chain_id(), 1, "chain_id comes from the server payload");
+    }
+
+    #[tokio::test]
+    async fn api_key_without_chain_keeps_legacy_paths() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/health"))
+            .and(header("authorization", "Bearer secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "healthy": true,
+                "last_update_ms": 1,
+                "num_solver_pools": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (client, _asserter) = make_hosted_test_client(
+            server.uri(),
+            RetryConfig::default(),
+            None,
+            hosted(Some("secret-key"), None),
+        );
+
+        client
+            .health()
+            .await
+            .expect("health should succeed");
     }
 }

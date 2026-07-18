@@ -1,6 +1,6 @@
 import { decodeAbiParameters, encodeFunctionData, keccak256, serializeTransaction, toHex } from 'viem';
 import { createFyndClient, type FyndClient as AutogenClient } from "./autogen.js";
-import type { components } from "./autogen.js";
+import type { components, Middleware } from "./autogen.js";
 import { FyndError } from "./error.js";
 import * as mapping from "./mapping.js";
 import {
@@ -95,6 +95,22 @@ export interface ExecutionOptions {
 export interface FyndClientOptions {
   /** Base URL of the Fynd API (e.g. `"https://api.fynd.exchange"`). */
   baseUrl: string;
+  /**
+   * API key for the hosted Fynd gateway, sent as `Authorization: Bearer <apiKey>` on every
+   * request. The Tycho API key also authenticates Fynd. Omit for self-hosted instances.
+   */
+  apiKey?: string;
+  /**
+   * Chain slug for the hosted gateway's per-chain routing, e.g. `"ethereum"` or `"base"`.
+   * When set, requests go to `/v1/{chain}/quote` instead of `/v1/quote`. Omit for self-hosted
+   * instances, which serve the unprefixed paths.
+   */
+  chain?: string;
+  /**
+   * Extra headers sent with every request. `Authorization` set here is overridden by
+   * {@link apiKey} when both are provided.
+   */
+  headers?: Record<string, string>;
   /** Default sender address, used when {@link SigningHints.sender} is not set. */
   sender?: Address;
   /** HTTP request timeout in milliseconds (default: 30000). */
@@ -127,7 +143,20 @@ export class FyndClient {
   private infoPromise: Promise<InstanceInfo> | undefined = undefined;
 
   constructor(options: FyndClientOptions) {
-    this.http = createFyndClient(options.baseUrl);
+    const headers: Record<string, string> = { ...options.headers };
+    if (options.apiKey !== undefined) {
+      headers['Authorization'] = `Bearer ${options.apiKey}`;
+    }
+
+    this.http = createFyndClient(options.baseUrl, { headers });
+
+    // Per-chain routing is applied as middleware rather than at the call sites: the OpenAPI
+    // schema only knows the unprefixed literals ("/v1/quote", ...), so rewriting the URL here
+    // keeps every call site typed against the generated schema instead of casting each one.
+    if (options.chain !== undefined) {
+      this.http.use(chainRoutingMiddleware(options.chain));
+    }
+
     this.options = options;
   }
 
@@ -614,6 +643,22 @@ export class FyndClient {
       }),
     };
   }
+}
+
+/**
+ * Rewrites `/v1/<endpoint>` to `/v1/<chain>/<endpoint>` for the hosted gateway.
+ *
+ * Only the first `/v1/` segment is rewritten, so a base URL that itself contains a path
+ * prefix is left intact.
+ */
+function chainRoutingMiddleware(chain: string): Middleware {
+  return {
+    onRequest({ request }) {
+      const url = new URL(request.url);
+      url.pathname = url.pathname.replace('/v1/', `/v1/${chain}/`);
+      return new Request(url, request);
+    },
+  };
 }
 
 function sleep(ms: number): Promise<void> {
