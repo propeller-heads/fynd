@@ -376,7 +376,15 @@ pub struct FyndClientBuilder {
     rpc_url: Option<String>,
     submit_url: Option<String>,
     sender: Option<Address>,
+    api_key: Option<String>,
+    quote_path: String,
+    health_path: String,
 }
+
+/// Default request path for `POST` quote requests, appended to the base URL.
+const DEFAULT_QUOTE_PATH: &str = "/v1/quote";
+/// Default request path for `GET` health requests, appended to the base URL.
+const DEFAULT_HEALTH_PATH: &str = "/v1/health";
 
 impl FyndClientBuilder {
     /// Create a new builder.
@@ -395,6 +403,9 @@ impl FyndClientBuilder {
             rpc_url: None,
             submit_url: None,
             sender: None,
+            api_key: None,
+            quote_path: DEFAULT_QUOTE_PATH.to_string(),
+            health_path: DEFAULT_HEALTH_PATH.to_string(),
         }
     }
 
@@ -430,6 +441,34 @@ impl FyndClientBuilder {
     /// Set the default sender address used when [`SigningHints::sender`] is `None`.
     pub fn with_sender(mut self, sender: Address) -> Self {
         self.sender = Some(sender);
+        self
+    }
+
+    /// Set an API key sent verbatim as the `Authorization` header on every request.
+    ///
+    /// The value is sent exactly as given — no `Bearer ` prefix is added — because the auth
+    /// gateway matches the raw header value against its key store. Use this when the Fynd base URL
+    /// is behind an authenticating reverse proxy.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Override the request path appended to the base URL for quote requests
+    /// (default: `/v1/quote`).
+    ///
+    /// Set this when the base URL already carries a path prefix that the upstream expects to be
+    /// stripped — e.g. a chain-scoped gateway base like `https://host/v1/base` needs `/quote` so
+    /// the external request is `https://host/v1/base/quote`.
+    pub fn with_quote_path(mut self, quote_path: impl Into<String>) -> Self {
+        self.quote_path = quote_path.into();
+        self
+    }
+
+    /// Override the request path appended to the base URL for health requests
+    /// (default: `/v1/health`). See [`with_quote_path`](Self::with_quote_path).
+    pub fn with_health_path(mut self, health_path: impl Into<String>) -> Self {
+        self.health_path = health_path.into();
         self
     }
 
@@ -471,6 +510,9 @@ impl FyndClientBuilder {
             provider,
             submit_provider,
             info_cache: tokio::sync::OnceCell::new(),
+            api_key: self.api_key,
+            quote_path: self.quote_path,
+            health_path: self.health_path,
         })
     }
 
@@ -531,6 +573,9 @@ impl FyndClientBuilder {
             provider,
             submit_provider,
             info_cache: tokio::sync::OnceCell::new(),
+            api_key: self.api_key,
+            quote_path: self.quote_path,
+            health_path: self.health_path,
         })
     }
 }
@@ -557,6 +602,9 @@ where
     provider: P,
     submit_provider: P,
     info_cache: tokio::sync::OnceCell<InstanceInfo>,
+    api_key: Option<String>,
+    quote_path: String,
+    health_path: String,
 }
 
 impl<P> FyndClient<P>
@@ -586,6 +634,9 @@ where
             provider,
             submit_provider,
             info_cache: tokio::sync::OnceCell::new(),
+            api_key: None,
+            quote_path: DEFAULT_QUOTE_PATH.to_string(),
+            health_path: DEFAULT_HEALTH_PATH.to_string(),
         }
     }
 
@@ -622,19 +673,31 @@ where
         Err(FyndError::Protocol("retry loop exhausted without result".into()))
     }
 
+    /// Apply the configured API key (if any) as a verbatim `Authorization` header.
+    ///
+    /// The value is sent without a `Bearer ` prefix to match the auth gateway, which compares the
+    /// raw header value against its key store.
+    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(key) => req.header(reqwest::header::AUTHORIZATION, key),
+            None => req,
+        }
+    }
+
     async fn request_quote(
         &self,
         dto_request: &fynd_rpc_types::QuoteRequest,
         token_out: Bytes,
         receiver: Bytes,
     ) -> Result<Quote, FyndError> {
-        let url = format!("{}/v1/quote", self.base_url);
+        let url = format!("{}{}", self.base_url, self.quote_path);
         let response = self
-            .http
-            .post(&url)
-            .json(dto_request)
+            .apply_auth(self.http.post(&url).json(dto_request))
             .send()
             .await?;
+        if let Some(err) = rate_limited(&response) {
+            return Err(err);
+        }
         if !response.status().is_success() {
             let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::dto_error_to_fynd(dto_err));
@@ -679,13 +742,14 @@ where
         dto_request: &fynd_rpc_types::QuoteRequest,
         order_meta: Vec<(Bytes, Bytes)>,
     ) -> Result<Vec<Quote>, FyndError> {
-        let url = format!("{}/v1/quote", self.base_url);
+        let url = format!("{}{}", self.base_url, self.quote_path);
         let response = self
-            .http
-            .post(&url)
-            .json(dto_request)
+            .apply_auth(self.http.post(&url).json(dto_request))
             .send()
             .await?;
+        if let Some(err) = rate_limited(&response) {
+            return Err(err);
+        }
         if !response.status().is_success() {
             let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::dto_error_to_fynd(dto_err));
@@ -696,8 +760,14 @@ where
 
     /// Get the health status of the Fynd RPC server.
     pub async fn health(&self) -> Result<HealthStatus, FyndError> {
-        let url = format!("{}/v1/health", self.base_url);
-        let response = self.http.get(&url).send().await?;
+        let url = format!("{}{}", self.base_url, self.health_path);
+        let response = self
+            .apply_auth(self.http.get(&url))
+            .send()
+            .await?;
+        if let Some(err) = rate_limited(&response) {
+            return Err(err);
+        }
         let status = response.status();
         let body = response.text().await?;
         // The server returns HealthStatus JSON for both 200 and 503 (not-ready).
@@ -955,7 +1025,13 @@ where
 
     async fn fetch_info(&self) -> Result<InstanceInfo, FyndError> {
         let url = format!("{}/v1/info", self.base_url);
-        let response = self.http.get(&url).send().await?;
+        let response = self
+            .apply_auth(self.http.get(&url))
+            .send()
+            .await?;
+        if let Some(err) = rate_limited(&response) {
+            return Err(err);
+        }
         if !response.status().is_success() {
             let dto_err: fynd_rpc_types::ErrorResponse = response.json().await?;
             return Err(mapping::dto_error_to_fynd(dto_err));
@@ -1217,6 +1293,23 @@ where
 
         Ok(ExecutionReceipt::Transaction(Box::pin(async move { Ok(settled) })))
     }
+}
+
+/// Map an HTTP 429 response to a [`FyndError::RateLimited`], reading the `Retry-After` header.
+///
+/// Returns `None` for any other status so the caller continues its normal response handling. The
+/// 429 body is intentionally ignored: an auth gateway's rate-limit payload is not a Fynd
+/// `ErrorResponse`, and parsing it would surface a misleading deserialization error.
+fn rate_limited(response: &reqwest::Response) -> Option<FyndError> {
+    if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    Some(FyndError::RateLimited { retry_after })
 }
 
 /// Decode a standard Solidity `Error(string)` revert payload.
@@ -1598,6 +1691,171 @@ mod tests {
     }
 
     // ========================================================================
+    // gateway auth + path override tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn quote_sends_api_key_as_raw_authorization_header() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        // The mock only matches when the raw key is present verbatim (no `Bearer ` prefix),
+        // mirroring the auth gateway which compares the raw Authorization value.
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .and(header("authorization", "secret-token-xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FyndClientBuilder::new(server.uri())
+            .with_api_key("secret-token-xyz")
+            .build_quote_only()
+            .expect("client builds");
+
+        client
+            .quote(make_quote_params())
+            .await
+            .expect("quote should match the authorized mock");
+    }
+
+    #[tokio::test]
+    async fn quote_omits_authorization_header_when_no_api_key() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_body()))
+            .mount(&server)
+            .await;
+
+        let client = FyndClientBuilder::new(server.uri())
+            .build_quote_only()
+            .expect("client builds");
+        client
+            .quote(make_quote_params())
+            .await
+            .expect("quote should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            !requests[0]
+                .headers
+                .contains_key("authorization"),
+            "no Authorization header should be sent without an API key"
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_uses_overridden_quote_path() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        // Chain-scoped gateway base + `/quote` override must join to `/v1/base/quote`.
+        Mock::given(method("POST"))
+            .and(path("/v1/base/quote"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(minimal_quote_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FyndClientBuilder::new(format!("{}/v1/base", server.uri()))
+            .with_quote_path("/quote")
+            .build_quote_only()
+            .expect("client builds");
+        client
+            .quote(make_quote_params())
+            .await
+            .expect("quote should hit the overridden path");
+    }
+
+    #[tokio::test]
+    async fn health_uses_overridden_health_path() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/base/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "healthy": true,
+                "last_update_ms": 100,
+                "num_solver_pools": 5
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FyndClientBuilder::new(format!("{}/v1/base", server.uri()))
+            .with_health_path("/health")
+            .build_quote_only()
+            .expect("client builds");
+        let status = client
+            .health()
+            .await
+            .expect("health should hit the overridden path");
+        assert!(status.healthy());
+    }
+
+    #[tokio::test]
+    async fn quote_returns_rate_limited_without_retrying_on_429() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        // A gateway 429 body is not a Fynd ErrorResponse; expect(1) proves the client does not
+        // retry it despite the default 3-attempt retry policy.
+        Mock::given(method("POST"))
+            .and(path("/v1/quote"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "2")
+                    .set_body_json(serde_json::json!({
+                        "error": "rate_limit_exceeded",
+                        "message": "Request rate limit exceeded",
+                        "limit": 100,
+                        "retry_after": 2
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FyndClientBuilder::new(server.uri())
+            .with_api_key("secret-token-xyz")
+            .build_quote_only()
+            .expect("client builds");
+
+        let err = client
+            .quote(make_quote_params())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FyndError::RateLimited { retry_after: Some(2) }),
+            "expected RateLimited with retry_after=2, got {err:?}"
+        );
+    }
+
+    // ========================================================================
     // swap_payload() tests
     // ========================================================================
 
@@ -1953,6 +2211,24 @@ mod tests {
         );
 
         QuoteParams::new(order, QuoteOptions::default())
+    }
+
+    /// A minimal single-order quote response body accepted by [`FyndClient::quote`].
+    fn minimal_quote_body() -> serde_json::Value {
+        serde_json::json!({
+            "orders": [{
+                "order_id": "gw-1",
+                "status": "success",
+                "amount_in": "1000000",
+                "amount_out": "990000",
+                "gas_estimate": "50000",
+                "amount_out_net_gas": "940000",
+                "price_impact_bps": 10,
+                "block": {"number": 1, "hash": "0xabc", "timestamp": 1700000000}
+            }],
+            "total_gas_estimate": "50000",
+            "solve_time_ms": 5
+        })
     }
 
     // ========================================================================

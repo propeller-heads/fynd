@@ -117,6 +117,17 @@ pub enum FyndError {
     #[error("transaction reverted: {0}")]
     TransactionReverted(String),
 
+    /// The request was rejected by an upstream rate limiter (HTTP 429), e.g. an auth gateway
+    /// enforcing a per-key RPS budget. Deliberately **not** retried by the client's retry loop:
+    /// retrying a rate-limited request only adds load and distorts latency measurements. The
+    /// caller decides whether and when to back off. `retry_after` is the server's `Retry-After`
+    /// hint in seconds, when present.
+    #[error("rate limited by upstream (HTTP 429), retry_after={retry_after:?}")]
+    RateLimited {
+        /// Seconds to wait before retrying, from the `Retry-After` response header, if present.
+        retry_after: Option<u64>,
+    },
+
     /// Invalid client configuration (e.g. unparseable URL, missing sender address).
     #[error("configuration error: {0}")]
     Config(String),
@@ -200,5 +211,11 @@ mod tests {
             .is_retryable());
         assert!(!FyndError::Protocol("bad data".into()).is_retryable());
         assert!(!FyndError::Config("missing sender".into()).is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_is_not_retryable() {
+        assert!(!FyndError::RateLimited { retry_after: Some(1) }.is_retryable());
+        assert!(!FyndError::RateLimited { retry_after: None }.is_retryable());
     }
 }
