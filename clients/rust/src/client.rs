@@ -397,7 +397,8 @@ fn chain_id_for_slug(chain: &str) -> Result<u64, FyndError> {
 /// unauthenticated requests against `{base_url}/v1/…`.
 #[derive(Clone, Default)]
 pub struct HostedConfig {
-    /// API key sent as `Authorization: Bearer <key>` on every Fynd API request.
+    /// API key sent as the raw `Authorization` header value (no `Bearer ` prefix) on every Fynd
+    /// API request.
     pub api_key: Option<String>,
     /// Chain slug that scopes the request path to `{base_url}/v1/{chain}/…`.
     pub chain: Option<String>,
@@ -447,9 +448,9 @@ impl FyndClientBuilder {
 
     /// Authenticate against the hosted Fynd gateway.
     ///
-    /// The key is sent as `Authorization: Bearer <key>` on every Fynd API request. The Tycho
-    /// API key issued by the keygen bot also authenticates Fynd. Not needed for self-hosted
-    /// instances.
+    /// The key is sent as the raw `Authorization` header value (no `Bearer ` prefix) on every
+    /// Fynd API request, matching what the deployed gateway expects. The Tycho API key issued by
+    /// the keygen bot also authenticates Fynd. Not needed for self-hosted instances.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.hosted.api_key = Some(api_key.into());
         self
@@ -701,10 +702,15 @@ where
         }
     }
 
-    /// Attach the hosted-gateway bearer token when an API key is configured.
+    /// Attach the hosted-gateway API key when configured.
+    ///
+    /// The key is sent as the raw `Authorization` header value, with no `Bearer ` prefix: the
+    /// deployed gateway (`ph-nginx-auth`) matches the entire header value against its key store,
+    /// so a `Bearer ` prefix produces a 401 (verified against the live gateway: raw key → 200,
+    /// `Bearer <key>` → 401).
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.hosted.api_key {
-            Some(api_key) => request.bearer_auth(api_key),
+            Some(api_key) => request.header(reqwest::header::AUTHORIZATION, api_key),
             None => request,
         }
     }
@@ -2455,7 +2461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quote_sends_bearer_token_to_chain_scoped_path() {
+    async fn quote_sends_api_key_to_chain_scoped_path() {
         use wiremock::{
             matchers::{header, method, path},
             Mock, MockServer, ResponseTemplate,
@@ -2479,7 +2485,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/base/quote"))
-            .and(header("authorization", "Bearer secret-key"))
+            .and(header("authorization", "secret-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
             .mount(&server)
@@ -2560,7 +2566,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/v1/arbitrum/health"))
-            .and(header("authorization", "Bearer secret-key"))
+            .and(header("authorization", "secret-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "healthy": true,
                 "last_update_ms": 100,
@@ -2595,7 +2601,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/v1/unichain/info"))
-            .and(header("authorization", "Bearer secret-key"))
+            .and(header("authorization", "secret-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(make_info_body()))
             .expect(1)
             .mount(&server)
@@ -2626,7 +2632,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/v1/health"))
-            .and(header("authorization", "Bearer secret-key"))
+            .and(header("authorization", "secret-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "healthy": true,
                 "last_update_ms": 1,

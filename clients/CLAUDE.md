@@ -49,7 +49,7 @@ Against the hosted gateway (`fynd-api.propellerheads.xyz`), add auth and per-cha
 
 ```rust
 FyndClientBuilder::new("https://fynd-api.propellerheads.xyz")
-    .with_api_key(tycho_api_key)  // sent as `Authorization: Bearer <key>`
+    .with_api_key(tycho_api_key)  // sent as the raw `Authorization` header value (no `Bearer` prefix)
     .with_chain("base")           // routes to /v1/base/quote instead of /v1/quote
     .build_quote_only()?
 ```

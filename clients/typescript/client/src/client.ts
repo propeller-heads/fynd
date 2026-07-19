@@ -96,8 +96,9 @@ export interface FyndClientOptions {
   /** Base URL of the Fynd API (e.g. `"https://api.fynd.exchange"`). */
   baseUrl: string;
   /**
-   * API key for the hosted Fynd gateway, sent as `Authorization: Bearer <apiKey>` on every
-   * request. The Tycho API key also authenticates Fynd. Omit for self-hosted instances.
+   * API key for the hosted Fynd gateway, sent as the raw `Authorization` header value (no
+   * `Bearer` prefix) on every request, matching what the deployed gateway expects. The Tycho
+   * API key also authenticates Fynd. Omit for self-hosted instances.
    */
   apiKey?: string;
   /**
@@ -145,7 +146,7 @@ export class FyndClient {
   constructor(options: FyndClientOptions) {
     const headers: Record<string, string> = { ...options.headers };
     if (options.apiKey !== undefined) {
-      headers['Authorization'] = `Bearer ${options.apiKey}`;
+      headers['Authorization'] = options.apiKey;
     }
 
     this.http = createFyndClient(options.baseUrl, { headers });

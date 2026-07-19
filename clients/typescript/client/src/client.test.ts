@@ -1024,13 +1024,13 @@ describe('hosted gateway auth and routing', () => {
     vi.unstubAllGlobals();
   });
 
-  it('sends the api key as a bearer token', async () => {
+  it('sends the api key as the raw Authorization header', async () => {
     const fetchMock = stubFetch();
     const client = new FyndClient({ baseUrl: 'http://localhost:8080', apiKey: 'secret-key' });
 
     await client.health();
 
-    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('Bearer secret-key');
+    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('secret-key');
   });
 
   it('routes to the chain-scoped path when chain is set', async () => {
@@ -1057,7 +1057,7 @@ describe('hosted gateway auth and routing', () => {
 
     const request = sentRequest(fetchMock);
     expect(new URL(request.url).pathname).toBe('/v1/unichain/quote');
-    expect(request.headers.get('authorization')).toBe('Bearer secret-key');
+    expect(request.headers.get('authorization')).toBe('secret-key');
   });
 
   it('keeps legacy paths and sends no auth header when neither option is set', async () => {
@@ -1102,6 +1102,6 @@ describe('hosted gateway auth and routing', () => {
 
     await client.health();
 
-    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('Bearer secret-key');
+    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('secret-key');
   });
 });
