@@ -13,10 +13,10 @@
 //! sent and received per token, subtract, and require **exactly one token net-out and one token
 //! net-in**. Intermediate hops (multi-hop routes, wrap/unwrap legs) net to zero on their own, so
 //! they disappear without being modeled. The strict one-in/one-out rule is what keeps the
-//! re-solve comparison honest: a net with more tokens on a side is a batch settlement or an
-//! unmodeled shape, and amounts across tokens are not comparable, so guessing a "dominant" leg
-//! would pair unrelated tokens. Ambiguous nets are declined, with one provable exception —
-//! see [`TransferLedger::net_swap`] on residue legs.
+//! re-solve comparison honest. A net with more tokens on a side is a batch settlement or a
+//! shape this model doesn't cover, and guessing a "dominant" leg there would pair unrelated
+//! tokens — so ambiguous nets are declined, with one provable exception (residue legs, see
+//! [`TransferLedger::net_swap`]).
 //!
 //! # Assumptions
 //!
@@ -148,7 +148,7 @@ impl TransferLedger {
     }
 
     /// Gross total received per token by any of `recipients` (native ETH keyed by
-    /// [`Address::ZERO`]). Used for client-fee accounting: what reached the fee collectors,
+    /// [`Address::ZERO`]). Used for venue-fee accounting: what reached the fee collectors,
     /// regardless of sender.
     pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
         let mut totals: HashMap<Address, U256> = HashMap::new();

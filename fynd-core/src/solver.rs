@@ -834,6 +834,7 @@ impl FyndBuilder {
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = c.tycho_feed.run().await {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
@@ -893,6 +894,7 @@ impl FyndBuilder {
                 .run_with_pending(pending_tx, pending_indexers)
                 .await
             {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });

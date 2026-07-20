@@ -32,6 +32,16 @@ use crate::{
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
+/// Records per-pool queue metrics at task pickup: how long the task waited in the
+/// queue and the depth left behind it. Queue wait growing while solve time stays
+/// flat is the leading indicator of worker saturation.
+fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth: usize) {
+    metrics::histogram!("worker_pool_queue_wait_seconds", "pool" => pool_name.to_string())
+        .record(queue_wait.as_secs_f64());
+    metrics::gauge!("worker_pool_queue_depth", "pool" => pool_name.to_string())
+        .set(queue_depth as f64);
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -55,8 +65,9 @@ where
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
-    // TODO: make this a string to include pool name
     worker_id: usize,
+    /// Pool name (used as the `pool` metric label).
+    pool_name: String,
 }
 
 impl<A> SolverWorker<A>
@@ -74,11 +85,13 @@ where
     /// * `derived_data` - Shared reference to derived data (pool depths, token prices)
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
+    /// * `pool_name` - Pool name (used as the `pool` metric label)
     pub fn new(
         market_data: MarketData,
         derived_data: SharedDerivedDataRef,
         algorithm: A,
         worker_id: usize,
+        pool_name: String,
     ) -> Self {
         let requirements = algorithm.computation_requirements();
         Self {
@@ -91,6 +104,7 @@ where
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
             worker_id,
+            pool_name,
         }
     }
 
@@ -519,7 +533,11 @@ where
                     match task.ok() {
                         Some(task) => {
                             let task_id = task.id();
-                            let _wait_time = task.wait_time();
+                            record_task_pickup_metrics(
+                                &self.pool_name,
+                                task.wait_time(),
+                                task_rx.len(),
+                            );
 
                             // Wait for derived data readiness before solving
                             // Use algorithm timeout as the max wait time
@@ -690,7 +708,8 @@ mod tests {
     async fn test_quote_rejects_invalid_route() {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-        let mut worker = SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0);
+        let mut worker =
+            SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0, "test_pool".to_string());
 
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -716,7 +735,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let algorithm = MockAlgorithm::new();
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should return immediately since there are no requirements
         let result = worker
@@ -734,7 +753,7 @@ mod tests {
             .allow_stale(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark as ready by handling a completion event
         worker
@@ -761,7 +780,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should timeout since no events are received
         let result = worker
@@ -787,7 +806,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle to simulate the main loop notifying
         let notify = worker.ready_notify.clone();
@@ -819,7 +838,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle and get a reference to the tracker
         let notify = worker.ready_notify.clone();
@@ -862,7 +881,7 @@ mod tests {
             .allow_stale(TokenGasPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         let notify = worker.ready_notify.clone();
 
@@ -907,7 +926,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
         worker
@@ -955,7 +974,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
         worker
@@ -997,7 +1016,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Create channels
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
@@ -1073,7 +1092,8 @@ mod tests {
 
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-        let mut worker = SolverWorker::new(market, derived, MockAlgorithm::new(), 0);
+        let mut worker =
+            SolverWorker::new(market, derived, MockAlgorithm::new(), 0, "test_pool".to_string());
 
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
@@ -1105,5 +1125,48 @@ mod tests {
             closed_warns, 1,
             "closed channel must be handled once, not spun on ({closed_warns} warns)"
         );
+    }
+
+    #[test]
+    fn task_pickup_metrics_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_task_pickup_metrics("test_pool", std::time::Duration::from_millis(25), 3);
+        });
+
+        let mut wait_seen = false;
+        let mut depth_seen = false;
+        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            let pool_label = key
+                .labels()
+                .find(|label| label.key() == "pool")
+                .map(|label| label.value().to_string());
+            match key.name() {
+                "worker_pool_queue_wait_seconds" => {
+                    assert_eq!(pool_label.as_deref(), Some("test_pool"));
+                    let DebugValue::Histogram(samples) = value else {
+                        panic!("expected histogram, got {value:?}");
+                    };
+                    assert_eq!(samples.len(), 1);
+                    assert!((samples[0].into_inner() - 0.025).abs() < 1e-9);
+                    wait_seen = true;
+                }
+                "worker_pool_queue_depth" => {
+                    assert_eq!(pool_label.as_deref(), Some("test_pool"));
+                    let DebugValue::Gauge(depth) = value else {
+                        panic!("expected gauge, got {value:?}");
+                    };
+                    assert!((depth.into_inner() - 3.0).abs() < f64::EPSILON);
+                    depth_seen = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(wait_seen, "queue wait histogram not recorded");
+        assert!(depth_seen, "queue depth gauge not recorded");
     }
 }

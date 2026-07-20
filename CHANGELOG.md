@@ -1,3 +1,44 @@
+## [0.92.0](https://github.com/propeller-heads/fynd/compare/0.91.0...0.92.0) (2026-07-17)
+
+
+### Features
+
+* add chain label and histogram buckets to metrics exporter ([0bcbf29](https://github.com/propeller-heads/fynd/commit/0bcbf29b7ab1ffd5a044650857813443654d6272))
+* add component and token count getters to MarketState ([3825175](https://github.com/propeller-heads/fynd/commit/3825175a231ef5f3ee62b3ef6d847637539738f7))
+* add HTTP metrics middleware with per-client labels ([3f30279](https://github.com/propeller-heads/fynd/commit/3f30279dd645e7af7c7560e04522092c15403d28))
+* record derived computation duration, failure, freshness metrics ([60080fc](https://github.com/propeller-heads/fynd/commit/60080fc99c51741e37320914dd0fe69d7041ef7f))
+* record encoding duration and failure metrics ([b601716](https://github.com/propeller-heads/fynd/commit/b601716f15fda4280b52a2326ef498acb1f2d5bf))
+* record feed freshness, update duration, and size metrics ([1c42bc3](https://github.com/propeller-heads/fynd/commit/1c42bc399fd90d69ce1d222e5ba21c2004c1f3ae))
+
+
+### Bug Fixes
+
+* bound per-client metric label values ([a9f5063](https://github.com/propeller-heads/fynd/commit/a9f50633f5b2c5a068f5b51c3dd4b8b25b99dcc0))
+
+## [0.91.0](https://github.com/propeller-heads/fynd/compare/0.90.3...0.91.0) (2026-07-17)
+
+
+### Features
+
+* record per-pool queue wait and depth metrics at task pickup ([bef8139](https://github.com/propeller-heads/fynd/commit/bef8139b527e6b0db3094ac95032775bc9902ebf))
+
+## [0.90.3](https://github.com/propeller-heads/fynd/compare/0.90.2...0.90.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* restore native CurveState using upstream curve_filter ([79c616b](https://github.com/propeller-heads/fynd/commit/79c616b03afed2261ccee74f9f28205da1b969d2)), closes [#318](https://github.com/propeller-heads/fynd/issues/318)
+
+## [0.90.2](https://github.com/propeller-heads/fynd/compare/0.90.1...0.90.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* correct vm:curve revert rationale comment ([fd367f4](https://github.com/propeller-heads/fynd/commit/fd367f4c3f59fcb1b12d717d83b93c5bd80e7f9a))
+* revert vm:curve to EVMPoolState VM simulation ([38f54bf](https://github.com/propeller-heads/fynd/commit/38f54bf09ee3d264c2ec858ff5100707c50fb66f))
+
+## [0.90.1](https://github.com/propeller-heads/fynd/compare/0.90.0...0.90.1) (2026-07-16)
+
 ## [0.90.0](https://github.com/propeller-heads/fynd/compare/0.89.2...0.90.0) (2026-07-14)
 
 

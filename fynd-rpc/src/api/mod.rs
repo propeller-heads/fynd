@@ -6,6 +6,8 @@ pub mod dto;
 pub mod error;
 /// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
+/// HTTP metrics middleware recording request duration and per-client usage.
+pub(crate) mod middleware;
 #[cfg(feature = "experimental")]
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;

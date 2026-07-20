@@ -344,6 +344,16 @@ impl MarketState {
         self.last_updated.as_ref()
     }
 
+    /// Number of protocol components (pools) currently tracked.
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Number of tokens currently tracked.
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
     /// Returns the protocol sync status indexed by their protocol system name.
     pub fn get_protocol_sync_status(&self, protocol_system: &String) -> Option<&SynchronizerState> {
         self.protocol_sync_status
@@ -806,6 +816,46 @@ mod tests {
                 .expect("last_updated must be set")
                 .number(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn component_and_token_counts_track_upserts_and_removals() {
+        let market = MarketData::new_shared();
+        let tok_a = token(1, "A");
+        let tok_b = token(2, "B");
+
+        market
+            .apply_block_update(1, |data| {
+                data.upsert_components([component("pool_ab", &[tok_a.clone(), tok_b.clone()])]);
+                data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
+            })
+            .await;
+        {
+            let data = market.read().await;
+            assert_eq!(
+                data.base_market_state()
+                    .component_count(),
+                1
+            );
+            assert_eq!(data.base_market_state().token_count(), 2);
+        }
+
+        market
+            .apply_block_update(2, |data| {
+                data.remove_components(["pool_ab".to_string()].iter());
+            })
+            .await;
+        let data = market.read().await;
+        assert_eq!(
+            data.base_market_state()
+                .component_count(),
+            0
+        );
+        assert_eq!(
+            data.base_market_state().token_count(),
+            2,
+            "tokens are not removed with their components"
         );
     }
 }

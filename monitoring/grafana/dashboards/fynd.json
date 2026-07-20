@@ -14,17 +14,17 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.5\"}",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.95\"}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.99\"}",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -87,12 +87,12 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "worker_router_solver_responses{quantile=\"0.5\"}",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(worker_router_solver_responses_bucket[1m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "worker_router_solver_responses{quantile=\"0.95\"}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(worker_router_solver_responses_bucket[1m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -211,7 +211,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(increase(worker_router_best_solution_pool[5m])) by (pool)",
+          "expr": "sum(increase(worker_router_best_quote_pool[5m])) by (pool)",
           "legendFormat": "{{pool}}",
           "refId": "A"
         }

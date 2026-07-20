@@ -41,6 +41,8 @@ pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 pub(crate) struct SpawnWorkersParams {
     /// Algorithm name (e.g., "most_liquid") — used for thread naming and logging.
     pub algorithm: String,
+    /// Pool name from configuration (used as the `pool` metric label).
+    pub pool_name: String,
     /// Number of worker threads to spawn.
     pub num_workers: usize,
     /// Configuration for the algorithm used by each worker.
@@ -159,6 +161,7 @@ where
         let algorithm_config = params.algorithm_config.clone();
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
+        let pool_name = params.pool_name.clone();
         let factory = factory.clone();
 
         let handle = thread::Builder::new()
@@ -172,8 +175,13 @@ where
                 rt.block_on(async move {
                     let algorithm = factory(algorithm_config);
 
-                    let mut worker =
-                        SolverWorker::new(market_data, derived_data, algorithm, worker_id);
+                    let mut worker = SolverWorker::new(
+                        market_data,
+                        derived_data,
+                        algorithm,
+                        worker_id,
+                        pool_name,
+                    );
 
                     worker.initialize_graph().await;
                     worker
@@ -234,6 +242,7 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         SpawnWorkersParams {
             algorithm: algorithm.to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers,
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
@@ -271,6 +280,7 @@ mod tests {
 
         let params = SpawnWorkersParams {
             algorithm: "most_liquid".to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers: 3,
             algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None).unwrap(),
             task_rx,
@@ -311,6 +321,7 @@ mod tests {
         let registry_err = AlgorithmSpawner::Registry { algorithm: "my_custom_algo".to_string() }
             .spawn(SpawnWorkersParams {
                 algorithm: "my_custom_algo".to_string(),
+                pool_name: "test_pool".to_string(),
                 num_workers: 1,
                 algorithm_config: AlgorithmConfig::default(),
                 task_rx: task_rx.clone(),
@@ -336,6 +347,7 @@ mod tests {
         let workers = AlgorithmSpawner::Custom { algorithm: "my_custom_algo".to_string(), spawner }
             .spawn(SpawnWorkersParams {
                 algorithm: "my_custom_algo".to_string(),
+                pool_name: "test_pool".to_string(),
                 num_workers: 2,
                 algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None)
                     .unwrap(),
@@ -364,6 +376,7 @@ mod tests {
 
         let params = SpawnWorkersParams {
             algorithm: "path_frank_wolfe".to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers: 1,
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
