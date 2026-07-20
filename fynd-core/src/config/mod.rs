@@ -5,7 +5,8 @@
 //!
 //! 1. **Explicit overrides** — lib builder setters or CLI flags
 //! 2. **Local config file** — any subset of the fields, same schema as the embedded default
-//! 3. **Embedded default** — `default_config.toml`, compiled into the binary
+//! 3. **Remote config** — tuned values pulled from S3 per chain (see [`remote`])
+//! 4. **Embedded default** — `default_config.toml`, compiled into the binary
 //!
 //! The embedded default deserializes directly into a complete [`Config`] — every field
 //! (except the chain-specific `min_tvl`) is required, so a gap between the struct and
@@ -26,6 +27,8 @@
 //! let overrides = PartialConfig { worker_router_timeout_ms: Some(50), ..Default::default() };
 //! let config = embedded_default()
 //!     .clone()
+//!     .apply_remote(&remote::default_remote_config_url(chain), timeout)
+//!     .await
 //!     .apply(&PartialConfig::from_file("fynd.toml")?)
 //!     .apply(&overrides);
 //! let builder = FyndBuilder::new(chain, tycho_url, rpc_url, config.protocols.clone(), min_tvl)
@@ -38,6 +41,8 @@ use serde::Deserialize;
 use tycho_simulation::tycho_common::models::{Chain, TvlThresholdTier};
 
 use crate::solver::PoolConfig;
+
+pub mod remote;
 
 /// The embedded default configuration, compiled into the binary.
 const EMBEDDED_DEFAULT_TOML: &str = include_str!("default_config.toml");
@@ -149,6 +154,25 @@ static EMBEDDED_DEFAULT: LazyLock<Config> = LazyLock::new(|| {
 /// chain-specific `min_tvl` (see [`Config::min_tvl`]).
 pub fn embedded_default() -> &'static Config {
     &EMBEDDED_DEFAULT
+}
+
+/// Overall time budget (including retries) for the fetch inside [`get_default`].
+/// Callers wanting a different budget use [`Config::apply_remote`] directly.
+const GET_DEFAULT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Returns the embedded default configuration with the latest remotely tuned values for
+/// `chain` applied on top, fetched from the default S3 URL (see
+/// [`remote::default_remote_config_url`]).
+///
+/// The simple one-call form of `embedded_default().clone().apply_remote(...)`, with a
+/// built-in 2 s fetch budget. Never fails or panics: on any fetch problem the embedded
+/// defaults are returned unchanged (a warning is logged). Layer local overrides on top
+/// with [`Config::apply`]; for a custom URL or timeout use [`Config::apply_remote`].
+pub async fn get_default(chain: Chain) -> Config {
+    embedded_default()
+        .clone()
+        .apply_remote(&remote::default_remote_config_url(chain), GET_DEFAULT_FETCH_TIMEOUT)
+        .await
 }
 
 impl Config {

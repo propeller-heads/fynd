@@ -103,6 +103,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
 | `CONFIG_FILE` | Solver config file (default: `fynd.toml` if present) |
+| `REMOTE_CONFIG_URL` | Remote config URL (default: chain-specific PropellerHeads S3 URL; `--no-remote-config` disables) |
 | `WORKER_POOLS_CONFIG` | Deprecated legacy pools-only config file; its pools override the config file's |
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
@@ -120,7 +121,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | File | Purpose |
 |---|---|
-| `fynd.toml` | Full solver config: any subset of tuning fields + `[pools]`. Resolved field-by-field: CLI > file > embedded default (`fynd-core/src/config/default_config.toml`) |
+| `fynd.toml` | Full solver config: any subset of tuning fields + `[pools]`. Resolved field-by-field: CLI > file > remote config (S3, per chain) > embedded default (`fynd-core/src/config/default_config.toml`) |
 | `worker_pools.toml` | Deprecated legacy pools-only file, still honored (its pools override the config file's) |
 | `blocklist.toml` | Component IDs to exclude from the Tycho stream. Optional — falls back to tycho-simulation defaults if not found |
 

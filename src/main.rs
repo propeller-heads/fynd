@@ -35,11 +35,10 @@ use std::{path::Path, time::Duration};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use clap::Parser;
-use fynd_core::config::{embedded_default, PartialConfig};
+use fynd_core::config::{embedded_default, remote, PartialConfig};
 use fynd_rpc::{
     builder::FyndRPCBuilder,
     config::{defaults, BlocklistConfig, WorkerPoolsConfig},
-    parse_chain,
     protocols::resolve_protocols,
 };
 mod cli;
@@ -226,11 +225,19 @@ const DEFAULT_CONFIG_PATH: &str = "fynd.toml";
 /// local-file priority when no higher layer sets pools.
 const LEGACY_WORKER_POOLS_PATH: &str = "worker_pools.toml";
 
-/// Resolves the layered solver config: CLI flags > local config file > embedded default.
+/// Overall time budget for the remote config fetch (including its internal retries);
+/// startup resolves without the remote layer when it elapses.
+const REMOTE_CONFIG_FETCH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Resolves the layered solver config:
+/// CLI flags > local config file > remote config (S3) > embedded default.
 ///
 /// Local files fail fast when explicitly passed or malformed — a broken local setup should
-/// not start silently misconfigured.
-fn resolve_solver_config(args: &cli::ServeArgs) -> Result<fynd_core::config::Config, SolverError> {
+/// not start silently misconfigured. The remote fetch never fails startup: on any error or
+/// timeout a warning is logged and the lower layers apply unchanged.
+async fn resolve_solver_config(
+    args: &cli::ServeArgs,
+) -> Result<fynd_core::config::Config, SolverError> {
     if args.worker_pools_config.is_some() {
         warn!(
             "--worker-pools-config is deprecated and will be removed soon; move the [pools] \
@@ -278,9 +285,40 @@ fn resolve_solver_config(args: &cli::ServeArgs) -> Result<fynd_core::config::Con
             .pools = Some(pools);
     }
 
-    // Ascending priority: embedded default, then the local config file, then CLI overrides.
+    let remote_config = if args.no_remote_config {
+        None
+    } else {
+        let url = args
+            .remote_config_url
+            .clone()
+            .unwrap_or_else(|| remote::default_remote_config_url(args.chain));
+        match tokio::time::timeout(REMOTE_CONFIG_FETCH_TIMEOUT, remote::fetch_remote_config(&url))
+            .await
+        {
+            Ok(Ok(partial)) => {
+                info!(url, "fetched remote config");
+                Some(partial)
+            }
+            Ok(Err(e)) => {
+                warn!(url, error = %e, "remote config fetch failed; continuing without it");
+                None
+            }
+            Err(_elapsed) => {
+                warn!(
+                    url,
+                    timeout_ms = REMOTE_CONFIG_FETCH_TIMEOUT.as_millis() as u64,
+                    "remote config fetch timed out; continuing without it"
+                );
+                None
+            }
+        }
+    };
+
+    // Ascending priority: embedded default, then the remote config, then the local config
+    // file, then CLI overrides.
     let config = embedded_default()
         .clone()
+        .apply(&remote_config.unwrap_or_default())
         .apply(&local_file.unwrap_or_default())
         .apply(&overrides);
     config
@@ -292,14 +330,13 @@ fn resolve_solver_config(args: &cli::ServeArgs) -> Result<fynd_core::config::Con
 /// Sets up the solver (resolves config, parses chain, builds solver).
 /// Returns setup errors if any step fails.
 async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
-    let chain = parse_chain(&args.chain)
-        .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
+    let chain = args.chain;
 
-    let config = resolve_solver_config(args)?;
+    let config = resolve_solver_config(args).await?;
     info!(?config, "solver config resolved");
 
-    let tycho_url = resolve_tycho_url(&args.chain, args.tycho_url.as_deref())?;
-    let rpc_url = resolve_rpc_url(&args.chain, args.rpc_url.as_deref())?;
+    let tycho_url = resolve_tycho_url(&chain.to_string(), args.tycho_url.as_deref())?;
+    let rpc_url = resolve_rpc_url(&chain.to_string(), args.rpc_url.as_deref())?;
 
     let protocols = resolve_protocols(
         &tycho_url,
