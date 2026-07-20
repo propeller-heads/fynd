@@ -3360,6 +3360,7 @@ dependencies = [
  "fynd-core",
  "fynd-rpc",
  "hex",
+ "metrics",
  "metrics-exporter-prometheus",
  "num-bigint",
  "num-traits",

@@ -13,7 +13,7 @@ default = ["metrics"]
 # Enables the Prometheus metrics exporter on a separate HTTP server.
 # Disable with `--no-default-features` to omit Actix-Web and the Prometheus
 # recorder from the binary (e.g. for embedded/minimal builds).
-metrics = ["dep:actix-web", "dep:metrics-exporter-prometheus"]
+metrics = ["dep:actix-web", "dep:metrics-exporter-prometheus", "dep:metrics"]
 
 [dependencies]
 fynd-rpc = { workspace = true }
@@ -39,6 +39,7 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 # Serialization (for OpenAPI spec output)
