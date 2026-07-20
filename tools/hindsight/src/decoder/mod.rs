@@ -68,9 +68,9 @@ pub(crate) struct DecodedTrade {
     pub token_in: Address,
     pub token_out: Address,
     /// Input amount that actually entered the swap — a venue fee skimmed from the input (see
-    /// [`venue_fee`]) is already subtracted, so a re-solve compares like-for-like.
+    /// `venue_fee`) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
-    /// Gross swap output — a venue fee skimmed from the output (see [`venue_fee_out`]) is added
+    /// Gross swap output — a venue fee skimmed from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
     /// Venue fee skimmed from the input token before swapping (e.g. Relay's fee), in `token_in`

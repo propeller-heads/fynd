@@ -50,9 +50,9 @@ pub(crate) enum Verdict {
 }
 
 /// Minimum fraction of the settled output Fynd must produce for the result to count as a real
-/// comparison. Below this, Fynd could not serve the trade's size — because liquidity was too thin
-/// it returned a route covering only part of it — so the result is a coverage miss rather than a
-/// near-total loss; otherwise a single un-fillable whale dominates the USD aggregate.
+/// comparison. Below this, Fynd could not serve the trade's size (thin liquidity made it return
+/// a route covering only part of it), so the result is a coverage miss rather than a near-total
+/// loss. Without this cut, a single un-fillable whale trade dominates the USD aggregate.
 const MIN_FILL_RATIO: f64 = 0.5;
 
 /// Reclassify a Fynd quote that covers far less than the settled amount as a coverage miss.

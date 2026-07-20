@@ -121,8 +121,8 @@ fn date_from_unix(secs: u64) -> String {
 pub(super) fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
-    prices_top: &usd::PriceMap,
-    prices_back: &usd::PriceMap,
+    prices_top: &usd::Prices,
+    prices_back: &usd::Prices,
 ) {
     for range in ranges {
         let Ok(line) = serde_json::to_string(&comparison_record(range, prices_top, prices_back))
@@ -144,8 +144,8 @@ pub(super) fn write_comparisons<W: std::io::Write>(
 /// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
 fn comparison_record(
     range: &RangeComparison,
-    prices_top: &usd::PriceMap,
-    prices_back: &usd::PriceMap,
+    prices_top: &usd::Prices,
+    prices_back: &usd::Prices,
 ) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
@@ -176,7 +176,7 @@ fn comparison_record(
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
-    prices: &usd::PriceMap,
+    prices: &usd::Prices,
 ) -> serde_json::Value {
     let token_out = range.token_out;
     let solved = match &state.outcome {
@@ -189,9 +189,9 @@ fn state_record(
         Outcome::Unsolvable(reason) | Outcome::Partial(reason) => Some(reason.as_str()),
         Outcome::Solved(_) => None,
     };
-    let improvement_usd = solved
-        .and_then(|s| usd::savings_usd(token_out, s.amount_out, range.settled_amount_out, prices));
-    let fynd_value_usd = solved.and_then(|s| usd::value_usd(token_out, s.amount_out, prices));
+    let improvement_usd =
+        solved.and_then(|s| prices.savings_usd(token_out, s.amount_out, range.settled_amount_out));
+    let fynd_value_usd = solved.and_then(|s| prices.value_usd(token_out, s.amount_out));
     serde_json::json!({
         "verdict": state.verdict,
         "net_bps": state.deltas.net_bps,
@@ -201,7 +201,7 @@ fn state_record(
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
-        "settled_value_usd": usd::value_usd(token_out, range.settled_amount_out, prices),
+        "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
         "unsolvable_reason": unsolvable_reason,
         "quote": solved
             .and_then(|s| s.quote_json.as_deref())
@@ -262,9 +262,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
+        decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
         resolve::{build_range, SolvedAmount},
     };
+
+    fn empty_prices() -> usd::Prices {
+        usd::Prices::new(&Registry::ethereum())
+    }
 
     #[test]
     fn date_from_unix_matches_utc_calendar() {
@@ -328,11 +332,11 @@ mod tests {
         };
         let range = build_range(
             &trade,
-            &usd::PriceMap::new(),
+            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
         );
-        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
         assert_eq!(
             rec.pointer("/quoted_amount_out")
@@ -376,7 +380,9 @@ mod tests {
             .parse()
             .unwrap();
         // ETH=$2000: USDC (6dp) = 2e-9 native units/wei, WETH (18dp) = 1.0.
-        let prices = usd::PriceMap::from([(usdc, 2e-9), (weth, 1.0)]);
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+        prices.insert(weth, 1.0);
 
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
@@ -480,11 +486,11 @@ mod tests {
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(
             &trade,
-            &usd::PriceMap::new(),
+            &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
         );
-        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
         assert_eq!(
             rec.pointer("/top/unsolvable_reason")
@@ -533,8 +539,8 @@ mod tests {
                 quote_json: None,
             })
         };
-        let range = build_range(&trade, &usd::PriceMap::new(), solved(1_100), solved(1_050));
-        let rec = comparison_record(&range, &usd::PriceMap::new(), &usd::PriceMap::new());
+        let range = build_range(&trade, &empty_prices(), solved(1_100), solved(1_050));
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "sandwiched");

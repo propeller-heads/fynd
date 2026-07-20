@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.90.0"
+version = "0.92.0"
 
 [package]
 name = "fynd"
@@ -138,10 +138,11 @@ tracing-opentelemetry = "0.28"
 tracing-actix-web = "0.7"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.331.0"
-tycho-simulation = ">=0.331.0"
+tycho-execution = ">=0.338.0"
+tycho-simulation = ">=0.338.0"
 typetag = "0.2"
 
 # Compression
@@ -167,11 +168,11 @@ hex = "0.4"
 sha2 = "0.10"
 
 # Internal crates
-fynd-core = { path = "fynd-core", version = "0.90.0" }
-fynd-rpc = { path = "fynd-rpc", version = "0.90.0" }
-fynd-rpc-types = { path = "fynd-rpc-types", version = "0.90.0" }
-fynd-client = { path = "clients/rust", version = "0.90.0" }
-erc20-overrides = { path = "tools/erc20-overrides", version = "0.90.0" }
+fynd-core = { path = "fynd-core", version = "0.92.0" }
+fynd-rpc = { path = "fynd-rpc", version = "0.92.0" }
+fynd-rpc-types = { path = "fynd-rpc-types", version = "0.92.0" }
+fynd-client = { path = "clients/rust", version = "0.92.0" }
+erc20-overrides = { path = "tools/erc20-overrides", version = "0.92.0" }
 # Path-only (like fynd-test-fixtures): unpublished internal crate, so it must not carry a
 # version requirement -- release.config.js bumps the workspace version without bumping
 # requirements it does not know about, and a stale requirement sends cargo to crates.io.

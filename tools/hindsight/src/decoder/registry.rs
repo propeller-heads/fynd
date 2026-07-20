@@ -1,13 +1,13 @@
 //! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
-//! The data is pure configuration and lives in TOML — the built-in Ethereum book is embedded
-//! from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain book without
-//! recompiling. This module only holds the lookups the decode strategies ask
+//! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
+//! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
+//! address book without recompiling. This module only holds the lookups the decode strategies ask
 //! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
 };
@@ -26,20 +26,45 @@ const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
 #[serde(deny_unknown_fields)]
 struct AddressBook {
     wrapped_native: Address,
+    infrastructure: HashSet<Address>,
+    usd_stablecoins: HashMap<Address, u32>,
     batch_settlers: HashSet<Address>,
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
 }
 
-/// A venue's addresses on one chain: the contracts users enter through and the collectors its
-/// fee skims land on. Keyed by venue name in the book; the name binds to a decode strategy at
-/// load time (see [`crate::decoder::venues::Venue::from_name`]).
+/// A venue's address-book section on one chain: the contracts users enter through, the
+/// collectors its fee skims land on, and its calldata solver vocabulary. Keyed by venue name in
+/// the address book; the name binds to a decode strategy at load time (see
+/// [`crate::decoder::venues::Venue::from_name`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
     pub(crate) entry_points: HashSet<Address>,
     pub(crate) fee_collectors: HashSet<Address>,
+    /// Lowercase substrings of the venue's calldata solver ids, mapped to the solver name used
+    /// in the address book. Ordered for deterministic matching; empty for venues that declare
+    /// no solver in calldata.
+    #[serde(default)]
+    solver_aliases: BTreeMap<String, String>,
+}
+
+impl VenueAddresses {
+    /// Normalize a solver id this venue declared in calldata to the address book's solver
+    /// vocabulary: the first alias needle (in alias order) contained in the lowercased id names
+    /// the solver, trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a
+    /// 1:1 rename. Unmatched ids pass through as-is: still more informative than a raw executor
+    /// address, and a signal to extend the address book.
+    pub(crate) fn normalize_solver(&self, id: &str) -> String {
+        let lower = id.to_lowercase();
+        for (needle, name) in &self.solver_aliases {
+            if lower.contains(needle) {
+                return name.clone();
+            }
+        }
+        id.to_string()
+    }
 }
 
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
@@ -62,7 +87,13 @@ pub(crate) struct Registry {
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
     wrapped_native: Address,
-    /// Venue address sets, keyed by the venue name from the book.
+    /// Token-movement infrastructure (e.g. Permit2): contracts traces touch on most swaps
+    /// without ever being the settling venue.
+    infrastructure: HashSet<Address>,
+    /// `(stablecoin, decimals)` anchors for valuing trades in USD (see `crate::usd`), sorted by
+    /// address for deterministic averaging.
+    usd_stablecoins: Vec<(Address, u32)>,
+    /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
 }
 
@@ -91,7 +122,7 @@ impl Registry {
     }
 
     fn from_toml(text: &str) -> anyhow::Result<Self> {
-        let book: AddressBook =
+        let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
         // A venue section only carries addresses; its behavior is bound by name in code. An
@@ -113,6 +144,19 @@ impl Registry {
             }
         }
         let solver_names = book.solvers.values().cloned().collect();
+        let mut usd_stablecoins: Vec<(Address, u32)> = book
+            .usd_stablecoins
+            .into_iter()
+            .collect();
+        usd_stablecoins.sort_unstable();
+        // Alias needles match against lowercased ids, so a mixed-case needle in the address
+        // book would silently never match — canonicalize at load.
+        for venue in book.venues.values_mut() {
+            venue.solver_aliases = std::mem::take(&mut venue.solver_aliases)
+                .into_iter()
+                .map(|(needle, name)| (needle.to_lowercase(), name))
+                .collect();
+        }
 
         Ok(Self {
             solver_names,
@@ -121,6 +165,8 @@ impl Registry {
             batch_settlers: book.batch_settlers,
             labels: book.labels,
             wrapped_native: book.wrapped_native,
+            infrastructure: book.infrastructure,
+            usd_stablecoins,
             venues: book.venues,
         })
     }
@@ -151,6 +197,18 @@ impl Registry {
 
     pub(crate) fn wrapped_native(&self) -> Address {
         self.wrapped_native
+    }
+
+    /// Whether the address is token-movement infrastructure (Permit2, the wrapped-native
+    /// token): contracts a trace touches on most swaps without ever being the settling venue,
+    /// so attribution guesses must skip them.
+    pub(crate) fn is_infrastructure(&self, address: Address) -> bool {
+        self.infrastructure.contains(&address) || address == self.wrapped_native
+    }
+
+    /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
+    pub(crate) fn stablecoin_anchors(&self) -> &[(Address, u32)] {
+        &self.usd_stablecoins
     }
 
     /// The named venue's address book section, when the book has one.
@@ -237,6 +295,47 @@ mod tests {
     }
 
     #[test]
+    fn normalize_solver_trims_metamask_ids_and_passes_unknown_through() {
+        let registry = Registry::ethereum();
+        let metamask = registry.venue("metamask").unwrap();
+        assert_eq!(metamask.normalize_solver("oneInchV6FeeDynamic"), "1inch");
+        assert_eq!(metamask.normalize_solver("uniswapPermit2FeeDynamic"), "uniswap");
+        assert_eq!(metamask.normalize_solver("okx6"), "okx");
+        assert_eq!(metamask.normalize_solver("someFutureSolver"), "someFutureSolver");
+    }
+
+    #[test]
+    fn solver_aliases_are_scoped_to_their_venue() {
+        // The alias table is one venue's calldata vocabulary; a venue without one passes every
+        // id through unchanged.
+        let registry = Registry::ethereum();
+        let relay = registry.venue("relay").unwrap();
+        assert_eq!(relay.normalize_solver("oneInchV6FeeDynamic"), "oneInchV6FeeDynamic");
+    }
+
+    #[test]
+    fn mixed_case_alias_needle_still_matches() {
+        // Needles are canonicalized to lowercase at load, so a capitalized needle in the
+        // address book matches the same ids as a lowercase one.
+        let book = ETHEREUM_TOML.replace(
+            "[venues.metamask.solver_aliases]",
+            "[venues.metamask.solver_aliases]\nBeBop = \"bebop\"",
+        );
+        let registry = Registry::from_toml(&book).unwrap();
+        let metamask = registry.venue("metamask").unwrap();
+        assert_eq!(metamask.normalize_solver("bebopJamV2"), "bebop");
+    }
+
+    #[test]
+    fn infrastructure_covers_permit2_and_wrapped_native() {
+        let registry = Registry::ethereum();
+        let permit2 = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
+        assert!(registry.is_infrastructure(permit2));
+        assert!(registry.is_infrastructure(registry.wrapped_native()));
+        assert!(!registry.is_infrastructure(addr(123)));
+    }
+
+    #[test]
     fn cow_is_a_batch_settler() {
         let registry = Registry::ethereum();
         let cow = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
@@ -270,7 +369,7 @@ mod tests {
     #[test]
     fn venue_without_strategy_is_rejected() {
         // A venue section whose name has no decode strategy would silently never match, so the
-        // book must fail to load.
+        // address book must fail to load.
         let text =
             format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
         let err = Registry::from_toml(&text)

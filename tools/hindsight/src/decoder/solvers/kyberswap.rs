@@ -4,7 +4,7 @@
 //! verbatim in the swap calldata: a flat JSON object carrying the integrator's name and — the
 //! valuable part — the off-chain quoted output (`AmountOut`) the route was chosen on. The settled
 //! amount tells us what the user got; the quote tells us what the solver promised at decision
-//! time, which is the number a client like Relay actually compared against ours.
+//! time, which is the number a venue like Relay actually compared against ours.
 
 use alloy::primitives::U256;
 

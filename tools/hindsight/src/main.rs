@@ -30,10 +30,15 @@ enum Command {
     Monitor(resolve::monitor::MonitorArgs),
 }
 
-/// Chain access shared by every subcommand: the RPC endpoint and the decoder's address book.
+/// Chain selection shared by every subcommand: which chain to operate on and how to reach it.
+/// Chain-specific configuration beyond the RPC endpoint and address book belongs here too.
 #[derive(Args)]
-pub(crate) struct RpcArgs {
-    /// Ethereum RPC URL
+pub(crate) struct ChainArgs {
+    /// Chain to operate on — selects the decoder's address book (only ethereum is built in)
+    #[arg(long = "chain", value_name = "CHAIN", default_value = "ethereum")]
+    pub name: String,
+
+    /// Chain RPC URL
     #[arg(long, env = "RPC_URL")]
     pub rpc_url: String,
 
@@ -57,7 +62,7 @@ struct BlockArgs {
 #[derive(Args)]
 struct DecodeArgs {
     #[command(flatten)]
-    rpc: RpcArgs,
+    chain: ChainArgs,
 
     #[command(flatten)]
     blocks: BlockArgs,
@@ -70,7 +75,7 @@ struct DecodeArgs {
 #[derive(Args)]
 struct VerifyArgs {
     #[command(flatten)]
-    rpc: RpcArgs,
+    chain: ChainArgs,
 
     #[command(flatten)]
     blocks: BlockArgs,
@@ -127,9 +132,9 @@ async fn main() -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let registry = decoder::Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
@@ -166,10 +171,10 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
+    let registry = decoder::Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
     let mut decoder = decoder::Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");

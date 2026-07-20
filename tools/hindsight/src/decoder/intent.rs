@@ -18,13 +18,12 @@ use crate::decoder::{
 /// Find the order maker's trade in a filler-initiated intent fill.
 ///
 /// The transaction sender is the filler, not the swapper, so we look for the
-/// externally-owned account whose net flow is a clean two-token swap. Pools
-/// and routers net the inverse swap or residue dust but carry code, so
-/// contracts (via `eth_getCode`) never qualify — a fill with no clean-net EOA
-/// is declined rather than guessed: a routing intermediary's leftover dust
-/// nets as an absurd "swap" (seen live as a WETH → 2.4e-7 AAVE decode).
-/// Known registry contracts and the excluded addresses (filler, entry point)
-/// never qualify either.
+/// externally-owned account whose net flow is a clean two-token swap. Contracts
+/// never qualify (checked via `eth_getCode`): pools and routers net the inverse
+/// swap or leftover dust, and recording an intermediary's dust as the trade
+/// produces absurd "swaps" (seen live: WETH → 2.4e-7 AAVE). Known registry
+/// contracts and the excluded addresses (filler, entry point) are skipped too.
+/// A fill with no clean-net EOA is declined rather than guessed.
 ///
 /// v0 limitations (tracked for a decode/attribution rework):
 /// - **One maker per transaction.** The first clean-net EOA wins, so a batch that settles several

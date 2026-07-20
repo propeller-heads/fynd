@@ -9,11 +9,12 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use metrics::{counter, gauge, histogram};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -313,6 +314,12 @@ impl ComputationManager {
         for &idx in &schedule.unscheduled {
             let computation_id = nodes[idx].0;
             error!(computation = computation_id, "computation skipped: requirement cycle");
+            counter!(
+                "derived_computation_failures_total",
+                "computation" => computation_id,
+                "reason" => "cycle"
+            )
+            .increment(1);
             let _ = self
                 .event_tx
                 .send(DerivedDataEvent::ComputationFailed { computation_id, block });
@@ -338,12 +345,16 @@ impl ComputationManager {
                     if fresh_ready && stale_ready {
                         runnable.push(idx);
                     } else {
+                        let computation_id = nodes[idx].0;
+                        counter!(
+                            "derived_computation_failures_total",
+                            "computation" => computation_id,
+                            "reason" => "upstream_failed"
+                        )
+                        .increment(1);
                         let _ = self
                             .event_tx
-                            .send(DerivedDataEvent::ComputationFailed {
-                                computation_id: nodes[idx].0,
-                                block,
-                            });
+                            .send(DerivedDataEvent::ComputationFailed { computation_id, block });
                     }
                 }
             }
@@ -369,6 +380,16 @@ impl ComputationManager {
                 match result {
                     Ok(write) => {
                         (write.persist)(&mut store);
+                        histogram!(
+                            "derived_computation_duration_seconds",
+                            "computation" => computation_id
+                        )
+                        .record(elapsed.as_secs_f64());
+                        gauge!(
+                            "derived_last_success_timestamp_seconds",
+                            "computation" => computation_id
+                        )
+                        .set(unix_now_seconds());
                         info!(
                             computation = computation_id,
                             failed = write.failed_items.len(),
@@ -385,6 +406,12 @@ impl ComputationManager {
                         succeeded.insert(computation_id);
                     }
                     Err(e) => {
+                        counter!(
+                            "derived_computation_failures_total",
+                            "computation" => computation_id,
+                            "reason" => "error"
+                        )
+                        .increment(1);
                         warn!(
                             error = ?e,
                             computation = computation_id,
@@ -405,6 +432,14 @@ impl ComputationManager {
             "all derived computations complete"
         );
     }
+}
+
+/// Seconds since the Unix epoch, for freshness gauges consumed as `time() - <gauge>`.
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Computes the dependency-ordered execution plan for `nodes` (id paired with its
@@ -1294,5 +1329,165 @@ mod tests {
                     .is_some(),
             "store should persist failure reason for eth_dai (missing sim state)"
         );
+    }
+
+    // --- metrics ---------------------------------------------------------------------
+
+    /// Mirrors `CounterComputation`, but always fails, to exercise the failure-counter path.
+    struct FailingComputation;
+
+    #[async_trait::async_trait]
+    impl DerivedComputation for FailingComputation {
+        type Output = ();
+        const ID: ComputationId = "failing";
+
+        async fn compute(
+            &self,
+            _market: &MarketData,
+            _store: &SharedDerivedDataRef,
+            _changed: &ChangedComponents,
+        ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+            Err(ComputationError::InvalidConfiguration("always fails".to_string()))
+        }
+    }
+
+    /// Finds the debug value recorded for `name` carrying every label in `labels`.
+    fn find_metric<'a>(
+        recorded: &'a [(
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            metrics_util::debugging::DebugValue,
+        )],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a metrics_util::debugging::DebugValue {
+        recorded
+            .iter()
+            .find(|(key, _, _, _)| {
+                key.key().name() == name &&
+                    labels
+                        .iter()
+                        .all(|(label_key, label_value)| {
+                            key.key()
+                                .labels()
+                                .any(|l| l.key() == *label_key && l.value() == *label_value)
+                        })
+            })
+            .map(|(_, _, _, value)| value)
+            .unwrap_or_else(|| panic!("missing {name}{labels:?}, got {recorded:?}"))
+    }
+
+    #[test]
+    fn compute_all_records_derived_metrics() {
+        use metrics_util::debugging::DebugValue;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+                manager
+                    .register(CounterComputation)
+                    .unwrap();
+                manager
+                    .compute_all(&ChangedComponents {
+                        is_full_recompute: true,
+                        ..Default::default()
+                    })
+                    .await;
+            })
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        let recorded_names: Vec<(String, Vec<String>)> = recorded
+            .iter()
+            .map(|(key, _, _, _)| {
+                (
+                    key.key().name().to_string(),
+                    key.key()
+                        .labels()
+                        .map(|l| format!("{}={}", l.key(), l.value()))
+                        .collect(),
+                )
+            })
+            .collect();
+        for expected in
+            ["derived_computation_duration_seconds", "derived_last_success_timestamp_seconds"]
+        {
+            assert!(
+                recorded_names
+                    .iter()
+                    .any(|(name, labels)| name == expected &&
+                        labels.contains(&"computation=counter".to_string())),
+                "missing {expected}{{computation=counter}}, got {recorded_names:?}"
+            );
+        }
+
+        match find_metric(
+            &recorded,
+            "derived_last_success_timestamp_seconds",
+            &[("computation", "counter")],
+        ) {
+            DebugValue::Gauge(value) => {
+                assert!(value.0 > 1.7e9, "gauge value {} not a sane unix timestamp", value.0);
+            }
+            other => panic!("derived_last_success_timestamp_seconds is not a gauge: {other:?}"),
+        }
+
+        match find_metric(
+            &recorded,
+            "derived_computation_duration_seconds",
+            &[("computation", "counter")],
+        ) {
+            DebugValue::Histogram(samples) => {
+                assert!(!samples.is_empty(), "expected at least one recorded duration sample");
+            }
+            other => panic!("derived_computation_duration_seconds is not a histogram: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_all_records_failure_metric() {
+        use metrics_util::debugging::DebugValue;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+                manager
+                    .register(FailingComputation)
+                    .unwrap();
+                manager
+                    .compute_all(&ChangedComponents {
+                        is_full_recompute: true,
+                        ..Default::default()
+                    })
+                    .await;
+            })
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        match find_metric(
+            &recorded,
+            "derived_computation_failures_total",
+            &[("computation", "failing"), ("reason", "error")],
+        ) {
+            DebugValue::Counter(value) => {
+                assert!(*value >= 1, "expected failure counter >= 1, got {value}");
+            }
+            other => panic!("derived_computation_failures_total is not a counter: {other:?}"),
+        }
     }
 }

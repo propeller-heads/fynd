@@ -18,8 +18,7 @@ use crate::decoder::{
     intent,
     ledger::{NetSwap, TransferLedger},
     registry::Registry,
-    solvers::lifi,
-    venues,
+    solvers, venues,
 };
 
 /// Everything a decode strategy may need from one matched transaction, so every strategy is
@@ -131,18 +130,19 @@ impl Flow {
 /// A transaction qualifies two ways: its entry point (`tx.to`) is a known
 /// venue or solver, or one of its logs was emitted by a known solver
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
-/// Matched transactions that start a cross-chain bridge order are vetoed here
-/// (see [`lifi::started_bridge_order`]), before they cost a trace.
+/// Matched transactions whose logs mark a non-swap order shape are vetoed
+/// here (see [`solvers::match_veto`]), before they cost a trace.
 pub(crate) fn select<'a>(
     receipt: &'a TransactionReceipt,
     registry: &Registry,
 ) -> Option<Matched<'a>> {
     let matched = match_entry(receipt, registry)?;
-    if lifi::started_bridge_order(matched.receipt.logs()) {
+    if let Some(reason) = solvers::match_veto(matched.receipt.logs()) {
         debug!(
             tx = %matched.receipt.transaction_hash,
             venue = %registry.label(matched.entry_point),
-            "cross-chain bridge order; skipping"
+            reason,
+            "matched transaction is not a same-chain swap; skipping"
         );
         return None;
     }
