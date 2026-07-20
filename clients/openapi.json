@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.75.1"
+    "version": "0.89.2"
   },
   "paths": {
     "/v1/health": {
@@ -387,6 +387,11 @@
             "type": "string",
             "description": "Address of the Tycho Router contract on this chain.",
             "example": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+          },
+          "version": {
+            "type": "string",
+            "description": "Fynd binary version (Cargo package version, e.g. \"0.89.1\").\n\nDefaults to empty when absent so newer clients tolerate older servers that predate it.",
+            "example": "0.89.1"
           }
         }
       },

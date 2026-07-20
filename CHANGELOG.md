@@ -1,3 +1,11 @@
+## [0.93.0](https://github.com/propeller-heads/fynd/compare/0.92.0...0.93.0) (2026-07-20)
+
+
+### Features
+
+* add version to /v1/info instance info ([e9c0cd9](https://github.com/propeller-heads/fynd/commit/e9c0cd9c344bd85272e0a7969d86800051b2d935))
+* emit fynd_build_info metric with binary version ([6843465](https://github.com/propeller-heads/fynd/commit/6843465ce53da6765683508e653e7f7622f2e9e5))
+
 ## [0.92.0](https://github.com/propeller-heads/fynd/compare/0.91.0...0.92.0) (2026-07-17)
 
 

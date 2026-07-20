@@ -1013,6 +1013,8 @@ pub struct InstanceInfo {
     permit2_address: bytes::Bytes,
     /// Chain ID of the network this instance is deployed on.
     chain_id: u64,
+    /// Fynd binary version reported by the server.
+    version: String,
 }
 
 impl InstanceInfo {
@@ -1020,8 +1022,9 @@ impl InstanceInfo {
         router_address: bytes::Bytes,
         permit2_address: bytes::Bytes,
         chain_id: u64,
+        version: String,
     ) -> Self {
-        Self { router_address, permit2_address, chain_id }
+        Self { router_address, permit2_address, chain_id, version }
     }
 
     /// Router contract address (20 raw bytes).
@@ -1037,6 +1040,11 @@ impl InstanceInfo {
     /// Chain ID of the network this instance is deployed on.
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    /// Fynd binary version reported by the server.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 }
 
