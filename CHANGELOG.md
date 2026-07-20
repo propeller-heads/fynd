@@ -1,3 +1,23 @@
+## [0.94.0](https://github.com/propeller-heads/fynd/compare/0.93.0...0.94.0) (2026-07-20)
+
+
+### Features
+
+* **api:** report null router_address and 501 encoding on quote-only chains ([bda79ca](https://github.com/propeller-heads/fynd/commit/bda79ca6fa6d0e1a8db600b615d8082fe78485fa))
+* **chain:** resolve custom chains and native token via the registry ([96ee352](https://github.com/propeller-heads/fynd/commit/96ee352599d8fb4e6cfe142fa0a0965b99948664))
+* **cli:** add --chains-config to install the custom-chain registry ([a04a9cd](https://github.com/propeller-heads/fynd/commit/a04a9cd6751143cd78c58992410fcc878f8365bc))
+* **encoding:** add disabled encoder state for router-less chains ([cd4c006](https://github.com/propeller-heads/fynd/commit/cd4c006a47d04e39d97ff793bc5d1d379c4509c5))
+* make InstanceInfo.router_address optional for quote-only chains ([095063b](https://github.com/propeller-heads/fynd/commit/095063b9462ae8ea434b8754242e09467943541e))
+* **solver:** make router address optional and gate the fee fetcher ([a849b54](https://github.com/propeller-heads/fynd/commit/a849b5445fb6b2c4d80abd42700fe557a6256043))
+* upgrade tycho to 0.340.0 ([a08e77d](https://github.com/propeller-heads/fynd/commit/a08e77d266a09b3252540b2266edef06061849b2))
+
+
+### Bug Fixes
+
+* address custom-chain PR review comments ([38e486e](https://github.com/propeller-heads/fynd/commit/38e486ec3d39968506a4ee6fc0f610b379dc828e))
+* **api:** map only encoding-unavailable to 501, keep encoding failures at 422 ([ecfa019](https://github.com/propeller-heads/fynd/commit/ecfa01978267b815f9ebc0b96109b09d355cd7a3))
+* **chain:** preserve fail-fast for placeholder native token; drop dead lazy_static ([c3cc396](https://github.com/propeller-heads/fynd/commit/c3cc3965285822472ce40ec1a391559ca4340c1b))
+
 ## [0.93.0](https://github.com/propeller-heads/fynd/compare/0.92.0...0.93.0) (2026-07-20)
 
 
