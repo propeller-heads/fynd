@@ -731,7 +731,9 @@ fn combine_with_surplus(
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
     let committed_amount_out = committed.amount_out();
 
-    if realized_route_out <= committed_route_out {
+    // We promise the user the public route's output. A private route that produces less
+    // can't keep that promise, so we skip it — even when its gas savings make it better net.
+    if exclusive_route_amount_out < committed_amount_out {
         return public_ranked;
     }
 
