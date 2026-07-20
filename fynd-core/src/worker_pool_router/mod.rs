@@ -701,7 +701,7 @@ fn combine_with_surplus(
     };
 
     // Find the best exclusive-access candidate, respecting max_gas and route shape constraints.
-    let best_exclusive_access = responses
+    let best_exclusive_access_candidate = responses
         .quotes
         .iter()
         .filter(|(pool, _)| pool_roles.get(pool) == Some(&PoolRole::ExclusiveAccess))
@@ -719,29 +719,29 @@ fn combine_with_surplus(
         })
         .map(|(_, q)| q);
 
-    let Some(candidate) = best_exclusive_access else {
+    let Some(exclusive_candidate) = best_exclusive_access_candidate else {
         return public_ranked;
     };
 
     // The candidate route must beat the committed reference net-of-gas.
-    if candidate.amount_out_net_gas() <= committed.amount_out_net_gas() {
+    if exclusive_candidate.amount_out_net_gas() <= committed.amount_out_net_gas() {
         return public_ranked;
     }
 
-    let realized_route_out = candidate.amount_out();
-    let committed_route_out = committed.amount_out();
+    let exclusive_route_amount_out = exclusive_candidate.amount_out();
+    let committed_amount_out = committed.amount_out();
 
     if realized_route_out <= committed_route_out {
         return public_ranked;
     }
 
-    let surplus_amount = realized_route_out - committed_route_out;
+    let surplus_amount = exclusive_route_amount_out - committed_amount_out;
 
     // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
     // attach SurplusInfo.
-    let mut pinned_surplus = candidate.clone();
+    let mut surplus_quote = exclusive_candidate.clone();
 
-    if let Some(route) = pinned_surplus.route_mut() {
+    if let Some(route) = surplus_quote.route_mut() {
         for swap in route.swaps_mut() {
             if policy.is_exclusive(swap.protocol_component()) {
                 // Proportional reduction: committed_leg = leg.amount_out * committed / realized
@@ -752,33 +752,34 @@ fn combine_with_surplus(
         }
     }
 
-    pinned_surplus.set_amount_out(committed_route_out.clone());
+    surplus_quote.set_amount_out(committed_amount_out.clone());
 
     // Recompute amount_out_net_gas relative to committed output.
-    let gas_cost = if *candidate.amount_out() >= *candidate.amount_out_net_gas() {
-        candidate.amount_out() - candidate.amount_out_net_gas()
+    let gas_cost = if *exclusive_candidate.amount_out() >= *exclusive_candidate.amount_out_net_gas()
+    {
+        exclusive_candidate.amount_out() - exclusive_candidate.amount_out_net_gas()
     } else {
         BigUint::ZERO
     };
-    let committed_net_gas = if *committed_route_out >= gas_cost {
-        committed_route_out - &gas_cost
+    let committed_net_gas = if *committed_amount_out >= gas_cost {
+        committed_amount_out - &gas_cost
     } else {
         BigUint::ZERO
     };
-    pinned_surplus.set_amount_out_net_gas(committed_net_gas);
+    surplus_quote.set_amount_out_net_gas(committed_net_gas);
 
-    let surplus_info = SurplusInfo::new(surplus_amount, committed_route_out.clone());
-    pinned_surplus = pinned_surplus.with_surplus(surplus_info);
+    let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out.clone());
+    surplus_quote = surplus_quote.with_surplus(surplus_info);
 
     debug_assert!(
-        pinned_surplus.amount_out() >= committed.amount_out(),
+        surplus_quote.amount_out() >= committed.amount_out(),
         "user output ({}) must be >= committed reference ({})",
-        pinned_surplus.amount_out(),
+        surplus_quote.amount_out(),
         committed.amount_out(),
     );
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
-    result.push(pinned_surplus);
+    result.push(surplus_quote);
     result.extend(public_ranked);
     result
 }
