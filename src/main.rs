@@ -179,6 +179,8 @@ fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
 
+    record_build_info();
+
     tokio::spawn(async move {
         async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
             let metrics = handle.render();
@@ -204,6 +206,17 @@ fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()
             error!("Metrics server failed: {}", e);
         }
     })
+}
+
+/// Records a constant-1 gauge labelled with the Fynd binary version, so operators can see which
+/// build a running instance is on. The value carries no meaning; the version lives in the label.
+#[cfg(feature = "metrics")]
+fn record_build_info() {
+    metrics::describe_gauge!(
+        "fynd_build_info",
+        "Fynd build information exposed as a constant-1 gauge labelled by version."
+    );
+    metrics::gauge!("fynd_build_info", "version" => env!("CARGO_PKG_VERSION")).set(1.0);
 }
 
 /// Resolves the Tycho WebSocket URL: uses the override if provided, otherwise looks up the
@@ -394,4 +407,24 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
         let _ = provider.shutdown();
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod tests {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    #[test]
+    fn record_build_info_emits_versioned_gauge() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, super::record_build_info);
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(&format!(
+                "fynd_build_info{{version=\"{}\"}} 1",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "unexpected metrics output:\n{rendered}"
+        );
+    }
 }

@@ -141,14 +141,16 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
     )
 )]
 pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
-    let body = dto::InstanceInfo::new(
+    let body = dto::InstanceInfo::builder(
         state.chain_id(),
         state
             .router_address()
             .cloned()
             .map(Into::into),
         state.permit2_address().clone().into(),
-    );
+    )
+    .version(env!("CARGO_PKG_VERSION"))
+    .build();
     HttpResponse::Ok().json(body)
 }
 
@@ -595,5 +597,23 @@ mod tests {
             addr.contains("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
             "expected Ethereum Tycho Router address, got {addr}"
         );
+    }
+
+    #[actix_web::test]
+    async fn test_info_response_includes_version() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     }
 }
