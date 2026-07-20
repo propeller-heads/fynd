@@ -43,6 +43,7 @@ impl ResponseError for ApiError {
                 SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::ComputationFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+                SolveError::EncodingUnavailable(_) => StatusCode::NOT_IMPLEMENTED,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
@@ -66,6 +67,7 @@ impl ResponseError for ApiError {
                 SolveError::NotReady(_) => "NOT_READY",
                 SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
                 SolveError::FailedEncoding(_) => "FAILED_ENCODING",
+                SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
                 SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
                 other => {
                     warn!(?other, "unhandled SolveError variant");
@@ -172,5 +174,22 @@ mod tests {
         let (status, body) = json_body(ApiError::SolveFailed(err)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "STALE_DATA");
+    }
+
+    #[actix_web::test]
+    async fn test_encoding_unavailable_returns_501() {
+        let err =
+            SolveError::EncodingUnavailable("no router configured for this chain".to_string());
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "ENCODING_UNAVAILABLE");
+    }
+
+    #[actix_web::test]
+    async fn test_failed_encoding_returns_422() {
+        let err = SolveError::FailedEncoding("missing permit2 signature".to_string());
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "FAILED_ENCODING");
     }
 }

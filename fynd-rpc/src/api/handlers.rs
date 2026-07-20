@@ -143,7 +143,10 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
 pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
     let body = dto::InstanceInfo::builder(
         state.chain_id(),
-        state.router_address().clone().into(),
+        state
+            .router_address()
+            .cloned()
+            .map(Into::into),
         state.permit2_address().clone().into(),
     )
     .version(env!("CARGO_PKG_VERSION"))
@@ -364,7 +367,7 @@ mod tests {
             router,
             health_tracker,
             1,
-            router_address,
+            Some(router_address),
             permit2_address,
             #[cfg(feature = "experimental")]
             derived_data,

@@ -161,7 +161,7 @@ pub struct AppState {
     worker_router: Arc<WorkerPoolRouter>,
     health_tracker: HealthTracker,
     chain_id: u64,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     permit2_address: Bytes,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
@@ -175,7 +175,7 @@ impl AppState {
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
         chain_id: u64,
-        router_address: Bytes,
+        router_address: Option<Bytes>,
         permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
@@ -205,8 +205,8 @@ impl AppState {
         self.chain_id
     }
 
-    pub(crate) fn router_address(&self) -> &Bytes {
-        &self.router_address
+    pub(crate) fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     pub(crate) fn permit2_address(&self) -> &Bytes {

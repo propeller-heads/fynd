@@ -32,14 +32,15 @@ pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 ///
 /// # Fields
 /// * `tycho_encoder` - Encoder created using the configured chain for encoding solutions into tycho
-///   compatible transactions
+///   compatible transactions. `None` when the encoder is disabled (router-less / quote-only chain).
 /// * `chain` - Chain to be used.
-/// * `router_address` - Address of the Tycho Router contract on this chain.
+/// * `router_address` - Address of the Tycho Router contract on this chain, or `None` if Tycho has
+///   no router deployed there — encoding is then unavailable and `encode()` fails clearly.
 /// * `router_fees` - Router fee configuration, refreshed from chain by a background fetcher.
 pub struct Encoder {
-    tycho_encoder: Box<dyn TychoEncoder>,
+    tycho_encoder: Option<Box<dyn TychoEncoder>>,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     router_fees: SharedRouterFees,
 }
 
@@ -108,6 +109,11 @@ impl TryFrom<&OrderQuote> for Solution {
 }
 
 impl Encoder {
+    /// Whether Tycho has a router deployment (and thus encoding support) for `chain`.
+    pub fn is_supported(chain: Chain) -> bool {
+        get_router_address(&chain).is_ok()
+    }
+
     /// Creates a new `Encoder` for the given chain.
     ///
     /// # Arguments
@@ -115,28 +121,30 @@ impl Encoder {
     /// * `swap_encoder_registry` - Registry of swap encoders for supported protocols.
     ///
     /// # Returns
-    /// A new `Encoder` configured with `TransferFrom` user transfer type.
+    /// A new `Encoder` configured with `TransferFrom` user transfer type. If `chain` has no Tycho
+    /// router deployment, the encoder is returned in a disabled state: it can still be used to
+    /// quote, but [`Self::encode`] will fail with [`SolveError::FailedEncoding`].
     pub fn new(
         chain: Chain,
         swap_encoder_registry: SwapEncoderRegistry,
     ) -> Result<Self, SolveError> {
-        let router_address = get_router_address(&chain)
-            .map_err(|e| SolveError::FailedEncoding(e.to_string()))?
-            .clone();
-        Ok(Self {
-            tycho_encoder: TychoRouterEncoderBuilder::new()
-                .chain(chain)
-                .swap_encoder_registry(swap_encoder_registry)
-                .build()?,
-            chain,
-            router_address,
-            router_fees: SharedRouterFees::default(),
-        })
+        let router_address = get_router_address(&chain).ok().cloned();
+        let tycho_encoder = router_address
+            .is_some()
+            .then(|| {
+                TychoRouterEncoderBuilder::new()
+                    .chain(chain)
+                    .swap_encoder_registry(swap_encoder_registry)
+                    .build()
+            })
+            .transpose()?;
+        Ok(Self { tycho_encoder, chain, router_address, router_fees: SharedRouterFees::default() })
     }
 
-    /// Returns the Tycho Router contract address for this chain.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Returns the Tycho Router contract address for this chain, or `None` if encoding is
+    /// unavailable because no router is deployed there.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns the shared router fee handle this encoder reads on every encode.
@@ -160,6 +168,14 @@ impl Encoder {
         mut quotes: Vec<OrderQuote>,
         encoding_options: EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
+        let Some(tycho_encoder) = self.tycho_encoder.as_ref() else {
+            return Err(SolveError::EncodingUnavailable(format!(
+                "encoding is unavailable on chain '{}': no Tycho router is deployed. Fynd is \
+                 running quote-only; contact ops to deploy the router/executor contracts.",
+                self.chain
+            )));
+        };
+
         let slippage = encoding_options.slippage();
         if slippage == 0.0 {
             tracing::warn!("slippage is 0, transaction will likely revert");
@@ -185,9 +201,7 @@ impl Encoder {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
-        let encoded_solutions = self
-            .tycho_encoder
-            .encode_solutions(solutions)?;
+        let encoded_solutions = tycho_encoder.encode_solutions(solutions)?;
 
         let router_fees = self.router_fees.snapshot();
         for (encoded_solution, (idx, solution)) in encoded_solutions
@@ -588,24 +602,45 @@ mod tests {
         let router_fees = SharedRouterFees::default();
         router_fees.set(RouterFees::new(FEE_SCALE, 100_000, 20_000_000, HashMap::new()));
         Encoder {
-            tycho_encoder: Box::new(MockTychoEncoder),
+            tycho_encoder: Some(Box::new(MockTychoEncoder)),
             chain,
-            router_address: Bytes::from([0u8; 20].as_ref()),
+            router_address: Some(Bytes::from([0u8; 20].as_ref())),
             router_fees,
         }
     }
 
     #[test]
-    fn test_encoder_new_fails_on_unsupported_chain() {
+    fn test_encoder_new_disabled_on_unsupported_chain() {
         // Starknet has no entry in ROUTER_ADDRESSES_JSON.
         // Build a registry for Ethereum (which is valid) but pass Starknet to Encoder::new —
-        // the router address lookup must fail before the encoder builder is invoked.
+        // this must succeed with a disabled encoder rather than fail.
         let registry =
             tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry::new(Chain::Ethereum)
                 .add_default_encoders(None)
                 .expect("registry should build for Ethereum");
-        let result = Encoder::new(Chain::Starknet, registry);
-        assert!(result.is_err(), "expected Err for chain without router address, got Ok");
+        let encoder = Encoder::new(Chain::Starknet, registry)
+            .expect("new must not fail for a router-less chain");
+        assert!(
+            encoder.router_address().is_none(),
+            "expected disabled encoder, got a router address"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_encoder_quotes_but_refuses_to_encode() {
+        // A chain with no Tycho router deployment yields a disabled encoder.
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .unwrap();
+        let encoder =
+            Encoder::new(Chain::Starknet, registry).expect("new must not fail when disabled");
+        assert!(encoder.router_address().is_none());
+
+        let err = encoder
+            .encode(vec![], EncodingOptions::new(0.01))
+            .await
+            .expect_err("encoding must fail on a router-less chain");
+        assert!(matches!(err, SolveError::EncodingUnavailable(_)));
     }
 
     #[test]

@@ -344,7 +344,7 @@ struct CustomPoolEntry {
 struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
-    router_fee_fetcher: RouterFeeFetcher,
+    router_fee_fetcher: Option<RouterFeeFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -355,7 +355,7 @@ struct BuiltComponents {
     derived_data: SharedDerivedDataRef,
     router_fees: SharedRouterFees,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
@@ -764,16 +764,27 @@ impl FyndBuilder {
         };
 
         let chain = self.chain;
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         let router_fees = encoder.router_fees();
 
-        let router_fee_fetcher = RouterFeeFetcher::new(
-            self.rpc_url.as_str(),
-            &router_address,
-            router_fees.clone(),
-            defaults::ROUTER_FEE_REFRESH_INTERVAL,
-        )
-        .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?;
+        let router_fee_fetcher = match &router_address {
+            Some(addr) => Some(
+                RouterFeeFetcher::new(
+                    self.rpc_url.as_str(),
+                    addr,
+                    router_fees.clone(),
+                    defaults::ROUTER_FEE_REFRESH_INTERVAL,
+                )
+                .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?,
+            ),
+            None => {
+                tracing::warn!(
+                    %chain,
+                    "no Tycho router for this chain; running quote-only (encoding disabled)"
+                );
+                None
+            }
+        };
 
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
@@ -830,9 +841,10 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -889,9 +901,10 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -958,9 +971,10 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1006,7 +1020,7 @@ pub struct Solver {
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
@@ -1014,6 +1028,11 @@ impl Solver {
     /// Returns a clone of the shared market data reference.
     pub fn market_data(&self) -> MarketData {
         self.market_data.clone()
+    }
+
+    /// Returns the Tycho Router contract address, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a clone of the shared derived data reference.
@@ -1205,7 +1224,7 @@ impl Solver {
             Encoder::new(chain, registry).map_err(|e| SolverBuildError::Encoder(e.to_string()))?
         };
 
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         // Replay mode has no FeeCalculator to read; seed a zero-fee config at the standard
         // 8-decimal scale so the recording-based solver reports ready (integration tests do
         // not exercise encoding).
@@ -1316,8 +1335,8 @@ pub struct SolverParts {
     computation_shutdown_tx: broadcast::Sender<()>,
     /// Chain this solver is configured for.
     chain: Chain,
-    /// Address of the Tycho Router contract on this chain.
-    router_address: Bytes,
+    /// Address of the Tycho Router contract on this chain, or `None` on a quote-only chain.
+    router_address: Option<Bytes>,
 }
 
 impl SolverParts {
@@ -1326,9 +1345,9 @@ impl SolverParts {
         self.chain
     }
 
-    /// Returns the Tycho Router contract address for this chain.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Returns the Tycho Router contract address for this chain, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a reference to the worker pools.

@@ -194,10 +194,9 @@ pub(crate) fn register_rfq(
     for protocol in protocols {
         match protocol.as_str() {
             "rfq:bebop" => {
-                let user = get_env("BEBOP_USER")?;
                 let key = get_env("BEBOP_KEY")?;
                 info!("Adding {protocol} RFQ client...");
-                let bebop_client = BebopClientBuilder::new(chain, user, key)
+                let bebop_client = BebopClientBuilder::new(chain, key)
                     .tokens(rfq_tokens.clone())
                     .tvl_threshold(min_tvl)
                     .build()

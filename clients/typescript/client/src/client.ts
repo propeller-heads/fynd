@@ -493,9 +493,17 @@ export class FyndClient {
     if (params.transferType === 'none') return null;
 
     const info = await this.info();
-    const spender = params.transferType === 'transfer_from_permit2'
-      ? info.permit2Address
-      : info.routerAddress;
+    let spender: Address;
+    if (params.transferType === 'transfer_from_permit2') {
+      spender = info.permit2Address;
+    } else {
+      if (info.routerAddress === null) {
+        throw FyndError.config(
+          "server has no routerAddress; encoding is unavailable on this chain",
+        );
+      }
+      spender = info.routerAddress;
+    }
 
     const provider = this.options.provider;
     if (provider === undefined) throw FyndError.config("provider is required for approval");

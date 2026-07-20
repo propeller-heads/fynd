@@ -355,13 +355,17 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
     type Error = FyndError;
 
     fn try_from(dto: fynd_rpc_types::InstanceInfo) -> Result<Self, Self::Error> {
-        let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
+        let router = dto
+            .router_address()
+            .map(|r| bytes::Bytes::copy_from_slice(r.as_ref()));
         let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
-        if router.len() != 20 {
-            return Err(FyndError::Protocol(format!(
-                "router_address must be 20 bytes, got {}",
-                router.len()
-            )));
+        if let Some(router) = &router {
+            if router.len() != 20 {
+                return Err(FyndError::Protocol(format!(
+                    "router_address must be 20 bytes, got {}",
+                    router.len()
+                )));
+            }
         }
         if permit2.len() != 20 {
             return Err(FyndError::Protocol(format!(

@@ -793,6 +793,18 @@ describe('FyndClient.info', () => {
     const info = await client.info();
     expect(info.routerAddress).toBe(ROUTER);
   });
+
+  it('returns a null routerAddress on a quote-only chain', async () => {
+    const client = makeClientWithHttpMock(
+      { status: 200, data: wireSolution },
+      undefined,
+      undefined,
+      { status: 200, data: { ...wireInstanceInfo, router_address: null } },
+    );
+    const info = await client.info();
+    expect(info.routerAddress).toBeNull();
+    expect(info.permit2Address).toBe(PERMIT2);
+  });
 });
 
 describe('FyndClient.approval', () => {
@@ -803,6 +815,19 @@ describe('FyndClient.approval', () => {
     expect(payload).not.toBeNull();
     // approve(address,uint256) selector = 0x095ea7b3
     expect(payload!.tx.data.startsWith('0x095ea7b3')).toBe(true);
+  });
+
+  it('rejects transfer_from approval when routerAddress is null', async () => {
+    const provider = makeMockProvider();
+    const client = makeClientWithHttpMock(
+      { status: 200, data: wireSolution },
+      undefined,
+      { provider },
+      { status: 200, data: { ...wireInstanceInfo, router_address: null } },
+    );
+    await expect(
+      client.approval({ token: TOKEN_IN_ADDR, amount: 1000n }),
+    ).rejects.toThrow(FyndError);
   });
 
   it('sets spender to routerAddress from info', async () => {

@@ -987,7 +987,13 @@ where
         let info = self.info().await?;
         let spender_addr = match params.transfer_type {
             UserTransferType::TransferFrom => {
-                mapping::bytes_to_alloy_address(info.router_address())?
+                let router_address = info.router_address().ok_or_else(|| {
+                    FyndError::Config(
+                        "server has no router_address; encoding is unavailable on this chain"
+                            .into(),
+                    )
+                })?;
+                mapping::bytes_to_alloy_address(router_address)?
             }
             UserTransferType::TransferFromPermit2 => {
                 mapping::bytes_to_alloy_address(info.permit2_address())?
@@ -1996,7 +2002,13 @@ mod tests {
 
         assert_eq!(info1.chain_id(), 1);
         assert_eq!(info2.chain_id(), 1);
-        assert_eq!(info1.router_address().as_ref(), &[0x01u8; 20]);
+        assert_eq!(
+            info1
+                .router_address()
+                .expect("mock info response includes a router address")
+                .as_ref(),
+            &[0x01u8; 20],
+        );
         assert_eq!(info1.permit2_address().as_ref(), &[0x02u8; 20]);
         // MockServer verifies expect(1) on drop.
     }
