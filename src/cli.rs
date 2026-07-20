@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use fynd_core::config::{embedded_default, PartialConfig};
-use fynd_rpc::config::{defaults, WorkerPoolsConfig};
+use fynd_rpc::{
+    config::{defaults, WorkerPoolsConfig},
+    parse_chain,
+};
+use tycho_simulation::tycho_common::models::Chain;
 
 #[cfg(feature = "metrics")]
 pub(crate) const METRICS_PORT: u16 = 9898;
@@ -39,20 +43,31 @@ pub enum Commands {
 
 /// Arguments for the `serve` subcommand.
 ///
-/// Solver-tuning flags resolve field-by-field through three layers, highest priority first:
+/// Solver-tuning flags resolve field-by-field through four layers, highest priority first:
 /// explicit CLI flags, the local config file (`--config-file`, default `fynd.toml` if
-/// present), and the default config embedded in the binary.
+/// present), the remote config pulled from S3, and the default config embedded in the
+/// binary.
 #[derive(clap::Args, PartialEq, Debug)]
 pub struct ServeArgs {
     /// Target chain (e.g. Ethereum)
-    #[arg(short, long, default_value = "Ethereum")]
-    pub chain: String,
+    #[arg(short, long, default_value = "Ethereum", value_parser = parse_chain)]
+    pub chain: Chain,
 
     /// Path to a local TOML config file overriding the embedded defaults. Any subset of
     /// the config fields, same schema as the embedded default config.
     /// When omitted, ./fynd.toml is used if present.
     #[arg(long, env)]
     pub config_file: Option<PathBuf>,
+
+    /// URL of the remote config pulled at startup. Defaults to the chain-specific
+    /// PropellerHeads S3 URL. Fetch failures never block startup.
+    #[arg(long, env)]
+    pub remote_config_url: Option<String>,
+
+    /// Disable fetching the remote config; resolve from CLI, local file, and embedded
+    /// defaults only
+    #[arg(long)]
+    pub no_remote_config: bool,
 
     /// HTTP host (e.g. 0.0.0.0)
     #[arg(long, default_value = defaults::HTTP_HOST, env)]
@@ -236,7 +251,7 @@ mod cli_tests {
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");
         };
-        assert_eq!(args.chain, "Ethereum");
+        assert_eq!(args.chain, Chain::Ethereum);
         assert_eq!(args.http_host, "127.0.0.1");
         assert_eq!(args.http_port, 8080);
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
@@ -263,7 +278,7 @@ mod cli_tests {
         let Commands::Serve(args) = cli.command else {
             panic!("expected Serve command");
         };
-        assert_eq!(args.chain, "Ethereum");
+        assert_eq!(args.chain, Chain::Ethereum);
         assert_eq!(args.http_host, "0.0.0.0");
         assert_eq!(args.http_port, 3000);
         assert_eq!(args.tycho_api_key, None);

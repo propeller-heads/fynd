@@ -87,6 +87,8 @@ Run `fynd serve --help` for the full list.
 | `--worker-router-timeout-ms`       | —                     | `100`                      | Default solve timeout (ms)                                                                                                                                                                                     |
 | `--worker-router-min-responses`    | —                     | `0`                        | Early return threshold (0 = wait for all pools)                                                                                                                                                                |
 | `--config-file`                    | `CONFIG_FILE`         | `fynd.toml` (if present)   | TOML config file overriding the embedded defaults (see [Config file](#config-file-fyndtoml)).                                                                                                                  |
+| `--remote-config-url`              | `REMOTE_CONFIG_URL`   | _(chain-specific S3 URL)_  | Remote config with the latest tuned values, pulled at startup. Fetch failures never block startup.                                                                                                             |
+| `--no-remote-config`               | —                     | `false`                    | Disable the remote config fetch.                                                                                                                                                                               |
 | `-w, --worker-pools-config`        | `WORKER_POOLS_CONFIG` | `worker_pools.toml` (if present) | **Deprecated** — legacy pools-only config file; move the `[pools]` section into `fynd.toml`. Still honored: its pools override the config file's.                                                        |
 | `--blocklist-config`               | `BLOCKLIST_CONFIG`    | [tycho-simulation default](https://github.com/propeller-heads/tycho-simulation/blob/main/blocklist.toml)                          | Path to blocklist TOML config file. Components listed here are excluded from the Tycho stream.                                                                                                                                                                                     |
 | `--disable-tls`                    | —                     | `false`                    | Disable TLS for Tycho connection                                                                                                                                                                               |
@@ -104,8 +106,8 @@ Run `fynd serve --help` for the full list.
 
 ## Config file (`fynd.toml`)
 
-Every solver-tuning flag above resolves field-by-field through three layers, highest priority
-first: **CLI flags > config file > embedded defaults**. The config file may set any subset of
+Every solver-tuning flag above resolves field-by-field through four layers, highest priority
+first: **CLI flags > config file > remote config (S3) > embedded defaults**. The config file may set any subset of
 the fields (same names as the flags) plus the worker pools; `./fynd.toml` is picked up
 automatically, or pass `--config-file`.
 
