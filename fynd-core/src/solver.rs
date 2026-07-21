@@ -80,6 +80,28 @@ pub mod defaults {
     pub const POOL_MAX_HOPS: usize = 3;
     /// Per-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
+
+    /// Default anchor tokens for the `water_fill` algorithm: intermediate tokens its bounded
+    /// discovery prefers to route through when no `connector_tokens` allowlist is set. Chain
+    /// specifics live here (config defaults), not in the algorithm, so Fynd stays chain-agnostic;
+    /// override `anchor_tokens` per pool for other chains. Includes the native-ETH sentinel
+    /// (`0x0`), Ethereum mainnet majors (WETH, USDC, USDT, DAI, WBTC, wstETH, AAVE, UNI), and
+    /// OP-stack canonical tokens (WETH, Base USDC, Base cbBTC, Unichain USDC).
+    pub const WATER_FILL_ANCHOR_TOKENS: &[&str] = &[
+        "0x0000000000000000000000000000000000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+        "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+        "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+        "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9",
+        "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+        "0x4200000000000000000000000000000000000006",
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "0xcbB7C0000aB88B473b1f5afd9ef808440eed33bF",
+        "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
+    ];
 }
 
 // Internal-only defaults not shared with downstream crates.
@@ -107,6 +129,22 @@ fn default_algo_timeout_ms() -> u64 {
     defaults::POOL_TIMEOUT_MS
 }
 
+fn default_anchor_tokens() -> Vec<String> {
+    defaults::WATER_FILL_ANCHOR_TOKENS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Parses the built-in default anchor list into addresses. The entries are compile-time constants,
+/// so any that fail to parse are dropped rather than surfaced as an error.
+fn default_anchor_addresses() -> HashSet<Address> {
+    defaults::WATER_FILL_ANCHOR_TOKENS
+        .iter()
+        .filter_map(|s| Address::from_str(s).ok())
+        .collect()
+}
+
 fn parse_connector_tokens(
     raw: Option<&[String]>,
 ) -> Result<Option<HashSet<Address>>, SolverBuildError> {
@@ -121,6 +159,17 @@ fn parse_connector_tokens(
         set.insert(addr);
     }
     Ok(Some(set))
+}
+
+fn parse_anchor_tokens(raw: &[String]) -> Result<HashSet<Address>, SolverBuildError> {
+    let mut set = HashSet::with_capacity(raw.len());
+    for s in raw {
+        let addr = Address::from_str(s).map_err(|e| AlgorithmError::InvalidConfiguration {
+            reason: format!("anchor_tokens: invalid address {s:?}: {e}"),
+        })?;
+        set.insert(addr);
+    }
+    Ok(set)
 }
 
 /// Per-pool configuration for [`FyndBuilder::add_pool`].
@@ -151,6 +200,11 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
+    /// Hex addresses the `water_fill` algorithm's discovery prefers to route through when no
+    /// `connector_tokens` allowlist is set (a soft ranking hint, not a restriction). Ignored by
+    /// other algorithms. Absent = the built-in chain defaults; an empty list disables anchoring.
+    #[serde(default = "default_anchor_tokens")]
+    anchor_tokens: Vec<String>,
 }
 
 impl PoolConfig {
@@ -165,6 +219,7 @@ impl PoolConfig {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
+            anchor_tokens: default_anchor_tokens(),
         }
     }
 
@@ -250,6 +305,18 @@ impl PoolConfig {
     pub fn connector_tokens(&self) -> Option<&[String]> {
         self.connector_tokens.as_deref()
     }
+
+    /// Sets the anchor tokens `water_fill` discovery prefers (hex strings). Pass an empty list to
+    /// disable anchoring.
+    pub fn with_anchor_tokens(mut self, tokens: Vec<String>) -> Self {
+        self.anchor_tokens = tokens;
+        self
+    }
+
+    /// Returns the raw anchor token address strings.
+    pub fn anchor_tokens(&self) -> &[String] {
+        &self.anchor_tokens
+    }
 }
 
 /// Error returned by [`Solver::wait_until_ready`].
@@ -315,6 +382,7 @@ enum PoolEntry {
         timeout_ms: u64,
         max_routes: Option<usize>,
         connector_tokens: Option<HashSet<Address>>,
+        anchor_tokens: HashSet<Address>,
     },
     Custom(CustomPoolEntry),
 }
@@ -516,6 +584,7 @@ impl FyndBuilder {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
+            anchor_tokens: default_anchor_addresses(),
         });
         self
     }
@@ -609,6 +678,7 @@ impl FyndBuilder {
         config: &PoolConfig,
     ) -> Result<Self, SolverBuildError> {
         let connector_tokens = parse_connector_tokens(config.connector_tokens())?;
+        let anchor_tokens = parse_anchor_tokens(config.anchor_tokens())?;
         self.pools.push(PoolEntry::BuiltIn {
             name: name.into(),
             algorithm: config.algorithm().to_string(),
@@ -619,6 +689,7 @@ impl FyndBuilder {
             timeout_ms: config.timeout_ms(),
             max_routes: config.max_routes(),
             connector_tokens,
+            anchor_tokens,
         });
         Ok(self)
     }
@@ -696,13 +767,15 @@ impl FyndBuilder {
                     timeout_ms,
                     max_routes,
                     connector_tokens,
+                    anchor_tokens,
                 } => {
                     let mut algo_cfg = AlgorithmConfig::new(
                         min_hops,
                         max_hops,
                         Duration::from_millis(timeout_ms),
                         max_routes,
-                    )?;
+                    )?
+                    .with_anchor_tokens(anchor_tokens);
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
@@ -1304,5 +1377,40 @@ impl SolverParts {
             self.computation_handle,
             self.computation_shutdown_tx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_config_defaults_anchor_tokens() {
+        let config: PoolConfig = toml::from_str(r#"algorithm = "water_fill""#).unwrap();
+        assert_eq!(config.anchor_tokens(), default_anchor_tokens().as_slice());
+        assert!(!config.anchor_tokens().is_empty());
+    }
+
+    #[test]
+    fn pool_config_empty_anchor_tokens() {
+        let config: PoolConfig =
+            toml::from_str("algorithm = \"water_fill\"\nanchor_tokens = []").unwrap();
+        assert!(config.anchor_tokens().is_empty());
+    }
+
+    #[test]
+    fn pool_config_custom_anchor_tokens() {
+        let config: PoolConfig = toml::from_str(concat!(
+            "algorithm = \"water_fill\"\n",
+            "anchor_tokens = [\"0x0000000000000000000000000000000000000001\"]",
+        ))
+        .unwrap();
+        assert_eq!(config.anchor_tokens(), ["0x0000000000000000000000000000000000000001"]);
+    }
+
+    #[test]
+    fn parse_anchor_tokens_rejects_invalid_hex() {
+        let result = parse_anchor_tokens(&["not-hex".to_string()]);
+        assert!(matches!(result, Err(SolverBuildError::AlgorithmConfig(_))));
     }
 }

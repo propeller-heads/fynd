@@ -129,6 +129,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 | `timeout_ms`          | `100`           | Maximum time in milliseconds allowed per order processing in this pool |
 | `max_routes`          | _(no limit)_    | Maximum number of candidate routes to evaluate per order               |
 | `connector_tokens`    | _(no restriction)_ | Allowlist of `"0x..."`-prefixed token addresses permitted as intermediate hops. Source and destination are always allowed regardless. Absent = all tokens reachable. |
+| `anchor_tokens`       | built-in chain list | `water_fill` only: `"0x..."` addresses its discovery prefers to route through when no `connector_tokens` allowlist is set (a soft ranking hint, not a restriction). Absent = built-in defaults; `[]` disables anchoring. Ignored by other algorithms. |
 
 ### Connector tokens
 
@@ -148,6 +149,28 @@ connector_tokens = [
     "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC
     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH
+]
+```
+
+### Anchor tokens
+
+`anchor_tokens` applies only to the `water_fill` algorithm. It is a **soft ranking hint**, not a
+restriction: when no `connector_tokens` allowlist is set, `water_fill`'s bounded discovery prefers
+to expand through anchor tokens first, but still reaches any other token. This differs from
+`connector_tokens`, which is a hard allowlist that blocks every intermediate not in the set.
+
+Fynd ships a default anchor list (native-ETH sentinel plus Ethereum mainnet and OP-stack majors),
+so out of the box `water_fill` is tuned for those chains. Override it for other chains, or pass an
+empty list to disable anchoring entirely:
+
+```toml
+[pools.water_fill_arbitrum]
+algorithm = "water_fill"
+max_hops  = 3
+anchor_tokens = [
+    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  # WETH (Arbitrum)
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC (Arbitrum)
+    "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",  # USDT (Arbitrum)
 ]
 ```
 

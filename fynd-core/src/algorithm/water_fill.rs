@@ -33,8 +33,6 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    str::FromStr,
-    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -126,6 +124,7 @@ pub struct WaterFillAlgorithm {
     max_candidates: usize,
     max_paths: usize,
     connector_tokens: Option<HashSet<Address>>,
+    anchor_tokens: HashSet<Address>,
 }
 
 /// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
@@ -159,6 +158,7 @@ impl WaterFillAlgorithm {
                 .max(DEFAULT_MAX_PATHS),
             max_paths: DEFAULT_MAX_PATHS,
             connector_tokens: config.connector_tokens().cloned(),
+            anchor_tokens: config.anchor_tokens().clone(),
         })
     }
 
@@ -326,6 +326,7 @@ impl WaterFillAlgorithm {
                     max_hops: self.max_hops,
                     max_candidates: BOUNDED_DISCOVERY_CANDIDATES,
                     connector_tokens: self.connector_tokens.as_ref(),
+                    anchor_tokens: &self.anchor_tokens,
                     source_token: order.token_in(),
                     start: &start,
                     timeout_ms,
@@ -1212,10 +1213,11 @@ fn ratio(numerator: &BigUint, denominator: &BigUint) -> f64 {
 //
 // Bounded, amount-aware frontier search, unioned into the portfolio's exhaustive enumeration by
 // `setup`. A Penumbra-inspired expansion from the sell token: simulate frontier edges live and
-// prefer edges into the output token, configured connector tokens, or a default anchor set
-// (including the native-ETH sentinel). Generic over the graph's edge weight `W` (discovery only
-// reads `component_id`s) so it runs on the production `DepthAndPrice` graph while tests exercise it
-// on a bare topology graph.
+// prefer edges into the output token, the configured connector-token allowlist, or the configured
+// anchor tokens (a soft ranking hint; the chain defaults live in the config layer, see
+// `solver::defaults::WATER_FILL_ANCHOR_TOKENS`). Generic over the graph's edge weight `W`
+// (discovery only reads `component_id`s) so it runs on the production `DepthAndPrice` graph while
+// tests exercise it on a bare topology graph.
 
 type RankedPathScores = Vec<(usize, BigInt)>;
 type CandidatePathSet<'a, W = ()> = (Vec<Path<'a, W>>, RankedPathScores);
@@ -1241,6 +1243,7 @@ struct CandidateSearchConfig<'a> {
     max_hops: usize,
     max_candidates: usize,
     connector_tokens: Option<&'a HashSet<Address>>,
+    anchor_tokens: &'a HashSet<Address>,
     source_token: &'a Address,
     start: &'a Instant,
     timeout_ms: u64,
@@ -1248,33 +1251,6 @@ struct CandidateSearchConfig<'a> {
 
 fn timed_out(start: &Instant, timeout_ms: u64) -> bool {
     start.elapsed().as_millis() as u64 > timeout_ms
-}
-
-fn default_anchor_tokens() -> &'static HashSet<Address> {
-    static TOKENS: OnceLock<HashSet<Address>> = OnceLock::new();
-    TOKENS.get_or_init(|| {
-        [
-            // Native ETH sentinel used by Fynd/Tycho.
-            "0x0000000000000000000000000000000000000000",
-            // Ethereum mainnet: WETH, USDC, USDT, DAI, WBTC, wstETH, AAVE, UNI.
-            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-            "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-            "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-            "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-            "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-            "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9",
-            "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
-            // OP-stack chains: canonical WETH. Base: USDC and cbBTC. Unichain: USDC.
-            "0x4200000000000000000000000000000000000006",
-            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            "0xcbB7C0000aB88B473b1f5afd9ef808440eed33bF",
-            "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
-        ]
-        .into_iter()
-        .map(|addr| Address::from_str(addr).expect("valid default split anchor token"))
-        .collect()
-    })
 }
 
 /// Runs the bounded discovery and returns the candidate paths plus their `(index, full-amount
@@ -1443,7 +1419,8 @@ fn candidate_priority<W>(
     let token = &graph[node];
     match cfg.connector_tokens {
         Some(tokens) => tokens.contains(token).then_some(1),
-        None => default_anchor_tokens()
+        None => cfg
+            .anchor_tokens
             .contains(token)
             .then_some(2),
     }
@@ -1849,6 +1826,7 @@ mod tests {
                 max_hops: 3,
                 max_candidates: 128,
                 connector_tokens: None,
+                anchor_tokens: &HashSet::new(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
@@ -1896,6 +1874,7 @@ mod tests {
                 max_hops: 3,
                 max_candidates: 128,
                 connector_tokens: None,
+                anchor_tokens: &HashSet::new(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
