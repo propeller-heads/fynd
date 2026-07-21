@@ -15,6 +15,10 @@ use tracing::info;
 /// left untouched (it has no `skip_serializing_if` on that field), and the
 /// result still deserializes back into a [`QuoteRequest`] because serde treats
 /// a missing `Option` field as `None`.
+///
+/// This only captures routing inputs: `encoding_options` (slippage, transfer
+/// type, price guard) is intentionally dropped, so an outcome that depended
+/// on `price_guard` may not reproduce on replay.
 pub(crate) fn replay_json(request: &QuoteRequest) -> String {
     let mut value = match serde_json::to_value(request) {
         Ok(value) => value,
@@ -171,6 +175,56 @@ mod tests {
             .options()
             .encoding_options()
             .is_none());
+    }
+
+    #[test]
+    fn replay_json_output_keys_are_allowlisted() {
+        let req = request_with_signatures();
+        let json = replay_json(&req);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        let top_level: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            top_level,
+            ["orders", "options"].into_iter().collect(),
+            "unexpected top-level keys {top_level:?} — a new field may leak into replay logs; json: {json}"
+        );
+
+        let options = value
+            .get("options")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert!(
+            !options.contains_key("encoding_options"),
+            "encoding_options leaked into replay log; json: {json}"
+        );
+        let options_allowlist = ["timeout_ms", "min_responses", "max_gas"];
+        for key in options.keys() {
+            assert!(
+                options_allowlist.contains(&key.as_str()),
+                "unexpected key {key} — a new option field may leak into replay logs; json: {json}"
+            );
+        }
+
+        let orders_allowlist =
+            ["id", "token_in", "token_out", "amount", "side", "sender", "receiver"];
+        for order in value
+            .get("orders")
+            .and_then(Value::as_array)
+            .unwrap()
+        {
+            for key in order.as_object().unwrap().keys() {
+                assert!(
+                    orders_allowlist.contains(&key.as_str()),
+                    "unexpected key {key} — a new order field may leak into replay logs; json: {json}"
+                );
+            }
+        }
     }
 
     #[test]
