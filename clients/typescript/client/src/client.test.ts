@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { FyndClient } from './client.js';
 import { FyndError } from './error.js';
 import type { EthProvider, MinimalReceipt, FyndClientOptions } from './client.js';
@@ -993,3 +993,115 @@ function makeSignedSwap(
   const sig = `0x${'ab'.repeat(32)}${'cd'.repeat(32)}00` as `0x${string}`;
   return { payload, signature: sig };
 }
+
+// ---------------------------------------------------------------------------
+// Hosted gateway: API key + per-chain routing
+//
+// These go through the real openapi-fetch transport (unlike makeClientWithHttpMock,
+// which replaces the whole http client) so that headers and URL rewriting are observable.
+// ---------------------------------------------------------------------------
+
+describe('hosted gateway auth and routing', () => {
+  const WIRE_HEALTH = { healthy: true, last_update_ms: 1, num_solver_pools: 2 };
+
+  /** Stub globalThis.fetch. Must run before the client is constructed. */
+  function stubFetch(body: unknown = WIRE_HEALTH) {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify(body),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  /** The Request that openapi-fetch handed to fetch. */
+  function sentRequest(fetchMock: ReturnType<typeof stubFetch>): Request {
+    const [request] = fetchMock.mock.calls[0] as unknown as [Request];
+    return request;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends the api key as the raw Authorization header', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({ baseUrl: 'http://localhost:8080', apiKey: 'secret-key' });
+
+    await client.health();
+
+    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('secret-key');
+  });
+
+  it('routes to the chain-scoped path when chain is set', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({ baseUrl: 'http://localhost:8080', chain: 'base' });
+
+    await client.health();
+
+    expect(new URL(sentRequest(fetchMock).url).pathname).toBe('/v1/base/health');
+  });
+
+  it('rewrites the quote path too', async () => {
+    const fetchMock = stubFetch(wireSolution);
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      chain:   'unichain',
+      apiKey:  'secret-key',
+      sender:  SENDER,
+    });
+
+    await client.quote({
+      order: { tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT, amount: 1000n, side: 'sell', sender: SENDER },
+    });
+
+    const request = sentRequest(fetchMock);
+    expect(new URL(request.url).pathname).toBe('/v1/unichain/quote');
+    expect(request.headers.get('authorization')).toBe('secret-key');
+  });
+
+  it('keeps legacy paths and sends no auth header when neither option is set', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({ baseUrl: 'http://localhost:8080' });
+
+    await client.health();
+
+    const request = sentRequest(fetchMock);
+    expect(new URL(request.url).pathname).toBe('/v1/health');
+    expect(request.headers.get('authorization')).toBeNull();
+  });
+
+  it('preserves a base URL path prefix when inserting the chain segment', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({ baseUrl: 'http://localhost:8080/gateway', chain: 'base' });
+
+    await client.health();
+
+    expect(new URL(sentRequest(fetchMock).url).pathname).toBe('/gateway/v1/base/health');
+  });
+
+  it('passes through arbitrary headers', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      headers: { 'X-Trace-Id': 'abc123' },
+    });
+
+    await client.health();
+
+    expect(sentRequest(fetchMock).headers.get('x-trace-id')).toBe('abc123');
+  });
+
+  it('lets apiKey win over an Authorization header passed via headers', async () => {
+    const fetchMock = stubFetch();
+    const client = new FyndClient({
+      baseUrl: 'http://localhost:8080',
+      apiKey:  'secret-key',
+      headers: { Authorization: 'Bearer stale' },
+    });
+
+    await client.health();
+
+    expect(sentRequest(fetchMock).headers.get('authorization')).toBe('secret-key');
+  });
+});
