@@ -15,9 +15,9 @@
 //! comparable trades, and `registry` is the address book behind matching.
 
 mod decode;
-mod maker;
+mod intent;
 mod matching;
-mod netting;
+mod netting_decoders;
 mod registry;
 mod sandwich;
 mod solvers;
@@ -93,7 +93,7 @@ pub(crate) struct DecodedTrade {
     /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
     /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
     /// overhead is excluded — it is charged whichever router the venue picks, like the venue
-    /// fee. `None` when the trader did not pay the transaction's gas (maker fills, solver
+    /// fee. `None` when the trader did not pay the transaction's gas (intent fills, solver
     /// rebalances) or the route's gas could not be isolated from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
@@ -122,7 +122,7 @@ pub(crate) struct Decoder<P> {
     /// Whether an address had contract code when first checked, kept for the
     /// life of the decoder. An address gaining code mid-run (a deploy or an
     /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
-    /// for distinguishing maker EOAs from pools.
+    /// for distinguishing swapper EOAs from pools.
     code_cache: HashMap<Address, bool>,
 }
 

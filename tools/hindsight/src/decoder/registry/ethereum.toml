@@ -60,10 +60,10 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Display names for entry points that are neither venues nor solvers — market-maker fillers,
 # solver contracts, bot routers. Label-only: these must NOT be venues or solvers, because
 # known-ness drives strategy selection and filler-entered transactions have to keep matching via
-# their solver logs (Maker), not sender netting. Identified from public labels (Etherscan
+# their solver logs (Intent), not sender netting. Identified from public labels (Etherscan
 # tags, Dune spellbook solver lists, project sites), ranked by observed volume in monitor runs.
 [labels]
-# Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Maker";
+# Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Intent";
 # the 0xbee… vanity family is Kipseli across CoW/1inch listings).
 "0xbee162fa5ae892be74f3f3e01c23da89adbccccc" = "kipseli"
 "0xbee3211ab312a8d065c4fef0247448e17a8da000" = "kipseli"

@@ -51,7 +51,7 @@ All take `--chain` (selects the address book; only `ethereum` is built in) and `
            └────────┬────────┘   list several — a richer source first, a general one as fallback):
                     │
                     │   direct solver           →  [ SenderNetting ]
-                    │   batch settler / solver  →  [ MakerNetting ]
+                    │   batch settler / solver  →  [ IntentNetting ]
                     │   venue relay             →  [ RelayNetting ]
                     │   venue metamask          →  [ MetaMaskNetting ]
                     │  TraderFlow
@@ -84,7 +84,7 @@ trait TradeDecoder<P> {
 // decode.rs — the matched entity selects its decoders
 match role {
     Sender      => vec![Box::new(SenderNetting)],
-    Maker       => vec![Box::new(MakerNetting)],
+    Intent       => vec![Box::new(IntentNetting)],
     Venue(name) => venues::decoders_for(name),   // e.g. "relay" → [RelayNetting]
 }
 ```
@@ -106,17 +106,17 @@ match role {
                       │               └──────────────────────────────┘
                       │                    │ yes            │ no
                       │                    ▼                ▼
-                      │             TraderRole::Maker   ┌───────────────────────┐
-                      │                    │            │ Is entry_point KNOWN? │  is_known(tx.to)
-                      │                    │            │  (a registered router)│
-                      │                    │            └───────────────────────┘
-                      │                    │              │ yes          │ no
-                      │                    │              ▼              ▼
-                      │                    │       TraderRole::Sender  TraderRole::Maker
-                      │                    │              │              │
-                      ▼                    ▼              ▼              ▼
-           venues::decoders_for(name)  MakerNetting   SenderNetting   MakerNetting
-                      │                 (netting.rs)   (netting.rs)    (netting.rs)
+                      │            TraderRole::Intent  ┌───────────────────────┐
+                      │                    │           │ Is entry_point KNOWN? │  is_known(tx.to)
+                      │                    │           │  (a registered router) │
+                      │                    │           └───────────────────────┘
+                      │                    │             │ yes            │ no
+                      │                    │             ▼                ▼
+                      │                    │      TraderRole::Sender   TraderRole::Intent
+                      │                    │             │                │
+                      ▼                    ▼             ▼                ▼
+           venues::decoders_for(name)  IntentNetting  SenderNetting   IntentNetting
+                      │                 └──────── netting_decoders.rs ─────────┘
            ┌──────────┴───────────┐
            ▼                      ▼
      [RelayNetting]        [MetaMaskNetting]
@@ -124,19 +124,19 @@ match role {
 
    direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
      0x called directly             → Sender → [ SenderNetting ]  (your own tx, your gas)
-     0x settling your intent order  → Maker  → [ MakerNetting ]   (a solver settles for you)
-   when a solver settles an intent order, its own decoder can replace MakerNetting.
+     0x settling your intent order  → Intent → [ IntentNetting ]  (a solver settles for you)
+   when a solver settles an intent order, its own decoder can replace IntentNetting.
 
    implement a new decoder where the entity that carries the flow lives:
    ├─ new venue                       → venues/<name>.rs  +  arm in venues::decoders_for("<name>")
    └─ new read for an existing venue  → another TradeDecoder in that venue's list (first-wins order)
 
-   replace a Sender/Maker leaf in decode.rs decoders_for — the arm is global, so:
-     Maker => [ MyDecoder, MakerNetting ]   # prepend: self-guard; netting stays the fallback
-     Maker => [ MyDecoder ]                 # full swap: no fallback — must cover every maker trade
+   replace a Sender/Intent leaf in decode.rs decoders_for — the arm is global, so:
+     Intent => [ MyDecoder, IntentNetting ]   # prepend: self-guard; netting stays the fallback
+     Intent => [ MyDecoder ]                  # full swap: no fallback — must cover every intent trade
 ```
 
-One transaction goes to one entity — a direct sender, an order maker, or a specific venue — and
+One transaction goes to one entity — a direct sender, an intent order, or a specific venue — and
 that entity's decoders are tried in order, first hit wins. Every kind of evidence is gathered
 once into the `DecodeContext`, so a decoder takes only what it needs and a decoder that declines
 costs the next one nothing. What the common sources tell you — examples, not a fixed menu:
@@ -190,7 +190,7 @@ collectors are re-verified on every chain a venue is added on.
 | Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the quote and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
 | Read a solver's quote from its calldata | A `SolverKnowledge` impl in `solvers/`, registered in `solvers::IMPLEMENTATIONS` | Records for that solver carry no quote |
 | Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
-| Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and maker-finding then excludes the trader |
+| Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and intent decoding then excludes the trader |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
 | Add a new decode method | A `TradeDecoder` (a `netting`/`calldata` toolkit function behind it), listed for the entities that use it | Transactions the existing decoders cannot read stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |

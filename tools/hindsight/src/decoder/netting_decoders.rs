@@ -6,7 +6,7 @@
 //!
 //! This module is both a toolkit and two decoders. The toolkit — [`sender_flow`] and
 //! [`venue_flow`] — is the shared netting engine the venue decoders build on. The decoders are
-//! the venue-less cases: [`SenderNetting`] for direct solver swaps and [`MakerNetting`] for
+//! the venue-less cases: [`SenderNetting`] for direct solver swaps and [`IntentNetting`] for
 //! filler-initiated intent fills and batch settlements.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to a
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
-    maker,
+    intent,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -122,18 +122,18 @@ impl<P: Provider> TradeDecoder<P> for SenderNetting {
     }
 }
 
-/// Filler-initiated intent fills and batch settlements: the sender acts on a maker's behalf, so
-/// the real swap is the order maker's net flow.
-pub(crate) struct MakerNetting;
+/// Solver-initiated intent fills and batch settlements: the sender acts on the swapper's behalf, so
+/// the real swap is the swapper's net flow.
+pub(crate) struct IntentNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for MakerNetting {
+impl<P: Provider> TradeDecoder<P> for IntentNetting {
     fn name(&self) -> &'static str {
-        "maker-netting"
+        "intent-netting"
     }
 
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
-        maker::find_maker_trade(
+        intent::find_intent_trade(
             ctx.provider,
             ctx.transfer_ledger,
             &[ctx.entry_point, ctx.receipt.from],

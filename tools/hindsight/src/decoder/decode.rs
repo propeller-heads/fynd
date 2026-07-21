@@ -1,7 +1,7 @@
 //! Decoding a matched transaction into a trader's flow.
 //!
 //! One decoder handles one matched transaction. Which decoder runs is chosen by the matched
-//! entity ([`decoders_for`]): a direct sender, an order maker, or a specific venue. Each entity
+//! entity ([`decoders_for`]): a direct sender, an intent order, or a specific venue. Each entity
 //! maps to an ordered list of [`TradeDecoder`]s tried in turn — the first that returns a flow
 //! wins, so a later one is the fallback for what the earlier ones cannot decode. That is where an
 //! entity picks how its swaps are read, in the order it prefers.
@@ -22,7 +22,7 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    netting::{MakerNetting, SenderNetting},
+    netting_decoders::{IntentNetting, SenderNetting},
     registry::{Registry, VenueAddresses},
     transfer_ledger::{NetSwap, TransferLedger},
     venues,
@@ -45,8 +45,8 @@ pub(crate) trait TradeDecoder<P: Provider>: Send + Sync {
 pub(crate) enum TraderRole<'a> {
     /// The transaction sender (a direct solver swap).
     Sender,
-    /// An order maker: the sender is a filler or batch settler acting on its behalf.
-    Maker,
+    /// An intent fill: the sender is a solver or batch settler acting for the swapper.
+    Intent,
     /// A venue the sender entered through, named by its address-book section.
     Venue(&'a str),
 }
@@ -54,20 +54,20 @@ pub(crate) enum TraderRole<'a> {
 impl<'a> TraderRole<'a> {
     /// Classify the role from the entry point. Assumes the transaction already matched (see
     /// `matching`): an entry point that is neither a venue nor otherwise known can only have
-    /// matched via a solver log, which is a filler-initiated intent fill.
+    /// matched via a solver log, which is a solver-initiated intent fill.
     fn classify(entry_point: Address, registry: &'a Registry) -> Self {
         if let Some(name) = registry.venue_name(entry_point) {
             return TraderRole::Venue(name);
         }
         // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is
-        // an order maker's net flow — decoded like a filler-initiated intent fill.
+        // the swapper's net flow — decoded like a solver-initiated intent fill.
         if registry.is_batch_settler(entry_point) {
-            return TraderRole::Maker;
+            return TraderRole::Intent;
         }
         if registry.is_known(entry_point) {
             return TraderRole::Sender;
         }
-        TraderRole::Maker
+        TraderRole::Intent
     }
 }
 
@@ -77,7 +77,7 @@ impl<'a> TraderRole<'a> {
 fn decoders_for<P: Provider>(role: TraderRole<'_>) -> Vec<Box<dyn TradeDecoder<P>>> {
     match role {
         TraderRole::Sender => vec![Box::new(SenderNetting)],
-        TraderRole::Maker => vec![Box::new(MakerNetting)],
+        TraderRole::Intent => vec![Box::new(IntentNetting)],
         TraderRole::Venue(name) => venues::decoders_for(name),
     }
 }
@@ -130,7 +130,7 @@ pub(crate) struct DecodeContext<'a, P> {
     pub input: &'a [u8],
     /// The matched venue's address-book section (entry points, fee collectors, solver aliases),
     /// set when the transaction entered through a venue so venue decoders never look themselves
-    /// up by name. `None` for direct and maker transactions.
+    /// up by name. `None` for direct and intent transactions.
     pub venue: Option<&'a VenueAddresses>,
 }
 
@@ -143,7 +143,7 @@ pub(crate) enum GasScope {
     /// The trade runs inside a venue's contract: only the solver call's trace frame counts,
     /// keeping the venue's own overhead out of the comparison.
     SolverFrame,
-    /// Someone other than the trader paid the gas (maker fills, solver rebalances): none of it
+    /// Someone other than the trader paid the gas (intent fills, solver rebalances): none of it
     /// is charged.
     NotCharged,
 }

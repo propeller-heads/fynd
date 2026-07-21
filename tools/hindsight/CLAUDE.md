@@ -46,14 +46,14 @@ Match → trace → decode → veto → record.
 |---|---|
 | `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
 | `decode.rs` | The `TradeDecoder` trait, the matched entity → decoders mapping, `DecodeContext`, `TraderFlow` |
-| `netting.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting`/`MakerNetting` decoders |
+| `netting_decoders.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting`/`IntentNetting` decoders |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades) |
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
 | `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask), listed in `venues::decoders_for` |
 | `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution |
-| `maker.rs` | Maker-finding for intent fills and batch settlements |
+| `intent.rs` | Intent-fill decoding for intent fills and batch settlements |
 | `trace.rs` | Transaction trace fetching and processing |
 
 `src/verify/` contains the Allium integration:
@@ -106,10 +106,10 @@ savings aggregates; unsolved states keep their coverage verdicts).
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
   `TradeDecoder` in `venues/`, registered in the one `venues::decoders_for` arm (its `mod`
   declaration is the only other line). Most venues are sender netting + fee back-out — call
-  `netting::venue_flow` and add only what is specific to the venue. The registry fails to load if
+  `netting_decoders::venue_flow` and add only what is specific to the venue. The registry fails to load if
   an address-book venue has no decoder.
 - **Decoder** (a new way to read a swap — calldata decoding, log parsing): a `TradeDecoder`, with
-  its extraction toolkit in `netting`/`calldata`, listed in the mapping for the entities that use
+  its extraction toolkit in `netting_decoders`/`calldata`, listed in the mapping for the entities that use
   it. Netting is one shared engine; calldata is per-router, so a calldata decoder is a standalone
   parser.
 - **Chain**: a new `registry/<chain>.toml` (all sections required) wired into `Registry::load`,

@@ -14,9 +14,9 @@
 //! Missing venue knowledge does not stop decoding — it degrades it, silently:
 //!
 //! - **Venue not in the address book at all**: its transactions only match when a known solver
-//!   emitted a log inside them, and those decode via maker-finding, which excludes the sender — so
-//!   most of the venue's trades are missed or declined. They surface as coverage gaps in `verify`,
-//!   not as wrong records.
+//!   emitted a log inside them, and those decode via intent decoding, which excludes the sender —
+//!   so most of the venue's trades are missed or declined. They surface as coverage gaps in
+//!   `verify`, not as wrong records.
 //! - **Venue registered but a fee collector is missing**: trades decode, but wrongly — the fee is
 //!   not backed out, so the amounts include the venue's fee, and every comparison credits Fynd with
 //!   money better routing cannot recover.

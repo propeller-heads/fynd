@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
-    netting::venue_flow,
+    netting_decoders::venue_flow,
     registry::VenueAddresses,
 };
 

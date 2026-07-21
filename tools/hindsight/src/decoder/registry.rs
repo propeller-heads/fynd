@@ -82,7 +82,7 @@ pub(crate) struct Registry {
     /// Display names for entry points that are neither venues nor solvers — market-maker
     /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
     /// because `is_known` drives strategy selection and filler-entered transactions have to
-    /// keep matching via their solver logs (Maker), not sender netting.
+    /// keep matching via their solver logs (Intent), not sender netting.
     labels: HashMap<Address, String>,
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
@@ -195,7 +195,7 @@ impl Registry {
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
-    /// must be decoded by finding the order maker, not by tracking the
+    /// must be decoded by finding the swapper, not by tracking the
     /// sender: a solver settles many orders at once, so its net flow is not a
     /// single swap even when it happens to net to one token on each side.
     pub(crate) fn is_batch_settler(&self, address: Address) -> bool {
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn display_label_resolution() {
         // Solver/filler labels are display-only: is_known drives strategy selection, and a
-        // filler-entered tx must keep matching via its solver logs (Maker), not as a
+        // filler-entered tx must keep matching via its solver logs (Intent), not as a
         // known-venue Sender flow.
         let registry = Registry::ethereum();
         let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");
