@@ -193,6 +193,56 @@ impl TestScenario {
         setup_market_unweighted(pools)
     }
 
+    /// Builds a `DepthAndPrice`-weighted `MarketData` + graph manager from this scenario's pool
+    /// definitions, for algorithms that route on the weighted graph (`water_fill`, Most Liquid).
+    /// Uses the same fixed gas assumptions as [`build_market`](Self::build_market) (100 wei/gas).
+    pub(crate) fn build_market_weighted(
+        &self,
+    ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+        let mut market = MarketState::new();
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
+        });
+        market.update_last_updated(BlockInfo::new(1, "0x00".to_string(), 0));
+
+        let mut edge_weights = Vec::new();
+        for pool in &self.pools {
+            let tokens = [pool.token_1.clone(), pool.token_2.clone()];
+            let weight_to =
+                DepthAndPrice::from_protocol_sim(pool.sim.as_ref(), &pool.token_1, &pool.token_2)
+                    .unwrap();
+            let weight_from =
+                DepthAndPrice::from_protocol_sim(pool.sim.as_ref(), &pool.token_2, &pool.token_1)
+                    .unwrap();
+            market.upsert_components(std::iter::once(component(pool.id, &tokens)));
+            market.update_states([(pool.id.to_string(), pool.sim.clone_box())]);
+            market.upsert_tokens(tokens.to_vec());
+            edge_weights.push((
+                pool.id,
+                pool.token_1.address.clone(),
+                pool.token_2.address.clone(),
+                weight_to,
+                weight_from,
+            ));
+        }
+
+        let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+        weighted.initialize_graph(&market.component_topology());
+        for (pool_id, addr_1, addr_2, weight_to, weight_from) in edge_weights {
+            weighted
+                .set_edge_weight(&pool_id.to_string(), &addr_1, &addr_2, weight_to, false)
+                .unwrap();
+            weighted
+                .set_edge_weight(&pool_id.to_string(), &addr_2, &addr_1, weight_from, false)
+                .unwrap();
+        }
+
+        (MarketData::new(Arc::new(RwLock::new(market))), weighted)
+    }
+
     /// Builds a `SharedDerivedDataRef` with unit token-gas-prices for every token in this
     /// scenario, matching the `TestScenario` gas assumption (1 output-token = 1 ETH). This lets
     /// BF's `compute_net_amount_out` deduct gas costs.

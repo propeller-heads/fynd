@@ -1570,8 +1570,8 @@ mod tests {
     use crate::{
         algorithm::{
             split_test_harness::{
-                optimal_two_pool_output, split_metrics, two_equal_weth_usdc,
-                TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
+                evaluate_scenario, optimal_two_pool_output, split_metrics, split_scenarios,
+                two_equal_weth_usdc, TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
             },
             test_utils::{addr, setup_market_unweighted, token_with_decimals},
         },
@@ -1606,83 +1606,50 @@ mod tests {
 
     // ==================== Portfolio behavior ====================
 
-    /// Two equally-deep pools: a large order splits across both and beats any single path.
-    #[tokio::test]
-    async fn split_beats_single_path_on_two_equal_pools() {
-        let m = two_equal_weth_usdc(1);
-        let order = whole_weth_order(&m.weth, &m.usdc, 500);
-
-        let split = WaterFillAlgorithm::with_config(config())
-            .unwrap()
-            .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
-            )
-            .await
-            .expect("split solves");
-        let ml = MostLiquidAlgorithm::with_config(config())
-            .unwrap()
-            .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
-            )
-            .await
-            .expect("ml solves");
-
-        let (_, path_count, split_gross) = split_metrics(&split, &m.weth, &m.usdc);
-        let (_, _, ml_gross) = split_metrics(&ml, &m.weth, &m.usdc);
-        assert_eq!(path_count, 2, "large order should use both pools");
-        let gain = split_gross.to_f64().unwrap() / ml_gross.to_f64().unwrap();
-        assert!(gain > 1.15, "expected >15% gain from splitting, got {gain:.3}x");
+    fn water_fill_default() -> WaterFillAlgorithm {
+        WaterFillAlgorithm::with_config(
+            AlgorithmConfig::new(1, 4, Duration::from_millis(5000), None).unwrap(),
+        )
+        .unwrap()
     }
 
-    /// A tiny order must never lose to the single path.
+    /// Across every shared split scenario: never lose to the best single path, land within 5% of
+    /// the analytical optimum, and return a structurally valid route.
     #[tokio::test]
-    async fn small_order_does_not_lose_to_single_path() {
-        let m = two_equal_weth_usdc(1);
-        let order = Order::new(
-            m.weth.clone(),
-            m.usdc.clone(),
-            BigUint::from(10u64).pow(15),
-            OrderSide::Sell,
-            addr(0xFF),
-        );
+    async fn water_fill_all_scenarios() {
+        let algo = water_fill_default();
+        for scenario in split_scenarios::all() {
+            let name = scenario.name;
+            let (market, gm) = scenario.build_market_weighted();
+            let result = evaluate_scenario(&algo, &scenario, market, gm).await;
 
-        let split = WaterFillAlgorithm::with_config(config())
-            .unwrap()
-            .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
-            )
-            .await
-            .expect("split solves");
-        let ml = MostLiquidAlgorithm::with_config(config())
-            .unwrap()
-            .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
-            )
-            .await
-            .expect("ml solves");
+            result.assert_passes_lower_bound();
+            // water_fill reaches the analytical optimum within 5% on single-hop and shared-prefix
+            // scenarios. DOUBLE_SPLIT re-splits at both hops with mismatched pool sizes; the
+            // token-merged disjoint/fill-and-spill allocation reaches ~90% of that cross-hop
+            // optimum -- still well above the single-path floor, just short of PFW's per-hop
+            // line search there.
+            let tolerance_pct = if name == "DOUBLE_SPLIT" { 10 } else { 5 };
+            assert!(
+                result.within_pct_of_optimum(tolerance_pct),
+                "'{name}': not within {tolerance_pct}% of optimum",
+            );
+            let route = result
+                .route
+                .as_ref()
+                .unwrap_or_else(|| panic!("'{name}': expected a route"));
+            assert!(route.validate().is_ok(), "'{name}': route validation failed");
+        }
+    }
 
-        let (split_net, _, _) = split_metrics(&split, &m.weth, &m.usdc);
-        let (ml_net, _, _) = split_metrics(&ml, &m.weth, &m.usdc);
-        assert!(
-            split_net >= ml_net,
-            "split must never lose to single-path: split={split_net} ml={ml_net}",
-        );
+    /// When the extra-hop gas exceeds the split's gross benefit, the portfolio returns a single
+    /// path rather than a net-negative split.
+    #[tokio::test]
+    async fn water_fill_gas_kills_split() {
+        let scenario = split_scenarios::gas_kills_split();
+        let (market, gm) = scenario.build_market_weighted();
+        let result = evaluate_scenario(&water_fill_default(), &scenario, market, gm).await;
+        assert_eq!(result.path_count, 1, "high gas should prevent splitting");
     }
 
     /// On two equal fee-free pools the split's gross output must come within a tight tolerance of
@@ -1761,27 +1728,6 @@ mod tests {
                 "split lost to single-path under {ms}ms timeout: split={split_net} single={single_net}",
             );
         }
-    }
-
-    /// Gross output should scale with allocation: the fine grid must not overstate a leg's output.
-    #[tokio::test]
-    async fn portfolio_gross_is_positive_and_sane() {
-        let m = two_equal_weth_usdc(1);
-        let order = whole_weth_order(&m.weth, &m.usdc, 100);
-
-        let result = WaterFillAlgorithm::with_config(config())
-            .unwrap()
-            .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
-            )
-            .await
-            .expect("solves");
-        let (_, _, gross) = split_metrics(&result, &m.weth, &m.usdc);
-        assert!(gross.to_f64().unwrap() > 0.0);
     }
 
     // ==================== Candidate discovery ====================

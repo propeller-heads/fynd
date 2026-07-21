@@ -61,8 +61,8 @@ impl DepthAndPrice {
 
     /// Compute depth and spot price from a live protocol simulation.
     #[cfg(test)]
-    pub fn from_protocol_sim(
-        sim: &impl ProtocolSim,
+    pub fn from_protocol_sim<S: ProtocolSim + ?Sized>(
+        sim: &S,
         token_in: &Token,
         token_out: &Token,
     ) -> Result<Self, AlgorithmError> {
