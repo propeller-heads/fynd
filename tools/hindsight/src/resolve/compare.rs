@@ -17,7 +17,7 @@ fn to_biguint(amount: U256) -> BigUint {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct Deltas {
     /// `fynd amount_out` vs the settled amount, both gross of gas — always like-for-like, and
-    /// the basis of the headline [`Verdict`].
+    /// the basis of the headline `Verdict`.
     pub raw_bps: Option<f64>,
     /// Secondary, recorded for later gas analysis: `fynd amount_out_net_gas` vs the settled
     /// amount net of the gas the trader paid for it. Asymmetric when the settled gas is unknown
@@ -34,7 +34,7 @@ impl Deltas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    /// Fynd's gross output strictly beats the gross settled output ([`Deltas::raw_bps`] > 0).
+    /// Fynd's gross output strictly beats the gross settled output (`Deltas::raw_bps` > 0).
     Win,
     /// Fynd's output was equal to or worse than settled, or it could not be compared.
     Loss,
@@ -59,8 +59,8 @@ const MIN_FILL_RATIO: f64 = 0.5;
 ///
 /// Fynd does not do price-constrained partial fills, but when liquidity is thin it can return a
 /// route for only part of the requested size. Both amounts are in `token_out` units, so their
-/// ratio is unit-free. A `Solved` outcome whose raw output is below [`MIN_FILL_RATIO`] of the
-/// settled amount becomes [`Outcome::Partial`]; every other outcome passes through unchanged.
+/// ratio is unit-free. A `Solved` outcome whose raw output is below `MIN_FILL_RATIO` of the
+/// settled amount becomes `Outcome::Partial`; every other outcome passes through unchanged.
 pub(crate) fn served(outcome: Outcome, settled_amount_out: U256) -> Outcome {
     let Outcome::Solved(ref solved) = outcome else {
         return outcome;
@@ -101,7 +101,7 @@ pub(crate) fn compare(
 /// Gross-vs-gross is the one comparison that is always like-for-like: the settled route's gas is
 /// often legitimately unattributable (most Relay settlements are submitted by Relay's own
 /// operators, so the trader paid no gas), and a net-vs-gross fallback would mix comparison bases
-/// across records. The net numbers are still recorded ([`Deltas::net_bps`]) for later analysis.
+/// across records. The net numbers are still recorded (`Deltas::net_bps`) for later analysis.
 pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
     if let Outcome::Partial(_) = outcome {
         return Verdict::CoverageMiss;

@@ -118,7 +118,7 @@ fn shared_attacker(
     None
 }
 
-/// The victim's pool contracts (see [`pool_addresses`]) that `front` and `back` each
+/// The victim's pool contracts (see `pool_addresses`) that `front` and `back` each
 /// independently re-emitted a log from — `front` and `back` need not touch the same one. `None`
 /// when either leg missed the overlap.
 fn overlapping_pools(

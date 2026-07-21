@@ -3,7 +3,7 @@
 //! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
 //! line is all that is needed: matching, attribution, and gas isolation work from the address
 //! alone. A solver whose transactions carry more information than that gets a module here with a
-//! [`SolverKnowledge`] impl registered in [`IMPLEMENTATIONS`]: an off-chain quote embedded in
+//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: an off-chain quote embedded in
 //! calldata, or a matching veto for order shapes that are not same-chain swaps.
 
 pub(crate) mod attribution;
@@ -54,7 +54,7 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     }
 }
 
-/// The solvers with a [`SolverKnowledge`] implementation, by address-book name. A solver absent
+/// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
 /// here needs none — its address-book entry alone is complete.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
     ("kyberswap", &kyberswap::Kyberswap),

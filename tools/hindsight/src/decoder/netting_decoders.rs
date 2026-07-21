@@ -4,9 +4,9 @@
 //! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
 //! declared. It needs no knowledge of any router's format.
 //!
-//! This module is both a toolkit and two decoders. The toolkit — [`sender_flow`] and
-//! [`venue_flow`] — is the shared netting engine the venue decoders build on. The decoders are
-//! the venue-less cases: [`SenderNetting`] for direct solver swaps and [`IntentNetting`] for
+//! This module is both a toolkit and two decoders. The toolkit — `sender_flow` and
+//! `venue_flow` — is the shared netting engine the venue decoders build on. The decoders are
+//! the venue-less cases: `SenderNetting` for direct solver swaps and `IntentNetting` for
 //! filler-initiated intent fills and batch settlements.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to a

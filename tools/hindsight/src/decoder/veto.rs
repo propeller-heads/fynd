@@ -1,11 +1,11 @@
-//! Vetoes: rejections that keep non-trades out of the records, and the [`Veto`] type they all
+//! Vetoes: rejections that keep non-trades out of the records, and the `Veto` type they all
 //! share.
 //!
 //! There are two veto points. Solver-specific vetoes run at match time on logs alone (see
 //! `solvers::solver_veto`), before a transaction costs a trace. The checks in this module run
 //! after decoding: netting can pair value legs that were never a swap — the payment side of an
 //! NFT purchase, or a cross-chain deposit's dust refund. Each check recognizes one such shape
-//! from the transaction itself (no prices, no external data); [`check`] is the single entry
+//! from the transaction itself (no prices, no external data); `check` is the single entry
 //! point the decoder runs on every decoded flow, so adding a check never touches the
 //! orchestrator.
 
@@ -35,7 +35,7 @@ pub(crate) enum Veto {
     MispairedWrapPair,
     /// A cross-chain bridge order settled by a solver router: the real output lands on the
     /// destination chain, so there is no same-chain swap to record. Placed at match time by
-    /// `solvers::solver_veto`, never by [`check`].
+    /// `solvers::solver_veto`, never by `check`.
     BridgeOrder,
 }
 

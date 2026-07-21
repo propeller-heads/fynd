@@ -1,8 +1,8 @@
 //! Re-solve engine: run Fynd on a decoded swap's inputs and compare its output against what
 //! actually settled on-chain.
 //!
-//! The [`SteppingSolver`] trait abstracts the solver so the two-state comparison pipeline is
-//! testable without a live Fynd instance. The production implementation ([`monitor`]) drives an
+//! The `SteppingSolver` trait abstracts the solver so the two-state comparison pipeline is
+//! testable without a live Fynd instance. The production implementation (`monitor`) drives an
 //! in-process `fynd-core` solver one block at a time, re-solving each trade at top-of-block (N-1)
 //! and back-of-block (N).
 
@@ -40,7 +40,7 @@ pub(crate) enum Outcome {
     /// Fynd produced a quote for the trade's full size.
     Solved(SolvedAmount),
     /// Fynd returned a route but for far less than the settled size — a liquidity-limited partial
-    /// route. Tracked apart from [`Outcome::Unsolvable`] so a coverage gap is not read as a loss.
+    /// route. Tracked apart from `Outcome::Unsolvable` so a coverage gap is not read as a loss.
     Partial(String),
     /// Fynd could not solve at all (missing token in Tycho, insufficient liquidity, timeout).
     Unsolvable(String),
@@ -99,8 +99,8 @@ pub(crate) struct RangeComparison {
 }
 
 /// Solves a sell order at the current block state and steps to the next block. The production
-/// implementation ([`monitor`]) drives an in-process `fynd-core` solver via
-/// [`fynd_core::BlockStepController`]; tests use a mock returning a top- then back-of-block
+/// implementation (`monitor`) drives an in-process `fynd-core` solver via
+/// `fynd_core::BlockStepController`; tests use a mock returning a top- then back-of-block
 /// outcome.
 #[async_trait]
 pub(crate) trait SteppingSolver {
@@ -110,7 +110,7 @@ pub(crate) trait SteppingSolver {
     async fn advance(&self) -> anyhow::Result<()>;
 }
 
-/// Build a [`RangeComparison`] from the two per-state outcomes of a trade.
+/// Build a `RangeComparison` from the two per-state outcomes of a trade.
 ///
 /// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
 /// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
@@ -118,7 +118,7 @@ pub(crate) trait SteppingSolver {
 /// their own gas.
 ///
 /// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
-/// [`Verdict::Sandwiched`]: its win or loss measures the MEV that moved the settled output, not
+/// `Verdict::Sandwiched`: its win or loss measures the MEV that moved the settled output, not
 /// routing quality. Unsolved states keep their verdicts — a sandwich explains the settled price,
 /// not why Fynd had no route, so the coverage buckets (`Unsolvable`, `CoverageMiss`) stay
 /// intact. The bps/USD deltas are left untouched either way, so the size of MEV-inflated deltas

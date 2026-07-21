@@ -2,21 +2,21 @@
 //!
 //! Everything the decoder knows about value movement comes from two sources: the transaction's
 //! ERC-20 `Transfer` logs and the native ETH transfers recovered from its call trace (native ETH
-//! moves emit no log). A [`TransferLedger`] flattens both into one list of
-//! `(token, from, to, value)` entries — native ETH is token [`Address::ZERO`] — and every flow
+//! moves emit no log). A `TransferLedger` flattens both into one list of
+//! `(token, from, to, value)` entries — native ETH is token `Address::ZERO` — and every flow
 //! question a decoder asks is answered from that list, so all decoders share one model
 //! of "what moved".
 //!
 //! # The netting model
 //!
-//! [`TransferLedger::net_swap`] recovers the swap one address performed: sum what the address
+//! `TransferLedger::net_swap` recovers the swap one address performed: sum what the address
 //! sent and received per token, subtract, and require **exactly one token net-out and one token
 //! net-in**. Intermediate hops (multi-hop routes, wrap/unwrap legs) net to zero on their own, so
 //! they disappear without being modeled. The strict one-in/one-out rule is what keeps the
 //! re-solve comparison honest. A net with more tokens on a side is a batch settlement or a
 //! shape this model doesn't cover, and guessing a "dominant" leg there would pair unrelated
 //! tokens — so ambiguous nets are declined, with one provable exception (residue legs, see
-//! [`TransferLedger::net_swap`]).
+//! `TransferLedger::net_swap`).
 //!
 //! # Assumptions
 //!
@@ -48,7 +48,7 @@ pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
 }
 
 /// A netted swap: the single token (and amount) that left an address and the
-/// single token that came back. Native ETH is [`Address::ZERO`].
+/// single token that came back. Native ETH is `Address::ZERO`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NetSwap {
     pub token_in: Address,
@@ -60,7 +60,7 @@ pub(crate) struct NetSwap {
 /// One token's totals from a single pass over a transaction's transfers, seen from one
 /// tracked address. `gross` and `routed_third_party` describe the whole transaction's flow of
 /// the token — facts the tracked address's own totals cannot tell, which the residue rules in
-/// [`TransferLedger::net_swap`] need.
+/// `TransferLedger::net_swap` need.
 #[derive(Default)]
 struct TokenAmounts {
     /// Gross amount the tracked address sent; nets against `received`.
@@ -78,7 +78,7 @@ struct TokenAmounts {
 /// Built once per transaction and shared by all decoders (see the module docs for the
 /// model and its assumptions).
 pub(crate) struct TransferLedger {
-    /// `(token, from, to, value)` for every transfer; native ETH is token [`Address::ZERO`].
+    /// `(token, from, to, value)` for every transfer; native ETH is token `Address::ZERO`.
     transfers: Vec<(Address, Address, Address, U256)>,
 }
 
@@ -154,7 +154,7 @@ impl TransferLedger {
     }
 
     /// Gross total received per token by any of `recipients`, regardless of sender (native ETH
-    /// keyed by [`Address::ZERO`]).
+    /// keyed by `Address::ZERO`).
     pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
         let mut totals: HashMap<Address, U256> = HashMap::new();
         if recipients.is_empty() {
@@ -244,7 +244,7 @@ fn net_positive(
 /// fraction of the token's gross transaction flow: `net * RESIDUE_GROSS_RATIO < gross` (1%).
 const RESIDUE_GROSS_RATIO: u64 = 100;
 
-/// Net the per-token amounts into a single swap (see [`TransferLedger::net_swap`]).
+/// Net the per-token amounts into a single swap (see `TransferLedger::net_swap`).
 fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
@@ -263,7 +263,7 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
     drop_residue_legs(&mut net_received, amounts_by_token, |amounts| amounts.sent);
 
     if net_sent.len() != 1 || net_received.len() != 1 {
-        // TraderFlow on both sides but more than one significant token on one of them: a real batch
+        // Value on both sides but more than one significant token on one of them: a real batch
         // settlement, or a residue leg the pruning rules cannot prove (see the docstring).
         if !net_sent.is_empty() && !net_received.is_empty() {
             debug!(?net_sent, ?net_received, "declining multi-token net flow");
@@ -276,7 +276,7 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
 }
 
 /// Drop residue legs from one side of an ambiguous net, per the three-condition proof in
-/// [`TransferLedger::net_swap`]. Only runs when the side has more than one leg — a lone leg is
+/// `TransferLedger::net_swap`. Only runs when the side has more than one leg — a lone leg is
 /// the swap itself, however small.
 ///
 /// `opposite_flow` reads the tracked address's gross flow on the other side of the trade from a

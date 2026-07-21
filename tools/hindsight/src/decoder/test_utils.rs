@@ -24,7 +24,7 @@ pub(crate) fn tx_hash(n: u8) -> TxHash {
     TxHash::from(bytes)
 }
 
-/// A [`NetSwap`] literal, for concise assertions.
+/// A `NetSwap` literal, for concise assertions.
 pub(crate) fn swap(
     token_in: Address,
     amount_in: u64,

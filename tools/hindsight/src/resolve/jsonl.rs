@@ -1,7 +1,7 @@
 //! JSON-lines output for the live monitor.
 //!
 //! Projects each re-solved trade to one JSON record carrying both block states (verdict, bps, USD
-//! deltas, and a slim route/calldata or the unsolvable reason), and projects a Fynd [`OrderQuote`]
+//! deltas, and a slim route/calldata or the unsolvable reason), and projects a Fynd `OrderQuote`
 //! to a slim route + calldata that omits each hop's bulky, sometimes-unserializable
 //! `protocol_state`.
 

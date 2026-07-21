@@ -97,7 +97,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Decode a `MetaMask` transaction through the full [`MetaMaskNetting`] decoder.
+    /// Decode a `MetaMask` transaction through the full `MetaMaskNetting` decoder.
     async fn decode(
         registry: &Registry,
         ledger: &TransferLedger,

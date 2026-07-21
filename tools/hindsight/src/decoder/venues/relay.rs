@@ -58,7 +58,7 @@ impl<P: Provider> TradeDecoder<P> for RelayNetting {
 /// net-sends. The output is one of two shapes — the token that comes back to the collector (an
 /// internal inventory rebalance), or the asset received by the single external recipient that
 /// only receives and never sends (a cross-chain order fill; see
-/// [`TransferLedger::sink_receipts`]).
+/// `TransferLedger::sink_receipts`).
 ///
 /// Declines (returns `None`) when the shape is ambiguous: not exactly one input token, a
 /// same-token "swap", more than one token back to the collector, or more than one external
@@ -150,7 +150,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Decode a Relay transaction through the full [`RelayNetting`] decoder.
+    /// Decode a Relay transaction through the full `RelayNetting` decoder.
     async fn decode(
         registry: &Registry,
         ledger: &TransferLedger,

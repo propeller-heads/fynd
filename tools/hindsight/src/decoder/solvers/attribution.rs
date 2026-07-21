@@ -1,7 +1,7 @@
 //! Which solver settled a matched transaction.
 //!
 //! One decision, taken here in full: the solver label on a record comes from the first evidence
-//! tier that answers, most- to least-trusted (see [`AttributionSource`]). The tier is recorded
+//! tier that answers, most- to least-trusted (see `AttributionSource`). The tier is recorded
 //! alongside the label so downstream analysis can weigh it — an embedded quote attached to a
 //! `declared` attribution is solid; one attached to a `largest_call` guess is not.
 

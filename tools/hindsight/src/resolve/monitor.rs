@@ -2,9 +2,9 @@
 //! each block's settled trades at top-of-block (N-1) and back-of-block (N).
 //!
 //! The block barrier is deterministic: after releasing a block via
-//! [`BlockStepController::trigger_next_block`], we wait until the solver's `MarketData` reports the
+//! `BlockStepController::trigger_next_block`, we wait until the solver's `MarketData` reports the
 //! next applied block before re-solving back-of-block. The pure orchestration is unit-tested in the
-//! parent module via a mock [`SteppingSolver`]; this live driver is exercised by the gated
+//! parent module via a mock `SteppingSolver`; this live driver is exercised by the gated
 //! integration test in `tests/` (requires `TYCHO_URL` + `RPC_URL`).
 
 use std::time::{Duration, Instant};
@@ -111,7 +111,7 @@ pub(crate) struct MonitorArgs {
     pub comparisons_dir: Option<std::path::PathBuf>,
 }
 
-/// Drives the in-process solver, stepping the chain one block per [`SteppingSolver::advance`].
+/// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
 struct StepAdapter<'a> {
     solver: &'a Solver,
     controller: &'a BlockStepController,
@@ -316,7 +316,7 @@ async fn build_solver(
 
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
 /// range. When the tycho feed dies (its stream ends, or no block arrives within
-/// [`FEED_DEAD_TIMEOUT`]), the solver is torn down and rebuilt in place — fresh subscriptions,
+/// `FEED_DEAD_TIMEOUT`), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     let chain = parse_chain(&cfg.chain.name)
@@ -513,7 +513,7 @@ async fn run_session<P: Provider>(
     }
 }
 
-/// Snapshot the solver's current token prices as [`Prices`] (token native-units per wei of
+/// Snapshot the solver's current token prices as `Prices` (token native-units per wei of
 /// the gas token), anchored by `registry`'s USD anchor tokens. Empty until the first
 /// derived-data computation completes; tokens with an unconvertible price are skipped.
 async fn snapshot_prices(solver: &Solver, registry: &Registry) -> Prices {
@@ -546,7 +546,7 @@ async fn snapshot_prices(solver: &Solver, registry: &Registry) -> Prices {
     prices
 }
 
-/// Convert a tycho-core 20-byte address to an alloy [`Address`].
+/// Convert a tycho-core 20-byte address to an alloy `Address`.
 fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
     let bytes: &[u8] = address.as_ref();
     (bytes.len() == 20).then(|| Address::from_slice(bytes))

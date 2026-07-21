@@ -195,7 +195,7 @@ pub(crate) fn record_range(
 /// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD histograms carry no
 /// outcome label, so skipping is the only way to keep the "value of adding Fynd" aggregates
 /// clean. The USD value is still computed and returned so the per-trade Loki line (in
-/// [`record_range`]) keeps logging.
+/// `record_range`) keeps logging.
 ///
 /// Returns the signed USD savings it computed, `None` when the state is unsolved or unpriced.
 fn record_state(

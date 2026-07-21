@@ -54,7 +54,7 @@ pub(crate) use crate::decoder::{
 
 /// A decoded solver trade: what token went in, what came out.
 ///
-/// Native ETH is represented as [`Address::ZERO`].
+/// Native ETH is represented as `Address::ZERO`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DecodedTrade {
     pub tx_hash: TxHash,
@@ -64,7 +64,7 @@ pub(crate) struct DecodedTrade {
     pub tx_index: u64,
     pub venue: String,
     pub solver: String,
-    /// The evidence tier the solver label came from (see [`solvers::attribution`]). Downstream
+    /// The evidence tier the solver label came from (see `solvers::attribution`). Downstream
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
@@ -98,13 +98,13 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
     /// The solver's own off-chain quote for this swap, recovered from calldata (see
-    /// [`solvers::embedded_quote`] for the solvers that declare one). Informational — it is what
+    /// `solvers::embedded_quote` for the solvers that declare one). Informational — it is what
     /// the venue compared against at decision time, as opposed to `amount_out`, which is what
     /// execution delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<SolverQuote>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
-    /// [`sandwich::detect`]). `None` when no bracket pair was found.
+    /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
 }
@@ -260,7 +260,7 @@ impl<P: Provider> Decoder<P> {
         );
 
         // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
-        // which gas that is — see [`GasScope`].
+        // which gas that is — see `GasScope`.
         let settled_gas = match flow.gas_scope {
             GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
             GasScope::SolverFrame => route_gas(root, registry),

@@ -4,7 +4,7 @@
 //! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
 //! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
 //! address book without recompiling. This module only holds the lookups the decoders ask
-//! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
+//! (`Registry::is_solver`, `Registry::is_batch_settler`, `Registry::label`, …).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -37,7 +37,7 @@ struct AddressBook {
 /// A venue's address-book section on one chain: the contracts users enter through, the
 /// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
 /// the address book; the name binds to a decoder at load time (see
-/// [`crate::decoder::venues::decoders_for`]).
+/// `crate::decoder::venues::decoders_for`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {

@@ -1,6 +1,6 @@
 //! Which transactions in a block are solver trades.
 //!
-//! [`select`] is the cheap, receipt-only filter the decoder runs on every transaction before
+//! `select` is the cheap, receipt-only filter the decoder runs on every transaction before
 //! anything costs a trace. It answers only "is this a solver trade at all" — how the trade is
 //! then decoded is the decoders' job (see `decode`).
 
@@ -22,7 +22,7 @@ pub(crate) struct MatchedSolverTrade<'a> {
 /// venue or solver, or one of its logs was emitted by a known solver
 /// (filler-initiated intent fills, where `tx.to` is a rotating filler).
 /// Matched transactions whose logs mark a non-swap order shape are vetoed
-/// here (see [`solvers::solver_veto`]), before they cost a trace.
+/// here (see `solvers::solver_veto`), before they cost a trace.
 pub(crate) fn select<'a>(
     receipt: &'a TransactionReceipt,
     registry: &Registry,

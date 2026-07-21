@@ -1,7 +1,7 @@
 //! Venue-specific decoders: the platforms users enter through (Relay, `MetaMask`).
 //!
 //! A venue owns the order flow — it picks a solver and may take a fee. One module here is one
-//! venue, holding every decoder for it. A venue lists its decoders in [`decoders_for`], tried in
+//! venue, holding every decoder for it. A venue lists its decoders in `decoders_for`, tried in
 //! order: today each is a netting decoder (net the sender, back the fee out, add venue-specific
 //! corrections), and a venue that is better read from its calldata would add a calldata decoder
 //! ahead of or behind netting.
@@ -33,7 +33,7 @@ use crate::decoder::decode::TradeDecoder;
 
 /// The decoders tried for a venue, in order (first hit wins). This is the one place a venue is
 /// registered — adding a venue is a `mod` declaration plus one arm here. A name that resolves to
-/// no decoders is rejected by the registry at load time (see [`has_decoder`]).
+/// no decoders is rejected by the registry at load time (see `has_decoder`).
 pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<P>>> {
     match name {
         "relay" => vec![Box::new(relay::RelayNetting)],
@@ -42,7 +42,7 @@ pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<
     }
 }
 
-/// Whether a venue name resolves to a decoder — derived from [`decoders_for`] so the two cannot
+/// Whether a venue name resolves to a decoder — derived from `decoders_for` so the two cannot
 /// drift. The registry uses this at load time to reject an address-book venue with no decoder.
 /// The provider type is irrelevant; only whether a decoder exists matters.
 pub(crate) fn has_decoder(name: &str) -> bool {

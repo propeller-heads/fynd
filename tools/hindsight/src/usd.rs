@@ -30,7 +30,7 @@ pub(crate) struct Prices {
 }
 
 impl Prices {
-    /// An empty snapshot carrying `registry`'s USD anchors; fill it with [`Prices::insert`].
+    /// An empty snapshot carrying `registry`'s USD anchors; fill it with `Prices::insert`.
     pub(crate) fn new(registry: &Registry) -> Self {
         Self {
             map: HashMap::new(),
@@ -115,7 +115,7 @@ impl Prices {
 
     /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).
     ///
-    /// Both amounts are `token_out` native units, valued in USD via [`Prices::value_usd`]; the
+    /// Both amounts are `token_out` native units, valued in USD via `Prices::value_usd`; the
     /// savings is their difference. Returns `None` when `token_out` is not priced or no anchor
     /// stablecoin is available.
     pub(crate) fn savings_usd(

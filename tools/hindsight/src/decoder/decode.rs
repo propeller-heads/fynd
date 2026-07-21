@@ -1,13 +1,13 @@
 //! Decoding a matched transaction into a trader's flow.
 //!
 //! One decoder handles one matched transaction. Which decoder runs is chosen by the matched
-//! entity ([`decoders_for`]): a direct sender, an intent order, or a specific venue. Each entity
-//! maps to an ordered list of [`TradeDecoder`]s tried in turn — the first that returns a flow
+//! entity (`decoders_for`): a direct sender, an intent order, or a specific venue. Each entity
+//! maps to an ordered list of `TradeDecoder`s tried in turn — the first that returns a flow
 //! wins, so a later one is the fallback for what the earlier ones cannot decode. That is where an
 //! entity picks how its swaps are read, in the order it prefers.
 //!
 //! What a decoder reads is open — the value movements, the calldata, the event logs, a
-//! combination, or a source not needed yet; all of it arrives in the [`DecodeContext`], and a
+//! combination, or a source not needed yet; all of it arrives in the `DecodeContext`, and a
 //! decoder takes only what it needs. `netting` is the shared engine that exists today; a method
 //! bespoke to one protocol lives in that protocol's module. Everything around decoding — matching,
 //! vetoes, attribution, gas, quotes — stays in the orchestrator.
