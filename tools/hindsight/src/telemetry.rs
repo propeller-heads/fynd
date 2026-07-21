@@ -48,7 +48,7 @@ fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
 /// Metric label for a range's settling solver. Registered solver names pass through; everything
 /// else collapses to "unknown". Attribution can also produce raw addresses, venue names, and
 /// venue-declared ids like "pancakeSwapRouterFeeDynamic" — none of which belong in a bounded
-/// metric vocabulary. The original label stays in the JSONL records, where it serves as the
+/// metric label set. The original label stays in the JSONL records, where it serves as the
 /// worklist for expanding the address book.
 fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
     if registry.is_solver_name(solver) {
@@ -479,8 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn label_vocabulary_is_registry_bounded() {
-        // Every metric label value must come from the registry vocabulary: registered venue and
+    fn labels_are_registry_bounded() {
+        // Every metric label value must come from the registry: registered venue and
         // solver names pass through; raw addresses, unregistered names, and calldata-declared
         // aggregator ids collapse — venues to "other", solvers to "unknown".
         let registry = Registry::ethereum();

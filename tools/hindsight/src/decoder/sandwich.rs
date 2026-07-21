@@ -152,7 +152,7 @@ fn overlapping_pools(
 /// `Transfer` and `Approval` emitters are token contracts, and the registry's infrastructure
 /// addresses (the wrapped-native token's `Deposit`/`Withdrawal`, Permit2's permit events) log on
 /// most swaps without being pools: counting any of them would give two transactions that merely
-/// share a token or its plumbing a trivial "pool" overlap.
+/// share a token or an infrastructure contract a trivial "pool" overlap.
 fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {

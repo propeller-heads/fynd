@@ -60,10 +60,10 @@ fn transfers_value(call_type: &str) -> bool {
 /// Gas consumed by the settled route inside a venue-wrapped transaction (Relay, `MetaMask`), in
 /// gas units.
 ///
-/// The venue's own gas — fee skim, forwarding, the base transaction cost — is charged whichever
-/// router the venue picks, so like the venue fee it is excluded from the comparison. Each trace
-/// frame's `gas_used` includes its whole subtree, so the call into the solver carries the full
-/// routing cost. Prefers the first call into a known solver; falls back to the most
+/// The venue's own gas — fee transfers, forwarding, the base transaction cost — is charged
+/// whichever router the venue picks, so like the venue fee it is excluded from the comparison. Each
+/// trace frame's `gas_used` includes its whole subtree, so the call into the solver carries the
+/// full routing cost. Prefers the first call into a known solver; falls back to the most
 /// gas-consuming direct child, since in a wrapped transaction the routing work dwarfs the
 /// bookkeeping calls. `None` when no usable frame exists — the caller then skips the gas
 /// deduction rather than guess.
@@ -259,7 +259,7 @@ mod tests {
         //   └── spender            180,406   <- largest child: wrapper, NOT the route
         //       └── adapter        175,635   (delegatecall)
         //           ├── 1inch v6   115,795   <- the route
-        //           └── fee wallet   6,329   (MetaMask's skim, correctly excluded)
+        //           └── fee wallet   6,329   (MetaMask's fee, correctly excluded)
         //
         // so the known-venue search must win over the largest-child fallback.
         let root: CallFrame =

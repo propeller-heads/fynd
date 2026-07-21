@@ -23,7 +23,8 @@ use crate::decoder::{
 pub(crate) enum Veto {
     /// The trader received an NFT: the netted token flow is the payment side of a purchase
     /// (e.g. an NFT sweep through Relay + Seaport), and the real consideration is invisible to
-    /// ERC-20 netting — recording it would pair the payment with the change as a phantom swap.
+    /// ERC-20 netting — recording it would pair the payment with the change as a swap that never
+    /// happened.
     NftPurchase,
     /// A native <-> wrapped-native "swap" far off 1:1, which a wrap or unwrap cannot produce: a
     /// mis-paired cross-chain deposit whose only same-chain receipt is a dust remainder refund.
@@ -83,7 +84,7 @@ fn received_nft(logs: &[Log], recipient: Address) -> bool {
 }
 
 /// A wrap-pair trade (native <-> wrapped native) more than this factor off 1:1 is mis-paired:
-/// wrapping is exactly 1:1 by construction, and fee skims only shave a few percent, so nothing
+/// wrapping is exactly 1:1 by construction, and venue fees only remove a few percent, so nothing
 /// legitimate strays this far.
 const WRAP_PAIR_MAX_RATIO: u64 = 2;
 
@@ -91,8 +92,8 @@ const WRAP_PAIR_MAX_RATIO: u64 = 2;
 /// cannot produce.
 ///
 /// Seen with cross-chain deposits where the trader sends WETH and the only same-chain receipt is
-/// a dust remainder refund in native ETH — netting pairs the two into a phantom trade orders of
-/// magnitude off parity.
+/// a dust remainder refund in native ETH — netting pairs the two into a trade that never happened,
+/// orders of magnitude off parity.
 fn wrap_pair_mispaired(swap: &NetSwap, wrapped_native: Address) -> bool {
     let pair = [swap.token_in, swap.token_out];
     if !(pair.contains(&Address::ZERO) && pair.contains(&wrapped_native)) {
@@ -170,7 +171,7 @@ mod tests {
     fn wrap_pair_near_parity_kept() {
         let weth = addr(20);
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 1000), weth));
-        // A fee-skimmed unwrap stays within the 2x band.
+        // An unwrap with a fee taken stays within the 2x band.
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 900), weth));
     }
 

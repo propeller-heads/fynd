@@ -438,7 +438,7 @@ async fn run_session<P: Provider>(
         {
             if head.saturating_sub(target) > cfg.max_lag_blocks {
                 return SessionEnd::Unhealthy(format!(
-                    "monitor is {} blocks behind head {head}; presuming a crippled session",
+                    "monitor is {} blocks behind head {head}; presuming an unhealthy session",
                     head - target
                 ));
             }

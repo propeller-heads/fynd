@@ -35,7 +35,7 @@ struct AddressBook {
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
-/// collectors its fee skims land on, and its calldata solver vocabulary. Keyed by venue name in
+/// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
 /// the address book; the name binds to a decode strategy at load time (see
 /// [`crate::decoder::venues::from_name`]).
 #[derive(Debug, Deserialize)]
@@ -52,14 +52,14 @@ pub(crate) struct VenueAddresses {
 
 impl VenueAddresses {
     /// Normalize a solver id this venue declared in calldata to the address book's solver
-    /// vocabulary: the first alias needle (in alias order) contained in the lowercased id names
+    /// names: the first alias substring (in table order) contained in the lowercased id names
     /// the solver, trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a
     /// 1:1 rename. Unmatched ids pass through as-is: still more informative than a raw executor
     /// address, and a signal to extend the address book.
     pub(crate) fn normalize_solver(&self, id: &str) -> String {
         let lower = id.to_lowercase();
-        for (needle, name) in &self.solver_aliases {
-            if lower.contains(needle) {
+        for (substring, name) in &self.solver_aliases {
+            if lower.contains(substring) {
                 return name.clone();
             }
         }
@@ -149,12 +149,12 @@ impl Registry {
             .into_iter()
             .collect();
         usd_stablecoins.sort_unstable();
-        // Alias needles match against lowercased ids, so a mixed-case needle in the address
+        // Alias substrings match against lowercased ids, so a mixed-case entry in the address
         // book would silently never match — canonicalize at load.
         for venue in book.venues.values_mut() {
             venue.solver_aliases = std::mem::take(&mut venue.solver_aliases)
                 .into_iter()
-                .map(|(needle, name)| (needle.to_lowercase(), name))
+                .map(|(substring, name)| (substring.to_lowercase(), name))
                 .collect();
         }
 
@@ -188,8 +188,8 @@ impl Registry {
     }
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label
-    /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
-    /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
+    /// names: attribution can also produce raw addresses, venue names (fallback tier), and
+    /// names a venue declared in calldata (`MetaMask` aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
         self.solver_names.contains(name)
     }
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn solver_aliases_are_scoped_to_their_venue() {
-        // The alias table is one venue's calldata vocabulary; a venue without one passes every
+        // The alias table is one venue's calldata names; a venue without one passes every
         // id through unchanged.
         let registry = Registry::ethereum();
         let relay = registry.venue("relay").unwrap();
@@ -321,8 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn mixed_case_alias_needle_still_matches() {
-        // Needles are canonicalized to lowercase at load, so a capitalized needle in the
+    fn mixed_case_alias_substring_still_matches() {
+        // Alias substrings are canonicalized to lowercase at load, so a capitalized entry in the
         // address book matches the same ids as a lowercase one.
         let book = ETHEREUM_TOML.replace(
             "[venues.metamask.solver_aliases]",

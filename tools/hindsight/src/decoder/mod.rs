@@ -2,7 +2,7 @@
 //!
 //! Terminology — three tiers, two of which appear in every record:
 //! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, `MetaMask`.
-//!   Order-flow owners; they pick a solver and may skim a fee.
+//!   Order-flow owners; they pick a solver and may take a fee.
 //! - **solver** (`solvers/`): the router that computed and settled the route — `KyberSwap`, 1inch,
 //!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
 //!   their column names; the two words mean the same thing.
@@ -76,10 +76,10 @@ pub(crate) struct DecodedTrade {
     /// Input amount that actually entered the swap — a venue fee taken from the input (see
     /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
-    /// Gross swap output — a venue fee skimmed from the output (see `venue_fee_out`) is added
+    /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
-    /// Venue fee skimmed from the input token before swapping (e.g. Relay's fee), in `token_in`
+    /// Venue fee taken from the input token before swapping (e.g. Relay's fee), in `token_in`
     /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +140,7 @@ impl<P: Provider> Decoder<P> {
         &self.provider
     }
 
-    /// The decoder's address registry, for label vocabulary shared with telemetry.
+    /// The decoder's address registry, for the label names shared with telemetry.
     pub(crate) fn registry(&self) -> &Registry {
         &self.registry
     }

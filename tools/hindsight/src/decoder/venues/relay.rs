@@ -1,6 +1,6 @@
 //! Relay-specific decoding.
 //!
-//! Relay differs from direct solver swaps in two ways: its router skims a
+//! Relay differs from direct solver swaps in two ways: its router sends a
 //! venue fee to a collector address on either side of the swap, and its
 //! solvers submit rebalancing fills whose transaction sender has no net flow.
 
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn decode_backs_fee_out_of_user_flow() {
-        // User swap through Relay: sender nets token_in -> token_out, with an input-side skim to
+        // User swap through Relay: sender nets token_in -> token_out, with an input-side fee to
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
         let collector = *registry
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn decode_skips_fee_back_out_for_collector_trader() {
         // Treasury op (live tx 0x80a4c0…): the fee collector itself unwraps WETH via the router.
-        // Its 1:1 native receipt must not be treated as a skim and added back — that doubled the
+        // Its 1:1 native receipt must not be treated as a fee and added back — that doubled the
         // output.
         let registry = Registry::ethereum();
         let collector = *registry

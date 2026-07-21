@@ -126,11 +126,11 @@ pub(crate) fn venue_fee_flow(
     Some(back_out_venue_fees(flow, transfer_ledger, fee_collectors))
 }
 
-/// Back a venue-fee skim out of a decoded user flow.
+/// Back a venue fee out of a decoded user flow.
 ///
-/// The collector can skim on either side. An input-side skim is subtracted
+/// The venue can take its fee on either side. An input-side fee is subtracted
 /// from `amount_in` (the user's gross spend included money that never entered
-/// the swap) and an output-side skim is added back into `amount_out` (the
+/// the swap) and an output-side fee is added back into `amount_out` (the
 /// swap produced more than the user kept), so both sides are the amounts
 /// actually swapped — the like-for-like basis vs Fynd.
 fn back_out_venue_fees(
@@ -169,8 +169,8 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
-    fn venue_fee_flow_backs_out_input_skim() {
-        // Router skims part of the input token to the collector; the rest goes to the pool.
+    fn venue_fee_flow_backs_out_input_fee() {
+        // The router sends part of the input token to the collector; the rest goes to the pool.
         let user = addr(1);
         let router = addr(2);
         let collector = addr(99);

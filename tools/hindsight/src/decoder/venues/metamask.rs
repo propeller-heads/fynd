@@ -1,10 +1,10 @@
 //! MetaMask-specific decoding.
 //!
-//! `MetaMask`'s Swap Router routes through a real solver and skims its fee (~87.5 bps, plus a gas
+//! `MetaMask`'s Swap Router routes through a real solver and takes its fee (~87.5 bps, plus a gas
 //! recoup on gasless "smart swaps") to a fee wallet — from the input token before swapping or
-//! from the output after. The skim is charged whichever router `MetaMask` plugs in, so it is not
+//! from the output after. The fee is charged whichever router `MetaMask` plugs in, so it is not
 //! value better routing can recover; without backing it out, every comparison credits Fynd with
-//! `MetaMask`'s own fee, and on dust trades — where the skim dominates — that fabricates extreme
+//! `MetaMask`'s own fee, and on dust trades — where the fee dominates — that fabricates extreme
 //! "wins".
 
 use alloy::{sol, sol_types::SolCall};
@@ -131,8 +131,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_backs_out_output_side_skim() {
-        // Live tx 0x142de458… shape: token in, ETH out; the router skims the fee from the native
+    fn decode_backs_out_output_side_fee() {
+        // Live tx 0x142de458… shape: token in, ETH out; the router takes the fee from the native
         // output before forwarding the rest to the trader. amount_out is grossed back up.
         let registry = Registry::ethereum();
         let collector = fee_wallet(&registry);
@@ -160,8 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_backs_out_input_side_skim() {
-        // ETH in, token out: the router skims the fee from the native input before forwarding
+    fn decode_backs_out_input_side_fee() {
+        // ETH in, token out: the router takes the fee from the native input before forwarding
         // the rest to the solver. amount_in shrinks to what actually entered the swap.
         let registry = Registry::ethereum();
         let collector = fee_wallet(&registry);
