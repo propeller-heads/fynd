@@ -13,9 +13,9 @@ use tracing::info;
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
 #[derive(Serialize)]
-struct ReplayOrder<'a> {
-    token_in: &'a Address,
-    token_out: &'a Address,
+struct ReplayOrder {
+    token_in: Address,
+    token_out: Address,
     amount: String,
     side: OrderSide,
 }
@@ -31,15 +31,7 @@ struct ReplayOptions {
     max_gas: Option<String>,
 }
 
-/// Routing-essential view of a whole quote request.
-#[derive(Serialize)]
-struct ReplayRequest<'a> {
-    orders: Vec<ReplayOrder<'a>>,
-    options: ReplayOptions,
-}
-
-/// Serializes `request` down to the routing-essential fields, as a JSON string,
-/// for the replay log.
+/// Owned, routing-essential view of a whole quote request.
 ///
 /// Captured (the fields that determine the route): per order `token_in`,
 /// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
@@ -49,32 +41,54 @@ struct ReplayRequest<'a> {
 /// (routing-irrelevant and PII). Built from an explicit allowlist, so no
 /// request field can leak into the logs.
 ///
-/// The result is NOT a full [`QuoteRequest`] — it omits the required `sender`,
-/// so a replay harness supplies a placeholder sender before re-issuing. An
-/// outcome that depended on `price_guard` may not reproduce on replay.
+/// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a
+/// replay harness supplies a placeholder sender before re-issuing. An outcome
+/// that depended on `price_guard` may not reproduce on replay.
+#[derive(Serialize)]
+pub(crate) struct ReplayRequest {
+    orders: Vec<ReplayOrder>,
+    options: ReplayOptions,
+}
+
+impl ReplayRequest {
+    /// Extracts the owned routing-essential capture from `request`. Cheap — a
+    /// few address clones and no JSON — so it is safe to run on the quote hot
+    /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
+    /// which the handler only calls off the response path.
+    pub(crate) fn capture(request: &QuoteRequest) -> Self {
+        let orders = request
+            .orders()
+            .iter()
+            .map(|order| ReplayOrder {
+                token_in: order.token_in().clone(),
+                token_out: order.token_out().clone(),
+                amount: order.amount().to_string(),
+                side: order.side(),
+            })
+            .collect();
+        let options = request.options();
+        Self {
+            orders,
+            options: ReplayOptions {
+                timeout_ms: options.timeout_ms(),
+                min_responses: options.min_responses(),
+                max_gas: options
+                    .max_gas()
+                    .map(ToString::to_string),
+            },
+        }
+    }
+
+    /// Serializes the capture to the replay-log JSON string.
+    pub(crate) fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
+    }
+}
+
+/// Serializes `request` down to the routing-essential fields, as a JSON string.
+/// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
 pub(crate) fn replay_json(request: &QuoteRequest) -> String {
-    let orders = request
-        .orders()
-        .iter()
-        .map(|order| ReplayOrder {
-            token_in: order.token_in(),
-            token_out: order.token_out(),
-            amount: order.amount().to_string(),
-            side: order.side(),
-        })
-        .collect();
-    let options = request.options();
-    let capture = ReplayRequest {
-        orders,
-        options: ReplayOptions {
-            timeout_ms: options.timeout_ms(),
-            min_responses: options.min_responses(),
-            max_gas: options
-                .max_gas()
-                .map(ToString::to_string),
-        },
-    };
-    serde_json::to_string(&capture).unwrap_or_else(|_| "<unserializable>".to_string())
+    ReplayRequest::capture(request).to_json()
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
