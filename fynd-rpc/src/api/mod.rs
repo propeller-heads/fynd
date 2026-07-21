@@ -11,6 +11,8 @@ pub(crate) mod middleware;
 #[cfg(feature = "experimental")]
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
+/// Builds re-issuable, signature-free representation of a quote request for replay logging.
+pub(crate) mod request_capture;
 
 use std::{
     sync::Arc,

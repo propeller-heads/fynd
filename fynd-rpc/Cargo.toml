@@ -36,3 +36,4 @@ experimental = []
 [dev-dependencies]
 rstest.workspace = true
 metrics-util.workspace = true
+tracing-subscriber.workspace = true

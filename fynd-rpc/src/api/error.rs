@@ -34,6 +34,32 @@ pub enum ApiError {
     },
 }
 
+/// Maps a [`SolveError`] to its stable machine-readable code.
+///
+/// Shared by the HTTP error response and the request-replay capture log so both
+/// use identical codes.
+pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
+    match err {
+        SolveError::NoRouteFound { .. } => "NO_ROUTE_FOUND",
+        SolveError::InsufficientLiquidity { .. } => "INSUFFICIENT_LIQUIDITY",
+        SolveError::Timeout { .. } => "TIMEOUT",
+        SolveError::QueueFull => "QUEUE_FULL",
+        SolveError::AlgorithmError(_) => "ALGORITHM_ERROR",
+        SolveError::MarketDataStale { .. } => "STALE_DATA",
+        SolveError::InvalidOrder(_) => "INVALID_ORDER",
+        SolveError::Internal(_) => "INTERNAL_ERROR",
+        SolveError::NotReady(_) => "NOT_READY",
+        SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
+        SolveError::FailedEncoding(_) => "FAILED_ENCODING",
+        SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
+        SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
+        other => {
+            warn!(?other, "unhandled SolveError variant");
+            "INTERNAL_ERROR"
+        }
+    }
+}
+
 impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -55,25 +81,7 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let code = match self {
             ApiError::BadRequest(_) => "BAD_REQUEST",
-            ApiError::SolveFailed(e) => match e {
-                SolveError::NoRouteFound { .. } => "NO_ROUTE_FOUND",
-                SolveError::InsufficientLiquidity { .. } => "INSUFFICIENT_LIQUIDITY",
-                SolveError::Timeout { .. } => "TIMEOUT",
-                SolveError::QueueFull => "QUEUE_FULL",
-                SolveError::AlgorithmError(_) => "ALGORITHM_ERROR",
-                SolveError::MarketDataStale { .. } => "STALE_DATA",
-                SolveError::InvalidOrder(_) => "INVALID_ORDER",
-                SolveError::Internal(_) => "INTERNAL_ERROR",
-                SolveError::NotReady(_) => "NOT_READY",
-                SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
-                SolveError::FailedEncoding(_) => "FAILED_ENCODING",
-                SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
-                SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
-                other => {
-                    warn!(?other, "unhandled SolveError variant");
-                    "INTERNAL_ERROR"
-                }
-            },
+            ApiError::SolveFailed(e) => solve_error_code(e),
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::Internal(_) => "INTERNAL_ERROR",
             ApiError::StaleData { .. } => "STALE_DATA",
