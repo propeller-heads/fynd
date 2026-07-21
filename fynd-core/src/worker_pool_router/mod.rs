@@ -1133,6 +1133,53 @@ mod tests {
     }
 
     #[rstest]
+    #[case::pending_exclusive_pool(0, Some(300), true)]
+    #[case::pending_public_pool(300, Some(0), true)]
+    #[case::failed_exclusive_pool(0, None, false)]
+    #[tokio::test]
+    async fn test_router_early_return_role_gating(
+        #[case] public_delay_ms: u64,
+        #[case] exclusive_delay_ms: Option<u64>,
+        #[case] expect_surplus: bool,
+    ) {
+        let (public_pool, public_worker) =
+            create_mock_pool("public_pool", Ok(make_single_quote(800)), public_delay_ms);
+        let exclusive_response = match exclusive_delay_ms {
+            Some(_) => Ok(make_exclusive_quote(1100)),
+            None => Err(SolveError::NoRouteFound { order_id: "test-order".to_string() }),
+        };
+        let (exclusive_pool, exclusive_worker) =
+            create_mock_pool("exclusive_pool", exclusive_response, exclusive_delay_ms.unwrap_or(0));
+        let exclusive_pool = exclusive_pool.with_role(PoolRole::ExclusiveAccess);
+
+        let config = WorkerPoolRouterConfig::default()
+            .with_timeout(Duration::from_millis(2000))
+            .with_min_responses(1);
+        let worker_router =
+            WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder())
+                .with_exclusivity_policy(exclusive_policy());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+
+        let start = Instant::now();
+        let result = worker_router
+            .quote(request)
+            .await
+            .expect("quote should succeed");
+        let elapsed = start.elapsed();
+
+        // Well under the 2s timeout: the gate releases as soon as both roles have responded.
+        assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
+        let order = &result.orders()[0];
+        assert_eq!(order.status(), QuoteStatus::Success);
+        assert_eq!(*order.amount_out(), BigUint::from(990u64));
+        assert_eq!(order.surplus_amount().is_some(), expect_surplus);
+
+        drop(worker_router);
+        public_worker.abort();
+        exclusive_worker.abort();
+    }
+
+    #[rstest]
     #[case::under_limit(100, Some(200), true)]
     #[case::at_limit(200, Some(200), true)]
     #[case::over_limit(300, Some(200), false)]
