@@ -496,7 +496,7 @@ fn aggregate_no_route_reason(
                 NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => {
                     return Some(*reason)
                 }
-                _ => {
+                NoPathReason::NoGraphPath | NoPathReason::NoScorablePaths => {
                     if first.is_none() {
                         first = Some(*reason);
                     }
