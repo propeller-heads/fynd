@@ -746,9 +746,11 @@ fn combine_with_surplus(
     if let Some(route) = surplus_quote.route_mut() {
         for swap in route.swaps_mut() {
             if policy.is_exclusive(swap.protocol_component()) {
-                // Proportional reduction: committed_leg = leg.amount_out * committed / realized
-                // (rounds down — safe direction: under-capture)
-                let committed_leg = swap.amount_out() * committed_route_out / realized_route_out;
+                // Proportional reduction: committed_leg = ceil(leg.amount_out * committed /
+                // realized).
+                let committed_leg = (swap.amount_out() * committed_amount_out +
+                    (exclusive_route_amount_out - 1u32)) /
+                    exclusive_route_amount_out;
                 swap.set_committed_amount_out(committed_leg);
             }
         }
