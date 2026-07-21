@@ -1,3 +1,10 @@
+## [0.96.0](https://github.com/propeller-heads/fynd/compare/0.95.0...0.96.0) (2026-07-21)
+
+
+### Features
+
+* **hindsight:** record which strategy decoded each trade ([bed0cdc](https://github.com/propeller-heads/fynd/commit/bed0cdc8f160f6fe1fca85f8921a24764c184486))
+
 ## [0.95.0](https://github.com/propeller-heads/fynd/compare/0.94.0...0.95.0) (2026-07-21)
 
 
