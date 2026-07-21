@@ -7,7 +7,11 @@
 //! parent module via a mock `SteppingSolver`; this live driver is exercised by the gated
 //! integration test in `tests/` (requires `TYCHO_URL` + `RPC_URL`).
 
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 use alloy::{
     primitives::{Address, U256},
@@ -324,10 +328,48 @@ fn default_lag_blocks(chain: &str) -> u64 {
     (20 * 60 / block_secs).max(1)
 }
 
+/// Resolves when the process receives Ctrl-C (SIGINT), the signal the monitor treats as "stop".
+/// If the handler cannot be installed the future never resolves, so a failed registration disables
+/// graceful shutdown rather than tearing the run down immediately.
+async fn shutdown_signal() {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        warn!(error = %e, "failed to install Ctrl-C handler; graceful shutdown disabled");
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Rebuild the solver after a feed death, retrying with backoff until it succeeds. Returns `None`
+/// when `shutdown` resolves first (Ctrl-C during the retry loop or a build), so the caller stops
+/// instead of rebuilding.
+async fn rebuild_after_feed_death<S: Future<Output = ()>>(
+    cfg: &MonitorArgs,
+    chain: Chain,
+    protocols: &[String],
+    pools_config: &fynd_rpc::config::WorkerPoolsConfig,
+    mut shutdown: Pin<&mut S>,
+) -> Option<(Solver, BlockStepController)> {
+    loop {
+        let rebuilt = tokio::select! {
+            biased;
+            () = shutdown.as_mut() => return None,
+            result = async {
+                tokio::time::sleep(REBUILD_BACKOFF).await;
+                build_solver(cfg, chain, protocols, pools_config).await
+            } => result,
+        };
+        match rebuilt {
+            Ok(built) => return Some(built),
+            Err(e) => warn!(error = %e, "solver rebuild failed; retrying"),
+        }
+    }
+}
+
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
 /// range. When the tycho feed dies (its stream ends, or no block arrives within
 /// `FEED_DEAD_TIMEOUT`), the solver is torn down and rebuilt in place — fresh subscriptions,
 /// same decoder cache and comparisons file — so a long unattended run survives feed failures.
+/// Ctrl-C stops the run cleanly at any await point, tearing the current solver down before
+/// returning.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     let chain = parse_chain(&cfg.chain.name)
         .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain.name))?;
@@ -385,37 +427,55 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         .max_lag_blocks
         .unwrap_or_else(|| default_lag_blocks(&cfg.chain.name));
     info!(max_lag_blocks, "chain-head lag threshold");
+
+    // Resolves on Ctrl-C, so a long run stops cleanly at any await below — including the
+    // multi-minute solver builds. On shutdown the in-flight block is abandoned, the solver's
+    // workers and background tasks are torn down, and `comparisons` flushes as it drops.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     // The first build fails fast — an error here is a configuration problem. Rebuilds after a
     // feed death retry forever, since the config is known good and failures are transient.
-    let (mut solver, mut controller) = build_solver(&cfg, chain, &protocols, &pools_config).await?;
+    let (mut solver, mut controller) = tokio::select! {
+        biased;
+        () = &mut shutdown => return Ok(()),
+        built = build_solver(&cfg, chain, &protocols, &pools_config) => built?,
+    };
     loop {
         let adapter =
             StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
-        match run_session(
-            &cfg,
-            max_lag_blocks,
-            &adapter,
-            &mut decoder,
-            &mut comparisons,
-            &mut totals,
-        )
-        .await
-        {
-            SessionEnd::Complete => return Ok(()),
-            SessionEnd::Unhealthy(reason) => {
-                warn!(reason, "session unhealthy; rebuilding the solver to resubscribe");
-                telemetry::record_feed_rebuild();
+        let reason = tokio::select! {
+            biased;
+            () = &mut shutdown => {
+                info!("received Ctrl-C; shutting down");
+                break;
             }
-        }
-        solver.shutdown();
-        (solver, controller) = loop {
-            tokio::time::sleep(REBUILD_BACKOFF).await;
-            match build_solver(&cfg, chain, &protocols, &pools_config).await {
-                Ok(built) => break built,
-                Err(e) => warn!(error = %e, "solver rebuild failed; retrying"),
-            }
+            end = run_session(
+                &cfg,
+                max_lag_blocks,
+                &adapter,
+                &mut decoder,
+                &mut comparisons,
+                &mut totals,
+            ) => match end {
+                SessionEnd::Complete => break,
+                SessionEnd::Unhealthy(reason) => reason,
+            },
         };
+        warn!(reason, "session unhealthy; rebuilding the solver to resubscribe");
+        telemetry::record_feed_rebuild();
+        solver.shutdown();
+        let Some(built) =
+            rebuild_after_feed_death(&cfg, chain, &protocols, &pools_config, shutdown.as_mut())
+                .await
+        else {
+            info!("received Ctrl-C during rebuild; shutting down");
+            return Ok(());
+        };
+        (solver, controller) = built;
     }
+    solver.shutdown();
+    Ok(())
 }
 
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
