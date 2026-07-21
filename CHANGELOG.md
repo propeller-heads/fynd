@@ -1,3 +1,15 @@
+## [0.95.0](https://github.com/propeller-heads/fynd/compare/0.94.0...0.95.0) (2026-07-21)
+
+
+### Features
+
+* add hosted-API auth and per-chain routing to clients ([d4405cb](https://github.com/propeller-heads/fynd/commit/d4405cbe64edbbef86a238bfcafafa9b6efe431c))
+
+
+### Bug Fixes
+
+* **client:** send API key as raw Authorization header, not Bearer ([4d63aaa](https://github.com/propeller-heads/fynd/commit/4d63aaafc4cbc9e790707f9cabf2a29d192af5e5))
+
 ## [0.94.0](https://github.com/propeller-heads/fynd/compare/0.93.0...0.94.0) (2026-07-20)
 
 
