@@ -1,36 +1,80 @@
-//! Builds the re-issuable, signature-free representation of a quote request for
-//! the replay-capture log emitted by the `/v1/quote` handler.
+//! Builds the routing-essential representation of a quote request for the
+//! replay-capture log emitted by the `/v1/quote` handler.
 
 use fynd_core::QuoteStatus;
-use fynd_rpc_types::QuoteRequest;
-use serde_json::Value;
+use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
+use serde::Serialize;
 use tracing::info;
 
-/// Serializes `request` to a re-issuable JSON string with all encoding data removed.
+/// Routing-essential view of a single order, serialized into the replay log.
 ///
-/// `encoding_options` is the only place a request carries user signatures
-/// (Permit2 / client-fee), and none of it is needed to replay routing against
-/// live state. The request is serialized, then the `options.encoding_options`
-/// key is dropped so signatures never reach the logs. The shared wire DTO is
-/// left untouched (it has no `skip_serializing_if` on that field), and the
-/// result still deserializes back into a [`QuoteRequest`] because serde treats
-/// a missing `Option` field as `None`.
+/// An allowlist by construction: only fields that affect route-finding are
+/// present. The server-generated `id`, the routing-irrelevant `sender` /
+/// `receiver` (also PII we keep out of logs), and all encoding data are
+/// omitted — nothing is copied implicitly, so no DTO field can leak.
+#[derive(Serialize)]
+struct ReplayOrder<'a> {
+    token_in: &'a Address,
+    token_out: &'a Address,
+    amount: String,
+    side: OrderSide,
+}
+
+/// Routing-essential view of the request-level solve options.
+#[derive(Serialize)]
+struct ReplayOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_responses: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_gas: Option<String>,
+}
+
+/// Routing-essential view of a whole quote request.
+#[derive(Serialize)]
+struct ReplayRequest<'a> {
+    orders: Vec<ReplayOrder<'a>>,
+    options: ReplayOptions,
+}
+
+/// Serializes `request` down to the routing-essential fields, as a JSON string,
+/// for the replay log.
 ///
-/// This only captures routing inputs: `encoding_options` (slippage, transfer
-/// type, price guard) is intentionally dropped, so an outcome that depended
-/// on `price_guard` may not reproduce on replay.
+/// Captured (the fields that determine the route): per order `token_in`,
+/// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
+/// `min_responses`, `max_gas`. Everything else is dropped: `encoding_options`
+/// (slippage / transfer type / price guard, and every Permit2 / client-fee
+/// **signature**), the server-generated order `id`, and `sender` / `receiver`
+/// (routing-irrelevant and PII). Built from an explicit allowlist, so no
+/// request field can leak into the logs.
+///
+/// The result is NOT a full [`QuoteRequest`] — it omits the required `sender`,
+/// so a replay harness supplies a placeholder sender before re-issuing. An
+/// outcome that depended on `price_guard` may not reproduce on replay.
 pub(crate) fn replay_json(request: &QuoteRequest) -> String {
-    let mut value = match serde_json::to_value(request) {
-        Ok(value) => value,
-        Err(_) => return "<unserializable>".to_string(),
+    let orders = request
+        .orders()
+        .iter()
+        .map(|order| ReplayOrder {
+            token_in: order.token_in(),
+            token_out: order.token_out(),
+            amount: order.amount().to_string(),
+            side: order.side(),
+        })
+        .collect();
+    let options = request.options();
+    let capture = ReplayRequest {
+        orders,
+        options: ReplayOptions {
+            timeout_ms: options.timeout_ms(),
+            min_responses: options.min_responses(),
+            max_gas: options
+                .max_gas()
+                .map(ToString::to_string),
+        },
     };
-    if let Some(options) = value
-        .get_mut("options")
-        .and_then(Value::as_object_mut)
-    {
-        options.remove("encoding_options");
-    }
-    value.to_string()
+    serde_json::to_string(&capture).unwrap_or_else(|_| "<unserializable>".to_string())
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
@@ -101,6 +145,7 @@ mod tests {
         QuoteOptions, QuoteRequest,
     };
     use num_bigint::BigUint;
+    use serde_json::Value;
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
@@ -113,6 +158,7 @@ mod tests {
             OrderSide::Sell,
             Bytes::from([0xCCu8; 20]),
         )
+        .with_receiver(Bytes::from([0x77u8; 20]))
     }
 
     fn request_with_signatures() -> QuoteRequest {
@@ -145,36 +191,37 @@ mod tests {
     }
 
     #[test]
-    fn replay_json_drops_encoding_and_signatures() {
+    fn replay_json_captures_only_routing_fields() {
         let json = replay_json(&request_with_signatures());
+        // No encoding data or signatures.
         assert!(!json.contains("encoding_options"), "json was: {json}");
         assert!(!json.contains("signature"), "json was: {json}");
         assert!(!json.contains("permit"), "json was: {json}");
         assert!(!json.contains("client_fee"), "json was: {json}");
+        // No id / sender / receiver (routing-irrelevant, PII).
+        assert!(!json.contains("\"id\""), "json was: {json}");
+        assert!(!json.contains("sender"), "json was: {json}");
+        assert!(!json.contains("receiver"), "json was: {json}");
+        assert!(!json.contains("cccccccc"), "sender address leaked; json was: {json}");
+        assert!(!json.contains("77777777"), "receiver address leaked; json was: {json}");
         // Routing inputs preserved.
         assert!(json.contains("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "json was: {json}");
         assert!(json.contains("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), "json was: {json}");
     }
 
     #[test]
-    fn replay_json_preserves_solve_options_and_round_trips() {
+    fn replay_json_keeps_routing_essentials_and_options() {
         let json = replay_json(&request_with_signatures());
-        let reparsed: QuoteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(reparsed.orders().len(), 1);
-        assert_eq!(reparsed.orders()[0].token_in().as_ref(), [0xAAu8; 20]);
-        assert_eq!(
-            reparsed.orders()[0]
-                .token_out()
-                .as_ref(),
-            [0xBBu8; 20]
-        );
-        assert_eq!(reparsed.options().timeout_ms(), Some(2000));
-        assert_eq!(reparsed.options().min_responses(), Some(1));
-        assert_eq!(reparsed.options().max_gas(), Some(&BigUint::from(500_000u64)));
-        assert!(reparsed
-            .options()
-            .encoding_options()
-            .is_none());
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let order = &value["orders"][0];
+        assert_eq!(order["token_in"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(order["token_out"], "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(order["amount"], "1000000000000000000");
+        assert_eq!(order["side"], "sell");
+        let options = &value["options"];
+        assert_eq!(options["timeout_ms"], 2000);
+        assert_eq!(options["min_responses"], 1);
+        assert_eq!(options["max_gas"], "500000");
     }
 
     #[test]
@@ -211,8 +258,8 @@ mod tests {
             );
         }
 
-        let orders_allowlist =
-            ["id", "token_in", "token_out", "amount", "side", "sender", "receiver"];
+        // Only routing-essential order fields — id / sender / receiver must NOT appear.
+        let orders_allowlist = ["token_in", "token_out", "amount", "side"];
         for order in value
             .get("orders")
             .and_then(Value::as_array)
