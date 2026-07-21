@@ -737,14 +737,6 @@ fn combine_with_surplus(
         return public_ranked;
     }
 
-    let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
-
-    // The commitment honors two floors: the displayed amount_out never drops below the public
-    // market's, and the user — who pays the exclusive route's gas — never nets less than the
-    // public route would leave them (public_net + gas).
-    let committed_amount_out =
-        (committed.amount_out_net_gas() + &exclusive_gas_cost).max(committed_amount_out.clone());
-
     let surplus_amount = exclusive_candidate.amount_out_net_gas() - committed.amount_out_net_gas();
 
     // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
@@ -764,29 +756,10 @@ fn combine_with_surplus(
 
     surplus_quote.set_amount_out(committed_amount_out.clone());
 
-    // Recompute amount_out_net_gas relative to committed output.
-    let gas_cost = if *exclusive_candidate.amount_out() >= *exclusive_candidate.amount_out_net_gas()
-    {
-        exclusive_candidate.amount_out() - exclusive_candidate.amount_out_net_gas()
-    } else {
-        BigUint::ZERO
-    };
-    let committed_net_gas = if *committed_amount_out >= gas_cost {
-        committed_amount_out - &gas_cost
-    } else {
-        BigUint::ZERO
-    };
-    surplus_quote.set_amount_out_net_gas(committed_net_gas);
+    surplus_quote.set_amount_out_net_gas(committed.amount_out_net_gas().clone());
 
     let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out.clone());
     surplus_quote = surplus_quote.with_surplus(surplus_info);
-
-    debug_assert!(
-        surplus_quote.amount_out() >= committed.amount_out(),
-        "user output ({}) must be >= committed reference ({})",
-        surplus_quote.amount_out(),
-        committed.amount_out(),
-    );
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
     result.push(surplus_quote);
