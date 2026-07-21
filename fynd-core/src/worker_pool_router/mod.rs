@@ -737,7 +737,15 @@ fn combine_with_surplus(
         return public_ranked;
     }
 
-    let surplus_amount = exclusive_route_amount_out - committed_amount_out;
+    let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
+
+    // The commitment honors two floors: the displayed amount_out never drops below the public
+    // market's, and the user — who pays the exclusive route's gas — never nets less than the
+    // public route would leave them (public_net + gas).
+    let committed_amount_out =
+        (committed.amount_out_net_gas() + &exclusive_gas_cost).max(committed_amount_out.clone());
+
+    let surplus_amount = exclusive_candidate.amount_out_net_gas() - committed.amount_out_net_gas();
 
     // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
     // attach SurplusInfo.
