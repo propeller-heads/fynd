@@ -1,7 +1,7 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::QuoteStatus;
+use fynd_core::{NoPathReason, QuoteStatus};
 use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
 use serde::Serialize;
 use tracing::info;
@@ -92,6 +92,19 @@ pub(crate) fn quote_status_code(status: QuoteStatus) -> &'static str {
     }
 }
 
+/// Stable snake_case code for a no-route [`NoPathReason`]. `""` when absent;
+/// wildcard guards the `#[non_exhaustive]` enum.
+pub(crate) fn no_route_reason_code(reason: Option<NoPathReason>) -> &'static str {
+    match reason {
+        None => "",
+        Some(NoPathReason::SourceTokenNotInGraph) => "source_token_not_in_graph",
+        Some(NoPathReason::DestinationTokenNotInGraph) => "destination_token_not_in_graph",
+        Some(NoPathReason::NoGraphPath) => "no_graph_path",
+        Some(NoPathReason::NoScorablePaths) => "no_scorable_paths",
+        Some(_) => "unknown",
+    }
+}
+
 /// Recorded outcome of a solved request, for the replay-capture log.
 pub(crate) enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
@@ -100,6 +113,9 @@ pub(crate) enum RequestOutcome {
         solve_time_ms: u64,
         /// One [`quote_status_code`] per order, in request order.
         order_statuses: Vec<&'static str>,
+        /// One [`no_route_reason_code`] per order, aligned with `order_statuses`
+        /// (`""` for non-`no_route_found` orders).
+        no_route_reasons: Vec<&'static str>,
     },
     /// Solve failed; carries the [`crate::api::error::solve_error_code`].
     Failed {
@@ -129,12 +145,13 @@ impl RequestOutcome {
 /// `event="quote_failure"`.
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {
     match outcome {
-        RequestOutcome::Solved { solve_time_ms, order_statuses } => info!(
+        RequestOutcome::Solved { solve_time_ms, order_statuses, no_route_reasons } => info!(
             event = "quote_failure",
             num_orders,
             solve_time_ms = *solve_time_ms,
             outcome = "ok",
             order_statuses = ?order_statuses,
+            no_route_reasons = ?no_route_reasons,
             request = %request_json,
             "quote failure captured"
         ),
@@ -349,6 +366,7 @@ mod tests {
                 &RequestOutcome::Solved {
                     solve_time_ms: 12,
                     order_statuses: vec!["success", "no_route_found"],
+                    no_route_reasons: vec!["", "no_graph_path"],
                 },
             );
         });
@@ -358,6 +376,39 @@ mod tests {
         assert!(logs.contains("ok"), "logs were: {logs}");
         assert!(logs.contains("no_route_found"), "logs were: {logs}");
         assert!(logs.contains("num_orders"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn no_route_reason_code_maps_variants() {
+        use fynd_core::NoPathReason;
+        assert_eq!(no_route_reason_code(None), "");
+        assert_eq!(
+            no_route_reason_code(Some(NoPathReason::SourceTokenNotInGraph)),
+            "source_token_not_in_graph"
+        );
+        assert_eq!(
+            no_route_reason_code(Some(NoPathReason::DestinationTokenNotInGraph)),
+            "destination_token_not_in_graph"
+        );
+        assert_eq!(no_route_reason_code(Some(NoPathReason::NoGraphPath)), "no_graph_path");
+        assert_eq!(no_route_reason_code(Some(NoPathReason::NoScorablePaths)), "no_scorable_paths");
+    }
+
+    #[test]
+    fn logs_ok_outcome_with_no_route_reasons() {
+        let logs = capture_logs(|| {
+            log_request_capture(
+                1,
+                r#"{"orders":[]}"#,
+                &RequestOutcome::Solved {
+                    solve_time_ms: 5,
+                    order_statuses: vec!["no_route_found"],
+                    no_route_reasons: vec!["destination_token_not_in_graph"],
+                },
+            );
+        });
+        assert!(logs.contains("no_route_reasons"), "logs were: {logs}");
+        assert!(logs.contains("destination_token_not_in_graph"), "logs were: {logs}");
     }
 
     #[test]
@@ -376,8 +427,11 @@ mod tests {
 
     #[test]
     fn is_failure_false_when_all_orders_succeed() {
-        let outcome =
-            RequestOutcome::Solved { solve_time_ms: 5, order_statuses: vec!["success", "success"] };
+        let outcome = RequestOutcome::Solved {
+            solve_time_ms: 5,
+            order_statuses: vec!["success", "success"],
+            no_route_reasons: vec!["", ""],
+        };
         assert!(!outcome.is_failure());
     }
 
@@ -386,6 +440,7 @@ mod tests {
         let outcome = RequestOutcome::Solved {
             solve_time_ms: 5,
             order_statuses: vec!["success", "no_route_found"],
+            no_route_reasons: vec!["", "no_graph_path"],
         };
         assert!(outcome.is_failure());
     }
