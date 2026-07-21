@@ -89,6 +89,53 @@ match role {
 }
 ```
 
+```
+                          matched transaction
+                          (tx.to = entry_point)
+                                 │
+                                 ▼
+               ┌─────────────────────────────────────┐
+               │ Is entry_point a known VENUE?        │  registry.venue_name(tx.to)
+               │   (Relay router, MetaMask router …)  │
+               └─────────────────────────────────────┘
+                      │ yes                    │ no
+                      ▼                        ▼
+            TraderRole::Venue(name)   ┌──────────────────────────────┐
+                      │               │ Is entry_point a BATCH SETTLER│  is_batch_settler(tx.to)
+                      │               │   (CoW settlement contract)?  │
+                      │               └──────────────────────────────┘
+                      │                    │ yes            │ no
+                      │                    ▼                ▼
+                      │             TraderRole::Maker   ┌───────────────────────┐
+                      │                    │            │ Is entry_point KNOWN? │  is_known(tx.to)
+                      │                    │            │  (a registered router)│
+                      │                    │            └───────────────────────┘
+                      │                    │              │ yes          │ no
+                      │                    │              ▼              ▼
+                      │                    │       TraderRole::Sender  TraderRole::Maker
+                      │                    │              │              │
+                      ▼                    ▼              ▼              ▼
+           venues::decoders_for(name)  MakerNetting   SenderNetting   MakerNetting
+                      │                 (netting.rs)   (netting.rs)    (netting.rs)
+           ┌──────────┴───────────┐
+           ▼                      ▼
+     [RelayNetting]        [MetaMaskNetting]
+     (venues/relay.rs)     (venues/metamask.rs)
+
+   direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
+     0x called directly             → Sender → [ SenderNetting ]  (your own tx, your gas)
+     0x settling your intent order  → Maker  → [ MakerNetting ]   (a solver settles for you)
+   when a solver settles an intent order, its own decoder can replace MakerNetting.
+
+   implement a new decoder where the entity that carries the flow lives:
+   ├─ new venue                       → venues/<name>.rs  +  arm in venues::decoders_for("<name>")
+   └─ new read for an existing venue  → another TradeDecoder in that venue's list (first-wins order)
+
+   replace a Sender/Maker leaf in decode.rs decoders_for — the arm is global, so:
+     Maker => [ MyDecoder, MakerNetting ]   # prepend: self-guard; netting stays the fallback
+     Maker => [ MyDecoder ]                 # full swap: no fallback — must cover every maker trade
+```
+
 One transaction goes to one entity — a direct sender, an order maker, or a specific venue — and
 that entity's decoders are tried in order, first hit wins. Every kind of evidence is gathered
 once into the `DecodeContext`, so a decoder takes only what it needs and a decoder that declines
