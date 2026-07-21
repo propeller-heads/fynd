@@ -7,7 +7,7 @@
 //! and back-of-block (N).
 
 mod compare;
-mod jsonl;
+pub(crate) mod jsonl;
 pub(crate) mod monitor;
 
 use alloy::primitives::{Address, TxHash, U256};

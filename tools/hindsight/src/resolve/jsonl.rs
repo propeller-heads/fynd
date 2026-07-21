@@ -118,7 +118,7 @@ fn date_from_unix(secs: u64) -> String {
 /// filter to wins for the improvement view or to unsolvables for the coverage worklist (where Fynd
 /// needs to improve). Losses keep their route (what path Fynd took and lost on); unsolvables keep
 /// the reason.
-pub(super) fn write_comparisons<W: std::io::Write>(
+pub(crate) fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
     prices_top: &Prices,

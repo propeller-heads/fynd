@@ -1,4 +1,5 @@
 mod decoder;
+mod report;
 mod resolve;
 mod telemetry;
 mod usd;
@@ -14,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
+    report::ReportArgs,
     resolve::monitor::MonitorArgs,
     verify::allium::AlliumClient,
 };
@@ -34,6 +36,8 @@ enum Command {
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
     Monitor(MonitorArgs),
+    /// Render an offline HTML report from a monitor run's comparison JSONL.
+    Report(ReportArgs),
 }
 
 /// Chain selection shared by every subcommand: which chain to operate on and how to reach it.
@@ -133,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
         Command::Monitor(args) => resolve::monitor::run(args).await,
+        Command::Report(args) => report::run(args),
     };
 
     // Log the failure before returning it: the fmt subscriber above writes to stdout, whereas a
