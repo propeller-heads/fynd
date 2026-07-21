@@ -94,7 +94,11 @@ pub(crate) async fn quote(
         },
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
     };
-    log_request_capture(num_orders, &replay_json, &outcome);
+    // Only failed quotes are logged (successful quotes are the common case and
+    // would dominate log volume); see RequestOutcome::is_failure.
+    if outcome.is_failure() {
+        log_request_capture(num_orders, &replay_json, &outcome);
+    }
 
     let core_quote = result?;
     let dto_quote: dto::Quote = core_quote.into();

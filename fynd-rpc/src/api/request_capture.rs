@@ -108,27 +108,42 @@ pub(crate) enum RequestOutcome {
     },
 }
 
-/// Emits the single `quote_request` replay-capture log line.
+impl RequestOutcome {
+    /// Whether this outcome represents a failed quote: a solver error, or a
+    /// solve in which at least one order did not succeed. Successful quotes
+    /// (every order `success`) are not logged.
+    pub(crate) fn is_failure(&self) -> bool {
+        match self {
+            RequestOutcome::Failed { .. } => true,
+            RequestOutcome::Solved { order_statuses, .. } => order_statuses
+                .iter()
+                .any(|status| *status != "success"),
+        }
+    }
+}
+
+/// Emits the single `quote_failure` capture log line.
 ///
-/// `request_json` is the sanitized, re-issuable request from
-/// [`replay_json`]. Filter these in Loki with `event="quote_request"`.
+/// `request_json` is the sanitized, re-issuable request from [`replay_json`].
+/// Only failed quotes are logged; filter these in Loki with
+/// `event="quote_failure"`.
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {
     match outcome {
         RequestOutcome::Solved { solve_time_ms, order_statuses } => info!(
-            event = "quote_request",
+            event = "quote_failure",
             num_orders,
             solve_time_ms = *solve_time_ms,
             outcome = "ok",
             order_statuses = ?order_statuses,
             request = %request_json,
-            "quote request captured"
+            "quote failure captured"
         ),
         RequestOutcome::Failed { code } => info!(
-            event = "quote_request",
+            event = "quote_failure",
             num_orders,
             outcome = *code,
             request = %request_json,
-            "quote request captured"
+            "quote failure captured"
         ),
     }
 }
@@ -338,7 +353,7 @@ mod tests {
             );
         });
         assert!(logs.contains("event"), "logs were: {logs}");
-        assert!(logs.contains("quote_request"), "logs were: {logs}");
+        assert!(logs.contains("quote_failure"), "logs were: {logs}");
         assert!(logs.contains("outcome"), "logs were: {logs}");
         assert!(logs.contains("ok"), "logs were: {logs}");
         assert!(logs.contains("no_route_found"), "logs were: {logs}");
@@ -350,7 +365,28 @@ mod tests {
         let logs = capture_logs(|| {
             log_request_capture(1, r#"{"orders":[]}"#, &RequestOutcome::Failed { code: "TIMEOUT" });
         });
-        assert!(logs.contains("quote_request"), "logs were: {logs}");
+        assert!(logs.contains("quote_failure"), "logs were: {logs}");
         assert!(logs.contains("TIMEOUT"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn is_failure_true_for_failed_outcome() {
+        assert!(RequestOutcome::Failed { code: "TIMEOUT" }.is_failure());
+    }
+
+    #[test]
+    fn is_failure_false_when_all_orders_succeed() {
+        let outcome =
+            RequestOutcome::Solved { solve_time_ms: 5, order_statuses: vec!["success", "success"] };
+        assert!(!outcome.is_failure());
+    }
+
+    #[test]
+    fn is_failure_true_when_any_order_not_success() {
+        let outcome = RequestOutcome::Solved {
+            solve_time_ms: 5,
+            order_statuses: vec!["success", "no_route_found"],
+        };
+        assert!(outcome.is_failure());
     }
 }
