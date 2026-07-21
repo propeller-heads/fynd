@@ -30,7 +30,7 @@ pub(crate) struct Prices {
 }
 
 impl Prices {
-    /// An empty snapshot carrying `registry`'s USD anchors; fill it with [`Prices::insert`].
+    /// An empty snapshot carrying `registry`'s USD anchors; fill it with `Prices::insert`.
     pub(crate) fn new(registry: &Registry) -> Self {
         Self {
             map: HashMap::new(),
@@ -115,7 +115,7 @@ impl Prices {
 
     /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).
     ///
-    /// Both amounts are `token_out` native units, valued in USD via [`Prices::value_usd`]; the
+    /// Both amounts are `token_out` native units, valued in USD via `Prices::value_usd`; the
     /// savings is their difference. Returns `None` when `token_out` is not priced or no anchor
     /// stablecoin is available.
     pub(crate) fn savings_usd(
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn anchors_come_from_the_address_book() {
+    fn test_anchors_against_the_address_book() {
         // USDC and WETH are anchors because the ethereum address book registers them, not
         // because this module knows them.
         let registry = Registry::ethereum();
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn output_leg_stable_positive_when_fynd_better() {
+    fn test_output_leg_stable_fynd_better() {
         // WETH→USDC: Fynd 1010 USDC vs settled 1000 USDC → +$10.
         let s = prices()
             .savings_usd(USDC, U256::from(1_010_000_000u64), U256::from(1_000_000_000u64))
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn output_leg_negative_when_fynd_worse() {
+    fn test_output_leg_fynd_worse() {
         let s = prices()
             .savings_usd(USDC, U256::from(990_000_000u64), U256::from(1_000_000_000u64))
             .unwrap();
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn output_leg_non_stable_token_priced_via_eth() {
+    fn test_output_leg_non_stable_token_priced_via_eth() {
         // USDC→WETH: Fynd 1.01 WETH vs settled 1.00 WETH → +0.01 ETH = +$20 (ETH = $2000).
         let one_weth = U256::from(10u64).pow(U256::from(18u64));
         let fynd_weth = one_weth * U256::from(101u64) / U256::from(100u64);
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn native_eth_falls_back_to_weth_price() {
+    fn test_native_eth_with_weth_price() {
         // token_out is native ETH (zero address); only WETH is priced → use WETH's price.
         let one_eth = U256::from(10u64).pow(U256::from(18u64));
         let fynd_eth = one_eth * U256::from(101u64) / U256::from(100u64);
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn large_gain_not_capped() {
+    fn test_large_gain() {
         // Fynd 1500 USDC vs settled 1000 USDC → +$500, no plausibility cap.
         let s = prices()
             .savings_usd(USDC, U256::from(1_500_000_000u64), U256::from(1_000_000_000u64))
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn value_usd_scales_amount_by_price_and_anchor() {
+    fn test_value_usd_priced_and_anchored() {
         // 1000 USDC (6 dp) → $1000.
         let v = prices()
             .value_usd(USDC, U256::from(1_000_000_000u64))
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn gas_in_token_converts_wei_at_snapshot_price() {
+    fn test_gas_in_token_at_snapshot_price() {
         // 0.001 ETH of gas, USDC at 2e-9 native units per wei (ETH = $2000) → 2 USDC.
         let gas_wei = U256::from(10u64).pow(U256::from(15u64));
         let got = prices()
@@ -256,24 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn gas_in_token_unpriced_token_is_none() {
+    fn test_gas_in_token_unpriced() {
         assert_eq!(prices().gas_in_token(U256::from(1u64), Address::repeat_byte(0x42)), None);
     }
 
     #[test]
-    fn value_usd_unpriced_or_no_anchor_is_none() {
+    fn test_value_usd_unpriced_or_no_anchor() {
         assert_eq!(prices().value_usd(Address::repeat_byte(0x42), U256::from(1u64)), None);
         assert_eq!(empty_prices().value_usd(USDC, U256::from(1u64)), None);
     }
 
     #[test]
-    fn unpriced_output_token_is_none() {
+    fn test_unpriced_output_token() {
         let unknown = Address::repeat_byte(0x42);
         assert_eq!(prices().savings_usd(unknown, U256::from(2u64), U256::from(1u64)), None);
     }
 
     #[test]
-    fn no_anchor_stablecoin_is_none() {
+    fn test_no_anchor_stablecoin() {
         // WETH priced but no stablecoin → cannot anchor ETH→USD.
         let mut prices = empty_prices();
         prices.insert(WETH, WETH_PRICE);
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_prices_is_none() {
+    fn test_savings_usd_with_empty_prices() {
         assert_eq!(empty_prices().savings_usd(USDC, U256::from(2u64), U256::from(1u64)), None);
     }
 }

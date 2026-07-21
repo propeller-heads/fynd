@@ -1,7 +1,7 @@
 //! JSON-lines output for the live monitor.
 //!
 //! Projects each re-solved trade to one JSON record carrying both block states (verdict, bps, USD
-//! deltas, and a slim route/calldata or the unsolvable reason), and projects a Fynd [`OrderQuote`]
+//! deltas, and a slim route/calldata or the unsolvable reason), and projects a Fynd `OrderQuote`
 //! to a slim route + calldata that omits each hop's bulky, sometimes-unserializable
 //! `protocol_state`.
 
@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::{
     resolve::{Outcome, RangeComparison, StateResult},
-    usd,
+    usd::Prices,
 };
 
 /// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
@@ -121,8 +121,8 @@ fn date_from_unix(secs: u64) -> String {
 pub(super) fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
 ) {
     for range in ranges {
         let Ok(line) = serde_json::to_string(&comparison_record(range, prices_top, prices_back))
@@ -144,8 +144,8 @@ pub(super) fn write_comparisons<W: std::io::Write>(
 /// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
 fn comparison_record(
     range: &RangeComparison,
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
 ) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
@@ -154,6 +154,7 @@ fn comparison_record(
         "venue": range.venue,
         "solver": range.solver,
         "solver_source": range.solver_source,
+        "decoder": range.decoder,
         "token_in": format!("{:#x}", range.token_in),
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
@@ -176,7 +177,7 @@ fn comparison_record(
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> serde_json::Value {
     let token_out = range.token_out;
     let solved = match &state.outcome {
@@ -266,12 +267,12 @@ mod tests {
         resolve::{build_range, SolvedAmount},
     };
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     #[test]
-    fn date_from_unix_matches_utc_calendar() {
+    fn test_date_from_unix_at_day_boundaries() {
         assert_eq!(date_from_unix(0), "1970-01-01");
         assert_eq!(date_from_unix(86_399), "1970-01-01"); // last second of the first day
         assert_eq!(date_from_unix(86_400), "1970-01-02"); // day boundary
@@ -281,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn rotating_writer_switches_files_at_a_new_date() {
+    fn test_rotating_writer_at_a_new_date() {
         let dir = std::env::temp_dir().join(format!("hindsight-rotate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -307,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_carries_solver_quote() {
+    fn test_comparison_record_with_solver_quote() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
@@ -315,12 +316,13 @@ mod tests {
             venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::ZERO,
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(69_996_280_564u64),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: Some(SolverQuote {
@@ -353,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn slim_transaction_emits_hex_calldata_and_address() {
+    fn test_slim_transaction_encoding() {
         use tycho_simulation::tycho_common::Bytes;
         let tx = Transaction::new(
             Bytes::from(vec![0x11u8; 20]),
@@ -372,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn improvement_record_carries_top_and_back_with_usd_and_slim_route() {
+    fn test_improvement_record_top_and_back() {
         let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
             .parse()
             .unwrap();
@@ -391,12 +393,13 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
@@ -464,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_captures_unsolvable_reason_and_null_quote() {
+    fn test_comparison_record_unsolvable() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
@@ -472,12 +475,13 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
@@ -504,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_carries_sandwich_evidence_and_becomes_sandwiched_verdict() {
+    fn test_comparison_record_sandwiched() {
         let mut trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
@@ -512,12 +516,13 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,

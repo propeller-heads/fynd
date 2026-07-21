@@ -1,8 +1,8 @@
 //! Re-solve engine: run Fynd on a decoded swap's inputs and compare its output against what
 //! actually settled on-chain.
 //!
-//! The [`SteppingSolver`] trait abstracts the solver so the two-state comparison pipeline is
-//! testable without a live Fynd instance. The production implementation ([`monitor`]) drives an
+//! The `SteppingSolver` trait abstracts the solver so the two-state comparison pipeline is
+//! testable without a live Fynd instance. The production implementation (`monitor`) drives an
 //! in-process `fynd-core` solver one block at a time, re-solving each trade at top-of-block (N-1)
 //! and back-of-block (N).
 
@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::{
     decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
-    usd,
+    usd::Prices,
 };
 
 /// A Fynd quote for the re-solved order.
@@ -40,7 +40,7 @@ pub(crate) enum Outcome {
     /// Fynd produced a quote for the trade's full size.
     Solved(SolvedAmount),
     /// Fynd returned a route but for far less than the settled size — a liquidity-limited partial
-    /// route. Tracked apart from [`Outcome::Unsolvable`] so a coverage gap is not read as a loss.
+    /// route. Tracked apart from `Outcome::Unsolvable` so a coverage gap is not read as a loss.
     Partial(String),
     /// Fynd could not solve at all (missing token in Tycho, insufficient liquidity, timeout).
     Unsolvable(String),
@@ -73,6 +73,8 @@ pub(crate) struct RangeComparison {
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
+    /// Which decoder recovered the settled trade.
+    pub decoder: &'static str,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -97,8 +99,8 @@ pub(crate) struct RangeComparison {
 }
 
 /// Solves a sell order at the current block state and steps to the next block. The production
-/// implementation ([`monitor`]) drives an in-process `fynd-core` solver via
-/// [`fynd_core::BlockStepController`]; tests use a mock returning a top- then back-of-block
+/// implementation (`monitor`) drives an in-process `fynd-core` solver via
+/// `fynd_core::BlockStepController`; tests use a mock returning a top- then back-of-block
 /// outcome.
 #[async_trait]
 pub(crate) trait SteppingSolver {
@@ -108,7 +110,7 @@ pub(crate) trait SteppingSolver {
     async fn advance(&self) -> anyhow::Result<()>;
 }
 
-/// Build a [`RangeComparison`] from the two per-state outcomes of a trade.
+/// Build a `RangeComparison` from the two per-state outcomes of a trade.
 ///
 /// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
 /// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
@@ -116,14 +118,14 @@ pub(crate) trait SteppingSolver {
 /// their own gas.
 ///
 /// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
-/// [`Verdict::Sandwiched`]: its win or loss measures the MEV that moved the settled output, not
+/// `Verdict::Sandwiched`: its win or loss measures the MEV that moved the settled output, not
 /// routing quality. Unsolved states keep their verdicts — a sandwich explains the settled price,
 /// not why Fynd had no route, so the coverage buckets (`Unsolvable`, `CoverageMiss`) stay
 /// intact. The bps/USD deltas are left untouched either way, so the size of MEV-inflated deltas
 /// stays studyable offline.
 pub(crate) fn build_range(
     trade: &DecodedTrade,
-    prices: &usd::Prices,
+    prices: &Prices,
     top: Outcome,
     back: Outcome,
 ) -> RangeComparison {
@@ -148,6 +150,7 @@ pub(crate) fn build_range(
         venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
+        decoder: trade.decoder,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
@@ -168,7 +171,7 @@ pub(crate) fn build_range(
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> anyhow::Result<Vec<RangeComparison>> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
@@ -198,8 +201,8 @@ mod tests {
     use super::*;
     use crate::decoder::Registry;
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     fn trade(settled: u64) -> DecodedTrade {
@@ -210,12 +213,13 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
@@ -260,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_headline_is_top() {
+    fn test_build_range_headline() {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
@@ -272,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_partial_fill_is_coverage_miss() {
+    fn test_build_range_partial_fill() {
         // Fynd fills only 10% of a 10_000 settled trade → reclassified as a coverage miss.
         let range =
             build_range(&trade(10_000), &empty_prices(), solved(1_000, 990), solved(1_000, 990));
@@ -282,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_sandwiched_trade_overrides_verdict_but_keeps_deltas() {
+    fn test_build_range_sandwiched_trade() {
         let mut sandwiched = trade(10_000);
         sandwiched.sandwich = Some(SandwichEvidence {
             front_tx: TxHash::repeat_byte(0xaa),
@@ -302,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_sandwich_override_spares_unsolved_states() {
+    fn test_build_range_sandwiched_with_unsolved_states() {
         // The sandwich explains the settled price, not why Fynd had no route: an unsolved state
         // keeps its verdict so the coverage buckets are unaffected by the reclassification.
         let mut sandwiched = trade(10_000);
@@ -325,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_deducts_settled_gas_when_priced() {
+    fn test_build_range_priced_gas() {
         // The settled trader paid 200 token_out units of gas (100 wei at a price of 2 units/wei):
         // the secondary net column carries the deduction; the verdict stays gross vs gross.
         let mut with_gas = trade(10_000);
@@ -340,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_unpriced_gas_keeps_settled_gross() {
+    fn test_build_range_unpriced_gas() {
         // token_out is not in the price map → no deduction. The secondary net column stays
         // gross; the verdict is unaffected either way (gross 10_050 beats gross 10_000).
         let mut with_gas = trade(10_000);
@@ -353,7 +357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_block_range_pairs_top_and_back() {
+    async fn test_resolve_block_range_top_and_back() {
         // Two trades. Top-of-block is optimistic (better), back-of-block pessimistic (worse).
         let solver = MockStepping {
             advanced: std::sync::atomic::AtomicBool::new(false),

@@ -1,9 +1,13 @@
-//! Post-decode vetoes: netted "swaps" that are not comparable trades.
+//! Vetoes: rejections that keep non-trades out of the records, and the `Veto` type they all
+//! share.
 //!
-//! Netting can pair value legs that were never a swap — the payment side of an NFT purchase, or
-//! a cross-chain deposit's dust refund. Each guard recognizes one such shape from the
-//! transaction itself (no prices, no external data); [`veto`] is the single check the decoder
-//! runs on every decoded flow, so adding a guard never touches the orchestrator.
+//! There are two veto points. Solver-specific vetoes run at match time on logs alone (see
+//! `solvers::solver_veto`), before a transaction costs a trace. The checks in this module run
+//! after decoding: netting can pair value legs that were never a swap — the payment side of an
+//! NFT purchase, or a cross-chain deposit's dust refund. Each check recognizes one such shape
+//! from the transaction itself (no prices, no external data); `check` is the single entry
+//! point the decoder runs on every decoded flow, so adding a check never touches the
+//! orchestrator.
 
 use alloy::{
     primitives::{Address, U256},
@@ -13,25 +17,30 @@ use alloy::{
 };
 
 use crate::decoder::{
-    ledger::{NetSwap, Transfer},
+    decode::TraderFlow,
     registry::Registry,
-    strategy::Flow,
+    transfer_ledger::{NetSwap, Transfer},
 };
 
-/// A decoded flow rejected as not a comparable trade, by the shape that disqualified it.
-#[derive(Debug, Clone, Copy)]
+/// A transaction rejected as not a comparable trade, by the shape that disqualified it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Veto {
     /// The trader received an NFT: the netted token flow is the payment side of a purchase
     /// (e.g. an NFT sweep through Relay + Seaport), and the real consideration is invisible to
-    /// ERC-20 netting — recording it would pair the payment with the change as a phantom swap.
+    /// ERC-20 netting — recording it would pair the payment with the change as a swap that never
+    /// happened.
     NftPurchase,
     /// A native <-> wrapped-native "swap" far off 1:1, which a wrap or unwrap cannot produce: a
     /// mis-paired cross-chain deposit whose only same-chain receipt is a dust remainder refund.
     MispairedWrapPair,
+    /// A cross-chain bridge order settled by a solver router: the real output lands on the
+    /// destination chain, so there is no same-chain swap to record. Placed at match time by
+    /// `solvers::solver_veto`, never by `check`.
+    BridgeOrder,
 }
 
-/// Check a decoded flow against every guard, returning the first veto.
-pub(crate) fn veto(flow: &Flow, logs: &[Log], registry: &Registry) -> Option<Veto> {
+/// Check a decoded flow against every post-decode veto, returning the first.
+pub(crate) fn check(flow: &TraderFlow, logs: &[Log], registry: &Registry) -> Option<Veto> {
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }
@@ -83,7 +92,7 @@ fn received_nft(logs: &[Log], recipient: Address) -> bool {
 }
 
 /// A wrap-pair trade (native <-> wrapped native) more than this factor off 1:1 is mis-paired:
-/// wrapping is exactly 1:1 by construction, and fee skims only shave a few percent, so nothing
+/// wrapping is exactly 1:1 by construction, and venue fees only remove a few percent, so nothing
 /// legitimate strays this far.
 const WRAP_PAIR_MAX_RATIO: u64 = 2;
 
@@ -91,8 +100,8 @@ const WRAP_PAIR_MAX_RATIO: u64 = 2;
 /// cannot produce.
 ///
 /// Seen with cross-chain deposits where the trader sends WETH and the only same-chain receipt is
-/// a dust remainder refund in native ETH — netting pairs the two into a phantom trade orders of
-/// magnitude off parity.
+/// a dust remainder refund in native ETH — netting pairs the two into a trade that never happened,
+/// orders of magnitude off parity.
 fn wrap_pair_mispaired(swap: &NetSwap, wrapped_native: Address) -> bool {
     let pair = [swap.token_in, swap.token_out];
     if !(pair.contains(&Address::ZERO) && pair.contains(&wrapped_native)) {
@@ -111,7 +120,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_nft_transfer_log, make_transfer_log, swap};
 
     #[test]
-    fn received_nft_detects_erc721() {
+    fn test_received_nft_erc721() {
         // The NFT purchase shape: buyer pays a token and receives an ERC-721, not a token amount.
         let buyer = addr(1);
         let seller = addr(2);
@@ -123,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn received_nft_detects_erc1155_single() {
+    fn test_received_nft_erc1155_single() {
         let buyer = addr(1);
         let operator = addr(3);
         let seller = addr(2);
@@ -146,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn received_nft_ignores_erc20_transfers() {
+    fn test_received_nft_erc20_only() {
         // A plain ERC-20 Transfer (three topics, amount in data) must not read as an NFT even
         // though it shares the event signature.
         let user = addr(1);
@@ -155,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_pair_mispaired_flags_dust_refund() {
+    fn test_wrap_pair_dust_refund() {
         // Relay cross-chain deposit shape (tx 0xc9de04eb…): 0.02 WETH in, a billionth of it
         // refunded back as native ETH — not an unwrap.
         let weth = addr(20);
@@ -167,15 +176,15 @@ mod tests {
     }
 
     #[test]
-    fn wrap_pair_near_parity_kept() {
+    fn test_wrap_pair_near_parity() {
         let weth = addr(20);
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 1000), weth));
-        // A fee-skimmed unwrap stays within the 2x band.
+        // An unwrap with a fee taken stays within the 2x band.
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 900), weth));
     }
 
     #[test]
-    fn non_wrap_pair_never_flagged() {
+    fn test_non_wrap_pair() {
         // Ordinary token pairs legitimately trade at any rate (decimals differ), and a
         // token <-> wrapped-native trade without the native side is a real swap too.
         let weth = addr(20);

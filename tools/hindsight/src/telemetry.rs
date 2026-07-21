@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::{
     decoder::Registry,
     resolve::{Outcome, RangeComparison, StateResult, Verdict},
-    usd,
+    usd::Prices,
 };
 
 const TRADES_TOTAL: &str = "hindsight_trades_total";
@@ -48,7 +48,7 @@ fn venue_label<'a>(venue: &'a str, registry: &Registry) -> &'a str {
 /// Metric label for a range's settling solver. Registered solver names pass through; everything
 /// else collapses to "unknown". Attribution can also produce raw addresses, venue names, and
 /// venue-declared ids like "pancakeSwapRouterFeeDynamic" — none of which belong in a bounded
-/// metric vocabulary. The original label stays in the JSONL records, where it serves as the
+/// metric label set. The original label stays in the JSONL records, where it serves as the
 /// worklist for expanding the address book.
 fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
     if registry.is_solver_name(solver) {
@@ -125,8 +125,8 @@ pub(crate) fn describe() {
 pub(crate) fn record_range(
     range: &RangeComparison,
     chain: &str,
-    prices_top: &usd::Prices,
-    prices_back: &usd::Prices,
+    prices_top: &Prices,
+    prices_back: &Prices,
     registry: &Registry,
 ) {
     let labels = MetricLabels {
@@ -195,7 +195,7 @@ pub(crate) fn record_range(
 /// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD histograms carry no
 /// outcome label, so skipping is the only way to keep the "value of adding Fynd" aggregates
 /// clean. The USD value is still computed and returned so the per-trade Loki line (in
-/// [`record_range`]) keeps logging.
+/// `record_range`) keeps logging.
 ///
 /// Returns the signed USD savings it computed, `None` when the state is unsolved or unpriced.
 fn record_state(
@@ -203,7 +203,7 @@ fn record_state(
     state: &StateResult,
     state_label: &'static str,
     labels: &MetricLabels<'_>,
-    prices: &usd::Prices,
+    prices: &Prices,
 ) -> Option<f64> {
     counter!(
         TRADES_TOTAL,
@@ -371,8 +371,8 @@ mod tests {
         resolve::{build_range, SolvedAmount},
     };
 
-    fn empty_prices() -> usd::Prices {
-        usd::Prices::new(&Registry::ethereum())
+    fn empty_prices() -> Prices {
+        Prices::new(&Registry::ethereum())
     }
 
     fn trade(token_out: Address, settled: u64) -> DecodedTrade {
@@ -383,12 +383,13 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
@@ -406,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_labels() {
+    fn test_outcome_labels() {
         assert_eq!(outcome_label(Verdict::Win), "win");
         assert_eq!(outcome_label(Verdict::Loss), "loss");
         assert_eq!(outcome_label(Verdict::CoverageMiss), "coverage_miss");
@@ -415,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn usd_outlier_threshold() {
+    fn test_usd_outlier_threshold() {
         assert!(!is_usd_outlier(0.0));
         assert!(!is_usd_outlier(USD_OUTLIER_THRESHOLD - 1.0));
         assert!(!is_usd_outlier(-(USD_OUTLIER_THRESHOLD - 1.0)));
@@ -424,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_labels_both_states() {
+    fn test_record_range_both_states() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
@@ -478,8 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn label_vocabulary_is_registry_bounded() {
-        // Every metric label value must come from the registry vocabulary: registered venue and
+    fn test_label_values_against_the_registry() {
+        // Every metric label value must come from the registry: registered venue and
         // solver names pass through; raw addresses, unregistered names, and calldata-declared
         // aggregator ids collapse — venues to "other", solvers to "unknown".
         let registry = Registry::ethereum();
@@ -497,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_address_labels_collapse() {
+    fn test_raw_address_labels() {
         // Unknown venues/solvers carry raw 0x… addresses; every distinct address would mint a
         // fresh series set, unbounded over a long run. Venues outside the registry's
         // [venues.*] sections collapse to "other", solvers outside [solvers] to "unknown".
@@ -524,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_solver_label_collapses_to_unknown() {
+    fn test_fallback_solver_label() {
         // The Fallback tier labels the solver with the entry point — a venue name like "relay",
         // not a solver — which would pollute the dashboard's solver dropdown. The metric label
         // must collapse to "unknown"; the JSONL keeps the entry-point detail.
@@ -550,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_falls_back_to_input_leg_when_output_unpriced() {
+    fn test_volume_with_unpriced_output() {
         // Swap into a long-tail token: the output leg is unpriced — which is exactly why the
         // trade is unsolvable — so volume must be valued from the input leg instead, or
         // unsolvable volume would be systematically undercounted.
@@ -583,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_skips_savings_when_unsolvable() {
+    fn test_record_range_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
@@ -609,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn record_range_skips_savings_when_sandwiched() {
+    fn test_record_range_sandwiched() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let mut sandwiched = trade(usdc, 1_000_000_000);
         sandwiched.sandwich = Some(SandwichEvidence {

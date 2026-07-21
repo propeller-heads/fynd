@@ -1,7 +1,7 @@
 //! Which solver settled a matched transaction.
 //!
 //! One decision, taken here in full: the solver label on a record comes from the first evidence
-//! tier that answers, most- to least-trusted (see [`AttributionSource`]). The tier is recorded
+//! tier that answers, most- to least-trusted (see `AttributionSource`). The tier is recorded
 //! alongside the label so downstream analysis can weigh it — an embedded quote attached to a
 //! `declared` attribution is solid; one attached to a `largest_call` guess is not.
 
@@ -75,7 +75,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, frame, PERMIT2};
 
     #[test]
-    fn declared_solver_outranks_the_trace() {
+    fn test_declared_solver_with_trace_candidate() {
         // MetaMask declares its solver in calldata; even a known router in the trace must not
         // override it.
         let registry = Registry::ethereum();
@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_swap_attributes_entry_point() {
+    fn test_direct_swap_entry_point() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let root = frame("CALL", addr(1), oneinch, 0);
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_attributes_internal_solver() {
+    fn test_relay_internal_solver() {
         // Mirrors the real Relay tx: the client router calls 0x's AllowanceHolder.
         // root(relay) -> [ relay (self-call), 0x AllowanceHolder (the solver) ]
         let registry = Registry::ethereum();
@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_attributes_tycho_router() {
+    fn test_relay_tycho_router() {
         // Real tx 0x8b461c…: Relay ApprovalProxy -> Relay router -> Tycho router.
         // The settling solver is Tycho even though it sits two levels deep.
         let registry = Registry::ethereum();
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_solver_falls_back_to_largest_external_call() {
+    fn test_unknown_solver_largest_external_call() {
         // No known solver in the trace: pick the largest external call,
         // skipping the client self-call and the refund back to the sender.
         let registry = Registry::ethereum();
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn attribution_declines_zero_value_fallback() {
+    fn test_attribution_zero_value_fallback() {
         // Unknown solver, token->token swap: every child call moves zero value, so the guess
         // would degenerate to the first child (the Permit2 token pull). The record is labeled
         // with its entry point instead, marked as a fallback.
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn attribution_never_picks_wrapped_native() {
+    fn test_attribution_wrapped_native_frames() {
         // ETH-input swap through an unknown router: the highest-value direct call is the
         // WETH.deposit() wrapping the input. Infrastructure, not a solver — the guess must
         // fall through to the real router call.
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn attribution_never_picks_permit2() {
+    fn test_attribution_permit2_frames() {
         // Even when Permit2 is the highest-value direct call, it is infrastructure, not a solver.
         let registry = Registry::ethereum();
         let sender = addr(1);
