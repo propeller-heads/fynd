@@ -29,8 +29,10 @@ use tycho_simulation::tycho_common::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
-use crate::algorithm::NoPathReason;
-use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
+use crate::{
+    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
+    AlgorithmError,
+};
 
 // ============================================================================
 // REQUEST TYPES
