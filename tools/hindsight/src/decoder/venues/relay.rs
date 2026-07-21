@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_external_token_fill() {
+    fn test_rebalance_external_token_fill() {
         let fee = addr(99);
         let pool = addr(50);
         let recipient = addr(7);
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_external_native_eth_out() {
+    fn test_rebalance_external_native_eth_out() {
         let fee = addr(99);
         let pool = addr(50);
         let recipient = addr(7);
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_internal_back_to_collector() {
+    fn test_rebalance_internal_back_to_collector() {
         let fee = addr(99);
         let pool = addr(50);
         let token_in = addr(10);
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_multi_recipient() {
+    fn test_rebalance_multi_recipient() {
         let fee = addr(99);
         let pool = addr(50);
         let token_in = addr(10);
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_unconverted_payout() {
+    fn test_rebalance_unconverted_payout() {
         // Live tx 0x455f5202…: the collector pays out its token unconverted to an external
         // recipient (cross-chain order settled from same-token inventory) plus a tiny native gas
         // top-up. Pairing the top-up as "the output" fabricated a 10-million-bps win — a payout
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_without_collector_outflow() {
+    fn test_rebalance_without_collector_outflow() {
         let logs = vec![make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000))];
         let collectors = HashSet::from([addr(99)]);
         let routers = HashSet::from([addr(2)]);
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_flow_with_fee() {
+    async fn test_user_flow_with_fee() {
         // User swap through Relay: sender nets token_in -> token_out, with an input-side fee to
         // the real Relay collector. The fee is backed out of amount_in.
         let registry = Registry::ethereum();
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collector_is_the_trader() {
+    async fn test_collector_is_the_trader() {
         // Treasury op (live tx 0x80a4c0…): the fee collector itself unwraps WETH via the router.
         // Its 1:1 native receipt must not be treated as a fee and added back — that doubled the
         // output.
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebalance_fill() {
+    async fn test_rebalance_fill() {
         // Solver fill: the sender has no net flow; the collector funds the swap. No fee back-out.
         let registry = Registry::ethereum();
         let collector = relay_collector(&registry);

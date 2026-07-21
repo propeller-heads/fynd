@@ -120,7 +120,7 @@ mod tests {
     };
 
     #[test]
-    fn implementation_names_against_the_address_book() {
+    fn test_implementation_names_against_the_address_book() {
         // A typo'd name here would compile and silently never match, so the registration list
         // gets the same validation as venue bindings: every name must exist in the book.
         let registry = Registry::ethereum();
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_veto_bridge_orders() {
+    fn test_solver_veto_bridge_orders() {
         let registry = Registry::ethereum();
         let lifi_router: Address = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
             .parse()
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_veto_scoped_to_the_solver_present() {
+    fn test_solver_veto_scoped_to_the_solver_present() {
         // The same bridge-shaped log from an address that is not the LiFi router: LiFi is not
         // part of the transaction, so its veto is never consulted.
         let registry = Registry::ethereum();
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn plausible_quote_slippage_and_unit_mismatch() {
+    fn test_plausible_quote_slippage_and_unit_mismatch() {
         let quote = |amount: u128| SolverQuote {
             amount_out: U256::from(amount),
             source: None,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_quote_dispatch() {
+    fn test_embedded_quote_dispatch() {
         // A ParaSwap-shaped word triple only parses when the attributed solver is paraswap;
         // an unlisted solver never yields a quote from the same bytes.
         let amount_in = U256::from(171_521_496u64);

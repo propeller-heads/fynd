@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_fynd_better() {
+    fn test_compare_fynd_better() {
         let (settled, net) = gross(10_000);
         let d = compare(&solved(10_100, 10_050), settled, net);
         assert!((d.raw_bps.unwrap() - 100.0).abs() < 0.01);
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_fynd_worse() {
+    fn test_compare_fynd_worse() {
         let (settled, net) = gross(10_000);
         let d = compare(&solved(9_900, 9_800), settled, net);
         assert!(d.raw_bps.unwrap() < 0.0);
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_with_settled_gas() {
+    fn test_compare_with_settled_gas() {
         // Settled 10_000 gross but its trader paid 100 in gas: raw still compares gross vs
         // gross; net compares 10_050 vs 9_900.
         let d = compare(&solved(10_100, 10_050), U256::from(10_000u64), U256::from(9_900u64));
@@ -158,27 +158,27 @@ mod tests {
     }
 
     #[test]
-    fn compare_unsolvable() {
+    fn test_compare_unsolvable() {
         let (settled, net) = gross(10_000);
         let d = compare(&Outcome::Unsolvable("no route".into()), settled, net);
         assert_eq!(d, Deltas::NONE);
     }
 
     #[test]
-    fn compare_zero_settled() {
+    fn test_compare_zero_settled() {
         let d = compare(&solved(10_000, 10_000), U256::ZERO, U256::ZERO);
         assert_eq!(d.raw_bps, None);
     }
 
     #[test]
-    fn verdict_win_threshold() {
+    fn test_verdict_win_threshold() {
         let (settled, net) = gross(10_000);
         let outcome = solved(10_100, 10_050);
         assert_eq!(verdict(&outcome, &compare(&outcome, settled, net)), Verdict::Win);
     }
 
     #[test]
-    fn verdict_gross_better_net_worse() {
+    fn test_verdict_gross_better_net_worse() {
         // Gross output wins even though Fynd's own gas would eat the edge: the headline verdict
         // compares gross vs gross, and the net delta stays available as a secondary number.
         let (settled, net) = gross(10_000);
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn verdict_with_settled_gas() {
+    fn test_verdict_with_settled_gas() {
         // The settled trader's gas does not move the verdict in either direction — only the
         // gross outputs do.
         let fynd = solved(10_050, 9_990);
@@ -199,14 +199,14 @@ mod tests {
     }
 
     #[test]
-    fn verdict_unsolvable() {
+    fn test_verdict_unsolvable() {
         let (settled, net) = gross(10_000);
         let outcome = Outcome::Unsolvable("missing token".into());
         assert_eq!(verdict(&outcome, &compare(&outcome, settled, net)), Verdict::Unsolvable);
     }
 
     #[test]
-    fn served_partial_route() {
+    fn test_served_partial_route() {
         // Fynd covered only 40% of the settled size → coverage miss, not a loss.
         let outcome = served(solved(400, 390), U256::from(1_000u64));
         assert!(matches!(outcome, Outcome::Partial(_)));
@@ -215,14 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn served_adequate_fill() {
+    fn test_served_adequate_fill() {
         // 90% coverage is a real (worse) quote, not a coverage miss; the floor is kept.
         assert!(matches!(served(solved(900, 880), U256::from(1_000u64)), Outcome::Solved(_)));
         assert!(matches!(served(solved(500, 490), U256::from(1_000u64)), Outcome::Solved(_)));
     }
 
     #[test]
-    fn served_unsolvable_and_zero_settled() {
+    fn test_served_unsolvable_and_zero_settled() {
         assert!(matches!(
             served(Outcome::Unsolvable("x".into()), U256::from(1_000u64)),
             Outcome::Unsolvable(_)

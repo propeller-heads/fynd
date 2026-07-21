@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn real_relay_blob() {
+    fn test_real_relay_blob() {
         let quote = Kyberswap
             .embedded_quote(&calldata_with(BLOB), U256::ZERO)
             .unwrap();
@@ -75,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn calldata_without_blob() {
+    fn test_calldata_without_blob() {
         assert!(Kyberswap
             .embedded_quote(&calldata_with(""), U256::ZERO)
             .is_none());
@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_or_fieldless_blob() {
+    fn test_truncated_or_fieldless_blob() {
         // Truncated before the closing brace: no valid JSON object to parse.
         let truncated = &BLOB[..BLOB.len() - 20];
         assert!(Kyberswap

@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_decoder_declines() {
+    async fn test_first_decoder_declines() {
         let (name, flow) = try_with(vec![Box::new(Declines), Box::new(Wins)])
             .await
             .unwrap();
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_decoder_succeeds() {
+    async fn test_first_decoder_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let (name, _) = try_with(vec![Box::new(Wins), Box::new(CountsCalls(Arc::clone(&calls)))])
             .await
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_decoder_answers() {
+    async fn test_no_decoder_answers() {
         assert!(try_with(vec![Box::new(Declines)])
             .await
             .is_none());

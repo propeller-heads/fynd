@@ -149,7 +149,7 @@ mod tests {
     use crate::decoder::test_utils::{addr, frame};
 
     #[test]
-    fn native_transfers_delegatecall_and_staticcall() {
+    fn test_native_transfers_delegatecall_and_staticcall() {
         let from = addr(1);
         let to = addr(2);
 
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn reverted_frame_and_subtree() {
+    fn test_reverted_frame_and_subtree() {
         let from = addr(1);
         let to = addr(2);
 
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_known_venue() {
+    fn test_route_gas_known_venue() {
         // Mirrors the audited Relay tx 0xf25ceafd…: two small wrapper self-calls around the
         // KyberSwap router call, whose frame carries the full routing cost.
         //
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_unknown_venue() {
+    fn test_route_gas_unknown_venue() {
         // Unknown venue: no registry match, so the most gas-consuming child is the route.
         let registry = Registry::ethereum();
         let client = addr(2);
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_reverted_and_empty() {
+    fn test_route_gas_reverted_and_empty() {
         let registry = Registry::ethereum();
         let client = addr(2);
 
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_real_relay_kyberswap_trace() {
+    fn test_route_gas_real_relay_kyberswap_trace() {
         // Real callTracer output of tx 0xf25ceafd… (block 25480207, 39.67 ETH -> USDT via
         // Relay + KyberSwap), payload fields stripped. The route's gas is the KyberSwap router
         // frame; Relay's wrapper overhead (1,271,689 total) stays out.
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn route_gas_real_metamask_oneinch_trace() {
+    fn test_route_gas_real_metamask_oneinch_trace() {
         // Real callTracer output of tx 0xe815e2b5… (block 25476433, a $3.4k MetaMask swap
         // routed via 1inch), payload fields stripped. The 1inch frame sits three levels deep:
         //
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn find_solver_frame_reverted_frames() {
+    fn test_find_solver_frame_reverted_frames() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 

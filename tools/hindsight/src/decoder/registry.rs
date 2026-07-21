@@ -248,7 +248,7 @@ mod tests {
     use crate::decoder::test_utils::addr;
 
     #[test]
-    fn embedded_ethereum_book() {
+    fn test_embedded_ethereum_book() {
         let registry = Registry::ethereum();
         assert!(!registry.solvers.is_empty());
         assert!(!registry
@@ -259,14 +259,14 @@ mod tests {
     }
 
     #[test]
-    fn load_ethereum() {
+    fn test_load_ethereum() {
         assert!(Registry::load("ethereum", None).is_ok());
         assert!(Registry::load("Ethereum", None).is_ok());
         assert!(Registry::load("base", None).is_err());
     }
 
     #[test]
-    fn load_unreadable_and_invalid_files() {
+    fn test_load_unreadable_and_invalid_files() {
         let missing = Registry::load("ethereum", Some(Path::new("/nonexistent/book.toml")));
         assert!(missing
             .unwrap_err()
@@ -285,14 +285,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_toml_key() {
+    fn test_unknown_toml_key() {
         // A typo'd section must fail loudly, not silently drop addresses.
         let text = format!("{ETHEREUM_TOML}\n[solverz]\n");
         assert!(Registry::from_toml(&text).is_err());
     }
 
     #[test]
-    fn registries_named() {
+    fn test_registries_named() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_solver_metamask_and_unknown_ids() {
+    fn test_normalize_solver_metamask_and_unknown_ids() {
         let registry = Registry::ethereum();
         let metamask = registry.venue("metamask").unwrap();
         assert_eq!(metamask.normalize_solver("oneInchV6FeeDynamic"), "1inch");
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn solver_alias_venue_scoping() {
+    fn test_solver_alias_venue_scoping() {
         // The alias table is one venue's calldata names; a venue without one passes every
         // id through unchanged.
         let registry = Registry::ethereum();
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_case_alias_substring() {
+    fn test_mixed_case_alias_substring() {
         // Alias substrings are canonicalized to lowercase at load, so a capitalized entry in the
         // address book matches the same ids as a lowercase one.
         let book = ETHEREUM_TOML.replace(
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn infrastructure_permit2_and_wrapped_native() {
+    fn test_infrastructure_permit2_and_wrapped_native() {
         let registry = Registry::ethereum();
         let permit2 = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
         assert!(registry.is_infrastructure(permit2));
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_settler_lookup() {
+    fn test_batch_settler_lookup() {
         let registry = Registry::ethereum();
         let cow = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn venue_section_lookup_by_name_and_entry_point() {
+    fn test_venue_section_lookup_by_name_and_entry_point() {
         let registry = Registry::ethereum();
         let relay = registry.venue("relay").unwrap();
         let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn venue_without_decoder() {
+    fn test_venue_without_decoder() {
         // A venue section whose name has no decoder would silently never decode, so the
         // address book must fail to load.
         let text =
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn label_known_and_unknown() {
+    fn test_label_known_and_unknown() {
         let registry = Registry::ethereum();
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
         let unknown = addr(123);
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn display_label_resolution() {
+    fn test_display_label_resolution() {
         // Solver/filler labels are display-only: is_known drives strategy selection, and a
         // filler-entered tx must keep matching via its solver logs (Intent), not as a
         // known-venue Sender flow.

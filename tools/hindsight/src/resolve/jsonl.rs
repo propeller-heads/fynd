@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn date_from_unix_at_day_boundaries() {
+    fn test_date_from_unix_at_day_boundaries() {
         assert_eq!(date_from_unix(0), "1970-01-01");
         assert_eq!(date_from_unix(86_399), "1970-01-01"); // last second of the first day
         assert_eq!(date_from_unix(86_400), "1970-01-02"); // day boundary
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn rotating_writer_at_a_new_date() {
+    fn test_rotating_writer_at_a_new_date() {
         let dir = std::env::temp_dir().join(format!("hindsight-rotate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_with_solver_quote() {
+    fn test_comparison_record_with_solver_quote() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn slim_transaction_encoding() {
+    fn test_slim_transaction_encoding() {
         use tycho_simulation::tycho_common::Bytes;
         let tx = Transaction::new(
             Bytes::from(vec![0x11u8; 20]),
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn improvement_record_top_and_back() {
+    fn test_improvement_record_top_and_back() {
         let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
             .parse()
             .unwrap();
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_unsolvable() {
+    fn test_comparison_record_unsolvable() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_record_sandwiched() {
+    fn test_comparison_record_sandwiched() {
         let mut trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,

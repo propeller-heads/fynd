@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn has_decoder_follows_decoders_for() {
+    fn test_has_decoder_follows_decoders_for() {
         // A registered venue resolves; an unknown name does not. Adding a venue needs no change
         // here — `has_decoder` derives from the one `decoders_for` registration.
         assert!(has_decoder("relay"));

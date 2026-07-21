@@ -277,30 +277,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_range_valid() {
+    fn test_parse_range_valid() {
         let blocks = parse_range("100-105").unwrap();
         assert_eq!(blocks, vec![100, 101, 102, 103, 104, 105]);
     }
 
     #[test]
-    fn parse_range_single_block() {
+    fn test_parse_range_single_block() {
         let blocks = parse_range("100-100").unwrap();
         assert_eq!(blocks, vec![100]);
     }
 
     #[test]
-    fn parse_range_invalid_format() {
+    fn test_parse_range_invalid_format() {
         assert!(parse_range("100").is_err());
         assert!(parse_range("100-200-300").is_err());
     }
 
     #[test]
-    fn parse_range_reversed() {
+    fn test_parse_range_reversed() {
         assert!(parse_range("200-100").is_err());
     }
 
     #[test]
-    fn parse_range_too_large() {
+    fn test_parse_range_too_large() {
         assert!(parse_range("0-1001").is_err());
     }
 }

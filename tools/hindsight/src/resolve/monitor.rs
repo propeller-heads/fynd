@@ -563,7 +563,7 @@ mod tests {
     ///   resolve::monitor -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires live TYCHO_URL + RPC_URL"]
-    async fn monitor_one_block_smoke() {
+    async fn test_monitor_one_block_smoke() {
         let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();

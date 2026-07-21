@@ -62,7 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn real_swap_exact_amount_in_layout() {
+    fn test_real_swap_exact_amount_in_layout() {
         // Live tx 0x1192b394… (block range of run5): srcToken, destToken, fromAmount, toAmount
         // (floor, -10bps), quotedAmount — the settled amount was 171,602,265, one unit under the
         // quote (ParaSwap caps the user at the quote and keeps the surplus).
@@ -83,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_input_amount() {
+    fn test_missing_input_amount() {
         // A partner fee (or any decode difference) means no word equals the decoded input.
         let words =
             [U256::from(171_521_496u64), U256::from(171_430_663u64), U256::from(171_602_266u64)];
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn implausible_floor_quote_pair() {
+    fn test_implausible_floor_quote_pair() {
         // The words after the input match are not a floor/quote pair: quote below the floor, or
         // wildly above it (different units).
         let amount_in = U256::from(1_000_000u64);

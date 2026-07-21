@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_headline() {
+    fn test_build_range_headline() {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_partial_fill() {
+    fn test_build_range_partial_fill() {
         // Fynd fills only 10% of a 10_000 settled trade → reclassified as a coverage miss.
         let range =
             build_range(&trade(10_000), &empty_prices(), solved(1_000, 990), solved(1_000, 990));
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_sandwiched_trade() {
+    fn test_build_range_sandwiched_trade() {
         let mut sandwiched = trade(10_000);
         sandwiched.sandwich = Some(SandwichEvidence {
             front_tx: TxHash::repeat_byte(0xaa),
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_sandwiched_with_unsolved_states() {
+    fn test_build_range_sandwiched_with_unsolved_states() {
         // The sandwich explains the settled price, not why Fynd had no route: an unsolved state
         // keeps its verdict so the coverage buckets are unaffected by the reclassification.
         let mut sandwiched = trade(10_000);
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_priced_gas() {
+    fn test_build_range_priced_gas() {
         // The settled trader paid 200 token_out units of gas (100 wei at a price of 2 units/wei):
         // the secondary net column carries the deduction; the verdict stays gross vs gross.
         let mut with_gas = trade(10_000);
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn build_range_unpriced_gas() {
+    fn test_build_range_unpriced_gas() {
         // token_out is not in the price map → no deduction. The secondary net column stays
         // gross; the verdict is unaffected either way (gross 10_050 beats gross 10_000).
         let mut with_gas = trade(10_000);
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_block_range_top_and_back() {
+    async fn test_resolve_block_range_top_and_back() {
         // Two trades. Top-of-block is optimistic (better), back-of-block pessimistic (worse).
         let solver = MockStepping {
             advanced: std::sync::atomic::AtomicBool::new(false),
