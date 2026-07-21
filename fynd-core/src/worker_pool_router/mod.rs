@@ -664,14 +664,15 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// route should execute instead of the best public route.
 ///
 /// Inputs: `public_ranked` is the ranking of public-pool quotes from `rank_quotes`; its head is
-/// the committed reference — the output the user is quoted no matter which route executes.
-/// `responses` additionally holds the candidates from `ExclusiveAccess`-role pools (routes that
-/// may use exclusive components).
+/// the public reference from which the committed amount is derived. `responses` additionally
+/// holds the candidates from `ExclusiveAccess`-role pools (routes that may use exclusive
+/// components).
 ///
-/// If the best exclusive-access candidate beats the committed reference net-of-gas, this returns
-/// a new list whose head is the pinned surplus quote, followed by every public candidate as
-/// price-guard fallbacks. The pinned quote is the winning candidate with:
-/// - `amount_out` pinned to the committed reference (the user is quoted the public output),
+/// If the best exclusive-access candidate beats the public reference net-of-gas and produces at
+/// least the committed amount, this returns a new list whose head is the pinned surplus quote,
+/// followed by every public candidate as price-guard fallbacks. The pinned quote is the winning
+/// candidate with:
+/// - `amount_out` pinned to the committed amount,
 /// - `Swap::committed_amount_out` set on each exclusive leg (consumed by the encoder), and
 /// - an order-level [`SurplusInfo`] attached (observability).
 ///
@@ -679,11 +680,13 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// public market.
 ///
 /// Per-leg attribution: each exclusive leg's `committed_amount_out` is its realized output scaled
-/// by `committed_reference / realized_route_output` — the same ratio by which the order-level
-/// output is pinned down. The protocol captures the difference between each leg's realized and
-/// committed output. Because the pinned `amount_out` equals the committed reference and only wins
-/// when the exclusive route's realized output strictly exceeds it, the user is always quoted at
-/// least the public-market output.
+/// by `committed / realized_route_output` — the same ratio by which the order-level output is
+/// pinned down — rounded up so the rounding error favors the user. The protocol captures the
+/// difference between each leg's realized and committed output.
+///
+/// Exact-in orders only: the commitment, both gates, and the surplus are all denominated in
+/// `amount_out`. Exact-out support would invert the logic — fixed output, commitment and surplus
+/// on the input side — and needs its own treatment here.
 fn combine_with_surplus(
     responses: &OrderResponses,
     pool_roles: &HashMap<String, PoolRole>,
@@ -728,6 +731,8 @@ fn combine_with_surplus(
         return public_ranked;
     }
 
+    // Exact-in assumption: everything below compares and commits output amounts. For exact-out
+    // orders this comparison would have to run on amount_in instead (see function docs).
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
     let committed_amount_out = committed.amount_out();
 
