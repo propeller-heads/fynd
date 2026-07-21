@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 
 use alloy::{
+    network::AnyTransactionReceipt,
     primitives::{Address, U256},
     providers::Provider,
-    rpc::types::TransactionReceipt,
 };
 use async_trait::async_trait;
 
@@ -120,7 +120,7 @@ pub(crate) struct DecodeContext<'a, P> {
     /// Cross-block contract-code cache, owned by the decoder.
     pub code_cache: &'a mut HashMap<Address, bool>,
     /// The matched transaction's receipt (sender, logs).
-    pub receipt: &'a TransactionReceipt,
+    pub receipt: &'a AnyTransactionReceipt,
     /// The contract the transaction entered through (`tx.to`).
     pub entry_point: Address,
     /// The transaction's flattened value movements.

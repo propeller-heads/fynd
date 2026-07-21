@@ -32,6 +32,8 @@ mod test_utils;
 use std::collections::HashMap;
 
 use alloy::{
+    eips::BlockId,
+    network::AnyTransactionReceipt,
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::trace::geth::CallFrame,
@@ -155,9 +157,17 @@ impl<P: Provider> Decoder<P> {
         &mut self,
         block_number: u64,
     ) -> anyhow::Result<Vec<DecodedTrade>> {
-        let receipts = self
+        // Fetch receipts as `AnyTransactionReceipt` rather than the Ethereum-typed default:
+        // OP-stack chains (Base) put a system deposit transaction (type `0x7e`) first in
+        // every block, which the Ethereum receipt enum rejects — failing the whole
+        // `eth_getBlockReceipts` batch. The `Any` receipt tolerates unknown transaction
+        // types.
+        let receipts: Vec<AnyTransactionReceipt> = self
             .provider
-            .get_block_receipts(block_number.into())
+            .raw_request::<_, Option<Vec<AnyTransactionReceipt>>>(
+                "eth_getBlockReceipts".into(),
+                (BlockId::from(block_number),),
+            )
             .await
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
