@@ -839,11 +839,8 @@ mod tests {
     #[tokio::test]
     async fn test_router_captures_solver_errors() {
         // Pool that returns an error
-        let (pool, worker) = create_mock_pool(
-            "error_pool",
-            Err(SolveError::NoRouteFound { order_id: "test-order".to_string() }),
-            0,
-        );
+        let (pool, worker) =
+            create_mock_pool("error_pool", Err(SolveError::no_route_found("test-order")), 0);
 
         let worker_router =
             WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
@@ -887,7 +884,7 @@ mod tests {
             quotes: vec![],
             failed_solvers: vec![
                 ("pool_a".to_string(), SolveError::Timeout { elapsed_ms: 100 }),
-                ("pool_b".to_string(), SolveError::NoRouteFound { order_id: "test".to_string() }),
+                ("pool_b".to_string(), SolveError::no_route_found("test")),
             ],
         };
 

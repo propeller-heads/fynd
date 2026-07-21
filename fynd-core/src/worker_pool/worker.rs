@@ -260,7 +260,7 @@ where
                                 order_id = %order.id(),
                                 "route missing first swap for buy order"
                             );
-                            SolveError::NoRouteFound { order_id: order.id().to_string() }
+                            SolveError::no_route_found(order.id())
                         })?
                 };
                 let amount_out = if order.is_sell() {
@@ -269,7 +269,7 @@ where
                             order_id = %order.id(),
                             "route missing swaps for sell order"
                         );
-                        SolveError::NoRouteFound { order_id: order.id().to_string() }
+                        SolveError::no_route_found(order.id())
                     })?;
                     route
                         .swaps()
@@ -314,13 +314,13 @@ where
             }
             Err(err) => {
                 let solve_error = match err {
-                    crate::AlgorithmError::NoPath { .. } => {
+                    crate::AlgorithmError::NoPath { reason, .. } => {
                         debug!(
                             order_id = %order.id(),
                             error = %err,
                             "no route found"
                         );
-                        SolveError::NoRouteFound { order_id: order.id().to_string() }
+                        SolveError::no_route_found_with_reason(order.id(), reason)
                     }
                     crate::AlgorithmError::Timeout { elapsed_ms } => {
                         warn!(
@@ -1125,6 +1125,30 @@ mod tests {
             closed_warns, 1,
             "closed channel must be handled once, not spun on ({closed_warns} warns)"
         );
+    }
+
+    #[test]
+    fn no_route_found_with_reason_carries_reason() {
+        use crate::algorithm::NoPathReason;
+        let err = SolveError::no_route_found_with_reason(
+            "order-1",
+            NoPathReason::DestinationTokenNotInGraph,
+        );
+        match err {
+            SolveError::NoRouteFound { order_id, reason } => {
+                assert_eq!(order_id, "order-1");
+                assert_eq!(reason, Some(NoPathReason::DestinationTokenNotInGraph));
+            }
+            other => panic!("expected NoRouteFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_route_found_defaults_to_no_reason() {
+        match SolveError::no_route_found("order-1") {
+            SolveError::NoRouteFound { reason, .. } => assert_eq!(reason, None),
+            other => panic!("expected NoRouteFound, got {other:?}"),
+        }
     }
 
     #[test]
