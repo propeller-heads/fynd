@@ -96,11 +96,10 @@ pub(crate) struct MonitorArgs {
 
     /// Chain-head lag (in blocks) beyond which the session is considered unhealthy and the solver
     /// is rebuilt — seen live: a worker died, every solve crawled, and the monitor slid hours
-    /// behind while the feed-dead watchdog never fired (blocks still trickled through). The
-    /// default is ~20 minutes on Ethereum mainnet's 12s blocks; scale it to the chain's block
-    /// time
-    #[arg(long, default_value_t = 100)]
-    pub max_lag_blocks: u64,
+    /// behind while the feed-dead watchdog never fired (blocks still trickled through). When
+    /// omitted, defaults to roughly 20 minutes' worth of blocks for the chain's block time
+    #[arg(long)]
+    pub max_lag_blocks: Option<u64>,
 
     /// Write one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
     /// coverage gaps) into this directory as `comparisons-YYYY-MM-DD.jsonl`, rotated at each UTC
@@ -314,6 +313,17 @@ async fn build_solver(
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))
 }
 
+/// Default chain-head lag threshold in blocks — about 20 minutes at the chain's block time, so the
+/// wall-clock tolerance stays roughly the same across chains. Used when `--max-lag-blocks` is not
+/// given; an unrecognised chain falls back to the 12-second-block assumption.
+fn default_lag_blocks(chain: &str) -> u64 {
+    let block_secs = match chain.to_lowercase().as_str() {
+        "base" => 2,
+        _ => 12,
+    };
+    (20 * 60 / block_secs).max(1)
+}
+
 /// Build the in-process stepped solver and re-solve each block's settled trades as a top/back
 /// range. When the tycho feed dies (its stream ends, or no block arrives within
 /// `FEED_DEAD_TIMEOUT`), the solver is torn down and rebuilt in place — fresh subscriptions,
@@ -371,13 +381,26 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     };
 
     let mut totals = Totals::default();
+    let max_lag_blocks = cfg
+        .max_lag_blocks
+        .unwrap_or_else(|| default_lag_blocks(&cfg.chain.name));
+    info!(max_lag_blocks, "chain-head lag threshold");
     // The first build fails fast — an error here is a configuration problem. Rebuilds after a
     // feed death retry forever, since the config is known good and failures are transient.
     let (mut solver, mut controller) = build_solver(&cfg, chain, &protocols, &pools_config).await?;
     loop {
         let adapter =
             StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
-        match run_session(&cfg, &adapter, &mut decoder, &mut comparisons, &mut totals).await {
+        match run_session(
+            &cfg,
+            max_lag_blocks,
+            &adapter,
+            &mut decoder,
+            &mut comparisons,
+            &mut totals,
+        )
+        .await
+        {
             SessionEnd::Complete => return Ok(()),
             SessionEnd::Unhealthy(reason) => {
                 warn!(reason, "session unhealthy; rebuilding the solver to resubscribe");
@@ -399,6 +422,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 /// completes or the feed dies.
 async fn run_session<P: Provider>(
     cfg: &MonitorArgs,
+    max_lag_blocks: u64,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
@@ -437,7 +461,7 @@ async fn run_session<P: Provider>(
             .get_block_number()
             .await
         {
-            if head.saturating_sub(target) > cfg.max_lag_blocks {
+            if head.saturating_sub(target) > max_lag_blocks {
                 return SessionEnd::Unhealthy(format!(
                     "monitor is {} blocks behind head {head}; presuming an unhealthy session",
                     head - target
@@ -556,6 +580,14 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_default_lag_blocks_scales_with_block_time() {
+        assert_eq!(default_lag_blocks("ethereum"), 100); // 12s blocks
+        assert_eq!(default_lag_blocks("base"), 600); // 2s blocks
+        assert_eq!(default_lag_blocks("BASE"), 600);
+        assert_eq!(default_lag_blocks("unknown"), 100);
+    }
+
     /// End-to-end smoke test of the live two-state monitor against a real solver.
     ///
     /// `#[ignore]`d so it never runs in CI (no Tycho/RPC). Run with:
@@ -578,7 +610,7 @@ mod tests {
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
-            max_lag_blocks: 100,
+            max_lag_blocks: Some(100),
             comparisons_dir: None,
         })
         .await
