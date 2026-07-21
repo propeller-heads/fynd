@@ -87,6 +87,7 @@ impl ReplayRequest {
 
 /// Serializes `request` down to the routing-essential fields, as a JSON string.
 /// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
+#[cfg(test)]
 pub(crate) fn replay_json(request: &QuoteRequest) -> String {
     ReplayRequest::capture(request).to_json()
 }
@@ -154,7 +155,8 @@ impl RequestOutcome {
 
 /// Emits the single `quote_failure` capture log line.
 ///
-/// `request_json` is the sanitized, re-issuable request from [`replay_json`].
+/// `request_json` is the sanitized, re-issuable request from
+/// [`ReplayRequest::to_json`].
 /// Only failed quotes are logged; filter these in Loki with
 /// `event="quote_failure"`.
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {

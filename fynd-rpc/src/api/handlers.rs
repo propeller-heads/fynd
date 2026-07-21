@@ -66,9 +66,10 @@ pub(crate) async fn quote(
     }
 
     // Capture a re-issuable, signature-free copy of the request BEFORE the core
-    // conversion consumes `dto_request`.
+    // conversion consumes `dto_request`. This is cheap (no serialization); the
+    // JSON encoding is deferred to the failure-only task below.
     let num_orders = dto_request.orders().len();
-    let replay_json = request_capture::replay_json(&dto_request);
+    let replay_capture = request_capture::ReplayRequest::capture(&dto_request);
 
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
@@ -102,9 +103,16 @@ pub(crate) async fn quote(
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
     };
     // Only failed quotes are logged (successful quotes are the common case and
-    // would dominate log volume); see RequestOutcome::is_failure.
+    // would dominate log volume); see RequestOutcome::is_failure. Emitting is
+    // deferred to a detached task so serialization never adds latency to the
+    // response; the current tracing span is carried over so the line keeps its
+    // request context.
     if outcome.is_failure() {
-        log_request_capture(num_orders, &replay_json, &outcome);
+        let span = tracing::Span::current();
+        actix_web::rt::spawn(async move {
+            let _guard = span.enter();
+            log_request_capture(num_orders, &replay_capture.to_json(), &outcome);
+        });
     }
 
     let core_quote = result?;
