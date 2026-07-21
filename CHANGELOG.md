@@ -1,3 +1,16 @@
+## [0.97.0](https://github.com/propeller-heads/fynd/compare/0.96.0...0.97.0) (2026-07-21)
+
+
+### Features
+
+* **core:** aggregate and attach no-route reason to OrderQuote ([5260938](https://github.com/propeller-heads/fynd/commit/5260938704c024e08d0e41df52fccacf86898cab))
+* **core:** carry NoPathReason on SolveError::NoRouteFound ([59eef1a](https://github.com/propeller-heads/fynd/commit/59eef1a393e40a93ed451df3b01b07b77b889868))
+* **rpc:** add request capture log emission ([13d47d1](https://github.com/propeller-heads/fynd/commit/13d47d10b87c9e974801f8e7b277f9b2dd73ab36))
+* **rpc:** add request replay-capture helpers ([53cbe7e](https://github.com/propeller-heads/fynd/commit/53cbe7e37d2275189b804b179342d484c485a795))
+* **rpc:** log every accepted quote request for replay ([1d60c00](https://github.com/propeller-heads/fynd/commit/1d60c00703984bc08ecd579b73c9c85c5e7ce1b9))
+* **rpc:** log no_route_reasons on the quote capture line ([394ba83](https://github.com/propeller-heads/fynd/commit/394ba831295d23c3494a24bb24eba11efc7b4097))
+* **rpc:** log only failed quotes, rename event to quote_failure ([de6b0c9](https://github.com/propeller-heads/fynd/commit/de6b0c91a724ed1e786da9683f1389a1045deb32))
+
 ## [0.96.0](https://github.com/propeller-heads/fynd/compare/0.95.0...0.96.0) (2026-07-21)
 
 
