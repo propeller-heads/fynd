@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use fynd_core::config::{embedded_default, PartialConfig};
+use fynd_core::config::{embedded_default, PartialConfig, Preset};
 use fynd_rpc::{
     config::{defaults, WorkerPoolsConfig},
     parse_chain,
@@ -15,9 +15,21 @@ use crate::commands::derive_connector_tokens::DeriveConnectorTokensArgs;
 
 /// Builds help text for a config-layered flag, appending the real default value pulled
 /// from the embedded default config (used when neither the CLI nor a config file sets the
-/// field).
+/// field). Shown values are the `balanced` preset's; other presets may differ.
 fn cfg_help(text: &str, default: impl std::fmt::Display) -> String {
     format!("{text} [default: {default}]")
+}
+
+/// Help text for `--preset`, listing the possible values derived from the enum.
+fn preset_help() -> String {
+    let names: Vec<&str> = Preset::all()
+        .iter()
+        .map(|preset| preset.as_str())
+        .collect();
+    format!(
+        "Tuning preset the default config (embedded and remote) is maintained for [possible values: {}]",
+        names.join(", ")
+    )
 }
 
 /// Fynd - High-performance DEX solver built on Tycho
@@ -52,6 +64,10 @@ pub struct ServeArgs {
     /// Target chain (e.g. Ethereum)
     #[arg(short, long, default_value = "Ethereum", value_parser = parse_chain)]
     pub chain: Chain,
+
+    /// Tuning preset selecting which defaults apply (embedded and remote)
+    #[arg(long, env, default_value = "balanced", help = preset_help())]
+    pub preset: Preset,
 
     /// Path to a local TOML config file overriding the embedded defaults. Any subset of
     /// the config fields, same schema as the embedded default config.
@@ -99,7 +115,7 @@ pub struct ServeArgs {
             "List of protocols to index (comma-separated). \"all_onchain\" expands to all \
              on-chain protocols fetched from Tycho RPC and can be combined with explicit \
              entries, e.g. all_onchain,rfq:bebop",
-            embedded_default().protocols.join(","),
+            embedded_default(Preset::Balanced).protocols.join(","),
         ))]
     pub protocols: Vec<String>,
 
@@ -115,35 +131,35 @@ pub struct ServeArgs {
             "TVL buffer ratio: avoids fluctuations from components hovering around a single \
              threshold. With ratio 1.1 and minimum TVL 10 ETH, components are added when \
              TVL >= 10 ETH and removed below 10 / 1.1 ≈ 9.09 ETH",
-            embedded_default().tvl_buffer_ratio,
+            embedded_default(Preset::Balanced).tvl_buffer_ratio,
         ))]
     pub tvl_buffer_ratio: Option<f64>,
 
     /// Minimum token quality filter.
-    #[arg(long, help = cfg_help("Minimum token quality filter", embedded_default().min_token_quality))]
+    #[arg(long, help = cfg_help("Minimum token quality filter", embedded_default(Preset::Balanced).min_token_quality))]
     pub min_token_quality: Option<i32>,
 
     /// Only include tokens traded within this many days.
-    #[arg(long, help = cfg_help("Only include tokens traded within this many days", embedded_default().traded_n_days_ago))]
+    #[arg(long, help = cfg_help("Only include tokens traded within this many days", embedded_default(Preset::Balanced).traded_n_days_ago))]
     pub traded_n_days_ago: Option<u64>,
 
     /// Gas price refresh interval in seconds.
-    #[arg(long, help = cfg_help("Gas price refresh interval in seconds", embedded_default().gas_refresh_interval_secs))]
+    #[arg(long, help = cfg_help("Gas price refresh interval in seconds", embedded_default(Preset::Balanced).gas_refresh_interval_secs))]
     pub gas_refresh_interval_secs: Option<u64>,
 
     /// Reconnect delay on connection failure in seconds.
-    #[arg(long, help = cfg_help("Reconnect delay on connection failure in seconds", embedded_default().reconnect_delay_secs))]
+    #[arg(long, help = cfg_help("Reconnect delay on connection failure in seconds", embedded_default(Preset::Balanced).reconnect_delay_secs))]
     pub reconnect_delay_secs: Option<u64>,
 
     /// Worker router timeout in milliseconds.
-    #[arg(long, help = cfg_help("Worker router timeout in milliseconds", embedded_default().worker_router_timeout_ms))]
+    #[arg(long, help = cfg_help("Worker router timeout in milliseconds", embedded_default(Preset::Balanced).worker_router_timeout_ms))]
     pub worker_router_timeout_ms: Option<u64>,
 
     /// Minimum solver responses before early return (0 = wait for all).
     #[arg(long,
         help = cfg_help(
             "Minimum solver responses before early return (0 = wait for all)",
-            embedded_default().worker_router_min_responses,
+            embedded_default(Preset::Balanced).worker_router_min_responses,
         ))]
     pub worker_router_min_responses: Option<usize>,
 
@@ -169,7 +185,7 @@ pub struct ServeArgs {
             "Enable partial block (flashblock) updates from the Tycho stream: pool state \
              updates arrive mid-block rather than only at finalization, reducing latency. \
              Only applies to on-chain protocols",
-            embedded_default().partial_blocks,
+            embedded_default(Preset::Balanced).partial_blocks,
         ))]
     pub partial_blocks: bool,
 
@@ -272,6 +288,7 @@ mod cli_tests {
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
         std::env::remove_var("CONFIG_FILE");
+        std::env::remove_var("PRESET");
         std::env::remove_var("WORKER_POOLS_CONFIG");
         let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
@@ -287,6 +304,7 @@ mod cli_tests {
         assert!(args.protocols.is_empty());
         // Solver-tuning flags default to None: the config layers supply the values.
         assert_eq!(args.config_file, None);
+        assert_eq!(args.preset, Preset::Balanced);
         assert_eq!(args.min_tvl, None);
         assert_eq!(args.tvl_buffer_ratio, None);
         assert_eq!(args.gas_refresh_interval_secs, None);

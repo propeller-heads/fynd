@@ -1,13 +1,18 @@
-# Embedded default solver configuration, compiled into the binary.
+# Embedded default solver configurations, compiled into the binary — one section per
+# preset (see `config::Preset`).
 #
-# This file is the single source of truth for all solver-tuning defaults:
-# `FyndBuilder::new` seeds its initial values from it, and the fynd binary uses it as the
-# base layer of config resolution (CLI flags > local config file > this file).
+# This file is the single source of truth for all solver-tuning defaults: the fynd binary
+# resolves the selected preset's section as the base layer (CLI flags > local config file >
+# remote config > this file), and `FyndBuilder::new` seeds from the `balanced` section.
 #
 # `min_tvl` is intentionally absent: it falls back to a chain-specific default TVL
-# threshold when no layer sets it. Every other field must be defined here — unit tests
-# (`config::tests::test_embedded_default_is_complete_and_valid`) enforce completeness.
+# threshold when no layer sets it. Every other field must be defined in every section —
+# unit tests (`config::tests`) enforce completeness and agreement with the `Preset` enum.
+#
+# NOTE: `balanced` and `deep` currently share the same values; `deep` will be tuned for
+# route quality over latency later.
 
+[balanced]
 tvl_buffer_ratio = 1.1
 min_token_quality = 100
 traded_n_days_ago = 3
@@ -18,7 +23,26 @@ worker_router_min_responses = 0
 partial_blocks = false
 protocols = ["all_onchain"]
 
-[pools.bellman_ford_2_hops]
+[balanced.pools.bellman_ford_2_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+min_hops = 1
+max_hops = 2
+timeout_ms = 500
+
+[deep]
+tvl_buffer_ratio = 1.1
+min_token_quality = 100
+traded_n_days_ago = 3
+gas_refresh_interval_secs = 30
+reconnect_delay_secs = 5
+worker_router_timeout_ms = 100
+worker_router_min_responses = 0
+partial_blocks = false
+protocols = ["all_onchain"]
+
+[deep.pools.bellman_ford_2_hops]
 algorithm = "bellman_ford"
 num_workers = 3
 task_queue_capacity = 1000
