@@ -1626,6 +1626,53 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::over_max_gas(
+        make_exclusive_quote(1100).order().clone(),
+        Some(50_000)
+    )]
+    #[case::mid_route_exclusive_leg(
+        make_route_quote(&[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]),
+        None
+    )]
+    fn combine_filters_exclusive_candidate(
+        #[case] exclusive_quote: OrderQuote,
+        #[case] max_gas: Option<u64>,
+    ) {
+        let mut options = QuoteOptions::default();
+        if let Some(max) = max_gas {
+            options = options.with_max_gas(BigUint::from(max));
+        }
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                (
+                    "public_pool".to_string(),
+                    make_public_quote_zero_gas(900)
+                        .order()
+                        .clone(),
+                ),
+                ("exclusive_access_pool".to_string(), exclusive_quote),
+            ],
+            failed_solvers: vec![],
+        };
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let policy = exclusive_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_roles(),
+            &options,
+            public_ranked,
+            Some(&policy),
+        );
+
+        assert_eq!(combined.len(), 1);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
+        assert_eq!(combined[0].surplus_amount(), None);
+    }
+
     #[test]
     fn combine_stamps_per_leg_committed_amount_out() {
         let responses = exclusive_access_responses(900, 1000);
