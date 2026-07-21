@@ -1,5 +1,6 @@
-//! Live two-state monitor: drive an in-process `fynd-core` solver one block at a time, re-solving
-//! each block's settled trades at top-of-block (N-1) and back-of-block (N).
+//! Live two-state monitor: drive an in-process `fynd-core` solver one block at a time, solving
+//! each block's settled trades at top-of-block (N-1) and re-executing each top route at
+//! back-of-block (N) to measure slippage between quote time and execution time.
 //!
 //! The block barrier is deterministic: after releasing a block via
 //! `BlockStepController::trigger_next_block`, we wait until the solver's `MarketData` reports the
@@ -192,6 +193,33 @@ impl SteppingSolver for StepAdapter<'_> {
         order_quote_to_outcome(order, &symbols)
     }
 
+    async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
+        let Some(route) = top.route.as_ref() else {
+            return Outcome::Unsolvable("top-of-block quote carried no route".to_string());
+        };
+        let market = self.solver.market_data();
+        let view = market.read().await;
+        match fynd_core::replay_route(route, view.base_market_state()) {
+            Ok(replay) => {
+                let amount_out = biguint_to_u256(&replay.amount_out);
+                // Same route ⇒ same gas: reuse the top quote's gas deduction (in token_out
+                // units) and its encoding-refined gas estimate instead of re-deriving gas
+                // prices at the new block state.
+                let gas_deduction = top
+                    .amount_out
+                    .saturating_sub(top.amount_out_net_gas);
+                Outcome::Solved(SolvedAmount {
+                    amount_out,
+                    amount_out_net_gas: amount_out.saturating_sub(gas_deduction),
+                    gas_estimate: top.gas_estimate,
+                    quote_json: top.quote_json.clone(),
+                    route: None,
+                })
+            }
+            Err(e) => Outcome::Unsolvable(format!("re-execution failed: {e}")),
+        }
+    }
+
     async fn advance(&self) -> anyhow::Result<()> {
         let before = self.current_block().await;
         self.controller
@@ -251,6 +279,8 @@ fn order_quote_to_outcome(quote: &OrderQuote, symbols: &HashMap<CoreAddress, Str
         gas_estimate: biguint_to_u256(quote.gas_estimate()),
         route: route_summary(quote, symbols),
         quote_json,
+        // Kept in memory so the route can be re-executed at back-of-block.
+        route: quote.route().cloned(),
     })
 }
 

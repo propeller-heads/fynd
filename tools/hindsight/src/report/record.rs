@@ -103,6 +103,7 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             route: RouteSummary::default(),
             quote_json: None,
+            route: None,
         });
         let range = build_range(&trade, &prices, top, Outcome::Unsolvable("x".into()));
 

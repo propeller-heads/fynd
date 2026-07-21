@@ -139,14 +139,27 @@ pub(crate) fn write_comparisons<W: std::io::Write>(
     }
 }
 
-/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, and a `top`
+/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, a `top`
 /// and `back` state (each with its verdict, bps, USD delta, and slim route/calldata or unsolvable
-/// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
+/// reason), and the top route's slippage between the two states. Top is valued at N-1 prices,
+/// back (and the slippage) at N prices, matching the state each was produced at.
 fn comparison_record(
     range: &RangeComparison,
     prices_top: &Prices,
     prices_back: &Prices,
 ) -> serde_json::Value {
+    // Signed in both directions; the positive records are the "revenue if we charged positive
+    // slippage" view, filtered downstream.
+    let slippage = range.slippage.map(|slippage| {
+        serde_json::json!({
+            "bps": slippage.bps,
+            "usd": prices_back.savings_usd(
+                range.token_out,
+                slippage.reexecuted_amount_out,
+                slippage.quoted_amount_out,
+            ),
+        })
+    });
     serde_json::json!({
         "block": range.block_number,
         "tx_index": range.tx_index,
@@ -165,6 +178,7 @@ fn comparison_record(
         "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
         "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
         "sandwich": range.sandwich,
+        "slippage": slippage,
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
     })
@@ -428,6 +442,7 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             route: route.clone(),
             quote_json: quote.clone(),
+            route: None,
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
@@ -435,6 +450,7 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             route,
             quote_json: quote,
+            route: None,
         });
         let range = build_range(&trade, &prices, top, back);
 
@@ -451,6 +467,20 @@ mod tests {
             .unwrap();
         assert!((top_usd - 10.0).abs() < 1e-3, "top_usd={top_usd}");
         assert!((back_usd - 2.0).abs() < 1e-3, "back_usd={back_usd}");
+        // Slippage: the top route re-executed at back produced 1002 vs 1010 quoted → −8 USDC,
+        // ≈ −79.2 bps and −$8 (signed; positive records are the chargeable-surplus view).
+        let slippage_bps = rec
+            .pointer("/slippage/bps")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((slippage_bps + 79.2).abs() < 0.1, "slippage_bps={slippage_bps}");
+        let slippage_usd = rec
+            .pointer("/slippage/usd")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((slippage_usd + 8.0).abs() < 1e-3, "slippage_usd={slippage_usd}");
         assert!(
             rec.pointer("/back/net_bps")
                 .unwrap()
@@ -532,6 +562,11 @@ mod tests {
                 "{field} should be null on an unsolvable state"
             );
         }
+        // No top route means nothing was re-executed: slippage is null, not zero.
+        assert!(rec
+            .pointer("/slippage")
+            .unwrap()
+            .is_null());
     }
 
     #[test]
@@ -570,6 +605,7 @@ mod tests {
                 gas_estimate: U256::from(21_000u64),
                 route: RouteSummary::default(),
                 quote_json: None,
+                route: None,
             })
         };
         let range = build_range(&trade, &empty_prices(), solved(1_100), solved(1_050));
