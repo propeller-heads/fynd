@@ -1536,10 +1536,26 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn combine_prefers_surplus_when_it_beats_public() {
-        let responses = exclusive_access_responses(900, 950);
-        let public_ranked = vec![make_public_quote_zero_gas(900)
+    /// Head selection across the gate case matrix. Each route is given as `(gross, net)`;
+    /// expected is `(head amount_out, captured surplus)`. A surplus win prepends the pinned
+    /// quote to the public fallbacks; otherwise the public ranking is returned unchanged.
+    #[rstest]
+    #[case::exclusive_beats_public((900, 900), (950, 950), (900, Some(50)))]
+    #[case::exclusive_below_public((950, 950), (900, 900), (950, None))]
+    #[case::exclusive_ties_public_net((900, 900), (900, 900), (900, None))]
+    #[case::exclusive_marginally_better((999, 999), (1000, 1000), (999, Some(1)))]
+    #[case::exclusive_cannot_cover_public_gross((1000, 950), (990, 980), (1000, None))]
+    fn combine_head_selection(
+        #[case] public: (u64, u64),
+        #[case] exclusive: (u64, u64),
+        #[case] expected: (u64, Option<u64>),
+    ) {
+        let (public_out, public_net) = public;
+        let (exclusive_out, exclusive_net) = exclusive;
+        let (expected_amount_out, expected_surplus) = expected;
+
+        let responses = responses_with_gas(public_out, public_net, exclusive_out, exclusive_net);
+        let public_ranked = vec![make_public_quote_with_net(public_out, public_net)
             .order()
             .clone()];
         let policy = exclusive_policy();
@@ -1551,32 +1567,16 @@ mod tests {
             Some(&policy),
         );
 
-        // The surplus winner is at the head: user is quoted the committed public output, protocol
-        // captures the surplus. The public candidate remains as a fallback.
-        assert_eq!(combined.len(), 2);
-        assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
-        assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(900u64)));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(50u64)));
-    }
-
-    #[test]
-    fn combine_falls_back_to_public_when_surplus_does_not_beat_it() {
-        let responses = exclusive_access_responses(950, 900);
-        let public_ranked = vec![make_public_quote_zero_gas(950)
-            .order()
-            .clone()];
-        let policy = exclusive_policy();
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_roles(),
-            &QuoteOptions::default(),
-            public_ranked,
-            Some(&policy),
-        );
-
-        assert_eq!(combined.len(), 1);
-        assert_eq!(*combined[0].amount_out(), BigUint::from(950u64));
-        assert_eq!(combined[0].surplus_amount(), None);
+        let expected_surplus = expected_surplus.map(BigUint::from);
+        assert_eq!(combined.len(), if expected_surplus.is_some() { 2 } else { 1 });
+        assert_eq!(*combined[0].amount_out(), BigUint::from(expected_amount_out));
+        assert_eq!(combined[0].surplus_amount(), expected_surplus.as_ref());
+        if expected_surplus.is_some() {
+            assert_eq!(
+                combined[0].committed_amount_out(),
+                Some(&BigUint::from(expected_amount_out))
+            );
+        }
     }
 
     #[test]
@@ -1655,30 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_user_never_short_changed() {
-        // Surplus is only slightly better — verify the invariant holds.
-        let responses = exclusive_access_responses(999, 1000);
-        let public_ranked = vec![make_public_quote_zero_gas(999)
-            .order()
-            .clone()];
-        let policy = exclusive_policy();
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_roles(),
-            &QuoteOptions::default(),
-            public_ranked,
-            Some(&policy),
-        );
-
-        let surplus_quote = &combined[0];
-        assert!(
-            surplus_quote.amount_out() >= &BigUint::from(999u64),
-            "user must receive at least the committed amount"
-        );
-    }
-
-    #[test]
-    fn combine_no_policy_returns_public_unchanged() {
+    fn combine_without_exclusivity_policy() {
         let responses = exclusive_access_responses(900, 950);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
@@ -1695,24 +1672,31 @@ mod tests {
         assert_eq!(combined[0].surplus_amount(), None);
     }
 
-    #[test]
-    fn combine_equal_net_gas_falls_back_to_public() {
-        // Equal net-of-gas does NOT count as "beats" — no surplus captured.
-        let responses = exclusive_access_responses(900, 900);
-        let public_ranked = vec![make_public_quote_zero_gas(900)
-            .order()
-            .clone()];
-        let policy = exclusive_policy();
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_roles(),
-            &QuoteOptions::default(),
-            public_ranked,
-            Some(&policy),
-        );
-
-        assert_eq!(combined.len(), 1);
-        assert_eq!(combined[0].surplus_amount(), None);
+    /// Builds an `OrderResponses` where both quotes carry explicit `amount_out_net_gas`.
+    fn responses_with_gas(
+        public_out: u64,
+        public_net: u64,
+        exclusive_out: u64,
+        exclusive_net: u64,
+    ) -> OrderResponses {
+        OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                (
+                    "public_pool".to_string(),
+                    make_public_quote_with_net(public_out, public_net)
+                        .order()
+                        .clone(),
+                ),
+                (
+                    "exclusive_access_pool".to_string(),
+                    make_exclusive_quote_with_leg(exclusive_out, exclusive_net, exclusive_out)
+                        .order()
+                        .clone(),
+                ),
+            ],
+            failed_solvers: vec![],
+        }
     }
 
     /// Builds a Success quote whose route has one swap per `(protocol_system, token_in, token_out)`
