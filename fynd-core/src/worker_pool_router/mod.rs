@@ -399,7 +399,7 @@ impl WorkerPoolRouter {
 
         // No valid quote found - return a NoRouteFound response
         // Try to get any response to extract block info, or create a placeholder
-        let fallback = if let Some((_, any_q)) = responses.quotes.first() {
+        let mut fallback = if let Some((_, any_q)) = responses.quotes.first() {
             counter!("worker_router_orders_total", "status" => "no_route").increment(1);
             OrderQuote::new(
                 responses.order_id.clone(),
@@ -466,6 +466,9 @@ impl WorkerPoolRouter {
                 label,
             )
         };
+        if fallback.status() == QuoteStatus::NoRouteFound {
+            fallback.set_no_route_reason(aggregate_no_route_reason(&responses.failed_solvers));
+        }
         vec![fallback]
     }
 
@@ -476,6 +479,32 @@ impl WorkerPoolRouter {
             .map(Duration::from_millis)
             .unwrap_or(self.config.default_timeout())
     }
+}
+
+/// Picks the most informative no-route reason across the failed pools.
+///
+/// A token-not-in-graph reason is a shared-graph fact and wins over any
+/// path-specific reason; otherwise the first reason present is used.
+fn aggregate_no_route_reason(
+    failed_solvers: &[(String, SolveError)],
+) -> Option<crate::algorithm::NoPathReason> {
+    use crate::algorithm::NoPathReason;
+    let mut first = None;
+    for (_, error) in failed_solvers {
+        if let SolveError::NoRouteFound { reason: Some(reason), .. } = error {
+            match reason {
+                NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => {
+                    return Some(*reason)
+                }
+                _ => {
+                    if first.is_none() {
+                        first = Some(*reason);
+                    }
+                }
+            }
+        }
+    }
+    first
 }
 
 fn refine_gas_estimates(
@@ -907,6 +936,52 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+    }
+
+    #[test]
+    fn rank_quotes_attaches_no_route_reason() {
+        use crate::algorithm::NoPathReason;
+        let responses = OrderResponses {
+            order_id: "test".to_string(),
+            quotes: vec![],
+            failed_solvers: vec![
+                (
+                    "pool_a".to_string(),
+                    SolveError::no_route_found_with_reason("test", NoPathReason::NoGraphPath),
+                ),
+                (
+                    "pool_b".to_string(),
+                    SolveError::no_route_found_with_reason(
+                        "test",
+                        NoPathReason::DestinationTokenNotInGraph,
+                    ),
+                ),
+            ],
+        };
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        // Token-not-in-graph wins over no_graph_path regardless of pool order.
+        assert_eq!(result[0].no_route_reason(), Some(NoPathReason::DestinationTokenNotInGraph));
+    }
+
+    #[test]
+    fn rank_quotes_no_route_reason_falls_back_to_first() {
+        use crate::algorithm::NoPathReason;
+        let responses = OrderResponses {
+            order_id: "test".to_string(),
+            quotes: vec![],
+            failed_solvers: vec![(
+                "pool_a".to_string(),
+                SolveError::no_route_found_with_reason("test", NoPathReason::NoGraphPath),
+            )],
+        };
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        assert_eq!(result[0].no_route_reason(), Some(NoPathReason::NoGraphPath));
     }
 
     #[test]

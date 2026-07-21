@@ -29,6 +29,7 @@ use tycho_simulation::tycho_common::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
+use crate::algorithm::NoPathReason;
 use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
 
 // ============================================================================
@@ -752,6 +753,9 @@ pub struct OrderQuote {
     /// The state overlay this quote was computed against.
     /// When no overlay was requested this is the block number of the base state at solve time.
     solved_against: StateLabel,
+    /// Why no route was found (internal use only; only set for `NoRouteFound`).
+    #[serde(skip)]
+    no_route_reason: Option<NoPathReason>,
 }
 
 impl OrderQuote {
@@ -786,6 +790,7 @@ impl OrderQuote {
             sender,
             receiver,
             solved_against,
+            no_route_reason: None,
         }
     }
 
@@ -914,6 +919,16 @@ impl OrderQuote {
     /// Returns the state overlay this quote was computed against.
     pub fn solved_against(&self) -> &StateLabel {
         &self.solved_against
+    }
+
+    /// Records why no route was found. Internal; skipped during serialization.
+    pub(crate) fn set_no_route_reason(&mut self, reason: Option<NoPathReason>) {
+        self.no_route_reason = reason;
+    }
+
+    /// Returns the recorded no-route reason, if any.
+    pub fn no_route_reason(&self) -> Option<NoPathReason> {
+        self.no_route_reason
     }
 }
 
