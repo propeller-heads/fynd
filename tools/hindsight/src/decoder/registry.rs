@@ -1,8 +1,8 @@
 //! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
-//! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
-//! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
+//! The data is pure configuration and lives in TOML — the built-in address books are embedded
+//! from the `registry/` directory; `--registry <path>` loads a modified or per-chain
 //! address book without recompiling. This module only holds the lookups the decoders ask
 //! (`Registry::is_solver`, `Registry::is_batch_settler`, `Registry::label`, …).
 
@@ -19,6 +19,7 @@ use serde::Deserialize;
 /// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
 /// cannot fail to parse at runtime).
 const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
+const BASE_TOML: &str = include_str!("registry/base.toml");
 
 /// On-disk shape of a chain's address book. Field meanings are documented in
 /// `registry/ethereum.toml`.
@@ -109,8 +110,9 @@ impl Registry {
         }
         match chain.to_lowercase().as_str() {
             "ethereum" => Ok(Self::ethereum()),
+            "base" => Ok(Self::base()),
             other => anyhow::bail!(
-                "no built-in decoder address registry for chain '{other}' (only ethereum); \
+                "no built-in decoder address registry for chain '{other}' (only ethereum, base); \
                  pass --registry with that chain's address book"
             ),
         }
@@ -119,6 +121,11 @@ impl Registry {
     /// The built-in Ethereum address book.
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
+    }
+
+    /// The built-in Base address book.
+    pub(crate) fn base() -> Self {
+        Self::from_toml(BASE_TOML).expect("embedded base registry must parse")
     }
 
     fn from_toml(text: &str) -> anyhow::Result<Self> {
@@ -259,10 +266,23 @@ mod tests {
     }
 
     #[test]
-    fn test_load_ethereum() {
+    fn test_embedded_base_book() {
+        let registry = Registry::base();
+        assert!(!registry.solvers.is_empty());
+        assert!(!registry
+            .venue("relay")
+            .unwrap()
+            .entry_points
+            .is_empty());
+    }
+
+    #[test]
+    fn test_load_builtin_chains() {
         assert!(Registry::load("ethereum", None).is_ok());
         assert!(Registry::load("Ethereum", None).is_ok());
-        assert!(Registry::load("base", None).is_err());
+        assert!(Registry::load("base", None).is_ok());
+        assert!(Registry::load("BASE", None).is_ok());
+        assert!(Registry::load("arbitrum", None).is_err());
     }
 
     #[test]

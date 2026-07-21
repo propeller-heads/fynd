@@ -15,7 +15,7 @@ measurable value of adding Fynd to a venue.
 | `verify` | Diff decoded trades against Allium's `aggregator_trades` ground truth (dev check) |
 | `monitor` | Live: drive an in-process Fynd solver block-by-block, re-solve every settled trade, emit JSONL + Prometheus metrics |
 
-All take `--chain` (selects the address book; only `ethereum` is built in) and `--registry` /
+All take `--chain` (selects the address book) and `--registry` /
 `HINDSIGHT_REGISTRY` to load a custom address book. See `--help` per subcommand and
 [CLAUDE.md](CLAUDE.md) for environment variables.
 
@@ -195,7 +195,7 @@ collectors are re-verified on every chain a venue is added on.
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
 | Add a new decode method | A `TradeDecoder` (a `netting`/`calldata` toolkit function behind it), listed for the entities that use it | Transactions the existing decoders cannot read stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
-| Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | Only `ethereum` is built in |
+| Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | The chain has no built-in book and must be passed via `--registry` |
 
 ### Re-solve monitor (`src/resolve/`)
 
