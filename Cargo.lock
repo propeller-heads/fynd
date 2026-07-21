@@ -3508,6 +3508,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-actix-web",
+ "tracing-subscriber 0.3.23",
  "tycho-execution",
  "tycho-simulation",
  "utoipa 5.5.0",
