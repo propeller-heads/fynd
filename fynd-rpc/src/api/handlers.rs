@@ -13,7 +13,9 @@ use crate::api::prices::{
 };
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
-    request_capture::{self, log_request_capture, quote_status_code, RequestOutcome},
+    request_capture::{
+        self, log_request_capture, no_route_reason_code, quote_status_code, RequestOutcome,
+    },
 };
 
 /// Configures API routes under /v1 namespace.
@@ -90,6 +92,11 @@ pub(crate) async fn quote(
                 .orders()
                 .iter()
                 .map(|order_quote| quote_status_code(order_quote.status()))
+                .collect(),
+            no_route_reasons: core_quote
+                .orders()
+                .iter()
+                .map(|order_quote| no_route_reason_code(order_quote.no_route_reason()))
                 .collect(),
         },
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
