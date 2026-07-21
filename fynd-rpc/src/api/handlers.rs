@@ -1,16 +1,19 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
+use tracing::instrument;
 #[cfg(feature = "experimental")]
-use tracing::warn;
-use tracing::{info, instrument};
+use tracing::{info, warn};
 
 use super::{dto, ApiError, AppState};
-use crate::api::error::ErrorResponse;
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
     price_to_f64, ComputationBlocks, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse,
     SpotPriceEntry, TokenPriceEntry,
+};
+use crate::api::{
+    error::{solve_error_code, ErrorResponse},
+    request_capture::{self, log_request_capture, quote_status_code, RequestOutcome},
 };
 
 /// Configures API routes under /v1 namespace.
@@ -60,28 +63,40 @@ pub(crate) async fn quote(
         return Err(ApiError::BadRequest("no orders provided".to_string()));
     }
 
+    // Capture a re-issuable, signature-free copy of the request BEFORE the core
+    // conversion consumes `dto_request`.
+    let num_orders = dto_request.orders().len();
+    let replay_json = request_capture::replay_json(&dto_request);
+
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
 
-    // Validate orders
+    // Validate orders (unchanged from the original handler).
     for order in core_request.orders() {
         if let Err(e) = order.validate() {
             return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
         }
     }
 
-    let core_quote = state
+    let result = state
         .worker_router()
         .quote(core_request)
-        .await?;
+        .await;
 
-    info!(
-        solve_time_ms = core_quote.solve_time_ms(),
-        num_orders = core_quote.orders().len(),
-        num_pools = state.worker_router().num_pools(),
-        "quote completed"
-    );
+    let outcome = match &result {
+        Ok(core_quote) => RequestOutcome::Solved {
+            solve_time_ms: core_quote.solve_time_ms(),
+            order_statuses: core_quote
+                .orders()
+                .iter()
+                .map(|order_quote| quote_status_code(order_quote.status()))
+                .collect(),
+        },
+        Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
+    };
+    log_request_capture(num_orders, &replay_json, &outcome);
 
+    let core_quote = result?;
     let dto_quote: dto::Quote = core_quote.into();
 
     Ok(HttpResponse::Ok().json(dto_quote))
