@@ -751,6 +751,12 @@ fn combine_with_surplus(
                 let committed_leg = (swap.amount_out() * committed_amount_out +
                     (exclusive_route_amount_out - 1u32)) /
                     exclusive_route_amount_out;
+                debug_assert!(
+                    committed_leg <= *swap.amount_out(),
+                    "committed leg ({committed_leg}) must not exceed the leg's realized output \
+                     ({})",
+                    swap.amount_out(),
+                );
                 swap.set_committed_amount_out(committed_leg);
             }
         }
@@ -1384,10 +1390,14 @@ mod tests {
         ExclusivityPolicy::new(|c| c.protocol_system == "vm:exclusive")
     }
 
-    /// Like `make_single_quote` but the swap uses an exclusive protocol component.
-    /// `amount_out` is used as both the route output and `amount_out_net_gas` (gas cost = 0 for
-    /// simplicity in surplus unit tests).
-    fn make_exclusive_quote(amount_out: u64) -> SingleOrderQuote {
+    /// Like `make_single_quote` but the swap uses an exclusive protocol component. The swap's own
+    /// output is `leg_amount_out`, letting tests exercise per-leg attribution where the leg
+    /// differs from the route total
+    fn make_exclusive_quote_with_leg(
+        amount_out: u64,
+        amount_out_net_gas: u64,
+        leg_amount_out: u64,
+    ) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -1412,7 +1422,7 @@ mod tests {
             tin.clone(),
             tout.clone(),
             BigUint::from(1000u64),
-            BigUint::from(amount_out),
+            BigUint::from(leg_amount_out),
             BigUint::from(50_000u64),
             comp,
             Box::new(MockProtocolSim::default()),
@@ -1426,7 +1436,7 @@ mod tests {
             BigUint::from(1000u64),
             BigUint::from(amount_out),
             BigUint::from(100_000u64),
-            BigUint::from(amount_out),
+            BigUint::from(amount_out_net_gas),
             BlockInfo::new(1, "0x123".to_string(), 1000),
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
@@ -1437,9 +1447,13 @@ mod tests {
         SingleOrderQuote::new(quote, 5)
     }
 
-    /// Like `make_single_quote` but `amount_out` = `amount_out_net_gas` (zero gas cost) for
-    /// easier surplus math in tests.
-    fn make_public_quote_zero_gas(amount_out: u64) -> SingleOrderQuote {
+    fn make_exclusive_quote(amount_out: u64) -> SingleOrderQuote {
+        make_exclusive_quote_with_leg(amount_out, amount_out, amount_out)
+    }
+
+    /// Like `make_single_quote` but with a configurable `amount_out_net_gas` so tests can
+    /// express non-zero gas cost.
+    fn make_public_quote_with_net(amount_out: u64, amount_out_net_gas: u64) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -1476,7 +1490,7 @@ mod tests {
             BigUint::from(1000u64),
             BigUint::from(amount_out),
             BigUint::from(100_000u64),
-            BigUint::from(amount_out),
+            BigUint::from(amount_out_net_gas),
             BlockInfo::new(1, "0x123".to_string(), 1000),
             "test".to_string(),
             Bytes::from(make_address(0xAA).as_ref()),
@@ -1485,6 +1499,10 @@ mod tests {
         )
         .with_route(Route::new(vec![swap], tokens).expect("non-empty route"));
         SingleOrderQuote::new(quote, 5)
+    }
+
+    fn make_public_quote_zero_gas(amount_out: u64) -> SingleOrderQuote {
+        make_public_quote_with_net(amount_out, amount_out)
     }
 
     /// Builds an `OrderResponses` with a public quote and an exclusive-access quote (zero gas
@@ -1584,6 +1602,51 @@ mod tests {
         // committed_leg = leg.amount_out * committed_route_out / realized_route_out
         // = 1000 * 900 / 1000 = 900
         assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(900u64)),);
+    }
+
+    #[test]
+    fn combine_committed_leg_rounding() {
+        // leg = 995, committed = 900, realized = 1000: exact quotient is 895.5. Ceiling commits
+        // the user to 896; truncation would commit 895, shorting the user by 1 wei.
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                (
+                    "public_pool".to_string(),
+                    make_public_quote_zero_gas(900)
+                        .order()
+                        .clone(),
+                ),
+                (
+                    "exclusive_access_pool".to_string(),
+                    make_exclusive_quote_with_leg(1000, 1000, 995)
+                        .order()
+                        .clone(),
+                ),
+            ],
+            failed_solvers: vec![],
+        };
+        let public_ranked = vec![make_public_quote_zero_gas(900)
+            .order()
+            .clone()];
+        let policy = exclusive_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        let route = combined[0]
+            .route()
+            .expect("surplus quote should have a route");
+        let perm_swap = route
+            .swaps()
+            .iter()
+            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .expect("should have an exclusive swap");
+        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(896u64)));
     }
 
     #[test]
