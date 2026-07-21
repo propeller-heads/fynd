@@ -36,7 +36,7 @@ impl WorkerPoolsConfig {
     /// truth for solver-tuning defaults.
     pub fn builtin_default() -> Self {
         Self {
-            pools: fynd_core::config::embedded_default()
+            pools: fynd_core::config::embedded_default(fynd_core::config::Preset::Balanced)
                 .pools
                 .clone(),
         }

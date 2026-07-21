@@ -285,40 +285,19 @@ async fn resolve_solver_config(
             .pools = Some(pools);
     }
 
-    let remote_config = if args.no_remote_config {
-        None
-    } else {
+    // Ascending priority: embedded default (per preset), then the remote config, then the
+    // local config file, then CLI overrides.
+    let mut config = embedded_default(args.preset).clone();
+    if !args.no_remote_config {
         let url = args
             .remote_config_url
             .clone()
             .unwrap_or_else(|| remote::default_remote_config_url(args.chain));
-        match tokio::time::timeout(REMOTE_CONFIG_FETCH_TIMEOUT, remote::fetch_remote_config(&url))
-            .await
-        {
-            Ok(Ok(partial)) => {
-                info!(url, "fetched remote config");
-                Some(partial)
-            }
-            Ok(Err(e)) => {
-                warn!(url, error = %e, "remote config fetch failed; continuing without it");
-                None
-            }
-            Err(_elapsed) => {
-                warn!(
-                    url,
-                    timeout_ms = REMOTE_CONFIG_FETCH_TIMEOUT.as_millis() as u64,
-                    "remote config fetch timed out; continuing without it"
-                );
-                None
-            }
-        }
-    };
-
-    // Ascending priority: embedded default, then the remote config, then the local config
-    // file, then CLI overrides.
-    let config = embedded_default()
-        .clone()
-        .apply(&remote_config.unwrap_or_default())
+        config = config
+            .apply_remote(&url, args.preset, REMOTE_CONFIG_FETCH_TIMEOUT)
+            .await;
+    }
+    let config = config
         .apply(&local_file.unwrap_or_default())
         .apply(&overrides);
     config

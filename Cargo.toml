@@ -143,6 +143,9 @@ tycho-execution = ">=0.331.0"
 tycho-simulation = ">=0.331.0"
 typetag = "0.2"
 
+# Enum derives (Display, FromStr, variant listing)
+strum = { version = "0.27", features = ["derive"] }
+
 # Compression
 zstd = "0.13"
 

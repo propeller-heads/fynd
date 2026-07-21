@@ -77,6 +77,11 @@ const DEFAULT_TYCHO_USE_TLS: bool = true;
 const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 /// Generous router timeout for standalone (non-server) use. HTTP services should
 /// override this to a tighter value appropriate for their SLA.
+///
+/// Deliberately NOT sourced from `config/default_config.toml` (whose
+/// `worker_router_timeout_ms` targets the HTTP service): editing the file does not change
+/// this standalone default. The one exception to the embedded-config seeding in
+/// [`FyndBuilder::new`].
 const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);
 
 // serde requires free functions for `#[serde(default = "...")]` — these delegate to the
@@ -383,10 +388,11 @@ pub struct FyndBuilder {
 impl FyndBuilder {
     /// Creates a new builder with the required parameters.
     ///
-    /// Solver-tuning defaults come from the embedded default config
-    /// (`config/default_config.toml`) — the single source of truth. Exception: the worker
-    /// router timeout defaults to a generous standalone value rather than the embedded
-    /// HTTP-service-oriented one.
+    /// Solver-tuning defaults come from the embedded default config's `balanced` preset
+    /// (`config/default_config.toml`) — the single source of truth. Apply a differently
+    /// resolved [`Config`](crate::config::Config) with [`apply_config`](Self::apply_config).
+    /// Exception: the worker router timeout defaults to a generous standalone value rather
+    /// than the embedded HTTP-service-oriented one.
     pub fn new(
         chain: Chain,
         tycho_url: impl Into<String>,
@@ -394,7 +400,7 @@ impl FyndBuilder {
         protocols: Vec<String>,
         min_tvl: f64,
     ) -> Self {
-        let embedded = crate::config::embedded_default();
+        let embedded = crate::config::embedded_default(crate::config::Preset::Balanced);
         Self {
             chain,
             tycho_url: tycho_url.into(),

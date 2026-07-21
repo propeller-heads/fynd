@@ -2,8 +2,9 @@
 //!
 //! # Layering
 //!
-//! The remote payload is a [`PartialConfig`] in the same schema as the local config file,
-//! published per chain. It applies **right above the embedded default**:
+//! The remote payload is one document per chain with one [`PartialConfig`] section per
+//! preset (`[balanced]`, `[deep]` — the same layout as the embedded `default_config.toml`);
+//! the selected preset's section applies **right above the embedded default**:
 //!
 //! ```text
 //! CLI flags  >  local config file (fynd.toml)  >  remote config (S3)  >  embedded default
@@ -51,11 +52,11 @@ use std::time::Duration;
 
 use tycho_simulation::tycho_common::models::Chain;
 
-use super::{Config, ConfigError, PartialConfig};
+use super::{Config, ConfigError, PartialConfig, Preset};
 use crate::worker_pool::registry::AVAILABLE_ALGORITHMS;
 
 /// URL template behind [`default_remote_config_url`]; `{chain}` is substituted with the
-/// lowercase chain name.
+/// lowercase chain name. One document per chain holds every preset's section.
 const DEFAULT_REMOTE_URL_TEMPLATE: &str =
     "https://s3.eu-central-1.amazonaws.com/repo.propellerheads-propellerheads/fynd/presets/{chain}/latest.toml";
 
@@ -70,7 +71,7 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(150);
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 
 /// Returns the default remote config URL for `chain` (the PropellerHeads-maintained S3
-/// object with the latest tuned values).
+/// object with the latest tuned values, one section per preset).
 pub fn default_remote_config_url(chain: Chain) -> String {
     DEFAULT_REMOTE_URL_TEMPLATE.replace("{chain}", &chain.to_string())
 }
@@ -143,10 +144,12 @@ impl Config {
     /// `timeout` bounds the whole fetch including retries. This method can never fail or
     /// panic (safety properties 1 and 4): on any fetch error or timeout it logs a warning
     /// and returns `self` unchanged.
-    pub async fn apply_remote(self, url: &str, timeout: Duration) -> Self {
-        match tokio::time::timeout(timeout, fetch_remote_config(url)).await {
+    pub async fn apply_remote(self, url: &str, preset: Preset, timeout: Duration) -> Self {
+        match tokio::time::timeout(timeout, fetch_remote_config(url, preset)).await {
             Ok(Ok(partial)) => {
-                tracing::info!(url, "fetched remote config");
+                // Remote is the one layer that changes without a deploy; log exactly what
+                // it overrides so a bad publish is visible in the startup log.
+                tracing::info!(url, overrides = ?partial.set_fields(), "fetched remote config");
                 self.apply(&partial)
             }
             Ok(Err(e)) => {
@@ -177,7 +180,10 @@ impl Config {
 ///
 /// Returns [`RemoteConfigError`] on any transport, size, parse, or payload-safety problem.
 /// Treat every error as non-fatal: warn and resolve without the remote layer.
-pub async fn fetch_remote_config(url: &str) -> Result<PartialConfig, RemoteConfigError> {
+pub async fn fetch_remote_config(
+    url: &str,
+    preset: Preset,
+) -> Result<PartialConfig, RemoteConfigError> {
     let mut attempt = 1;
     let body = loop {
         match http_get_capped(url).await {
@@ -191,9 +197,17 @@ pub async fn fetch_remote_config(url: &str) -> Result<PartialConfig, RemoteConfi
         }
     };
 
-    let partial = PartialConfig::from_toml_str(&body, url)?;
-    check_payload(&partial)?;
-    Ok(partial)
+    let sections: std::collections::HashMap<String, PartialConfig> = toml::from_str(&body)
+        .map_err(|e| ConfigError::Parse { context: url.to_string(), source: e })?;
+    let Some(partial) = sections.get(preset.as_str()) else {
+        // A legitimate steady state: nothing tuned for this preset (or an empty document).
+        tracing::info!(url, preset = %preset, "remote config has no section for this preset");
+        return Ok(PartialConfig::default());
+    };
+    // Only the selected section is checked: another preset's section may legitimately use
+    // algorithms from a newer binary without breaking this one.
+    check_payload(partial)?;
+    Ok(partial.clone())
 }
 
 /// One GET attempt with the response body capped at [`MAX_RESPONSE_BYTES`]
@@ -301,8 +315,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_applies_valid_payload() {
-        let url = spawn_server(vec![(200, b"worker_router_timeout_ms = 123".to_vec())]).await;
-        let partial = fetch_remote_config(&url)
+        let url =
+            spawn_server(vec![(200, b"[balanced]\nworker_router_timeout_ms = 123".to_vec())]).await;
+        let partial = fetch_remote_config(&url, Preset::Balanced)
             .await
             .expect("fetch errored");
         assert_eq!(partial.worker_router_timeout_ms, Some(123));
@@ -310,14 +325,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_missing_preset_section_is_empty_layer() {
+        // An empty document (the "nothing tuned" steady state) or a document without the
+        // selected preset's section applies nothing — no error, no fallback noise.
+        let url = spawn_server(vec![(200, b"# nothing tuned\n".to_vec())]).await;
+        let partial = fetch_remote_config(&url, Preset::Deep)
+            .await
+            .expect("fetch errored");
+        assert_eq!(partial, PartialConfig::default());
+    }
+
+    #[tokio::test]
     async fn test_fetch_retries_transient_5xx() {
         let url = spawn_server(vec![
             (500, b"".to_vec()),
             (503, b"".to_vec()),
-            (200, b"min_token_quality = 90".to_vec()),
+            (200, b"[balanced]\nmin_token_quality = 90".to_vec()),
         ])
         .await;
-        let partial = fetch_remote_config(&url)
+        let partial = fetch_remote_config(&url, Preset::Balanced)
             .await
             .expect("fetch errored");
         assert_eq!(partial.min_token_quality, Some(90));
@@ -328,7 +354,7 @@ mod tests {
         // A single 404 response; a retry would hang on the closed listener, so completing
         // with an error proves no retry happened.
         let url = spawn_server(vec![(404, b"".to_vec())]).await;
-        let error = fetch_remote_config(&url)
+        let error = fetch_remote_config(&url, Preset::Balanced)
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteConfigError::Request(_)));
@@ -339,7 +365,7 @@ mod tests {
         // S3 answers 301 without a Location header when the URL targets the wrong
         // region; the XML error body must not reach the parser.
         let url = spawn_server(vec![(301, b"<?xml version=\"1.0\"?><Error/>".to_vec())]).await;
-        let error = fetch_remote_config(&url)
+        let error = fetch_remote_config(&url, Preset::Balanced)
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteConfigError::UnexpectedStatus { .. }));
@@ -350,7 +376,7 @@ mod tests {
     async fn test_fetch_rejects_oversized_body() {
         let huge = vec![b'#'; (MAX_RESPONSE_BYTES + 1) as usize];
         let url = spawn_server(vec![(200, huge)]).await;
-        let error = fetch_remote_config(&url)
+        let error = fetch_remote_config(&url, Preset::Balanced)
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteConfigError::TooLarge { .. }));
@@ -359,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_rejects_garbage_payload() {
         let url = spawn_server(vec![(200, b"not [ valid { toml".to_vec())]).await;
-        let error = fetch_remote_config(&url)
+        let error = fetch_remote_config(&url, Preset::Balanced)
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteConfigError::Parse(_)));
@@ -367,9 +393,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_rejects_unknown_algorithm_payload() {
-        let url =
-            spawn_server(vec![(200, b"[pools.p]\nalgorithm = \"quantum_router\"".to_vec())]).await;
-        let error = fetch_remote_config(&url)
+        let url = spawn_server(vec![(
+            200,
+            b"[balanced.pools.p]\nalgorithm = \"quantum_router\"".to_vec(),
+        )])
+        .await;
+        let error = fetch_remote_config(&url, Preset::Balanced)
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteConfigError::UnknownAlgorithm { .. }));
@@ -379,10 +408,14 @@ mod tests {
     async fn test_apply_remote_falls_back_on_fetch_failure() {
         // Port 9 (discard) refuses connections; the config must come through unchanged,
         // never a panic or an error.
-        let base = super::super::embedded_default().clone();
+        let base = super::super::embedded_default(Preset::Balanced).clone();
         let config = base
             .clone()
-            .apply_remote("http://127.0.0.1:9/latest.toml", Duration::from_millis(200))
+            .apply_remote(
+                "http://127.0.0.1:9/latest.toml",
+                Preset::Balanced,
+                Duration::from_millis(200),
+            )
             .await;
         assert_eq!(config, base);
     }

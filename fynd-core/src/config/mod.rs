@@ -1,12 +1,19 @@
 //! Layered solver configuration.
 //!
-//! Every solver-tuning field resolves independently through three layers, highest priority
+//! Every solver-tuning field resolves independently through four layers, highest priority
 //! first:
 //!
 //! 1. **Explicit overrides** — lib builder setters or CLI flags
 //! 2. **Local config file** — any subset of the fields, same schema as the embedded default
-//! 3. **Remote config** — tuned values pulled from S3 per chain (see [`remote`])
-//! 4. **Embedded default** — `default_config.toml`, compiled into the binary
+//! 3. **Remote config** — tuned values pulled from S3 per chain, one section per preset (see
+//!    [`remote`])
+//! 4. **Embedded default** — the selected preset's section of `default_config.toml`, compiled into
+//!    the binary
+//!
+//! A [`Preset`] names a tuning profile; both the embedded defaults and the remote payloads
+//! are maintained per preset. Selecting one only changes which defaults apply underneath —
+//! local overrides always win, and the preset itself is chosen via CLI/lib, never inside a
+//! config file.
 //!
 //! The embedded default deserializes directly into a complete [`Config`] — every field
 //! (except the chain-specific `min_tvl`) is required, so a gap between the struct and
@@ -25,9 +32,9 @@
 //! use fynd_core::config::{embedded_default, PartialConfig};
 //!
 //! let overrides = PartialConfig { worker_router_timeout_ms: Some(50), ..Default::default() };
-//! let config = embedded_default()
+//! let config = embedded_default(Preset::Balanced)
 //!     .clone()
-//!     .apply_remote(&remote::default_remote_config_url(chain), timeout)
+//!     .apply_remote(&remote::default_remote_config_url(chain), preset, timeout)
 //!     .await
 //!     .apply(&PartialConfig::from_file("fynd.toml")?)
 //!     .apply(&overrides);
@@ -36,6 +43,47 @@
 //! ```
 
 use std::{collections::HashMap, path::Path, sync::LazyLock};
+
+/// A named tuning profile for the default configuration (embedded and remote).
+///
+/// Presets only select which *defaults* apply; every config layer above them behaves
+/// identically. Each variant corresponds to a section of `default_config.toml` (and a
+/// remote payload path), named after the lowercase variant name; unit tests guard against
+/// the enum and the file drifting apart. Adding a preset requires only a new variant here
+/// and a matching section in the file — names, parsing, and listing are derived.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum Preset {
+    /// Balanced latency/quality trade-off: the historic defaults.
+    Balanced,
+    /// Tuned for route quality over latency (deeper searches, more generous timeouts).
+    /// NOTE: currently identical to `Balanced`; to be tuned.
+    Deep,
+}
+
+impl Preset {
+    /// All presets, in declaration order.
+    pub fn all() -> &'static [Preset] {
+        <Preset as strum::VariantArray>::VARIANTS
+    }
+
+    /// The preset's name as used in `default_config.toml` sections, remote payload paths,
+    /// and on the CLI.
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
 
 use serde::Deserialize;
 use tycho_simulation::tycho_common::models::{Chain, TvlThresholdTier};
@@ -122,12 +170,77 @@ pub struct PartialConfig {
 }
 
 impl PartialConfig {
+    /// Every field name, for detecting unknown keys in hand-written config files.
+    /// Kept in sync with the struct by `test_known_fields_match_struct`.
+    const KNOWN_FIELDS: &'static [&'static str] = &[
+        "min_tvl",
+        "tvl_buffer_ratio",
+        "min_token_quality",
+        "traded_n_days_ago",
+        "gas_refresh_interval_secs",
+        "reconnect_delay_secs",
+        "worker_router_timeout_ms",
+        "worker_router_min_responses",
+        "partial_blocks",
+        "protocols",
+        "pools",
+    ];
+
+    /// Names of the fields this layer sets, in declaration order.
+    ///
+    /// Used to log what a layer actually changed (e.g. what the remote config applied).
+    pub fn set_fields(&self) -> Vec<&'static str> {
+        // Exhaustive destructuring (no `..`): adding a field without listing it here is a
+        // compile error.
+        let Self {
+            min_tvl,
+            tvl_buffer_ratio,
+            min_token_quality,
+            traded_n_days_ago,
+            gas_refresh_interval_secs,
+            reconnect_delay_secs,
+            worker_router_timeout_ms,
+            worker_router_min_responses,
+            partial_blocks,
+            protocols,
+            pools,
+        } = self;
+        let mut fields = Vec::new();
+        let mut record = |set: bool, name: &'static str| {
+            if set {
+                fields.push(name);
+            }
+        };
+        record(min_tvl.is_some(), "min_tvl");
+        record(tvl_buffer_ratio.is_some(), "tvl_buffer_ratio");
+        record(min_token_quality.is_some(), "min_token_quality");
+        record(traded_n_days_ago.is_some(), "traded_n_days_ago");
+        record(gas_refresh_interval_secs.is_some(), "gas_refresh_interval_secs");
+        record(reconnect_delay_secs.is_some(), "reconnect_delay_secs");
+        record(worker_router_timeout_ms.is_some(), "worker_router_timeout_ms");
+        record(worker_router_min_responses.is_some(), "worker_router_min_responses");
+        record(partial_blocks.is_some(), "partial_blocks");
+        record(protocols.is_some(), "protocols");
+        record(pools.is_some(), "pools");
+        fields
+    }
+
     /// Parses a config layer from a TOML string.
     ///
-    /// `source` names the origin (e.g. a file path) for error messages. Unknown fields are
-    /// ignored (see the type-level docs).
+    /// `source` names the origin (e.g. a file path) for error messages. Unknown keys are
+    /// ignored but logged as warnings: in a hand-written file an unknown key is most
+    /// likely a typo silently falling through to lower layers.
     pub fn from_toml_str(raw: &str, source: &str) -> Result<Self, ConfigError> {
-        toml::from_str(raw)
+        let value: toml::Value = toml::from_str(raw)
+            .map_err(|e| ConfigError::Parse { context: source.to_string(), source: e })?;
+        if let Some(table) = value.as_table() {
+            for key in table.keys() {
+                if !Self::KNOWN_FIELDS.contains(&key.as_str()) {
+                    tracing::warn!(source, key, "unknown config key ignored (typo?)");
+                }
+            }
+        }
+        Self::deserialize(value)
             .map_err(|e| ConfigError::Parse { context: source.to_string(), source: e })
     }
 
@@ -140,38 +253,48 @@ impl PartialConfig {
     }
 }
 
-/// The embedded default configuration, parsed once on first use.
-static EMBEDDED_DEFAULT: LazyLock<Config> = LazyLock::new(|| {
-    toml::from_str(EMBEDDED_DEFAULT_TOML)
-        .expect("embedded default_config.toml is a complete, valid Config; checked by unit tests")
+/// The embedded default configurations, one per preset, parsed once on first use.
+static EMBEDDED_DEFAULTS: LazyLock<HashMap<Preset, Config>> = LazyLock::new(|| {
+    let sections: HashMap<String, Config> = toml::from_str(EMBEDDED_DEFAULT_TOML)
+        .expect("embedded default_config.toml is a complete, valid Config per preset; checked by unit tests");
+    Preset::all()
+        .iter()
+        .map(|&preset| {
+            let config = sections
+                .get(preset.as_str())
+                .expect("every Preset has a default_config.toml section; checked by unit tests")
+                .clone();
+            (preset, config)
+        })
+        .collect()
 });
 
-/// Returns the embedded default configuration (`default_config.toml`), parsed once and
-/// cached.
+/// Returns the embedded default configuration for `preset` (its section of
+/// `default_config.toml`), parsed once and cached.
 ///
-/// This is the single source of truth for all solver-tuning defaults. The TOML
+/// This file is the single source of truth for all solver-tuning defaults. Each section
 /// deserializes directly into a complete [`Config`]; every field is required except the
 /// chain-specific `min_tvl` (see [`Config::min_tvl`]).
-pub fn embedded_default() -> &'static Config {
-    &EMBEDDED_DEFAULT
+pub fn embedded_default(preset: Preset) -> &'static Config {
+    &EMBEDDED_DEFAULTS[&preset]
 }
 
 /// Overall time budget (including retries) for the fetch inside [`get_default`].
 /// Callers wanting a different budget use [`Config::apply_remote`] directly.
 const GET_DEFAULT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Returns the embedded default configuration with the latest remotely tuned values for
-/// `chain` applied on top, fetched from the default S3 URL (see
+/// Returns the embedded default configuration for `preset` with the latest remotely tuned
+/// values for `chain` applied on top, fetched from the default S3 URL (see
 /// [`remote::default_remote_config_url`]).
 ///
-/// The simple one-call form of `embedded_default().clone().apply_remote(...)`, with a
-/// built-in 2 s fetch budget. Never fails or panics: on any fetch problem the embedded
+/// The simple one-call form of `embedded_default(preset).clone().apply_remote(...)`, with
+/// a built-in 2 s fetch budget. Never fails or panics: on any fetch problem the embedded
 /// defaults are returned unchanged (a warning is logged). Layer local overrides on top
 /// with [`Config::apply`]; for a custom URL or timeout use [`Config::apply_remote`].
-pub async fn get_default(chain: Chain) -> Config {
-    embedded_default()
+pub async fn get_default(chain: Chain, preset: Preset) -> Config {
+    embedded_default(preset)
         .clone()
-        .apply_remote(&remote::default_remote_config_url(chain), GET_DEFAULT_FETCH_TIMEOUT)
+        .apply_remote(&remote::default_remote_config_url(chain), preset, GET_DEFAULT_FETCH_TIMEOUT)
         .await
 }
 
@@ -340,8 +463,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_embedded_presets_match_enum_and_are_valid() {
+        let sections: HashMap<String, Config> =
+            toml::from_str(EMBEDDED_DEFAULT_TOML).expect("embedded file failed to parse");
+        let mut section_names: Vec<&str> = sections
+            .keys()
+            .map(String::as_str)
+            .collect();
+        section_names.sort_unstable();
+        let mut enum_names: Vec<&str> = Preset::all()
+            .iter()
+            .map(|preset| preset.as_str())
+            .collect();
+        enum_names.sort_unstable();
+        assert_eq!(section_names, enum_names, "Preset enum and default_config.toml drifted");
+        for &preset in Preset::all() {
+            embedded_default(preset)
+                .validate()
+                .unwrap_or_else(|e| panic!("embedded '{preset}' failed validation: {e}"));
+        }
+    }
+
+    #[test]
     fn test_embedded_default_is_complete_and_valid() {
-        let config = embedded_default();
+        let config = embedded_default(Preset::Balanced);
         config
             .validate()
             .expect("embedded default failed validation");
@@ -369,7 +514,7 @@ mod tests {
             ..PartialConfig::default()
         };
         // Ascending priority: embedded default, then local config file, then overrides.
-        let config = embedded_default()
+        let config = embedded_default(Preset::Balanced)
             .clone()
             .apply(&local_file)
             .apply(&overrides);
@@ -392,7 +537,7 @@ mod tests {
             protocols: Some(vec!["curve".to_string()]),
             ..PartialConfig::default()
         };
-        let config = embedded_default()
+        let config = embedded_default(Preset::Balanced)
             .clone()
             .apply(&local_file);
         // The whole map/list is replaced, not merged entry by entry.
@@ -404,10 +549,30 @@ mod tests {
     #[test]
     fn test_min_tvl_override() {
         let overrides = PartialConfig { min_tvl: Some(42.0), ..PartialConfig::default() };
-        let config = embedded_default()
+        let config = embedded_default(Preset::Balanced)
             .clone()
             .apply(&overrides);
         assert_eq!(config.min_tvl, Some(42.0));
+    }
+
+    #[test]
+    fn test_known_fields_match_struct() {
+        // A fully-set PartialConfig must report every KNOWN_FIELDS entry: adding a struct
+        // field without updating KNOWN_FIELDS (or vice versa) fails here.
+        let full = PartialConfig {
+            min_tvl: Some(1.0),
+            tvl_buffer_ratio: Some(1.1),
+            min_token_quality: Some(1),
+            traded_n_days_ago: Some(1),
+            gas_refresh_interval_secs: Some(1),
+            reconnect_delay_secs: Some(1),
+            worker_router_timeout_ms: Some(1),
+            worker_router_min_responses: Some(1),
+            partial_blocks: Some(true),
+            protocols: Some(vec![]),
+            pools: Some(HashMap::new()),
+        };
+        assert_eq!(full.set_fields(), PartialConfig::KNOWN_FIELDS);
     }
 
     #[test]
@@ -454,7 +619,7 @@ mod tests {
     #[test]
     fn test_validation_runs_on_resolved_config() {
         let overrides = PartialConfig { tvl_buffer_ratio: Some(0.5), ..PartialConfig::default() };
-        let error = embedded_default()
+        let error = embedded_default(Preset::Balanced)
             .clone()
             .apply(&overrides)
             .validate()
@@ -476,7 +641,7 @@ mod tests {
                 .with_max_hops(2),
         );
         let overrides = PartialConfig { pools: Some(pools), ..PartialConfig::default() };
-        let error = embedded_default()
+        let error = embedded_default(Preset::Balanced)
             .clone()
             .apply(&overrides)
             .validate()
