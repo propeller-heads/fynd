@@ -679,10 +679,11 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
 /// public market.
 ///
-/// Per-leg attribution: each exclusive leg's `committed_amount_out` is its realized output scaled
-/// by `committed / realized_route_output` — the same ratio by which the order-level output is
-/// pinned down — rounded up so the rounding error favors the user. The protocol captures the
-/// difference between each leg's realized and committed output.
+/// Per-leg attribution: the route's excess over the committed amount (`realized − committed`)
+/// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
+/// in route order. Public branches of a split cannot be skimmed, so the whole excess
+/// comes out of the exclusive legs; if they cannot absorb all of it, the remainder is
+/// under-captured (user-safe: the user then receives more than the committed amount).
 ///
 /// Exact-in orders only: the commitment, both gates, and the surplus are all denominated in
 /// `amount_out`. Exact-out support would invert the logic — fixed output, commitment and surplus
@@ -748,20 +749,57 @@ fn combine_with_surplus(
     // attach SurplusInfo.
     let mut surplus_quote = exclusive_candidate.clone();
 
+    // Final output of each swap's path, walked backwards (a path's terminal output propagates
+    // to its chained predecessors). Converting captured excess into a leg's token needs the
+    // realized downstream price `path_final_out / leg_out`; for terminal legs the ratio is 1.
+    let path_final_outs: Vec<BigUint> = surplus_quote
+        .route()
+        .map(|route| {
+            let swaps = route.swaps();
+            let mut finals = vec![BigUint::ZERO; swaps.len()];
+            let mut current_final = BigUint::ZERO;
+            for i in (0..swaps.len()).rev() {
+                let is_terminal =
+                    i == swaps.len() - 1 || swaps[i + 1].token_in() != swaps[i].token_out();
+                if is_terminal {
+                    current_final = swaps[i].amount_out().clone();
+                }
+                finals[i] = current_final.clone();
+            }
+            finals
+        })
+        .unwrap_or_default();
+
     if let Some(route) = surplus_quote.route_mut() {
-        for swap in route.swaps_mut() {
+        // Capture the route's excess at the exclusive legs.
+        // Each leg absorbs up to its path's capacity; any remainder is left with the user.
+        let mut excess = exclusive_route_amount_out - committed_amount_out;
+        for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
             if policy.is_exclusive(swap.protocol_component()) {
-                // Proportional reduction: committed_leg = ceil(leg.amount_out * committed /
-                // realized).
-                let committed_leg = (swap.amount_out() * committed_amount_out +
-                    (exclusive_route_amount_out - 1u32)) /
-                    exclusive_route_amount_out;
+                let Some(path_final_out) = path_final_outs.get(i) else {
+                    continue;
+                };
+                let captured = excess
+                    .clone()
+                    .min(path_final_out.clone());
+                // Convert into the leg's own token, rounding down so any error is taken
+                // from the protocol, not the user. Today the leg is always the last hop of
+                // its path (validator), so path_final_out equals the leg's output and this
+                // divides by itself — a plain subtraction. Once mid-path legs are allowed,
+                // the "user gets at least the committed amount" guarantee also requires the
+                // pools after the leg to have diminishing returns.
+                let captured_leg = if *path_final_out == BigUint::ZERO {
+                    BigUint::ZERO
+                } else {
+                    &captured * swap.amount_out() / path_final_out
+                };
                 debug_assert!(
-                    committed_leg <= *swap.amount_out(),
-                    "committed leg ({committed_leg}) must not exceed the leg's realized output \
-                     ({})",
+                    captured_leg <= *swap.amount_out(),
+                    "captured amount ({captured_leg}) must not exceed the leg's output ({})",
                     swap.amount_out(),
                 );
+                let committed_leg = swap.amount_out() - &captured_leg;
+                excess -= captured;
                 swap.set_committed_amount_out(committed_leg);
             }
         }
@@ -780,15 +818,16 @@ fn combine_with_surplus(
     result
 }
 
-/// Returns `true` only for routes carrying at least one exclusive leg where every exclusive leg is
-/// the terminal leg of its path.
+/// Returns `true` only for routes carrying exactly one exclusive leg, positioned as the terminal
+/// leg of its path.
 ///
-/// Returns `false` for routes with no exclusive leg, an empty route, no route at all, or any
-/// exclusive leg that sits mid-path.
+/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty
+/// route, no route at all, or an exclusive leg that sits mid-path.
 ///
-/// The terminal-only constraint is a v1 restriction: it keeps per-leg surplus attribution exact
-/// (no inverse simulation needed). Mid-route exclusive legs and multiple exclusive legs per path
-/// are deferred to a future version. Path boundaries are detected by checking whether the next
+/// Both constraints are v1 restrictions that keep per-leg surplus attribution exact and
+/// unambiguous: a mid-route leg would need inverse simulation to convert the excess into its
+/// token, and multiple exclusive legs make the per-pool attribution non-unique. Both are
+/// deferred to a future version. Path boundaries are detected by checking whether the next
 /// swap's `token_in` differs from the current swap's `token_out` — correct for Fynd's sequential
 /// route representation, but would need revisiting if routes gain explicit path-boundary markers.
 fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
@@ -818,7 +857,7 @@ fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> 
         exclusive_count += 1;
     }
 
-    exclusive_count >= 1
+    exclusive_count == 1
 }
 
 fn refine_gas_estimates(
@@ -1503,6 +1542,76 @@ mod tests {
         make_exclusive_quote_with_leg(amount_out, amount_out, amount_out)
     }
 
+    /// Split route with two parallel branches (same token pair): a public pool producing
+    /// `public_leg_out` and an exclusive pool producing `exclusive_leg_out`. Route output is the
+    /// sum of the branches; zero gas cost.
+    fn make_exclusive_split_quote(public_leg_out: u64, exclusive_leg_out: u64) -> SingleOrderQuote {
+        let make_token = |addr: Address| Token {
+            address: addr,
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let tin = make_address(0x01);
+        let tout = make_address(0x02);
+        let tin_token = make_token(tin.clone());
+        let tout_token = make_token(tout.clone());
+        let public_swap = Swap::new(
+            "pool-pub".to_string(),
+            "uniswap_v2".to_string(),
+            tin.clone(),
+            tout.clone(),
+            BigUint::from(500u64),
+            BigUint::from(public_leg_out),
+            BigUint::from(50_000u64),
+            component(
+                "0x0000000000000000000000000000000000000001",
+                &[tin_token.clone(), tout_token.clone()],
+            ),
+            Box::new(MockProtocolSim::default()),
+        );
+        let mut exclusive_comp = component(
+            "0x0000000000000000000000000000000000000002",
+            &[tin_token.clone(), tout_token.clone()],
+        );
+        exclusive_comp.protocol_system = "vm:exclusive".to_string();
+        let exclusive_swap = Swap::new(
+            "pool-perm".to_string(),
+            "vm:exclusive".to_string(),
+            tin.clone(),
+            tout.clone(),
+            BigUint::from(500u64),
+            BigUint::from(exclusive_leg_out),
+            BigUint::from(50_000u64),
+            exclusive_comp,
+            Box::new(MockProtocolSim::default()),
+        );
+        let mut tokens = HashMap::new();
+        tokens.insert(tin, tin_token);
+        tokens.insert(tout, tout_token);
+        let total = public_leg_out + exclusive_leg_out;
+        let quote = OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(total),
+            BigUint::from(100_000u64),
+            BigUint::from(total),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(
+            Route::new(vec![public_swap, exclusive_swap], tokens).expect("non-empty route"),
+        );
+        SingleOrderQuote::new(quote, 5)
+    }
+
     /// Like `make_single_quote` but with a configurable `amount_out_net_gas` so tests can
     /// express non-zero gas cost.
     fn make_public_quote_with_net(amount_out: u64, amount_out_net_gas: u64) -> SingleOrderQuote {
@@ -1704,9 +1813,9 @@ mod tests {
     }
 
     #[test]
-    fn combine_committed_leg_rounding() {
-        // leg = 995, committed = 900, realized = 1000: exact quotient is 895.5. Ceiling commits
-        // the user to 896; truncation would commit 895, shorting the user by 1 wei.
+    fn combine_committed_leg_deduction() {
+        // leg = 995, committed = 900, realized = 1000: the route's excess (100) is deducted from
+        // the exclusive leg in full — committed_leg = 995 − 100 = 895, exactly, no rounding.
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
@@ -1745,7 +1854,7 @@ mod tests {
             .iter()
             .find(|s| policy.is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
-        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(896u64)));
+        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(895u64)));
     }
 
     #[test]
@@ -1847,34 +1956,25 @@ mod tests {
         .with_route(Route::new(swaps, tokens).expect("non-empty route"))
     }
 
-    #[test]
-    fn exclusive_route_accepts_terminal_exclusive_leg() {
-        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)]);
-        assert!(has_valid_exclusive_route(&quote, &exclusive_policy()));
-    }
-
-    #[test]
-    fn exclusive_route_rejects_mid_route_exclusive_leg() {
-        let quote = make_route_quote(&[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]);
-        assert!(!has_valid_exclusive_route(&quote, &exclusive_policy()));
-    }
-
-    #[test]
-    fn exclusive_route_accepts_exclusive_leg_ending_its_path() {
-        // Split route in sequential representation: path 1 is a single exclusive hop 0x01→0x02;
-        // path 2 is 0x01→0x03→0x02. The exclusive leg is terminal for its path because the next
-        // swap starts over from 0x01.
-        let quote = make_route_quote(&[
-            ("vm:exclusive", 0x01, 0x02),
-            ("uniswap_v2", 0x01, 0x03),
-            ("uniswap_v2", 0x03, 0x02),
-        ]);
-        assert!(has_valid_exclusive_route(&quote, &exclusive_policy()));
-    }
-
-    #[test]
-    fn exclusive_route_rejects_route_without_exclusive_leg() {
-        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]);
-        assert!(!has_valid_exclusive_route(&quote, &exclusive_policy()));
+    /// Route-shape validation: exactly one exclusive leg, terminal in its path.
+    #[rstest]
+    #[case::terminal_exclusive_leg(
+        &[("uniswap_v2", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)], true)]
+    #[case::mid_route_exclusive_leg(
+        &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
+    // Split route in sequential representation: path 1 is a single exclusive hop 0x01→0x02;
+    // path 2 is 0x01→0x03→0x02. The exclusive leg is terminal for its path because the next
+    // swap starts over from 0x01.
+    #[case::exclusive_leg_ending_its_path(
+        &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x01, 0x03), ("uniswap_v2", 0x03, 0x02)],
+        true)]
+    #[case::no_exclusive_leg(
+        &[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
+    // Two exclusive legs: out of scope for v1 (ambiguous per-pool attribution).
+    #[case::two_exclusive_legs(
+        &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
+    fn exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
+        let quote = make_route_quote(legs);
+        assert_eq!(has_valid_exclusive_route(&quote, &exclusive_policy()), expected);
     }
 }
