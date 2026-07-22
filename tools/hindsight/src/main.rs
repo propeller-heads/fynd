@@ -12,6 +12,12 @@ use clap::{Args, Parser, Subcommand};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::{
+    decoder::{DecodedTrade, Decoder, Registry},
+    resolve::monitor::MonitorArgs,
+    verify::allium::AlliumClient,
+};
+
 #[derive(Parser)]
 #[command(name = "hindsight", about = "Decode solver swaps from on-chain data")]
 struct Cli {
@@ -27,13 +33,18 @@ enum Command {
     Verify(VerifyArgs),
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
-    Monitor(resolve::monitor::MonitorArgs),
+    Monitor(MonitorArgs),
 }
 
-/// Chain access shared by every subcommand: the RPC endpoint and the decoder's address book.
+/// Chain selection shared by every subcommand: which chain to operate on and how to reach it.
+/// Chain-specific configuration beyond the RPC endpoint and address book belongs here too.
 #[derive(Args)]
-pub(crate) struct RpcArgs {
-    /// Ethereum RPC URL
+pub(crate) struct ChainArgs {
+    /// Chain to operate on — selects the decoder's address book (only ethereum is built in)
+    #[arg(long = "chain", value_name = "CHAIN", default_value = "ethereum")]
+    pub name: String,
+
+    /// Chain RPC URL
     #[arg(long, env = "RPC_URL")]
     pub rpc_url: String,
 
@@ -57,7 +68,7 @@ struct BlockArgs {
 #[derive(Args)]
 struct DecodeArgs {
     #[command(flatten)]
-    rpc: RpcArgs,
+    chain: ChainArgs,
 
     #[command(flatten)]
     blocks: BlockArgs,
@@ -70,7 +81,7 @@ struct DecodeArgs {
 #[derive(Args)]
 struct VerifyArgs {
     #[command(flatten)]
-    rpc: RpcArgs,
+    chain: ChainArgs,
 
     #[command(flatten)]
     blocks: BlockArgs,
@@ -127,10 +138,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
-    let mut decoder = decoder::Decoder::new(provider, registry);
+    let registry = Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
+    let mut decoder = Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
@@ -166,11 +177,11 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.rpc.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = decoder::Registry::load("ethereum", args.rpc.registry.as_deref())?;
-    let mut decoder = decoder::Decoder::new(provider, registry);
+    let allium = AlliumClient::new(args.allium_key, args.allium_query_id);
+    let registry = Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
+    let mut decoder = Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
@@ -211,7 +222,7 @@ pub(crate) async fn resolve_blocks<P: Provider>(
 }
 
 #[expect(clippy::print_stdout)]
-fn print_trades(trades: &[decoder::DecodedTrade]) {
+fn print_trades(trades: &[DecodedTrade]) {
     if trades.is_empty() {
         println!("No solver trades found.");
         return;
@@ -266,30 +277,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_range_valid() {
+    fn test_parse_range_valid() {
         let blocks = parse_range("100-105").unwrap();
         assert_eq!(blocks, vec![100, 101, 102, 103, 104, 105]);
     }
 
     #[test]
-    fn parse_range_single_block() {
+    fn test_parse_range_single_block() {
         let blocks = parse_range("100-100").unwrap();
         assert_eq!(blocks, vec![100]);
     }
 
     #[test]
-    fn parse_range_invalid_format() {
+    fn test_parse_range_invalid_format() {
         assert!(parse_range("100").is_err());
         assert!(parse_range("100-200-300").is_err());
     }
 
     #[test]
-    fn parse_range_reversed() {
+    fn test_parse_range_reversed() {
         assert!(parse_range("200-100").is_err());
     }
 
     #[test]
-    fn parse_range_too_large() {
+    fn test_parse_range_too_large() {
         assert!(parse_range("0-1001").is_err());
     }
 }

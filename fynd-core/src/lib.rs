@@ -48,7 +48,8 @@ pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{
-    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
+    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, NoPathReason,
+    PathFrankWolfeAlgorithm,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;

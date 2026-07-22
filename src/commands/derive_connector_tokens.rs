@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -8,7 +8,7 @@ use fynd_core::{
 };
 use fynd_rpc::parse_chain;
 use tracing::info;
-use tycho_simulation::tycho_common::models::{Address, TvlThresholdTier};
+use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Address};
 
 /// Derives recommended connector tokens from live Tycho market data.
 ///
@@ -63,9 +63,20 @@ pub struct DeriveConnectorTokensArgs {
     /// How long to wait for the initial Tycho snapshot (seconds).
     #[arg(long, default_value_t = 120)]
     pub wait_secs: u64,
+
+    /// Path to the custom-chains config (chains.yaml). Required to run a chain that Tycho does
+    /// not know as a built-in. Uses the same file the indexer reads.
+    #[arg(long, env = "TYCHO_CHAINS_CONFIG")]
+    pub chains_config: Option<PathBuf>,
 }
 
 pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
+    if let Some(path) = &args.chains_config {
+        fynd_rpc::init_chain_registry_from_file(path)
+            .map_err(|e| anyhow::anyhow!("failed to load chains config: {e}"))?;
+        info!(?path, "installed custom chain registry");
+    }
+
     let chain = parse_chain(&args.chain).context("invalid chain")?;
     let tycho_url = crate::resolve_tycho_url(&args.chain, args.tycho_url.as_deref())
         .map_err(|e| anyhow::anyhow!("{e}"))?;

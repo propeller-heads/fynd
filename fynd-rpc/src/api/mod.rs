@@ -6,9 +6,13 @@ pub mod dto;
 pub mod error;
 /// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
+/// HTTP metrics middleware recording request duration and per-client usage.
+pub(crate) mod middleware;
 #[cfg(feature = "experimental")]
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
+/// Builds re-issuable, signature-free representation of a quote request for replay logging.
+pub(crate) mod request_capture;
 
 use std::{
     sync::Arc,
@@ -159,7 +163,7 @@ pub struct AppState {
     worker_router: Arc<WorkerPoolRouter>,
     health_tracker: HealthTracker,
     chain_id: u64,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     permit2_address: Bytes,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
@@ -173,7 +177,7 @@ impl AppState {
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
         chain_id: u64,
-        router_address: Bytes,
+        router_address: Option<Bytes>,
         permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
@@ -203,8 +207,8 @@ impl AppState {
         self.chain_id
     }
 
-    pub(crate) fn router_address(&self) -> &Bytes {
-        &self.router_address
+    pub(crate) fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     pub(crate) fn permit2_address(&self) -> &Bytes {

@@ -1,13 +1,14 @@
 //! Bracket-pair sandwich detection.
 //!
-//! For a victim trade, scans the receipts immediately around it — already fetched by
-//! [`super::Decoder::decode_block`] in one `eth_getBlockReceipts` call, so detection makes no
-//! extra RPC calls — for a front-run/back-run pair that links to one attacker, touches a pool
-//! the victim's swap touched, and moves the victim's output token in sandwich direction
-//! (accumulate before the victim, dispose after). See
-//! `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the heuristic
-//! and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool overlap to
-//! per-protocol).
+//! For each victim trade, scan the transactions immediately around it in the block for a
+//! front-run/back-run pair that satisfies three conditions: both legs link to one attacker,
+//! both touch a pool the victim's swap touched, and the attacker accumulates the victim's
+//! output token before the victim trades and disposes of it after. The block's receipts were
+//! already fetched for decoding, so detection costs no extra RPC calls.
+//!
+//! See `docs/superpowers/specs/2026-07-13-hindsight-sandwich-detection-design.md` for the
+//! heuristic and its known coarseness (Uniswap V4's singleton pool manager collapses per-pool
+//! overlap to per-protocol).
 
 use std::collections::HashSet;
 
@@ -19,9 +20,8 @@ use alloy::{
 };
 
 use crate::decoder::{
-    ledger::{to_primitive_log, Transfer},
     registry::Registry,
-    trace::PERMIT2,
+    transfer_ledger::{to_primitive_log, Transfer},
     DecodedTrade,
 };
 
@@ -94,11 +94,12 @@ pub(crate) fn detect(
 }
 
 /// Whether `front` and `back` share a link that plausibly identifies one attacker running both
-/// legs: the same sender, or the same target contract that is not a registry-known venue or
-/// solver. The registry exclusion keeps two unrelated users entering the same popular router
-/// (Universal Router, 1inch) from tripping the same-`to` check — real sandwich bots settle
-/// through private contracts. A link matching the victim's own sender is excluded: a trader on
-/// both sides of their own trade is not a sandwich.
+/// legs: the same sender, or the same target contract.
+///
+/// A shared target only counts when it is not a known venue or solver — otherwise two unrelated
+/// users entering the same popular router (Universal Router, 1inch) would look linked, while
+/// real sandwich bots settle through private contracts. A link matching the victim's own sender
+/// is also excluded: a trader on both sides of their own trade is not a sandwich.
 fn shared_attacker(
     front: &TransactionReceipt,
     back: &TransactionReceipt,
@@ -117,7 +118,7 @@ fn shared_attacker(
     None
 }
 
-/// The victim's pool contracts (see [`pool_addresses`]) that `front` and `back` each
+/// The victim's pool contracts (see `pool_addresses`) that `front` and `back` each
 /// independently re-emitted a log from — `front` and `back` need not touch the same one. `None`
 /// when either leg missed the overlap.
 fn overlapping_pools(
@@ -148,10 +149,10 @@ fn overlapping_pools(
 /// The addresses that emitted a log in a transaction, minus everything known not to be a pool —
 /// candidate pool contracts.
 ///
-/// `Transfer` and `Approval` emitters are token contracts, and the wrapped-native token
-/// (`Deposit`/`Withdrawal`) and Permit2 (its own permit events) log on most swaps without being
-/// pools: counting any of them would give two transactions that merely share a token or its
-/// plumbing a trivial "pool" overlap.
+/// `Transfer` and `Approval` emitters are token contracts, and the registry's infrastructure
+/// addresses (the wrapped-native token's `Deposit`/`Withdrawal`, Permit2's permit events) log on
+/// most swaps without being pools: counting any of them would give two transactions that merely
+/// share a token or an infrastructure contract a trivial "pool" overlap.
 fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {
@@ -161,7 +162,7 @@ fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<
             .is_some_and(|topic| {
                 *topic == Transfer::SIGNATURE_HASH || *topic == Approval::SIGNATURE_HASH
             });
-        if token_event || log.address() == registry.wrapped_native() || log.address() == PERMIT2 {
+        if token_event || registry.is_infrastructure(log.address()) {
             continue;
         }
         pools.insert(log.address());
@@ -274,12 +275,13 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
             sender,
             token_in: addr(59),
             token_out,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(2_000u64),
-            venue_fee: None,
+            venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
@@ -298,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_same_from_bracket() {
+    fn test_same_from_bracket() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -316,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_same_to_when_not_registry_known() {
+    fn test_same_to_bracket_not_registry_known() {
         let victim_sender = addr(1);
         let shared_to = addr(77);
         let pool = addr(50);
@@ -331,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn same_to_registry_known_is_not_flagged() {
+    fn test_same_to_bracket_registry_known() {
         // 1inch is a registered solver: two unrelated traders entering it must not read as a
         // shared-attacker link, even when the token flows happen to line up.
         let victim_sender = addr(1);
@@ -347,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn attacker_link_without_pool_overlap_is_not_flagged() {
+    fn test_attacker_link_without_pool_overlap() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -372,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn front_only_pool_overlap_is_not_flagged() {
+    fn test_front_only_pool_overlap() {
         // Both legs must re-touch a victim pool: an attacker-linked pair where only the front
         // leg overlaps is not a bracket.
         let attacker = addr(90);
@@ -388,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn back_only_pool_overlap_is_not_flagged() {
+    fn test_back_only_pool_overlap() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -402,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_overlap_without_attacker_link_is_not_flagged() {
+    fn test_pool_overlap_without_attacker_link() {
         let victim_sender = addr(1);
         let pool = addr(50);
         let receipts = vec![
@@ -415,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_pair_without_token_flow_is_not_flagged() {
+    fn test_linked_pair_without_token_flow() {
         // Attacker link and pool overlap hold, but neither leg moves the victim's output token
         // for any linked entity — repeat activity on a busy pool, not a bracket.
         let attacker = addr(90);
@@ -431,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn same_direction_both_legs_is_not_flagged() {
+    fn test_same_direction_both_legs() {
         // An arbitrage bot buying the same token on the same pool twice around an unrelated
         // victim accumulates on both legs — no dispose leg, no sandwich.
         let attacker = addr(90);
@@ -447,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_in_shared_contract_confirms_direction() {
+    fn test_inventory_in_shared_contract() {
         // Typical bot shape: one EOA signs both legs (the link), but the token inventory moves
         // through its private contract — the shared `to` — not the EOA itself.
         let attacker_eoa = addr(90);
@@ -475,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn native_output_checks_wrapped_flow() {
+    fn test_native_output_wrapped_flow() {
         // The victim receives native ETH, which emits no log: the attacker's legs show as WETH
         // transfers instead, so direction is confirmed on the wrapped form.
         let registry = Registry::ethereum();
@@ -496,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn pairs_outside_window_are_ignored() {
+    fn test_pairs_outside_window() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -516,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn closest_bracket_pair_wins() {
+    fn test_competing_bracket_pairs() {
         let close_attacker = addr(90);
         let far_attacker = addr(91);
         let victim_sender = addr(1);
@@ -554,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn self_sandwich_by_shared_sender_excluded() {
+    fn test_self_sandwich_by_shared_sender() {
         // The victim's own address appears on both sides — not a sandwich.
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -578,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn self_sandwich_by_shared_target_excluded() {
+    fn test_self_sandwich_by_shared_target() {
         // The victim's own address is the shared `to` — also not a sandwich.
         let victim_sender = addr(1);
         let pool = addr(50);
@@ -602,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn transfer_only_victim_logs_yield_no_pools() {
+    fn test_pool_addresses_transfer_only_logs() {
         let attacker = addr(90);
         let victim_sender = addr(1);
         let token = addr(60);
@@ -621,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_native_logs_are_not_pools() {
+    fn test_pool_addresses_wrapped_native_logs() {
         // Every ETH-wrapping transaction logs from the WETH contract (Deposit/Withdrawal are not
         // Transfer events), so WETH alone must never count as a shared pool.
         let registry = Registry::ethereum();
@@ -638,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_logs_are_not_pools() {
+    fn test_pool_addresses_approval_logs() {
         // ERC-20 Approval is emitted by token contracts; a shared token approval is not a
         // shared pool.
         let attacker = addr(90);
@@ -662,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn victim_at_block_edge_does_not_panic() {
+    fn test_victim_at_block_edge() {
         let victim_sender = addr(1);
         let receipts =
             vec![receipt(tx_hash(0), victim_sender, Some(addr(9)), vec![make_pool_log(addr(50))])];

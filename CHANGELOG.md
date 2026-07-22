@@ -1,3 +1,128 @@
+## [0.97.1](https://github.com/propeller-heads/fynd/compare/0.97.0...0.97.1) (2026-07-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes the --reconnect-delay-secs CLI flag and the public
+reconnect_delay builder methods / RECONNECT_DELAY constant (all dead code).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+### Bug Fixes
+
+* correct hosted-api onboarding docs and improve serve-path observability ([595385c](https://github.com/propeller-heads/fynd/commit/595385c8c62d3f1588b68b22709bb5ff0af891f3))
+
+
+### Reverts
+
+* keep the reconnect_delay knob (avoid breaking change) ([c509a04](https://github.com/propeller-heads/fynd/commit/c509a040b79b36a32a4424c95aefab933dab4173))
+
+
+### Code Refactoring
+
+* address PR review comments ([aa2916c](https://github.com/propeller-heads/fynd/commit/aa2916c45100f1412a5851015f406b96824f8c7a))
+
+## [0.97.0](https://github.com/propeller-heads/fynd/compare/0.96.0...0.97.0) (2026-07-21)
+
+
+### Features
+
+* **core:** aggregate and attach no-route reason to OrderQuote ([5260938](https://github.com/propeller-heads/fynd/commit/5260938704c024e08d0e41df52fccacf86898cab))
+* **core:** carry NoPathReason on SolveError::NoRouteFound ([59eef1a](https://github.com/propeller-heads/fynd/commit/59eef1a393e40a93ed451df3b01b07b77b889868))
+* **rpc:** add request capture log emission ([13d47d1](https://github.com/propeller-heads/fynd/commit/13d47d10b87c9e974801f8e7b277f9b2dd73ab36))
+* **rpc:** add request replay-capture helpers ([53cbe7e](https://github.com/propeller-heads/fynd/commit/53cbe7e37d2275189b804b179342d484c485a795))
+* **rpc:** log every accepted quote request for replay ([1d60c00](https://github.com/propeller-heads/fynd/commit/1d60c00703984bc08ecd579b73c9c85c5e7ce1b9))
+* **rpc:** log no_route_reasons on the quote capture line ([394ba83](https://github.com/propeller-heads/fynd/commit/394ba831295d23c3494a24bb24eba11efc7b4097))
+* **rpc:** log only failed quotes, rename event to quote_failure ([de6b0c9](https://github.com/propeller-heads/fynd/commit/de6b0c91a724ed1e786da9683f1389a1045deb32))
+
+## [0.96.0](https://github.com/propeller-heads/fynd/compare/0.95.0...0.96.0) (2026-07-21)
+
+
+### Features
+
+* **hindsight:** record which strategy decoded each trade ([bed0cdc](https://github.com/propeller-heads/fynd/commit/bed0cdc8f160f6fe1fca85f8921a24764c184486))
+
+## [0.95.0](https://github.com/propeller-heads/fynd/compare/0.94.0...0.95.0) (2026-07-21)
+
+
+### Features
+
+* add hosted-API auth and per-chain routing to clients ([d4405cb](https://github.com/propeller-heads/fynd/commit/d4405cbe64edbbef86a238bfcafafa9b6efe431c))
+
+
+### Bug Fixes
+
+* **client:** send API key as raw Authorization header, not Bearer ([4d63aaa](https://github.com/propeller-heads/fynd/commit/4d63aaafc4cbc9e790707f9cabf2a29d192af5e5))
+
+## [0.94.0](https://github.com/propeller-heads/fynd/compare/0.93.0...0.94.0) (2026-07-20)
+
+
+### Features
+
+* **api:** report null router_address and 501 encoding on quote-only chains ([bda79ca](https://github.com/propeller-heads/fynd/commit/bda79ca6fa6d0e1a8db600b615d8082fe78485fa))
+* **chain:** resolve custom chains and native token via the registry ([96ee352](https://github.com/propeller-heads/fynd/commit/96ee352599d8fb4e6cfe142fa0a0965b99948664))
+* **cli:** add --chains-config to install the custom-chain registry ([a04a9cd](https://github.com/propeller-heads/fynd/commit/a04a9cd6751143cd78c58992410fcc878f8365bc))
+* **encoding:** add disabled encoder state for router-less chains ([cd4c006](https://github.com/propeller-heads/fynd/commit/cd4c006a47d04e39d97ff793bc5d1d379c4509c5))
+* make InstanceInfo.router_address optional for quote-only chains ([095063b](https://github.com/propeller-heads/fynd/commit/095063b9462ae8ea434b8754242e09467943541e))
+* **solver:** make router address optional and gate the fee fetcher ([a849b54](https://github.com/propeller-heads/fynd/commit/a849b5445fb6b2c4d80abd42700fe557a6256043))
+* upgrade tycho to 0.340.0 ([a08e77d](https://github.com/propeller-heads/fynd/commit/a08e77d266a09b3252540b2266edef06061849b2))
+
+
+### Bug Fixes
+
+* address custom-chain PR review comments ([38e486e](https://github.com/propeller-heads/fynd/commit/38e486ec3d39968506a4ee6fc0f610b379dc828e))
+* **api:** map only encoding-unavailable to 501, keep encoding failures at 422 ([ecfa019](https://github.com/propeller-heads/fynd/commit/ecfa01978267b815f9ebc0b96109b09d355cd7a3))
+* **chain:** preserve fail-fast for placeholder native token; drop dead lazy_static ([c3cc396](https://github.com/propeller-heads/fynd/commit/c3cc3965285822472ce40ec1a391559ca4340c1b))
+
+## [0.93.0](https://github.com/propeller-heads/fynd/compare/0.92.0...0.93.0) (2026-07-20)
+
+
+### Features
+
+* add version to /v1/info instance info ([e9c0cd9](https://github.com/propeller-heads/fynd/commit/e9c0cd9c344bd85272e0a7969d86800051b2d935))
+* emit fynd_build_info metric with binary version ([6843465](https://github.com/propeller-heads/fynd/commit/6843465ce53da6765683508e653e7f7622f2e9e5))
+
+## [0.92.0](https://github.com/propeller-heads/fynd/compare/0.91.0...0.92.0) (2026-07-17)
+
+
+### Features
+
+* add chain label and histogram buckets to metrics exporter ([0bcbf29](https://github.com/propeller-heads/fynd/commit/0bcbf29b7ab1ffd5a044650857813443654d6272))
+* add component and token count getters to MarketState ([3825175](https://github.com/propeller-heads/fynd/commit/3825175a231ef5f3ee62b3ef6d847637539738f7))
+* add HTTP metrics middleware with per-client labels ([3f30279](https://github.com/propeller-heads/fynd/commit/3f30279dd645e7af7c7560e04522092c15403d28))
+* record derived computation duration, failure, freshness metrics ([60080fc](https://github.com/propeller-heads/fynd/commit/60080fc99c51741e37320914dd0fe69d7041ef7f))
+* record encoding duration and failure metrics ([b601716](https://github.com/propeller-heads/fynd/commit/b601716f15fda4280b52a2326ef498acb1f2d5bf))
+* record feed freshness, update duration, and size metrics ([1c42bc3](https://github.com/propeller-heads/fynd/commit/1c42bc399fd90d69ce1d222e5ba21c2004c1f3ae))
+
+
+### Bug Fixes
+
+* bound per-client metric label values ([a9f5063](https://github.com/propeller-heads/fynd/commit/a9f50633f5b2c5a068f5b51c3dd4b8b25b99dcc0))
+
+## [0.91.0](https://github.com/propeller-heads/fynd/compare/0.90.3...0.91.0) (2026-07-17)
+
+
+### Features
+
+* record per-pool queue wait and depth metrics at task pickup ([bef8139](https://github.com/propeller-heads/fynd/commit/bef8139b527e6b0db3094ac95032775bc9902ebf))
+
+## [0.90.3](https://github.com/propeller-heads/fynd/compare/0.90.2...0.90.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* restore native CurveState using upstream curve_filter ([79c616b](https://github.com/propeller-heads/fynd/commit/79c616b03afed2261ccee74f9f28205da1b969d2)), closes [#318](https://github.com/propeller-heads/fynd/issues/318)
+
+## [0.90.2](https://github.com/propeller-heads/fynd/compare/0.90.1...0.90.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* correct vm:curve revert rationale comment ([fd367f4](https://github.com/propeller-heads/fynd/commit/fd367f4c3f59fcb1b12d717d83b93c5bd80e7f9a))
+* revert vm:curve to EVMPoolState VM simulation ([38f54bf](https://github.com/propeller-heads/fynd/commit/38f54bf09ee3d264c2ec858ff5100707c50fb66f))
+
+## [0.90.1](https://github.com/propeller-heads/fynd/compare/0.90.0...0.90.1) (2026-07-16)
+
 ## [0.90.0](https://github.com/propeller-heads/fynd/compare/0.89.2...0.90.0) (2026-07-14)
 
 

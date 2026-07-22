@@ -57,5 +57,7 @@ export type {
   RetryConfig,
   SigningHints,
 } from "./client.js";
+export { createFyndClient } from "./autogen.js";
+export type { CreateFyndClientOptions, Middleware } from "./autogen.js";
 export { viemProvider } from "./viem.js";
 export type { ViemPublicClient } from "./viem.js";

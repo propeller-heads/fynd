@@ -1,11 +1,14 @@
 use alloy::{
     consensus::{Eip658Value, Receipt, ReceiptEnvelope, ReceiptWithBloom},
-    primitives::{Address, Bloom, Bytes, Log as PrimitiveLog, TxHash, B256, U256},
+    primitives::{address, Address, Bloom, Bytes, Log as PrimitiveLog, TxHash, B256, U256},
     rpc::types::{trace::geth::CallFrame, Log, TransactionReceipt},
     sol_types::SolEvent,
 };
 
-use crate::decoder::ledger::{NetSwap, Transfer};
+use crate::decoder::transfer_ledger::{NetSwap, Transfer};
+
+/// The canonical Permit2 deployment, for fixtures exercising the registry's infrastructure set.
+pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
 
 /// An address with `n` in its last byte, for readable test fixtures.
 pub(crate) fn addr(n: u8) -> Address {
@@ -21,7 +24,7 @@ pub(crate) fn tx_hash(n: u8) -> TxHash {
     TxHash::from(bytes)
 }
 
-/// A [`NetSwap`] literal, for concise assertions.
+/// A `NetSwap` literal, for concise assertions.
 pub(crate) fn swap(
     token_in: Address,
     amount_in: u64,

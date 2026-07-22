@@ -6,6 +6,9 @@ use fynd_rpc::config::defaults;
 #[cfg(feature = "metrics")]
 pub(crate) const METRICS_PORT: u16 = 9898;
 
+#[cfg(feature = "metrics")]
+pub(crate) const METRICS_HOST: &str = "0.0.0.0";
+
 use crate::commands::derive_connector_tokens::DeriveConnectorTokensArgs;
 
 /// Fynd - High-performance DEX solver built on Tycho
@@ -26,7 +29,7 @@ pub enum Commands {
     /// Print the OpenAPI spec as JSON to stdout
     Openapi,
     /// Analyze live Tycho market data and suggest connector tokens for routing
-    DeriveConnectorTokens(DeriveConnectorTokensArgs),
+    DeriveConnectorTokens(Box<DeriveConnectorTokensArgs>),
 }
 
 /// Arguments for the `serve` subcommand.
@@ -112,6 +115,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub blocklist_config: Option<PathBuf>,
 
+    /// Path to the custom-chains config (chains.yaml). Required to run a chain that Tycho does
+    /// not know as a built-in. Uses the same file the indexer reads.
+    #[arg(long, env = "TYCHO_CHAINS_CONFIG")]
+    pub chains_config: Option<PathBuf>,
+
     /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
     /// Disabled by default.
     #[arg(long)]
@@ -132,6 +140,12 @@ pub struct ServeArgs {
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
     pub metrics_port: u16,
+
+    /// Host/address the Prometheus metrics HTTP server binds to (requires `metrics` feature).
+    /// Defaults to all interfaces; set to `127.0.0.1` to expose metrics on loopback only.
+    #[cfg(feature = "metrics")]
+    #[arg(long, default_value = METRICS_HOST, env)]
+    pub metrics_host: String,
 }
 
 #[cfg(test)]
@@ -226,5 +240,13 @@ mod cli_tests {
     fn test_openapi_subcommand() {
         let cli = Cli::try_parse_from(vec!["fynd", "openapi"]).expect("parse errored");
         assert_eq!(cli.command, Commands::Openapi);
+    }
+
+    #[test]
+    fn parses_chains_config() {
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--chains-config", "chains.yaml"])
+            .expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.chains_config, Some(PathBuf::from("chains.yaml")));
     }
 }

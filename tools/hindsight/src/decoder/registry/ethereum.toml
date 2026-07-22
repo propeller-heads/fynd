@@ -1,4 +1,4 @@
-# Ethereum address book for trade decoding: which contracts are solvers, clients, batch
+# Ethereum address book for trade decoding: which contracts are solvers, venues, batch
 # settlers, and venue infrastructure. Loaded by `Registry` (see registry.rs for what each section
 # drives); pass a modified copy via `--registry` to extend it without recompiling.
 
@@ -6,9 +6,24 @@
 # intermediary.
 wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
+# Contracts nearly every swap routes through but that never settle the trade. Hindsight guesses
+# an unknown swap's settling venue from on-chain activity; without this list those guesses would
+# name these infrastructure contracts instead of the real venue. The wrapped-native token above is skipped the
+# same way.
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+
 # Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
 # a solver, not the trader (CoW Protocol Settlement).
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
+
+# Stablecoins anchoring the native token to USD for reporting (address = decimals): a priced
+# stablecoin is worth ~$1 per 10^decimals native units, which pins the native token's USD value.
+[usd_stablecoins]
+"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" = 6  # USDC
+"0xdac17f958d2ee523a2206206994597c13d831ec7" = 6  # USDT
+"0x6b175474e89094c44da98b954eedeac495271d0f" = 18 # DAI
+"0x4c9edd5852cd905f086c759e8383e09bff1e68b3" = 18 # USDe
+"0xdc035d45d973e3ec169d2276ddab16f1e407384f" = 18 # USDS
 
 # Solver routers — the venue that actually settles a swap.
 [solvers]
@@ -40,15 +55,15 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 
 # Venues — platforms that initiate a trade and route it through a solver found in the
 # trace. Each section name must have a decode strategy in code (venues::Venue);
-# `entry_points` are the contracts users enter through, `fee_collectors` where its skims land.
+# `entry_points` are the contracts users enter through, `fee_collectors` where its fees are sent.
 
 # Display names for entry points that are neither venues nor solvers — market-maker fillers,
 # solver contracts, bot routers. Label-only: these must NOT be venues or solvers, because
 # known-ness drives strategy selection and filler-entered transactions have to keep matching via
-# their solver logs (Maker), not sender netting. Identified from public labels (Etherscan
+# their solver logs (Intent), not sender netting. Identified from public labels (Etherscan
 # tags, Dune spellbook solver lists, project sites), ranked by observed volume in monitor runs.
 [labels]
-# Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Maker";
+# Kipseli Capital: CoW solver (spellbook) and market-maker filler (Etherscan "Market Intent";
 # the 0xbee… vanity family is Kipseli across CoW/1inch listings).
 "0xbee162fa5ae892be74f3f3e01c23da89adbccccc" = "kipseli"
 "0xbee3211ab312a8d065c4fef0247448e17a8da000" = "kipseli"
@@ -78,7 +93,7 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-# Relay fee collector (input-side skim by the Relay router). Sole collector across a 25-tx
+# Relay fee collector (the Relay router takes the fee on the input side). Sole collector across a 25-tx
 # on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
 fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
@@ -86,9 +101,23 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 # MetaMask Swap Router.
 entry_points = ["0x881d40237659c251811cec9c364ef91dc08d300c"]
 # MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the two, the
-# rest were genuinely fee-free pairs); the skim is ~87.5 bps plus a gas recoup on gasless "smart
+# rest were genuinely fee-free pairs); the fee is ~87.5 bps plus a gas recoup on gasless "smart
 # swaps", taken from whichever swap side is native ETH, else from a swap token directly.
 fee_collectors = [
     "0xe3478b0bb1a5084567c319096437924948be1964",
     "0xf326e4de8f66a0bdc0970b79e0924e33c79f1915",
 ]
+
+# MetaMask's router names the solver API behind each swap in a calldata aggregatorId like
+# "oneInchV6FeeDynamic" or "okx6". Each entry maps a lowercase substring of that id to a solver
+# name used in this address book; ids that match no entry are recorded as-is.
+[venues.metamask.solver_aliases]
+oneinch = "1inch"
+zeroex = "0x"
+uniswap = "uniswap"
+okx = "okx"
+kyber = "kyberswap"
+paraswap = "paraswap"
+airswap = "airswap"
+openocean = "openocean"
+hashflow = "hashflow"
