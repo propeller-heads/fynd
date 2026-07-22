@@ -17,10 +17,6 @@ use tycho_simulation::tycho_client::feed::SynchronizerState;
 
 use crate::feed::market_data::MarketData;
 
-/// Every state label exported for the `market_protocol_sync_state` state-set
-/// gauge. Each protocol reports 1 for its current state and 0 for the rest.
-const SYNC_STATE_LABELS: [&str; 6] = ["started", "ready", "delayed", "stale", "advanced", "ended"];
-
 /// Periodically exports per-protocol pool counts and sync status as gauges.
 pub(crate) struct MetricsSampler {
     market_data: MarketData,
@@ -75,16 +71,8 @@ fn emit_market_metrics(
     }
 
     for (protocol, sync_state) in sync_states {
-        let current_label = sync_state_label(sync_state);
-        for state_label in SYNC_STATE_LABELS {
-            let value = if state_label == current_label { 1.0 } else { 0.0 };
-            gauge!(
-                "market_protocol_sync_state",
-                "protocol" => protocol.clone(),
-                "state" => state_label
-            )
-            .set(value);
-        }
+        gauge!("market_protocol_sync_state", "protocol" => protocol.clone())
+            .set(sync_state_code(sync_state));
         if let Some(block_number) = sync_state_block_number(sync_state) {
             gauge!("market_protocol_block", "protocol" => protocol.clone())
                 .set(block_number as f64);
@@ -92,14 +80,17 @@ fn emit_market_metrics(
     }
 }
 
-fn sync_state_label(sync_state: &SynchronizerState) -> &'static str {
+/// Numeric code per synchronizer state, matching the value mappings the
+/// existing `tycho_integration_protocol_sync_state` Grafana panels use, so
+/// both metrics can share dashboard and alert definitions.
+fn sync_state_code(sync_state: &SynchronizerState) -> f64 {
     match sync_state {
-        SynchronizerState::Started => "started",
-        SynchronizerState::Ready(_) => "ready",
-        SynchronizerState::Delayed(_) => "delayed",
-        SynchronizerState::Stale(_) => "stale",
-        SynchronizerState::Advanced(_) => "advanced",
-        SynchronizerState::Ended(_) => "ended",
+        SynchronizerState::Started => 1.0,
+        SynchronizerState::Ready(_) => 2.0,
+        SynchronizerState::Delayed(_) => 3.0,
+        SynchronizerState::Stale(_) => 4.0,
+        SynchronizerState::Advanced(_) => 5.0,
+        SynchronizerState::Ended(_) => 6.0,
     }
 }
 
@@ -191,38 +182,16 @@ mod tests {
             0.0
         );
 
-        // State-set gauge: exactly one state is 1 per protocol, all others 0.
+        // Sync state is a numeric code (1=started .. 6=ended), matching the
+        // value mappings used by the tycho_integration_protocol_sync_state
+        // Grafana panels: ready = 2, stale = 4.
         assert_eq!(
-            find_gauge(
-                &recorded,
-                "market_protocol_sync_state",
-                &[("protocol", "uniswap_v2"), ("state", "ready")],
-            ),
-            1.0
+            find_gauge(&recorded, "market_protocol_sync_state", &[("protocol", "uniswap_v2")]),
+            2.0
         );
         assert_eq!(
-            find_gauge(
-                &recorded,
-                "market_protocol_sync_state",
-                &[("protocol", "uniswap_v2"), ("state", "stale")],
-            ),
-            0.0
-        );
-        assert_eq!(
-            find_gauge(
-                &recorded,
-                "market_protocol_sync_state",
-                &[("protocol", "uniswap_v3"), ("state", "stale")],
-            ),
-            1.0
-        );
-        assert_eq!(
-            find_gauge(
-                &recorded,
-                "market_protocol_sync_state",
-                &[("protocol", "uniswap_v3"), ("state", "ready")],
-            ),
-            0.0
+            find_gauge(&recorded, "market_protocol_sync_state", &[("protocol", "uniswap_v3")]),
+            4.0
         );
 
         assert_eq!(
