@@ -134,3 +134,15 @@ fee_collectors = [
     "0xcd6b980029e6e6e0733ac8ec3e02be9410d09799",
     "0x39041f1b366fe33f9a5a79de5120f2aee2577ebc",
 ]
+
+[venues.coinbase]
+# Coinbase Wallet's swap proxies — the app-owned `tx.to` for its 0x-powered swaps ("aggregation is
+# powered by 0x", docs.cdp.coinbase.com). These proxies have been quiet since late 2025 (flow may
+# have moved off them — see the Hindsight targets doc); kept so historical trades decode and to
+# catch a resumption.
+entry_points = [
+    "0x8df6084e3b84a65ab9dd2325b5422e5debd8944a",
+    "0xe66b31678d6c16e9ebf358268a790b763c133750",
+]
+# Coinbase's 0x integration fee, taken from the output token and sent to this wallet.
+fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]

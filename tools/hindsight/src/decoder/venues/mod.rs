@@ -24,6 +24,7 @@
 //! The second failure mode is why fee collectors are verified against on-chain samples (see the
 //! address book's comments) before a venue is added.
 
+pub(crate) mod coinbase;
 pub(crate) mod metamask;
 pub(crate) mod rabby;
 pub(crate) mod relay;
@@ -40,6 +41,7 @@ pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<
         "relay" => vec![Box::new(relay::RelayNetting)],
         "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
         "rabby" => vec![Box::new(rabby::RabbyNetting)],
+        "coinbase" => vec![Box::new(coinbase::CoinbaseNetting)],
         _ => vec![],
     }
 }
