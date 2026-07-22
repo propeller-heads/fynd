@@ -16,7 +16,7 @@
 
 mod clients;
 mod decode;
-mod intent;
+mod intents;
 mod matching;
 mod netting_decoders;
 mod registry;

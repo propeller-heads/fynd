@@ -1,19 +1,43 @@
-//! Intent-finding for intent fills and batch settlements.
+//! Generic intent decoding: the fallback for the Intent role.
 //!
-//! Covers transactions where the sender is not the trader: solver-initiated
-//! intent fills (`UniswapX`, 1inch limit orders) and batch settlements (`CoW`),
-//! where the real swap is an order swapper's net flow.
+//! Covers transactions where the sender is not the trader — solver-initiated intent fills
+//! (`UniswapX`, 1inch limit orders) and batch settlements — by finding the order swapper's net
+//! flow. `IntentNetting` is the decoder; `find_intent_trade` does the finding. A source with a
+//! richer signal (see `super::cow`) is tried ahead of this.
 
 use std::collections::HashMap;
 
 use alloy::{primitives::Address, providers::Provider};
+use async_trait::async_trait;
 use tracing::warn;
 
 use crate::decoder::{
-    decode::TraderFlow,
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
     registry::Registry,
     transfer_ledger::{NetSwap, TransferLedger},
 };
+
+/// Solver-initiated intent fills and batch settlements: the sender acts on the swapper's behalf, so
+/// the real swap is the swapper's net flow.
+pub(crate) struct IntentNetting;
+
+#[async_trait]
+impl<P: Provider> TradeDecoder<P> for IntentNetting {
+    fn name(&self) -> &'static str {
+        "intent-netting"
+    }
+
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        find_intent_trade(
+            ctx.provider,
+            ctx.transfer_ledger,
+            &[ctx.entry_point, ctx.receipt.from],
+            ctx.registry,
+            ctx.code_cache,
+        )
+        .await
+    }
+}
 
 /// Find the order swapper's trade in a solver-initiated intent fill.
 ///

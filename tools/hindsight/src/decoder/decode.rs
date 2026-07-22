@@ -22,7 +22,8 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    netting_decoders::{IntentNetting, SenderNetting},
+    intents,
+    netting_decoders::SenderNetting,
     registry::{Registry, VenueAddresses},
     transfer_ledger::{NetSwap, TransferLedger},
     venues,
@@ -77,7 +78,7 @@ impl<'a> TraderRole<'a> {
 fn decoders_for<P: Provider>(role: TraderRole<'_>) -> Vec<Box<dyn TradeDecoder<P>>> {
     match role {
         TraderRole::Sender => vec![Box::new(SenderNetting)],
-        TraderRole::Intent => vec![Box::new(IntentNetting)],
+        TraderRole::Intent => intents::decoders_for(),
         TraderRole::Venue(name) => venues::decoders_for(name),
     }
 }
