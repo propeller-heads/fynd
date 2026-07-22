@@ -1139,7 +1139,10 @@ pub struct HealthStatus {
     /// Time since last market update in milliseconds.
     #[cfg_attr(feature = "openapi", schema(example = 1250))]
     last_update_ms: u64,
-    /// Number of active solver pools.
+    /// Number of solver pools configured at startup.
+    ///
+    /// This is the configured/registered count, not a live count of healthy worker
+    /// threads — it does not decrease if individual workers stop or panic.
     #[cfg_attr(feature = "openapi", schema(example = 2))]
     num_solver_pools: usize,
     /// Whether derived data has been computed at least once.

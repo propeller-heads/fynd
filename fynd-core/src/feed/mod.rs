@@ -39,6 +39,10 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) tvl_buffer_ratio: f64,
     /// Reconnect delay on connection failure.
     /// Default is 5 seconds.
+    ///
+    /// NOTE: currently unused by `TychoFeed` — the feed is fail-stop and relies on
+    /// tycho-client's internal transport reconnection rather than reconnecting itself.
+    /// Retained for config compatibility; see the tracking issue before wiring or removing.
     pub(crate) reconnect_delay: Duration,
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
