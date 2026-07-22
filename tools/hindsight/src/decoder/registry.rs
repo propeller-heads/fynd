@@ -37,6 +37,11 @@ struct AddressBook {
     /// books that have no owner-identified clients.
     #[serde(default)]
     client_owners: HashMap<Address, String>,
+    /// Fee-wallet address → client, for clients that route through a shared router and are only
+    /// identified by the fee transferred to their wallet (Phantom, Robinhood). Absent in books
+    /// with no fee-identified clients.
+    #[serde(default)]
+    client_fees: HashMap<Address, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -103,6 +108,9 @@ pub(crate) struct Registry {
     /// Trader address → order-flow client name, for clients identified by who owns the order
     /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
     client_owners: HashMap<Address, String>,
+    /// Fee-wallet address → client name, for clients identified by the fee they take on a shared
+    /// router rather than by the entry point (Phantom, Robinhood).
+    client_fees: HashMap<Address, String>,
 }
 
 impl Registry {
@@ -183,6 +191,7 @@ impl Registry {
             usd_stablecoins,
             venues: book.venues,
             client_owners: book.client_owners,
+            client_fees: book.client_fees,
         })
     }
 
@@ -244,6 +253,12 @@ impl Registry {
         self.client_owners
             .get(&address)
             .map(String::as_str)
+    }
+
+    /// Fee-wallet → client map, for attributing clients identified only by their fee leg on a
+    /// shared router (see `crate::decoder::clients`).
+    pub(crate) fn client_fees(&self) -> &HashMap<Address, String> {
+        &self.client_fees
     }
 
     /// The venue whose entry point this address is, if any.

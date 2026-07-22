@@ -262,6 +262,12 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
+        // A client fingerprint (a kpk Safe owning the order, or a client fee wallet taking the fee
+        // on a shared router) overrides the entry-point label, backing any client fee out before
+        // the quote check reads the grossed output.
+        let venue = clients::attribute(registry, &mut flow, &transfer_ledger)
+            .unwrap_or_else(|| registry.label(entry_point));
+
         let attribution = solvers::attribution::attribute(
             flow.solver_override.take(),
             root,
@@ -284,12 +290,6 @@ impl<P: Provider> Decoder<P> {
         // quote, and unit-checked against the settled amount (quotes are self-reported).
         let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
             .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
-
-        // The order-flow client, when a client fingerprint matches (e.g. a kpk Safe owning a
-        // CoW-settled order), overrides the entry-point label — which for those clients is only
-        // the shared settlement contract or router.
-        let venue =
-            clients::attribute(registry, &flow).unwrap_or_else(|| registry.label(entry_point));
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,

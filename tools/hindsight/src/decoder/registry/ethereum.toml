@@ -154,3 +154,16 @@ fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]
 "0x4f2083f5fbede34c2714affb3105539775f7fe64" = "kpk" # ENS Endowment
 "0x38f6a1b46144faee6a6d9f79d8de264c18e23848" = "kpk" # USD Alpha
 "0x99b9f5f24205cb88e33b1cc72008f644fc23768b" = "kpk" # ETH Alpha
+
+# Clients identified by the fee they take on a shared router (0x): the entry point is 0x's shared
+# AllowanceHolder, so the only fingerprint is the fee transfer to the client's wallet. Recognized
+# inside a matched solver trade (never a bare transfer), so the dust-spray gotcha does not apply.
+# The fee is taken from the output (buy) token and backed out so the settled output is gross.
+[client_fees]
+# Phantom: 0.85% buy-token fee. Current wallet confirmed 2026-07-17; earlier wallet retired
+# 2025-07-25 — both kept so either window decodes.
+"0x2cffed5d56eb6a17662756ca0fdf350e732c9818" = "phantom"
+"0x7afa9d836d2fccf172b66622625e56404e465dbd" = "phantom"
+# Robinhood Wallet: fee wallet confirmed 2026-07-17 (swaps are ERC-4337; identify by the fee leg,
+# never the bundler sender).
+"0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
