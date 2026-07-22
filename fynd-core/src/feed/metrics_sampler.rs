@@ -80,9 +80,11 @@ fn emit_market_metrics(
     }
 }
 
-/// Numeric code per synchronizer state, matching the value mappings the
-/// existing `tycho_integration_protocol_sync_state` Grafana panels use, so
-/// both metrics can share dashboard and alert definitions.
+/// Numeric code exported for each synchronizer state: 1=started, 2=ready,
+/// 3=delayed, 4=stale, 5=advanced, 6=ended.
+///
+/// The codes are part of the metric's contract — dashboards and alerts map
+/// them to state names — so add new states at the end rather than renumbering.
 fn sync_state_code(sync_state: &SynchronizerState) -> f64 {
     match sync_state {
         SynchronizerState::Started => 1.0,
@@ -182,9 +184,8 @@ mod tests {
             0.0
         );
 
-        // Sync state is a numeric code (1=started .. 6=ended), matching the
-        // value mappings used by the tycho_integration_protocol_sync_state
-        // Grafana panels: ready = 2, stale = 4.
+        // Sync state is a numeric code (1=started .. 6=ended): ready = 2,
+        // stale = 4.
         assert_eq!(
             find_gauge(&recorded, "market_protocol_sync_state", &[("protocol", "uniswap_v2")]),
             2.0
