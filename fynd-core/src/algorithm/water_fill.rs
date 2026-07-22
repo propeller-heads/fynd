@@ -31,7 +31,7 @@
 //! assembled through the shared, encoding-safe split primitives.
 
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
@@ -84,6 +84,9 @@ const CANDIDATE_EDGES_PER_STATE: usize = 16;
 const CANDIDATE_DIRECT_EDGES_PER_TOKEN: usize = 4;
 /// Parallel pools kept for a discovery edge into an anchor or configured connector token.
 const CANDIDATE_CONNECTOR_EDGES_PER_TOKEN: usize = 2;
+/// Number of highest-connectivity tokens taken as bounded-discovery anchors, derived per solve
+/// from the graph (see `derive_anchor_tokens`).
+const DERIVED_ANCHOR_COUNT: usize = 16;
 /// Exchange-refinement step floor: the pass stops once `delta` falls below one fine chunk divided
 /// by this factor, i.e. `amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR)`.
 const EXCHANGE_DELTA_FLOOR: usize = 64;
@@ -124,7 +127,6 @@ pub struct WaterFillAlgorithm {
     max_candidates: usize,
     max_paths: usize,
     connector_tokens: Option<HashSet<Address>>,
-    anchor_tokens: HashSet<Address>,
 }
 
 /// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
@@ -158,7 +160,6 @@ impl WaterFillAlgorithm {
                 .max(DEFAULT_MAX_PATHS),
             max_paths: DEFAULT_MAX_PATHS,
             connector_tokens: config.connector_tokens().cloned(),
-            anchor_tokens: config.anchor_tokens().clone(),
         })
     }
 
@@ -317,6 +318,7 @@ impl WaterFillAlgorithm {
             // candidates ahead of the pre-ranked set, so connector/anchor routes (incl. the
             // native-ETH sentinel) survive the spot×depth truncation. Discovery failure is not
             // fatal — the pre-ranked set already guarantees a route.
+            let anchor_tokens = derive_anchor_tokens(graph);
             let bounded = find_candidate_paths(
                 graph,
                 &view,
@@ -326,7 +328,7 @@ impl WaterFillAlgorithm {
                     max_hops: self.max_hops,
                     max_candidates: BOUNDED_DISCOVERY_CANDIDATES,
                     connector_tokens: self.connector_tokens.as_ref(),
-                    anchor_tokens: &self.anchor_tokens,
+                    anchor_tokens: &anchor_tokens,
                     source_token: order.token_in(),
                     start: &start,
                     timeout_ms,
@@ -1213,9 +1215,9 @@ fn ratio(numerator: &BigUint, denominator: &BigUint) -> f64 {
 //
 // Bounded, amount-aware frontier search, unioned into the portfolio's exhaustive enumeration by
 // `setup`. A Penumbra-inspired expansion from the sell token: simulate frontier edges live and
-// prefer edges into the output token, the configured connector-token allowlist, or the configured
-// anchor tokens (a soft ranking hint; the chain defaults live in the config layer, see
-// `solver::defaults::WATER_FILL_ANCHOR_TOKENS`). Generic over the graph's edge weight `W`
+// prefer edges into the output token, the configured connector-token allowlist, or a set of anchor
+// tokens (a soft ranking hint) derived per solve from the graph — the most-connected tokens plus
+// the native-ETH sentinel (see `derive_anchor_tokens`). Generic over the graph's edge weight `W`
 // (discovery only reads `component_id`s) so it runs on the production `DepthAndPrice` graph while
 // tests exercise it on a bare topology graph.
 
@@ -1405,6 +1407,27 @@ fn score_candidate_edges<'a, W>(
         scored.push(ScoredEdge { target: next_node, edge: edge.weight(), amount_out, priority });
     }
     scored
+}
+
+/// Derives bounded discovery's soft anchor set from the live graph: the `DERIVED_ANCHOR_COUNT`
+/// most-connected tokens (highest pool-edge degree) plus the native-ETH sentinel. Degree is the
+/// same connectivity signal `derive-connector-tokens` ranks by, so anchoring stays correct on any
+/// chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero degree
+/// but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as `0x0`, so
+/// it is anchored explicitly.
+fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
+    let mut by_degree: Vec<(NodeIndex, usize)> = graph
+        .node_indices()
+        .map(|node| (node, graph.edges(node).count()))
+        .collect();
+    by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
+    let mut anchors: HashSet<Address> = by_degree
+        .into_iter()
+        .take(DERIVED_ANCHOR_COUNT)
+        .map(|(node, _)| graph[node].clone())
+        .collect();
+    anchors.insert(Address::from([0u8; 20]));
+    anchors
 }
 
 fn candidate_priority<W>(
@@ -1829,6 +1852,29 @@ mod tests {
         assert!(
             matches!(result, Err(AlgorithmError::InvalidConfiguration { .. })),
             "min_hops of 0 should be rejected",
+        );
+    }
+
+    /// Anchors are the most-connected tokens (highest pool-edge degree) plus the native-ETH
+    /// sentinel, derived from the graph rather than a hardcoded list.
+    #[test]
+    fn derive_anchor_tokens_ranks_hub_and_includes_native_sentinel() {
+        let hub = token_with_decimals(0x01, "HUB", 18);
+        let a = token_with_decimals(0x02, "A", 18);
+        let b = token_with_decimals(0x03, "B", 18);
+        let c = token_with_decimals(0x04, "C", 18);
+        let (_market, graph_manager) = setup_market_unweighted(vec![
+            ("hub_a", &hub, &a, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
+            ("hub_b", &hub, &b, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
+            ("hub_c", &hub, &c, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
+        ]);
+
+        let anchors = derive_anchor_tokens(graph_manager.graph());
+
+        assert!(anchors.contains(&hub.address), "highest-degree token should be anchored");
+        assert!(
+            anchors.contains(&Address::from([0u8; 20])),
+            "native-ETH sentinel should always be anchored",
         );
     }
 }

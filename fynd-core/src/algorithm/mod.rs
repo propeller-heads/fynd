@@ -63,10 +63,6 @@ pub struct AlgorithmConfig {
     /// Tokens allowed as intermediate hops. `None` = no restriction (all tokens reachable).
     /// `token_in` and `token_out` for a given order are always allowed regardless.
     connector_tokens: Option<HashSet<Address>>,
-    /// Tokens the `water_fill` algorithm's discovery prefers to route through when no
-    /// `connector_tokens` allowlist is set (a soft ranking hint). Empty = no anchoring. Ignored by
-    /// other algorithms.
-    anchor_tokens: HashSet<Address>,
 }
 
 impl AlgorithmConfig {
@@ -106,7 +102,6 @@ impl AlgorithmConfig {
             max_routes,
             gas_aware: true,
             connector_tokens: None,
-            anchor_tokens: HashSet::new(),
         })
     }
 
@@ -154,17 +149,6 @@ impl AlgorithmConfig {
     /// Returns the connector token allowlist, or `None` if all tokens are permitted.
     pub fn connector_tokens(&self) -> Option<&HashSet<Address>> {
         self.connector_tokens.as_ref()
-    }
-
-    /// Sets the anchor tokens `water_fill` discovery prefers. Empty disables anchoring.
-    pub fn with_anchor_tokens(mut self, tokens: HashSet<Address>) -> Self {
-        self.anchor_tokens = tokens;
-        self
-    }
-
-    /// Returns the anchor tokens `water_fill` discovery prefers (empty = no anchoring).
-    pub fn anchor_tokens(&self) -> &HashSet<Address> {
-        &self.anchor_tokens
     }
 }
 

@@ -70,16 +70,16 @@ Discovery unions two sources so no useful route is dropped:
    single-path simulation. Water-fill also runs on the same `DepthAndPrice` weighted graph.
 2. **Bounded amount-aware search** — a Penumbra-inspired frontier search (the discovery section of
    `water_fill.rs`), expanding from the sell token with the full amount and preferring edges into the
-   output token, the `connector_tokens` allowlist, or the configured `anchor_tokens`.
+   output token, the `connector_tokens` allowlist, or a set of anchor tokens.
 
-`connector_tokens` and `anchor_tokens` are distinct: `connector_tokens` is a **hard allowlist** that
-blocks every intermediate token not in the set; `anchor_tokens` is a **soft ranking hint** used only
-when no `connector_tokens` allowlist is set — discovery prefers to expand through them but still
-reaches any other token. The anchor default ships in the config layer
-(`solver::defaults::WATER_FILL_ANCHOR_TOKENS`), not in the algorithm, so Fynd stays chain-agnostic;
-set `anchor_tokens` per pool to tune other chains, or `[]` to disable anchoring. The default anchor
-list includes the native ETH sentinel `0x0000000000000000000000000000000000000000`, so WETH → ETH →
-token routes survive on full Fynd setups where Tycho models native ETH as the zero address.
+Anchors are a **soft ranking hint**, distinct from the `connector_tokens` **hard allowlist**: when
+no `connector_tokens` allowlist is set, discovery prefers to expand through anchors but still
+reaches any other token. The anchor set is derived per solve from the graph itself — the most
+connected tokens (highest pool-edge degree, the same signal `derive-connector-tokens` ranks by)
+plus the native-ETH sentinel `0x0000000000000000000000000000000000000000`. Deriving from live
+connectivity keeps anchoring correct on every chain with no hardcoded per-chain list; the sentinel
+is anchored explicitly so WETH → ETH → token routes survive on full Fynd setups where Tycho models
+native ETH as the zero address.
 
 The bounded set is unioned ahead of the heuristic-ranked set, so connector and anchor routes survive
 the spot × depth truncation. Discovery failure in the bounded search is not fatal: the exhaustive
@@ -126,10 +126,9 @@ timeout_ms = 60000
 max_routes = 1024
 ```
 
-Set `connector_tokens` to restrict intermediate hops to a trusted allowlist (a hard filter). Set
-`anchor_tokens` to change which intermediates discovery prefers when no allowlist is set (a soft
-hint); it defaults to a built-in chain list and accepts `[]` to disable anchoring. See
-[Server Configuration](../guides/server-configuration.md) for both.
+Set `connector_tokens` to restrict intermediate hops to a trusted allowlist (a hard filter); see
+[Server Configuration](../guides/server-configuration.md). The soft anchor preference used when no
+allowlist is set is derived automatically from the graph and needs no configuration.
 
 ## Source Reference
 
