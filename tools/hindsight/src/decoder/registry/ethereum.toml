@@ -146,3 +146,11 @@ entry_points = [
 ]
 # Coinbase's 0x integration fee, taken from the output token and sent to this wallet.
 fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]
+
+# Order-flow clients identified by the trader address that owns the order, not by tx.to. kpk is a
+# treasury manager whose Safes trade through CoW: tx.from is the CoW solver, so the client is only
+# visible as the Safe owning the settled order. Addresses from docs.kpk.io / karpatkey.
+[client_owners]
+"0x4f2083f5fbede34c2714affb3105539775f7fe64" = "kpk" # ENS Endowment
+"0x38f6a1b46144faee6a6d9f79d8de264c18e23848" = "kpk" # USD Alpha
+"0x99b9f5f24205cb88e33b1cc72008f644fc23768b" = "kpk" # ETH Alpha

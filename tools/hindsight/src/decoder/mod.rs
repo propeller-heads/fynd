@@ -14,6 +14,7 @@
 //! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
+mod clients;
 mod decode;
 mod intent;
 mod matching;
@@ -284,11 +285,17 @@ impl<P: Provider> Decoder<P> {
         let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
             .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
 
+        // The order-flow client, when a client fingerprint matches (e.g. a kpk Safe owning a
+        // CoW-settled order), overrides the entry-point label — which for those clients is only
+        // the shared settlement contract or router.
+        let venue =
+            clients::attribute(registry, &flow).unwrap_or_else(|| registry.label(entry_point));
+
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
             tx_index,
-            venue: registry.label(entry_point),
+            venue,
             solver: attribution.solver,
             solver_source: attribution.source,
             decoder,

@@ -33,6 +33,10 @@ struct AddressBook {
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
+    /// Trader addresses that identify an order-flow client (e.g. kpk's Safes on `CoW`). Absent in
+    /// books that have no owner-identified clients.
+    #[serde(default)]
+    client_owners: HashMap<Address, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -96,6 +100,9 @@ pub(crate) struct Registry {
     usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
+    /// Trader address → order-flow client name, for clients identified by who owns the order
+    /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
+    client_owners: HashMap<Address, String>,
 }
 
 impl Registry {
@@ -175,6 +182,7 @@ impl Registry {
             infrastructure: book.infrastructure,
             usd_stablecoins,
             venues: book.venues,
+            client_owners: book.client_owners,
         })
     }
 
@@ -228,6 +236,14 @@ impl Registry {
     /// The named venue's address book section, when the book has one.
     pub(crate) fn venue(&self, name: &str) -> Option<&VenueAddresses> {
         self.venues.get(name)
+    }
+
+    /// The order-flow client that owns trades from this trader address, if any. Used to attribute
+    /// clients identified by who owns the order (e.g. kpk's Safes) rather than by `tx.to`.
+    pub(crate) fn client_for_owner(&self, address: Address) -> Option<&str> {
+        self.client_owners
+            .get(&address)
+            .map(String::as_str)
     }
 
     /// The venue whose entry point this address is, if any.
