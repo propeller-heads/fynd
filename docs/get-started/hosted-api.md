@@ -110,7 +110,7 @@ curl -H "Authorization: $FYND_API_KEY" \
 * `chain_id` — the EVM chain ID this backend serves (e.g. `1` for Ethereum). Corresponds to the `chain` path segment in the request URL.
 * `router_address` — the on-chain contract that executes swaps. Submit your encoded swap transaction to this address (it's already set as `transaction.to` in an encoded quote — you don't set it yourself). It is **chain-specific**: each chain returns its own router address.
 * `permit2_address` — the [Permit2](https://uniswap.org/blog/permit2) contract address. Used for permit-based token approvals (see [Approvals](#approvals) below).
-* `version` — the Fynd binary version serving this chain (the example value is illustrative). The hosted backends track the latest release.
+* `version` — the Fynd binary version serving this chain (the example value is illustrative). Hosted backends are updated on each production release, so the running version may lag the newest published Fynd release.
 
 ### 3. Request a quote
 
@@ -376,6 +376,7 @@ Full example: [`clients/typescript/examples/tutorial/main.ts`](https://github.co
 ```toml
 # Cargo.toml
 [dependencies]
+# Pin to any recent release; check crates.io for the latest: https://crates.io/crates/fynd-client
 fynd-client = "0.97"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"

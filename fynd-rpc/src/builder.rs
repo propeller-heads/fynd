@@ -121,12 +121,6 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets the reconnect delay on connection failure (default: 5 seconds).
-    pub fn reconnect_delay(mut self, delay: Duration) -> Self {
-        self.fynd_builder = self.fynd_builder.reconnect_delay(delay);
-        self
-    }
-
     /// Sets the worker router timeout (default: 100ms).
     pub fn worker_router_timeout(mut self, timeout: Duration) -> Self {
         self.fynd_builder = self
