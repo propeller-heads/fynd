@@ -20,7 +20,7 @@ use crate::decoder::{
     netting_decoders::venue_flow,
 };
 
-/// Selector of `fillQuoteEthToToken(address buyToken, address to, bytes data, uint256 feeAmount)`.
+/// Selector of Rainbow's ETH→token call, whose 4th argument is the input-side fee.
 const FILL_QUOTE_ETH_TO_TOKEN: [u8; 4] = [0x3c, 0x2b, 0x9a, 0x7d];
 
 /// Rainbow's calldata decoder.

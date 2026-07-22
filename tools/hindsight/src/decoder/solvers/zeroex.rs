@@ -1,35 +1,32 @@
-//! 0x-specific calldata extraction.
+//! 0x calldata extraction.
 //!
-//! 0x's Settler does not embed a self-describing quote the way `KyberSwap` does — its calldata is
-//! an array of encoded actions, and the numbers in them are slippage floors (`minAmountOut`), not
-//! the quoted output. The one action that carries the quote is `POSITIVE_SLIPPAGE(address
-//! recipient, address token, uint256 expectedAmount, uint256 maxBps)` (0x-settler
-//! `ISettlerActions`): when 0x collects positive slippage for an integrator, `expectedAmount` is
-//! the output the route was quoted at, and execution above it is skimmed as surplus.
+//! 0x's Settler calldata is a list of encoded actions whose numbers are slippage floors, not the
+//! quoted output. Only the positive-slippage action carries the quote: when 0x skims surplus for an
+//! integrator, it records the output the route was quoted at, and execution above it is the
+//! surplus. That is the one quote 0x exposes on-chain.
 //!
-//! So the quote is recoverable only for the swaps that include that action — integrators that let
-//! 0x collect surplus. Wallet integrations that take their own fee (Phantom, Robinhood, …) do not,
-//! and those decode without a quote. Partial coverage, but better than none for the highest-volume
+//! So a quote is recovered only for swaps that let 0x skim surplus. Wallets that take their own fee
+//! (Phantom, Robinhood) do not, and decode without a quote — partial coverage of the highest-volume
 //! competitor.
 
 use alloy::primitives::U256;
 
 use crate::decoder::solvers::{SolverKnowledge, SolverQuote};
 
-/// The `POSITIVE_SLIPPAGE(address,address,uint256,uint256)` action selector.
+/// Selector of 0x's positive-slippage action (`bytes4` of its signature; see the test).
 const POSITIVE_SLIPPAGE: [u8; 4] = [0x34, 0xee, 0x90, 0xca];
 
 /// The 0x solver.
 pub(crate) struct ZeroEx;
 
 impl SolverKnowledge for ZeroEx {
-    /// Extract 0x's quoted output from a `POSITIVE_SLIPPAGE` action, when the calldata has one.
+    /// Extract 0x's quoted output from the positive-slippage action, when the calldata has one.
     ///
-    /// The action is located by its selector rather than by decoding the Settler call, so it is
-    /// found whether 0x is the entry point, wrapped by `AllowanceHolder`, or nested inside another
-    /// venue's calldata. The `recipient` and `token` words after the selector must be addresses
-    /// (top 12 bytes zero); this rejects a stray selector match in unrelated calldata. The caller
-    /// unit-checks the quote against the settled amount.
+    /// The action is found by its selector, not by decoding the whole Settler call, so it is picked
+    /// up wherever 0x sits — the entry point, behind the shared allowance contract, or nested in
+    /// another venue's calldata. The two address words after the selector must have their top 12
+    /// bytes zero, which rejects a stray selector match in unrelated bytes. The caller unit-checks
+    /// the quote against the settled amount.
     fn embedded_quote(&self, input: &[u8], _amount_in: U256) -> Option<SolverQuote> {
         let start = input
             .windows(POSITIVE_SLIPPAGE.len())
