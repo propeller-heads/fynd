@@ -311,6 +311,9 @@ pub enum NoPathReason {
     NoGraphPath,
     /// Paths exist but none could be scored (e.g., missing edge weights).
     NoScorablePaths,
+    /// A path exists, but the requested amount is too small to produce a
+    /// non-zero output (dust).
+    AmountTooSmall,
 }
 
 impl std::fmt::Display for NoPathReason {
@@ -320,6 +323,7 @@ impl std::fmt::Display for NoPathReason {
             Self::DestinationTokenNotInGraph => write!(f, "destination token not in graph"),
             Self::NoGraphPath => write!(f, "no connecting path in graph"),
             Self::NoScorablePaths => write!(f, "no paths with valid scores"),
+            Self::AmountTooSmall => write!(f, "output amount too small to route"),
         }
     }
 }

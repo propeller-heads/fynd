@@ -496,7 +496,9 @@ fn aggregate_no_route_reason(
                 NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => {
                     return Some(*reason)
                 }
-                NoPathReason::NoGraphPath | NoPathReason::NoScorablePaths => {
+                NoPathReason::NoGraphPath
+                | NoPathReason::NoScorablePaths
+                | NoPathReason::AmountTooSmall => {
                     if first.is_none() {
                         first = Some(*reason);
                     }
@@ -982,6 +984,26 @@ mod tests {
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
         let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
         assert_eq!(result[0].no_route_reason(), Some(NoPathReason::NoGraphPath));
+    }
+
+    #[test]
+    fn aggregate_no_route_reason_surfaces_amount_too_small() {
+        use crate::algorithm::NoPathReason;
+        let failed = vec![(
+            "bf".to_string(),
+            SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall),
+        )];
+        assert_eq!(aggregate_no_route_reason(&failed), Some(NoPathReason::AmountTooSmall));
+    }
+
+    #[test]
+    fn aggregate_token_not_in_graph_wins_over_amount_too_small() {
+        use crate::algorithm::NoPathReason;
+        let failed = vec![
+            ("bf".to_string(), SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall)),
+            ("ml".to_string(), SolveError::no_route_found_with_reason("o2", NoPathReason::DestinationTokenNotInGraph)),
+        ];
+        assert_eq!(aggregate_no_route_reason(&failed), Some(NoPathReason::DestinationTokenNotInGraph));
     }
 
     #[test]
