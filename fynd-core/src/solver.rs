@@ -69,6 +69,8 @@ pub mod defaults {
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+    /// Delay before reconnecting to the Tycho feed after a disconnect.
+    pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
     /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
@@ -375,6 +377,7 @@ pub struct FyndBuilder {
     traded_n_days_ago: u64,
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
+    reconnect_delay: Duration,
     blocklisted_components: HashSet<String>,
     partial_blocks: bool,
     router_timeout: Duration,
@@ -407,6 +410,7 @@ impl FyndBuilder {
             traded_n_days_ago: defaults::TRADED_N_DAYS_AGO,
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
+            reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: HashSet::new(),
             partial_blocks: false,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
@@ -464,6 +468,12 @@ impl FyndBuilder {
     /// Sets how often the gas price is refreshed from the RPC node (default: 30 s).
     pub fn gas_refresh_interval(mut self, interval: Duration) -> Self {
         self.gas_refresh_interval = interval;
+        self
+    }
+
+    /// Sets the delay before reconnecting to Tycho after a disconnection (default: 5 s).
+    pub fn reconnect_delay(mut self, delay: Duration) -> Self {
+        self.reconnect_delay = delay;
         self
     }
 
@@ -643,6 +653,7 @@ impl FyndBuilder {
             self.min_tvl,
         )
         .tvl_buffer_ratio(self.tvl_buffer_ratio)
+        .reconnect_delay(self.reconnect_delay)
         .min_token_quality(self.min_token_quality)
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)

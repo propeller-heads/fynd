@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use tycho_simulation::tycho_common::models::Chain;
 
@@ -37,6 +37,9 @@ pub(crate) struct TychoFeedConfig {
     /// `min_tvl / tvl_buffer_ratio`.
     /// Default is 1.1 (10% buffer).
     pub(crate) tvl_buffer_ratio: f64,
+    /// Reconnect delay on connection failure.
+    /// Default is 5 seconds.
+    pub(crate) reconnect_delay: Duration,
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from the Tycho stream.
@@ -66,6 +69,7 @@ impl TychoFeedConfig {
             min_token_quality: 100,
             traded_n_days_ago: None,
             tvl_buffer_ratio: 1.1,
+            reconnect_delay: Duration::from_secs(5),
             blocklisted_components: HashSet::new(),
             partial_blocks: false,
         }
@@ -73,6 +77,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn tvl_buffer_ratio(mut self, tvl_buffer_ratio: f64) -> Self {
         self.tvl_buffer_ratio = tvl_buffer_ratio;
+        self
+    }
+
+    pub(crate) fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
+        self.reconnect_delay = reconnect_delay;
         self
     }
 

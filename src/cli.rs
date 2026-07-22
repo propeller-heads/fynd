@@ -94,6 +94,10 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::GAS_REFRESH_INTERVAL.as_secs())]
     pub gas_refresh_interval_secs: u64,
 
+    /// Reconnect delay on connection failure in seconds
+    #[arg(long, default_value_t = defaults::RECONNECT_DELAY.as_secs())]
+    pub reconnect_delay_secs: u64,
+
     /// Worker router timeout in milliseconds
     #[arg(long, default_value_t = defaults::WORKER_ROUTER_TIMEOUT_MS)]
     pub worker_router_timeout_ms: u64,
@@ -212,6 +216,7 @@ mod cli_tests {
         assert_eq!(args.min_tvl, None);
         assert_eq!(args.tvl_buffer_ratio, 1.1);
         assert_eq!(args.gas_refresh_interval_secs, 30);
+        assert_eq!(args.reconnect_delay_secs, 5);
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.blocklist_config, None);
