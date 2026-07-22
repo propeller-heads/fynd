@@ -705,22 +705,26 @@ impl SingleOrderQuote {
 }
 
 /// Order-level surplus summary for a quote routed through an exclusive component:
-/// `surplus_amount` is what the protocol captures (realized output minus the committed
-/// public-market output the user is quoted), in the order's `token_out`.
+/// `surplus_amount` is what the protocol captures (realized output minus the committed output
+/// the user is quoted), in the order's `token_out`.
+///
+/// The committed output is `max(public_amount_out, public_net + exclusive_gas)` — never below
+/// the public market's displayed amount, and high enough that the user still nets the public
+/// route's value after paying the exclusive route's gas.
 ///
 /// Informational only (observability). The value the encoder acts on is the per-leg
 /// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
 #[derive(Debug, Clone)]
 pub struct SurplusInfo {
     /// Surplus captured by the protocol: realized surplus-route output minus the committed
-    /// (public-reference) output.
+    /// output.
     surplus_amount: BigUint,
-    /// The best public-market output the user is committed to (the quoted `amount_out`).
+    /// The output the user is committed to (the quoted `amount_out`).
     committed_amount_out: BigUint,
 }
 
 impl SurplusInfo {
-    /// Creates surplus info from the captured surplus and the committed public output.
+    /// Creates surplus info from the captured surplus and the committed output.
     pub fn new(surplus_amount: BigUint, committed_amount_out: BigUint) -> Self {
         Self { surplus_amount, committed_amount_out }
     }
@@ -730,7 +734,7 @@ impl SurplusInfo {
         &self.surplus_amount
     }
 
-    /// Returns the committed public-market output the user is quoted.
+    /// Returns the committed output the user is quoted.
     pub fn committed_amount_out(&self) -> &BigUint {
         &self.committed_amount_out
     }

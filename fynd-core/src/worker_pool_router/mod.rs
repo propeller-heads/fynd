@@ -668,6 +668,11 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// holds the candidates from `ExclusiveAccess`-role pools (routes that may use exclusive
 /// components).
 ///
+/// The committed amount honors two floors: `max(public_amount_out, public_net + exclusive_gas)`.
+/// The first keeps the quoted `amount_out` from ever dropping below the public market's; the
+/// second keeps the user — who pays the exclusive route's gas — netting at least what the public
+/// route would leave them.
+///
 /// If the best exclusive-access candidate beats the public reference net-of-gas and produces at
 /// least the committed amount, this returns a new list whose head is the pinned surplus quote,
 /// followed by every public candidate as price-guard fallbacks. The pinned quote is the winning
@@ -676,8 +681,8 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// - `Swap::committed_amount_out` set on each exclusive leg (consumed by the encoder), and
 /// - an order-level [`SurplusInfo`] attached (observability).
 ///
-/// Otherwise `public_ranked` is returned unchanged, so the user is never quoted worse than the
-/// public market.
+/// Otherwise `public_ranked` is returned unchanged. Either way the user is never worse off than
+/// the public market — neither in quoted `amount_out` nor net of gas.
 ///
 /// Per-leg attribution: the route's excess over the committed amount (`realized − committed`)
 /// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
@@ -735,15 +740,27 @@ fn combine_with_surplus(
     // Exact-in assumption: everything below compares and commits output amounts. For exact-out
     // orders this comparison would have to run on amount_in instead (see function docs).
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
-    let committed_amount_out = committed.amount_out();
+    let public_amount_out = committed.amount_out();
 
-    // We promise the user the public route's output. A private route that produces less
-    // can't keep that promise, so we skip it — even when its gas savings make it better net.
-    if exclusive_route_amount_out < committed_amount_out {
+    // We promise the user at least the public route's output. A private route that produces
+    // less can't keep that promise, so we skip it — even when its gas savings make it better
+    // net.
+    if exclusive_route_amount_out < public_amount_out {
         return public_ranked;
     }
 
-    let surplus_amount = exclusive_candidate.amount_out_net_gas() - committed.amount_out_net_gas();
+    // Gas the user pays to execute the exclusive route, in output-token terms.
+    let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
+
+    // The commitment honors two floors: the quoted amount_out never drops below the public
+    // market's, and the user — who pays the exclusive route's gas — never nets less than the
+    // public route would leave them (public_net + gas). Together with the strict net check
+    // above, these gates guarantee the route covers the committed amount.
+    let committed_amount_out =
+        (committed.amount_out_net_gas() + &exclusive_gas_cost).max(public_amount_out.clone());
+
+    // What the hooks capture: everything the route produces above the commitment.
+    let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
 
     // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
     // attach SurplusInfo.
@@ -773,7 +790,7 @@ fn combine_with_surplus(
     if let Some(route) = surplus_quote.route_mut() {
         // Capture the route's excess at the exclusive legs.
         // Each leg absorbs up to its path's capacity; any remainder is left with the user.
-        let mut excess = exclusive_route_amount_out - committed_amount_out;
+        let mut excess = exclusive_route_amount_out - &committed_amount_out;
         for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
             if policy.is_exclusive(swap.protocol_component()) {
                 let Some(path_final_out) = path_final_outs.get(i) else {
@@ -807,9 +824,12 @@ fn combine_with_surplus(
 
     surplus_quote.set_amount_out(committed_amount_out.clone());
 
-    surplus_quote.set_amount_out_net_gas(committed.amount_out_net_gas().clone());
+    // The user nets the committed amount minus the exclusive route's gas; by construction of
+    // the committed amount this is >= the public head's net, so the returned list stays ranked
+    // descending.
+    surplus_quote.set_amount_out_net_gas(&committed_amount_out - &exclusive_gas_cost);
 
-    let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out.clone());
+    let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out);
     surplus_quote = surplus_quote.with_surplus(surplus_info);
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
@@ -1873,6 +1893,112 @@ mod tests {
 
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].surplus_amount(), None);
+    }
+
+    #[test]
+    fn combine_gas_heavier_exclusive_compensates_user() {
+        // public 1000/950 (gas 50); exclusive 1100/960 (gas 140). The committed amount rises to
+        // max(1000, 950 + 140) = 1090 so the user still nets 950 after the pricier gas; the
+        // protocol captures 1100 − 1090 = 10 (the value the route actually created).
+        let responses = responses_with_gas(1000, 950, 1100, 960);
+        let public_ranked = vec![make_public_quote_with_net(1000, 950)
+            .order()
+            .clone()];
+        let policy = exclusive_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        assert_eq!(combined.len(), 2);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(1090u64));
+        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(950u64));
+        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(10u64)));
+        assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(1090u64)));
+    }
+
+    #[test]
+    fn combine_gas_cheaper_exclusive_keeps_public_amount() {
+        // public 1000/950 (gas 50); exclusive 1100/1060 (gas 40). The public floor dominates:
+        // committed = max(1000, 950 + 40) = 1000. The user keeps the gas saving (nets 960) and
+        // the protocol captures 100.
+        let responses = responses_with_gas(1000, 950, 1100, 1060);
+        let public_ranked = vec![make_public_quote_with_net(1000, 950)
+            .order()
+            .clone()];
+        let policy = exclusive_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        assert_eq!(combined.len(), 2);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(1000u64));
+        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(960u64));
+        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(100u64)));
+    }
+
+    #[test]
+    fn combine_split_route_attribution() {
+        // Split route: public branch 600 + exclusive branch 500 = 1100 realized vs 1000
+        // committed (zero gas). Only the exclusive leg is stamped; the public branch flows to
+        // the user untouched.
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                (
+                    "public_pool".to_string(),
+                    make_public_quote_zero_gas(1000)
+                        .order()
+                        .clone(),
+                ),
+                (
+                    "exclusive_access_pool".to_string(),
+                    make_exclusive_split_quote(600, 500)
+                        .order()
+                        .clone(),
+                ),
+            ],
+            failed_solvers: vec![],
+        };
+        let public_ranked = vec![make_public_quote_zero_gas(1000)
+            .order()
+            .clone()];
+        let policy = exclusive_policy();
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_roles(),
+            &QuoteOptions::default(),
+            public_ranked,
+            Some(&policy),
+        );
+
+        assert_eq!(*combined[0].amount_out(), BigUint::from(1000u64));
+        let route = combined[0]
+            .route()
+            .expect("surplus quote should have a route");
+        let public_leg = route
+            .swaps()
+            .iter()
+            .find(|s| !policy.is_exclusive(s.protocol_component()))
+            .expect("should have a public swap");
+        assert_eq!(public_leg.committed_amount_out(), None);
+
+        // The public branch (600) can't be skimmed, so the full excess (1100 − 1000 = 100) is
+        // deducted from the exclusive leg: committed_leg = 500 − 100 = 400. The user receives
+        // 600 + 400 = 1000 (exactly the committed amount) and the hook captures all 100.
+        let exclusive_leg = route
+            .swaps()
+            .iter()
+            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .expect("should have an exclusive swap");
+        assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(400u64)));
     }
 
     /// Builds an `OrderResponses` where both quotes carry explicit `amount_out_net_gas`.
