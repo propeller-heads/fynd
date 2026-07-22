@@ -5,7 +5,7 @@
 
 use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
-use crate::decoder::{solvers::SolverKnowledge, veto::Veto};
+use crate::decoder::{solvers::SolverKnowledge, transfer_ledger::to_primitive_log, veto::Veto};
 
 /// The `LiFi` solver.
 pub(crate) struct Lifi;
@@ -21,6 +21,26 @@ impl SolverKnowledge for Lifi {
             .any(|log| log.topics().first() == Some(&LiFiTransferStarted::SIGNATURE_HASH))
             .then_some(Veto::BridgeOrder)
     }
+
+    /// The integrator tag a same-chain `LiFi` swap declares, from either generic-swap event. This
+    /// is the only fingerprint of a `LiFi` frontend (Infinex, Robinhood's `LiFi` leg), which routes
+    /// through the shared Diamond.
+    fn integrator(&self, logs: &[Log]) -> Option<String> {
+        logs.iter()
+            .find_map(|log| match log.topics().first() {
+                Some(topic) if *topic == LiFiGenericSwapCompleted::SIGNATURE_HASH => {
+                    LiFiGenericSwapCompleted::decode_log(&to_primitive_log(log))
+                        .ok()
+                        .map(|event| event.integrator.clone())
+                }
+                Some(topic) if *topic == LiFiSwappedGeneric::SIGNATURE_HASH => {
+                    LiFiSwappedGeneric::decode_log(&to_primitive_log(log))
+                        .ok()
+                        .map(|event| event.integrator.clone())
+                }
+                _ => None,
+            })
+    }
 }
 
 sol! {
@@ -29,6 +49,29 @@ sol! {
     event LiFiTransferStarted(
         (bytes32, string, string, address, address, address, uint256, uint256, bool, bool)
             bridgeData
+    );
+
+    /// Same-chain `LiFi` swap, current facet — carries the integrator tag as its first string.
+    event LiFiGenericSwapCompleted(
+        bytes32 indexed transactionId,
+        string integrator,
+        string referrer,
+        address receiver,
+        address fromAssetId,
+        address toAssetId,
+        uint256 fromAmount,
+        uint256 toAmount
+    );
+
+    /// Same-chain `LiFi` swap, older facet — same integrator tag, no `receiver` field.
+    event LiFiSwappedGeneric(
+        bytes32 indexed transactionId,
+        string integrator,
+        string referrer,
+        address fromAssetId,
+        address toAssetId,
+        uint256 fromAmount,
+        uint256 toAmount
     );
 }
 
@@ -54,5 +97,30 @@ mod tests {
 
         let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
         assert_eq!(Lifi.solver_veto(&swap_logs), None);
+    }
+
+    #[test]
+    fn test_integrator_from_generic_swap() {
+        use alloy::primitives::{Address, B256};
+
+        let event = LiFiGenericSwapCompleted {
+            transactionId: B256::ZERO,
+            integrator: "infinex".to_string(),
+            referrer: String::new(),
+            receiver: Address::ZERO,
+            fromAssetId: addr(10),
+            toAssetId: addr(11),
+            fromAmount: U256::from(1000),
+            toAmount: U256::from(2000),
+        };
+        let data = event.encode_log_data();
+        let primitive =
+            PrimitiveLog::new_unchecked(addr(70), data.topics().to_vec(), data.data.clone());
+        let logs = vec![Log { inner: primitive, ..Default::default() }];
+        assert_eq!(Lifi.integrator(&logs).as_deref(), Some("infinex"));
+
+        // A non-LiFi log carries no integrator.
+        let other = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1))];
+        assert_eq!(Lifi.integrator(&other), None);
     }
 }

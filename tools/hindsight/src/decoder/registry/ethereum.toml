@@ -174,3 +174,10 @@ fee_collectors = []
 # Robinhood Wallet: fee wallet confirmed 2026-07-17 (swaps are ERC-4337; identify by the fee leg,
 # never the bundler sender).
 "0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+
+# Clients identified by the integrator tag a provider records in its swap event. LiFi frontends
+# route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /
+# LiFiSwappedGeneric is the only fingerprint. Keys are lowercase (matched case-insensitively).
+[client_integrators]
+"infinex" = "infinex"
+"robinhood" = "robinhood"

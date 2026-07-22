@@ -1,16 +1,20 @@
 //! Order-flow client attribution.
 //!
 //! A trade's venue is normally the contract the trader entered through (`tx.to`). Some clients own
-//! the order flow without being that contract — kpk's Safes settle through `CoW`, so `tx.to` is
-//! the solver and the client is only visible as the order's owner. This module recognizes those
-//! clients from the decoded flow and overrides the venue label accordingly.
+//! the order flow without being that contract, and are recognized here from the decoded flow —
+//! overriding the venue label. Every fingerprint is registry-driven; nothing here knows about a
+//! specific client or provider.
 //!
-//! Two fingerprints today:
-//! - **owning trader** — the swap's net flow was read from a known client address (kpk's Safes).
-//! - **fee wallet** — the trade routed through a shared router (0x) but a known client fee wallet
-//!   received the output-token fee (Phantom, Robinhood). The fee is backed out so the settled
-//!   output stays gross. This is only checked inside an already-matched solver trade, so the
-//!   dust-spray gotcha (bare transfers to a fee wallet) does not apply.
+//! Three fingerprints, tried in order:
+//! - **owning trader** — the swap's net flow was read from a known client address
+//!   (`[client_owners]`).
+//! - **fee wallet** — a known client fee wallet received the output-token fee (`[client_fees]`);
+//!   the fee is backed out so the settled output stays gross. Checked only inside an
+//!   already-matched solver trade, so a bare dust transfer to a fee wallet is not mistaken for
+//!   flow.
+//! - **provider integrator tag** — a provider's event carried an integrator string mapped to a
+//!   client (`[client_integrators]`). The tag is extracted by the caller (it is provider-specific;
+//!   see `crate::decoder::solvers::integrator`), so this module stays generic.
 
 use std::collections::HashSet;
 
@@ -19,22 +23,27 @@ use alloy::primitives::{Address, U256};
 use crate::decoder::{decode::TraderFlow, registry::Registry, transfer_ledger::TransferLedger};
 
 /// The order-flow client for a decoded flow, when a fingerprint matches. On a fee-wallet match the
-/// client's fee is backed out of `flow` (added to the gross output), unless a venue decoder already
+/// client's fee is backed out of `flow` (added to the gross output) unless a venue decoder already
 /// accounted a fee.
 pub(crate) fn attribute(
     registry: &Registry,
     flow: &mut TraderFlow,
     ledger: &TransferLedger,
+    integrator: Option<&str>,
 ) -> Option<String> {
     if let Some(client) = registry.client_for_owner(flow.tracked) {
         return Some(client.to_string());
     }
-    let (client, fee) = fee_client(registry, ledger, flow.swap.token_out)?;
-    if flow.venue_fee_out.is_none() {
-        flow.venue_fee_out = Some(fee);
-        flow.swap.amount_out = flow.swap.amount_out.saturating_add(fee);
+    if let Some((client, fee)) = fee_client(registry, ledger, flow.swap.token_out) {
+        if flow.venue_fee_out.is_none() {
+            flow.venue_fee_out = Some(fee);
+            flow.swap.amount_out = flow.swap.amount_out.saturating_add(fee);
+        }
+        return Some(client);
     }
-    Some(client)
+    integrator
+        .and_then(|tag| registry.client_for_integrator(tag))
+        .map(str::to_string)
 }
 
 /// The client whose fee wallet received the output token in this trade, with the fee amount.
@@ -71,7 +80,7 @@ mod tests {
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(kpk_safe, swap(addr(10), 1, addr(11), 2));
-        assert_eq!(attribute(&registry, &mut flow, &ledger).as_deref(), Some("kpk"));
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None).as_deref(), Some("kpk"));
     }
 
     #[test]
@@ -79,7 +88,7 @@ mod tests {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(addr(9), swap(addr(10), 1, addr(11), 2));
-        assert_eq!(attribute(&registry, &mut flow, &ledger), None);
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None), None);
     }
 
     #[test]
@@ -100,9 +109,23 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 9915));
 
-        assert_eq!(attribute(&registry, &mut flow, &ledger).as_deref(), Some("phantom"));
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
         assert_eq!(flow.venue_fee_out, Some(U256::from(85)));
         assert_eq!(flow.swap.amount_out, U256::from(10000));
+    }
+
+    #[test]
+    fn test_integrator_tag_attributes_client() {
+        // A provider integrator tag maps to its client, case-insensitively; an unknown tag does
+        // not.
+        let registry = Registry::ethereum();
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+        let mut flow = TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2));
+        assert_eq!(
+            attribute(&registry, &mut flow, &ledger, Some("Infinex")).as_deref(),
+            Some("infinex")
+        );
+        assert_eq!(attribute(&registry, &mut flow, &ledger, Some("somedapp")), None);
     }
 
     #[test]
@@ -119,6 +142,6 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 2000));
-        assert_eq!(attribute(&registry, &mut flow, &ledger), None);
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None), None);
     }
 }

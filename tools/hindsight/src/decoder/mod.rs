@@ -265,8 +265,10 @@ impl<P: Provider> Decoder<P> {
         // A client fingerprint (a kpk Safe owning the order, or a client fee wallet taking the fee
         // on a shared router) overrides the entry-point label, backing any client fee out before
         // the quote check reads the grossed output.
-        let venue = clients::attribute(registry, &mut flow, &transfer_ledger)
-            .unwrap_or_else(|| registry.label(entry_point));
+        let integrator = solvers::integrator(logs);
+        let venue =
+            clients::attribute(registry, &mut flow, &transfer_ledger, integrator.as_deref())
+                .unwrap_or_else(|| registry.label(entry_point));
 
         let attribution = solvers::attribution::attribute(
             flow.solver_override.take(),

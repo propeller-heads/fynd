@@ -42,6 +42,11 @@ struct AddressBook {
     /// with no fee-identified clients.
     #[serde(default)]
     client_fees: HashMap<Address, String>,
+    /// Provider integrator tag → client, for clients identified by the integrator string in a
+    /// provider's event (`LiFi` frontends: Infinex, Robinhood). Keys are lowercase. Absent in
+    /// books with no integrator-identified clients.
+    #[serde(default)]
+    client_integrators: HashMap<String, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -111,6 +116,9 @@ pub(crate) struct Registry {
     /// Fee-wallet address → client name, for clients identified by the fee they take on a shared
     /// router rather than by the entry point (Phantom, Robinhood).
     client_fees: HashMap<Address, String>,
+    /// Provider integrator tag (lowercase) → client name, for clients identified by the integrator
+    /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
+    client_integrators: HashMap<String, String>,
 }
 
 impl Registry {
@@ -192,6 +200,11 @@ impl Registry {
             venues: book.venues,
             client_owners: book.client_owners,
             client_fees: book.client_fees,
+            client_integrators: book
+                .client_integrators
+                .into_iter()
+                .map(|(tag, client)| (tag.to_lowercase(), client))
+                .collect(),
         })
     }
 
@@ -259,6 +272,14 @@ impl Registry {
     /// shared router (see `crate::decoder::clients`).
     pub(crate) fn client_fees(&self) -> &HashMap<Address, String> {
         &self.client_fees
+    }
+
+    /// The client for a provider integrator tag (case-insensitive), if one is registered. Used to
+    /// attribute `LiFi` frontends by the integrator string in the swap event.
+    pub(crate) fn client_for_integrator(&self, integrator: &str) -> Option<&str> {
+        self.client_integrators
+            .get(&integrator.to_lowercase())
+            .map(String::as_str)
     }
 
     /// The venue whose entry point this address is, if any.
