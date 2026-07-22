@@ -496,9 +496,9 @@ fn aggregate_no_route_reason(
                 NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => {
                     return Some(*reason)
                 }
-                NoPathReason::NoGraphPath
-                | NoPathReason::NoScorablePaths
-                | NoPathReason::AmountTooSmall => {
+                NoPathReason::NoGraphPath |
+                NoPathReason::NoScorablePaths |
+                NoPathReason::AmountTooSmall => {
                     if first.is_none() {
                         first = Some(*reason);
                     }
@@ -1000,10 +1000,22 @@ mod tests {
     fn aggregate_token_not_in_graph_wins_over_amount_too_small() {
         use crate::algorithm::NoPathReason;
         let failed = vec![
-            ("bf".to_string(), SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall)),
-            ("ml".to_string(), SolveError::no_route_found_with_reason("o2", NoPathReason::DestinationTokenNotInGraph)),
+            (
+                "bf".to_string(),
+                SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall),
+            ),
+            (
+                "ml".to_string(),
+                SolveError::no_route_found_with_reason(
+                    "o2",
+                    NoPathReason::DestinationTokenNotInGraph,
+                ),
+            ),
         ];
-        assert_eq!(aggregate_no_route_reason(&failed), Some(NoPathReason::DestinationTokenNotInGraph));
+        assert_eq!(
+            aggregate_no_route_reason(&failed),
+            Some(NoPathReason::DestinationTokenNotInGraph)
+        );
     }
 
     #[test]
