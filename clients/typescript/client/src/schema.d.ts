@@ -224,7 +224,10 @@ export interface components {
              */
             last_update_ms: number;
             /**
-             * @description Number of active solver pools.
+             * @description Number of solver pools configured at startup.
+             *
+             *     This is the configured/registered count, not a live count of healthy worker
+             *     threads — it does not decrease if individual workers stop or panic.
              * @example 2
              */
             num_solver_pools: number;
