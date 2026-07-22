@@ -26,7 +26,6 @@ num_cpus.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 itertools.workspace = true
-lazy_static.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
@@ -40,6 +39,10 @@ alloy = { workspace = true, features = ["sol-types"] }
 
 [features]
 test-utils = []
+# Block-step-controller build path: lets a caller release buffered blocks one at
+# a time (deterministic stepping). Used by the hindsight monitor; the API is not
+# yet stable, so it is opt-in.
+experimental = []
 
 [dev-dependencies]
 rstest.workspace = true
@@ -47,3 +50,4 @@ tempfile.workspace = true
 toml.workspace = true
 fynd-test-fixtures.workspace = true
 tracing-subscriber.workspace = true
+metrics-util.workspace = true

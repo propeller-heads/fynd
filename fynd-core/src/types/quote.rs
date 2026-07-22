@@ -29,7 +29,10 @@ use tycho_simulation::tycho_common::{
 use uuid::Uuid;
 
 use super::primitives::ComponentId;
-use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
+use crate::{
+    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
+    AlgorithmError,
+};
 
 // ============================================================================
 // REQUEST TYPES
@@ -752,6 +755,9 @@ pub struct OrderQuote {
     /// The state overlay this quote was computed against.
     /// When no overlay was requested this is the block number of the base state at solve time.
     solved_against: StateLabel,
+    /// Why no route was found (internal use only; only set for `NoRouteFound`).
+    #[serde(skip)]
+    no_route_reason: Option<NoPathReason>,
 }
 
 impl OrderQuote {
@@ -786,6 +792,7 @@ impl OrderQuote {
             sender,
             receiver,
             solved_against,
+            no_route_reason: None,
         }
     }
 
@@ -807,7 +814,6 @@ impl OrderQuote {
     }
 
     /// Sets the price impact in basis points.
-    #[allow(dead_code)]
     pub(crate) fn with_price_impact_bps(mut self, bps: i32) -> Self {
         self.price_impact_bps = Some(bps);
         self
@@ -915,6 +921,16 @@ impl OrderQuote {
     /// Returns the state overlay this quote was computed against.
     pub fn solved_against(&self) -> &StateLabel {
         &self.solved_against
+    }
+
+    /// Records why no route was found. Internal; skipped during serialization.
+    pub(crate) fn set_no_route_reason(&mut self, reason: Option<NoPathReason>) {
+        self.no_route_reason = reason;
+    }
+
+    /// Returns the recorded no-route reason, if any.
+    pub fn no_route_reason(&self) -> Option<NoPathReason> {
+        self.no_route_reason
     }
 }
 
@@ -1056,12 +1072,26 @@ pub struct RouteResult {
     net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
     gas_price: BigUint,
+    /// Price impact as a signed fraction (e.g. 0.0016 = 16 bps, -0.001 = favorable).
+    /// `None` when the algorithm did not compute one.
+    price_impact: Option<f64>,
 }
 
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price }
+        Self { route, net_amount_out, gas_price, price_impact: None }
+    }
+
+    /// Attaches an algorithm-computed price impact (signed fraction).
+    pub fn with_price_impact(mut self, price_impact: f64) -> Self {
+        self.price_impact = Some(price_impact);
+        self
+    }
+
+    /// Returns the algorithm-computed price impact (signed fraction), if any.
+    pub(crate) fn price_impact(&self) -> Option<f64> {
+        self.price_impact
     }
 
     pub(crate) fn route(&self) -> &Route {
@@ -1838,6 +1868,19 @@ mod tests {
                 _ => panic!("Unknown error type"),
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // RouteResult Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn route_result_price_impact_defaults_none_and_sets() {
+        let route = make_route(vec![(0x01, 0x02)]);
+        let rr = RouteResult::new(route.clone(), BigInt::from(0), BigUint::from(0u8));
+        assert_eq!(rr.price_impact(), None);
+        let rr2 = rr.with_price_impact(0.0025);
+        assert_eq!(rr2.price_impact(), Some(0.0025));
     }
 
     // -------------------------------------------------------------------------

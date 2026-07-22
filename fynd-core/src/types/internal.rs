@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::{quote::SolveParams, Order, SingleOrderQuote};
+use crate::algorithm::NoPathReason;
 
 /// Unique identifier for a solve task.
 pub type TaskId = Uuid;
@@ -78,6 +79,8 @@ pub enum SolveError {
     NoRouteFound {
         /// ID of the order for which no route was found.
         order_id: String,
+        /// Why no route was found, when the algorithm reported it.
+        reason: Option<NoPathReason>,
     },
 
     /// Insufficient liquidity for the requested amount.
@@ -138,6 +141,10 @@ pub enum SolveError {
     #[error("failed to encode: {0}")]
     FailedEncoding(String),
 
+    /// Encoding is unavailable on this chain because no Tycho router is deployed (quote-only).
+    #[error("encoding unavailable: {0}")]
+    EncodingUnavailable(String),
+
     /// Price check against external source failed.
     #[error("price check failed for order {order_id}")]
     PriceCheckFailed {
@@ -157,7 +164,12 @@ impl SolveError {
 
     /// Creates a [`SolveError::NoRouteFound`] for the given order ID.
     pub fn no_route_found(order_id: impl Into<String>) -> Self {
-        Self::NoRouteFound { order_id: order_id.into() }
+        Self::NoRouteFound { order_id: order_id.into(), reason: None }
+    }
+
+    /// Creates a [`SolveError::NoRouteFound`] carrying the algorithm's [`NoPathReason`].
+    pub fn no_route_found_with_reason(order_id: impl Into<String>, reason: NoPathReason) -> Self {
+        Self::NoRouteFound { order_id: order_id.into(), reason: Some(reason) }
     }
 
     /// Creates a [`SolveError::InsufficientLiquidity`] with the required and available amounts.

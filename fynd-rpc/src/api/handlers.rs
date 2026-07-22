@@ -1,16 +1,21 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpResponse};
+use tracing::instrument;
 #[cfg(feature = "experimental")]
-use tracing::warn;
-use tracing::{info, instrument};
+use tracing::{info, warn};
 
 use super::{dto, ApiError, AppState};
-use crate::api::error::ErrorResponse;
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
     price_to_f64, ComputationBlocks, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse,
     SpotPriceEntry, TokenPriceEntry,
+};
+use crate::api::{
+    error::{solve_error_code, ErrorResponse},
+    request_capture::{
+        self, log_request_capture, no_route_reason_code, quote_status_code, RequestOutcome,
+    },
 };
 
 /// Configures API routes under /v1 namespace.
@@ -60,28 +65,49 @@ pub(crate) async fn quote(
         return Err(ApiError::BadRequest("no orders provided".to_string()));
     }
 
+    // Capture a re-issuable, signature-free copy of the request BEFORE the core
+    // conversion consumes `dto_request`.
+    let num_orders = dto_request.orders().len();
+    let replay_json = request_capture::replay_json(&dto_request);
+
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
 
-    // Validate orders
+    // Validate orders (unchanged from the original handler).
     for order in core_request.orders() {
         if let Err(e) = order.validate() {
             return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
         }
     }
 
-    let core_quote = state
+    let result = state
         .worker_router()
         .quote(core_request)
-        .await?;
+        .await;
 
-    info!(
-        solve_time_ms = core_quote.solve_time_ms(),
-        num_orders = core_quote.orders().len(),
-        num_pools = state.worker_router().num_pools(),
-        "quote completed"
-    );
+    let outcome = match &result {
+        Ok(core_quote) => RequestOutcome::Solved {
+            solve_time_ms: core_quote.solve_time_ms(),
+            order_statuses: core_quote
+                .orders()
+                .iter()
+                .map(|order_quote| quote_status_code(order_quote.status()))
+                .collect(),
+            no_route_reasons: core_quote
+                .orders()
+                .iter()
+                .map(|order_quote| no_route_reason_code(order_quote.no_route_reason()))
+                .collect(),
+        },
+        Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
+    };
+    // Only failed quotes are logged (successful quotes are the common case and
+    // would dominate log volume); see RequestOutcome::is_failure.
+    if outcome.is_failure() {
+        log_request_capture(num_orders, &replay_json, &outcome);
+    }
 
+    let core_quote = result?;
     let dto_quote: dto::Quote = core_quote.into();
 
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -141,11 +167,16 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
     )
 )]
 pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
-    let body = dto::InstanceInfo::new(
+    let body = dto::InstanceInfo::builder(
         state.chain_id(),
-        state.router_address().clone().into(),
+        state
+            .router_address()
+            .cloned()
+            .map(Into::into),
         state.permit2_address().clone().into(),
-    );
+    )
+    .version(env!("CARGO_PKG_VERSION"))
+    .build();
     HttpResponse::Ok().json(body)
 }
 
@@ -362,7 +393,7 @@ mod tests {
             router,
             health_tracker,
             1,
-            router_address,
+            Some(router_address),
             permit2_address,
             #[cfg(feature = "experimental")]
             derived_data,
@@ -592,5 +623,23 @@ mod tests {
             addr.contains("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
             "expected Ethereum Tycho Router address, got {addr}"
         );
+    }
+
+    #[actix_web::test]
+    async fn test_info_response_includes_version() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/info", web::get().to(super::info)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/info")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     }
 }

@@ -26,7 +26,7 @@ pub enum Commands {
     /// Print the OpenAPI spec as JSON to stdout
     Openapi,
     /// Analyze live Tycho market data and suggest connector tokens for routing
-    DeriveConnectorTokens(DeriveConnectorTokensArgs),
+    DeriveConnectorTokens(Box<DeriveConnectorTokensArgs>),
 }
 
 /// Arguments for the `serve` subcommand.
@@ -111,6 +111,11 @@ pub struct ServeArgs {
     /// Tycho stream.
     #[arg(long, env)]
     pub blocklist_config: Option<PathBuf>,
+
+    /// Path to the custom-chains config (chains.yaml). Required to run a chain that Tycho does
+    /// not know as a built-in. Uses the same file the indexer reads.
+    #[arg(long, env = "TYCHO_CHAINS_CONFIG")]
+    pub chains_config: Option<PathBuf>,
 
     /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
     /// Disabled by default.
@@ -226,5 +231,13 @@ mod cli_tests {
     fn test_openapi_subcommand() {
         let cli = Cli::try_parse_from(vec!["fynd", "openapi"]).expect("parse errored");
         assert_eq!(cli.command, Commands::Openapi);
+    }
+
+    #[test]
+    fn parses_chains_config() {
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--chains-config", "chains.yaml"])
+            .expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.chains_config, Some(PathBuf::from("chains.yaml")));
     }
 }

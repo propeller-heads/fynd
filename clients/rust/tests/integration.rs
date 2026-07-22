@@ -15,8 +15,8 @@ use alloy::{
     providers::{ProviderBuilder, RootProvider},
 };
 use fynd_client::{
-    ErrorCode, FyndClient, FyndError, Order, OrderSide, QuoteOptions, QuoteParams, RetryConfig,
-    SigningHints, SwapPayload,
+    ErrorCode, FyndClient, FyndError, HostedConfig, Order, OrderSide, QuoteOptions, QuoteParams,
+    RetryConfig, SigningHints, SwapPayload,
 };
 use num_bigint::BigUint;
 use wiremock::{
@@ -54,6 +54,7 @@ fn make_client(
         default_sender,
         provider,
         submit_provider,
+        HostedConfig::default(),
     );
     (client, asserter)
 }

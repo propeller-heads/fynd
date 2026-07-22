@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 353a6a831f91313b1b8d5b66985f91b0385da4dc -->
+<!-- docs-synced-at: 4a30359cea111f5590fe698357b3a707fee65ece -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -45,7 +45,11 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 |---|---|---|
 | `fynd-benchmark` | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | `fynd-swap-cli` | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
+| `hindsight` | `tools/hindsight/` | Decode solver swaps from on-chain data; live-monitor re-solve quality |
 | `record-market` | `tools/record-market/` | Record live Tycho market state and generate expected outputs for the integration tests |
+| `fynd-gas-audit` | `tools/fynd-gas-audit/` | Compare quote-time gas estimates against `eth_estimateGas` |
+| `erc20-overrides` | `tools/erc20-overrides/` | ERC-20 storage slot detection for dry-run storage overrides |
+| `fynd-tools-common` | `tools/common/` | Shared internal library for tool crates |
 
 ## Architecture Overview
 
@@ -58,7 +62,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
    `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
-   `SplitBoundedAlgorithm`
+   `WaterFillAlgorithm`
 5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices
@@ -71,7 +75,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 1. `TychoFeed` receives state updates from Tycho WebSocket
 2. Writes new component/token/state data into `MarketState` (write lock)
 3. Broadcasts `MarketEvent` → each `SolverWorker` updates its local graph via `GraphManager`
-4. Signals `GasPriceFetcher` → fetches gas price from RPC node → writes to `MarketState`
+4. `GasPriceFetcher` runs independently on a timer → fetches gas price from RPC node → writes to `MarketState`
 5. Triggers `ComputationManager` → runs spot prices → pool depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
 
 **Quote request path** (`POST /v1/quote`):
@@ -96,7 +100,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | Variable | Purpose |
 |---|---|
 | `TYCHO_API_KEY` | Tycho API key (optional) |
-| `RPC_URL` | Ethereum RPC endpoint (default: `https://eth.llamarpc.com`) |
+| `RPC_URL` | Ethereum RPC endpoint (chain-specific default) |
 | `TYCHO_URL` | Tycho endpoint (chain-specific default) |
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
@@ -109,8 +113,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` (default `false`) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` (default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
+| `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 
 ### Config Files
 

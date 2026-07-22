@@ -203,7 +203,7 @@ Pluggable interface for route-finding algorithms:
 
 * `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
 * `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
-* `PathFrankWolfeAlgorithm` -- Bellman-Ford path discovery plus Frank-Wolfe split optimization.
+* `PathFrankWolfeAlgorithm` -- Frank-Wolfe path-based optimization for multi-hop routing.
 * `WaterFillAlgorithm` -- portfolio split router: exhaustive plus bounded amount-aware candidate discovery, then the best net of a single path, a coarse disjoint floor, a refined 256-chunk disjoint split, and a shared-pool fill-and-spill; gas-aware net ranking when derived token gas prices are available.
 
 ***

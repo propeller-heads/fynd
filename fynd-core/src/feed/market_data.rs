@@ -132,8 +132,10 @@ impl MarketData {
 
     /// Attempts a non-blocking read and wraps the result in a `MarketDataView`.
     ///
-    /// The overlay is not applied because this is a synchronous helper intended for tests where
-    /// no overlay is active.  Returns `None` if the lock is currently held for writing.
+    /// The overlay is not applied, so this only exposes the base market state. Suitable for
+    /// callers that read base data (e.g. token decimals) and do not depend on overlay state,
+    /// such as the quote price-impact fallback. Returns `None` if the lock is currently held
+    /// for writing (callers must treat that as "data unavailable", not an error).
     pub fn try_read_blocking(&self) -> Option<MarketDataView<'_>> {
         self.data
             .try_read()
@@ -340,6 +342,16 @@ impl MarketState {
     /// Returns the block info for the last update.
     pub fn last_updated(&self) -> Option<&BlockInfo> {
         self.last_updated.as_ref()
+    }
+
+    /// Number of protocol components (pools) currently tracked.
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Number of tokens currently tracked.
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
@@ -804,6 +816,46 @@ mod tests {
                 .expect("last_updated must be set")
                 .number(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn component_and_token_counts_track_upserts_and_removals() {
+        let market = MarketData::new_shared();
+        let tok_a = token(1, "A");
+        let tok_b = token(2, "B");
+
+        market
+            .apply_block_update(1, |data| {
+                data.upsert_components([component("pool_ab", &[tok_a.clone(), tok_b.clone()])]);
+                data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
+            })
+            .await;
+        {
+            let data = market.read().await;
+            assert_eq!(
+                data.base_market_state()
+                    .component_count(),
+                1
+            );
+            assert_eq!(data.base_market_state().token_count(), 2);
+        }
+
+        market
+            .apply_block_update(2, |data| {
+                data.remove_components(["pool_ab".to_string()].iter());
+            })
+            .await;
+        let data = market.read().await;
+        assert_eq!(
+            data.base_market_state()
+                .component_count(),
+            0
+        );
+        assert_eq!(
+            data.base_market_state().token_count(),
+            2,
+            "tokens are not removed with their components"
         );
     }
 }

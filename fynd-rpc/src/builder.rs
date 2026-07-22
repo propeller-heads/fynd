@@ -11,7 +11,7 @@ use fynd_core::{
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-use tycho_simulation::tycho_common::models::{Chain, TvlThresholdTier};
+use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
@@ -226,7 +226,7 @@ impl FyndRPCBuilder {
 
         let chain = parts.chain();
         let chain_id = chain.id();
-        let router_address = parts.router_address().clone();
+        let router_address = parts.router_address().cloned();
         let permit2_address = {
             use fynd_core::encoding::encoder::PERMIT2_ADDRESS;
             let hex = PERMIT2_ADDRESS
@@ -274,6 +274,9 @@ impl FyndRPCBuilder {
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
+                .wrap(actix_web::middleware::from_fn(
+                    crate::api::middleware::http_metrics_middleware,
+                ))
                 .configure(|cfg| configure_app(cfg, app_state.clone()))
         })
         .bind((self.http_host.as_str(), self.http_port))

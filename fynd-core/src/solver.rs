@@ -16,6 +16,8 @@ use num_cpus;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+#[cfg(feature = "experimental")]
+use tycho_simulation::evm::stream::BlockStepController;
 #[cfg(feature = "test-utils")]
 use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 use tycho_simulation::{
@@ -301,6 +303,11 @@ pub enum SolverBuildError {
     /// panicked rather than returning an error through the channel.
     #[error("pending processor channel closed before processor was delivered")]
     PendingChannelClosed,
+    /// The step-controller oneshot closed without delivering a value, meaning the feed task
+    /// panicked rather than returning an error through the channel.
+    #[cfg(feature = "experimental")]
+    #[error("step controller channel closed before controller was delivered")]
+    StepControllerChannelClosed,
 }
 
 /// Internal pool entry — either a built-in algorithm (by name) or a custom one.
@@ -337,7 +344,7 @@ struct CustomPoolEntry {
 struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
-    router_fee_fetcher: RouterFeeFetcher,
+    router_fee_fetcher: Option<RouterFeeFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -348,7 +355,7 @@ struct BuiltComponents {
     derived_data: SharedDerivedDataRef,
     router_fees: SharedRouterFees,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
@@ -757,16 +764,27 @@ impl FyndBuilder {
         };
 
         let chain = self.chain;
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         let router_fees = encoder.router_fees();
 
-        let router_fee_fetcher = RouterFeeFetcher::new(
-            self.rpc_url.as_str(),
-            &router_address,
-            router_fees.clone(),
-            defaults::ROUTER_FEE_REFRESH_INTERVAL,
-        )
-        .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?;
+        let router_fee_fetcher = match &router_address {
+            Some(addr) => Some(
+                RouterFeeFetcher::new(
+                    self.rpc_url.as_str(),
+                    addr,
+                    router_fees.clone(),
+                    defaults::ROUTER_FEE_REFRESH_INTERVAL,
+                )
+                .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?,
+            ),
+            None => {
+                tracing::warn!(
+                    %chain,
+                    "no Tycho router for this chain; running quote-only (encoding disabled)"
+                );
+                None
+            }
+        };
 
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
@@ -816,15 +834,17 @@ impl FyndBuilder {
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = c.tycho_feed.run().await {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -874,15 +894,17 @@ impl FyndBuilder {
                 .run_with_pending(pending_tx, pending_indexers)
                 .await
             {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -913,7 +935,77 @@ impl FyndBuilder {
             pending,
         ))
     }
-}
+
+    /// Assembles and starts all solver components, also returning a [`BlockStepController`]
+    /// that lets the caller control when each buffered block is released for processing.
+    ///
+    /// Intended for deterministic testing: call [`BlockStepController::trigger_next_block`] to
+    /// step through blocks one at a time, and [`BlockStepController::peek_next_block`] to inspect
+    /// a block before it is decoded. Dropping the controller ungates the stream so it runs to its
+    /// natural end.
+    ///
+    /// Only valid when at least one non-RFQ protocol is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are RFQ,
+    /// or the step-controller channel closes before the controller is delivered.
+    #[cfg(feature = "experimental")]
+    pub async fn build_with_step_controller(
+        self,
+    ) -> Result<(Solver, BlockStepController), SolverBuildError> {
+        let mut c = self.assemble_components()?;
+
+        let (controller_tx, controller_rx) =
+            tokio::sync::oneshot::channel::<Result<BlockStepController, String>>();
+
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = c
+                .tycho_feed
+                .run_with_step_controller(controller_tx)
+                .await
+            {
+                tracing::error!(error = %e, "tycho feed error");
+            }
+        });
+        let gas_price_handle = tokio::spawn(async move {
+            c.gas_price_fetcher.run().await;
+        });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
+        let computation_handle = tokio::spawn(async move {
+            c.computation_manager
+                .run(c.computation_event_rx, c.computation_shutdown_rx)
+                .await;
+        });
+
+        let controller = controller_rx
+            .await
+            .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+
+        Ok((
+            Solver {
+                router: c.router,
+                worker_pools: c.worker_pools,
+                market_data: c.market_data,
+                derived_data: c.derived_data,
+                router_fees: c.router_fees,
+                feed_handle,
+                gas_price_handle,
+                router_fee_handle,
+                computation_handle,
+                computation_shutdown_tx: c.computation_shutdown_tx,
+                chain: c.chain,
+                router_address: c.router_address,
+                market_event_tx: c.market_event_tx,
+            },
+            controller,
+        ))
+    }
+} // impl FyndBuilder
 
 /// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
@@ -928,7 +1020,7 @@ pub struct Solver {
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
@@ -936,6 +1028,11 @@ impl Solver {
     /// Returns a clone of the shared market data reference.
     pub fn market_data(&self) -> MarketData {
         self.market_data.clone()
+    }
+
+    /// Returns the Tycho Router contract address, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a clone of the shared derived data reference.
@@ -1127,7 +1224,7 @@ impl Solver {
             Encoder::new(chain, registry).map_err(|e| SolverBuildError::Encoder(e.to_string()))?
         };
 
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         // Replay mode has no FeeCalculator to read; seed a zero-fee config at the standard
         // 8-decimal scale so the recording-based solver reports ready (integration tests do
         // not exercise encoding).
@@ -1238,8 +1335,8 @@ pub struct SolverParts {
     computation_shutdown_tx: broadcast::Sender<()>,
     /// Chain this solver is configured for.
     chain: Chain,
-    /// Address of the Tycho Router contract on this chain.
-    router_address: Bytes,
+    /// Address of the Tycho Router contract on this chain, or `None` on a quote-only chain.
+    router_address: Option<Bytes>,
 }
 
 impl SolverParts {
@@ -1248,9 +1345,9 @@ impl SolverParts {
         self.chain
     }
 
-    /// Returns the Tycho Router contract address for this chain.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Returns the Tycho Router contract address for this chain, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a reference to the worker pools.

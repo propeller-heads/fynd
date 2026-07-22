@@ -58,6 +58,11 @@ Returns a `Solver` that can `quote()` directly. For standalone (non-HTTP) use.
 Price guard methods: `price_guard_enabled(bool)`, `register_price_provider(Box<dyn PriceProvider>)`,
 `add_default_price_providers()` (registers Binance WS + Hyperliquid providers).
 
+Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
+`with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
+pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
+`MarketEvent`s.
+
 ## Adding a Custom Algorithm
 
 1. Implement `Algorithm` with your `GraphType` and `GraphManager`

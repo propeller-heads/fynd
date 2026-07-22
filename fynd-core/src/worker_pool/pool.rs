@@ -114,6 +114,7 @@ impl WorkerPool {
         // Spawn workers
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
+            pool_name: name.clone(),
             num_workers: config.num_workers,
             algorithm_config: config.algorithm_config,
             task_rx,

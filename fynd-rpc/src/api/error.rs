@@ -34,6 +34,32 @@ pub enum ApiError {
     },
 }
 
+/// Maps a [`SolveError`] to its stable machine-readable code.
+///
+/// Shared by the HTTP error response and the request-replay capture log so both
+/// use identical codes.
+pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
+    match err {
+        SolveError::NoRouteFound { .. } => "NO_ROUTE_FOUND",
+        SolveError::InsufficientLiquidity { .. } => "INSUFFICIENT_LIQUIDITY",
+        SolveError::Timeout { .. } => "TIMEOUT",
+        SolveError::QueueFull => "QUEUE_FULL",
+        SolveError::AlgorithmError(_) => "ALGORITHM_ERROR",
+        SolveError::MarketDataStale { .. } => "STALE_DATA",
+        SolveError::InvalidOrder(_) => "INVALID_ORDER",
+        SolveError::Internal(_) => "INTERNAL_ERROR",
+        SolveError::NotReady(_) => "NOT_READY",
+        SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
+        SolveError::FailedEncoding(_) => "FAILED_ENCODING",
+        SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
+        SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
+        other => {
+            warn!(?other, "unhandled SolveError variant");
+            "INTERNAL_ERROR"
+        }
+    }
+}
+
 impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -43,6 +69,7 @@ impl ResponseError for ApiError {
                 SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::ComputationFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+                SolveError::EncodingUnavailable(_) => StatusCode::NOT_IMPLEMENTED,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
@@ -54,24 +81,7 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let code = match self {
             ApiError::BadRequest(_) => "BAD_REQUEST",
-            ApiError::SolveFailed(e) => match e {
-                SolveError::NoRouteFound { .. } => "NO_ROUTE_FOUND",
-                SolveError::InsufficientLiquidity { .. } => "INSUFFICIENT_LIQUIDITY",
-                SolveError::Timeout { .. } => "TIMEOUT",
-                SolveError::QueueFull => "QUEUE_FULL",
-                SolveError::AlgorithmError(_) => "ALGORITHM_ERROR",
-                SolveError::MarketDataStale { .. } => "STALE_DATA",
-                SolveError::InvalidOrder(_) => "INVALID_ORDER",
-                SolveError::Internal(_) => "INTERNAL_ERROR",
-                SolveError::NotReady(_) => "NOT_READY",
-                SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
-                SolveError::FailedEncoding(_) => "FAILED_ENCODING",
-                SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
-                other => {
-                    warn!(?other, "unhandled SolveError variant");
-                    "INTERNAL_ERROR"
-                }
-            },
+            ApiError::SolveFailed(e) => solve_error_code(e),
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::Internal(_) => "INTERNAL_ERROR",
             ApiError::StaleData { .. } => "STALE_DATA",
@@ -172,5 +182,22 @@ mod tests {
         let (status, body) = json_body(ApiError::SolveFailed(err)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "STALE_DATA");
+    }
+
+    #[actix_web::test]
+    async fn test_encoding_unavailable_returns_501() {
+        let err =
+            SolveError::EncodingUnavailable("no router configured for this chain".to_string());
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "ENCODING_UNAVAILABLE");
+    }
+
+    #[actix_web::test]
+    async fn test_failed_encoding_returns_422() {
+        let err = SolveError::FailedEncoding("missing permit2 signature".to_string());
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "FAILED_ENCODING");
     }
 }

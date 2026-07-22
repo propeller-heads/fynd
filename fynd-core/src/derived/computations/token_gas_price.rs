@@ -44,10 +44,13 @@ use tycho_simulation::{
 use crate::{
     derived::{
         computation::{
-            ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
+            ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
+            FailedItem, FailedItemError,
         },
+        computations::spot_price::SpotPriceComputation,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
+        store::DerivedData,
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::{MarketData, MarketState},
@@ -400,9 +403,12 @@ impl TokenGasPriceComputation {
             })
             .collect();
 
-        // Sort each token's paths: lowest spread last (for popping)
+        // Sort each token's paths: lowest spread last (for popping). A NaN score (degenerate
+        // pool math in the spread computation) cannot rank a path and would panic a
+        // partial_cmp-based sort, so drop those candidates and sort with the float total order.
         for paths in paths_by_token.values_mut() {
-            paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            paths.retain(|path| !path.score.is_nan());
+            paths.sort_by(|a, b| b.score.total_cmp(&a.score));
         }
 
         // Round-robin: pop one candidate per token each round, keep best by spread
@@ -554,6 +560,19 @@ impl DerivedComputation for TokenGasPriceComputation {
     type Output = TokenGasPrices;
 
     const ID: ComputationId = "token_prices";
+
+    fn requirements(&self) -> ComputationRequirements {
+        ComputationRequirements::fresh([SpotPriceComputation::ID])
+    }
+
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
     async fn compute(
@@ -756,6 +775,33 @@ mod tests {
         assert_eq!(target_paths[0].path.edge_data[0].component_id, "hop1");
         assert_eq!(target_paths[0].path.edge_data[1].component_id, "hop2");
         assert_eq!(target_paths[0].score, 0.0);
+    }
+
+    #[tokio::test]
+    async fn nan_scored_paths_are_dropped_not_panicked_on() {
+        // Degenerate pool math can yield a NaN spot-price spread. A NaN-scored candidate must
+        // be dropped — never panicked on — and the affected token simply gets no price.
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let (market, _) =
+            setup_market_weighted(vec![("nan_pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        // Inject NaN spot prices directly: the spread |forward - 1/reverse| becomes NaN.
+        let mut spot_prices = SpotPrices::default();
+        spot_prices
+            .insert(("nan_pool".to_string(), eth.address.clone(), usdc.address.clone()), f64::NAN);
+        spot_prices
+            .insert(("nan_pool".to_string(), usdc.address.clone(), eth.address.clone()), f64::NAN);
+
+        let computation = computation_for(&eth.address);
+        let (prices, _, _) = computation
+            .simulate_token_prices(&market, &spot_prices, None)
+            .await
+            .expect("a NaN-scored path must not fail the computation");
+        assert!(
+            !prices.contains_key(&usdc.address),
+            "the NaN-scored path must be dropped, not selected"
+        );
     }
 
     #[tokio::test]

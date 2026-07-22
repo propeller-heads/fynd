@@ -48,7 +48,8 @@ pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{
-    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
+    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, NoPathReason,
+    PathFrankWolfeAlgorithm,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
@@ -65,6 +66,10 @@ pub use tycho_simulation::evm::pending::PendingBlockProcessor;
 pub use tycho_simulation::evm::pending::PendingError;
 /// A pending transaction bundle passed to [`PendingBlockProcessor`] for simulation.
 pub use tycho_simulation::evm::pending::PendingUpdate;
+/// Handle returned by [`FyndBuilder::build_with_step_controller`] that controls when each
+/// buffered block is released for decoding. See [`tycho_simulation`] for the full API.
+#[cfg(feature = "experimental")]
+pub use tycho_simulation::evm::stream::BlockStepController;
 /// Implement this trait and register it via
 /// [`FyndBuilder::with_pending_indexer`](solver::FyndBuilder::with_pending_indexer)
 /// to receive raw transaction deltas during pending-block simulation.

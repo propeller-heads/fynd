@@ -1195,30 +1195,49 @@ impl HealthStatus {
 }
 
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+//
+// Dev note (source-only, deliberately not a doc comment so it stays out of the wire schema):
+// `/v1/info` is a public wire contract. When extending this type, add the field with
+// `#[serde(default)]` and a builder setter — additive, so older clients ignore it and newer
+// clients still deserialize responses from older servers. Never rename, remove, or retype an
+// existing field: that breaks the contract. Every shape change is surfaced by the OpenAPI/TS
+// drift check (regenerate via `./scripts/update-openapi.sh`) and the semver gate, so it cannot
+// merge unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[non_exhaustive]
 pub struct InstanceInfo {
     /// EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
     #[cfg_attr(feature = "openapi", schema(example = 1))]
     chain_id: u64,
-    /// Address of the Tycho Router contract on this chain.
+    /// Address of the Tycho Router contract on this chain; `null` on a quote-only chain.
     #[cfg_attr(
         feature = "openapi",
-        schema(value_type = String, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
+        schema(value_type = Option<String>, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
     )]
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     /// Address of the canonical Permit2 contract (same on all EVM chains).
     #[cfg_attr(
         feature = "openapi",
         schema(value_type = String, example = "0x000000000022D473030F116dDEE9F6B43aC78BA3")
     )]
     permit2_address: Bytes,
+    /// Fynd binary version (Cargo package version, e.g. "0.89.1").
+    ///
+    /// Defaults to empty when absent so newer clients tolerate older servers that predate it.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(example = "0.89.1"))]
+    version: String,
 }
 
 impl InstanceInfo {
-    /// Creates a new instance info.
-    pub fn new(chain_id: u64, router_address: Bytes, permit2_address: Bytes) -> Self {
-        Self { chain_id, router_address, permit2_address }
+    /// Starts building an instance info from the required immutable fields.
+    pub fn builder(
+        chain_id: u64,
+        router_address: Option<Bytes>,
+        permit2_address: Bytes,
+    ) -> InstanceInfoBuilder {
+        InstanceInfoBuilder { chain_id, router_address, permit2_address, version: String::new() }
     }
 
     /// EIP-155 chain ID.
@@ -1226,14 +1245,46 @@ impl InstanceInfo {
         self.chain_id
     }
 
-    /// Address of the Tycho Router contract.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Address of the Tycho Router contract, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Address of the canonical Permit2 contract.
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Fynd binary version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Builder for [`InstanceInfo`]. Keeps future `/v1/info` fields cheap to add.
+#[derive(Debug, Clone)]
+pub struct InstanceInfoBuilder {
+    chain_id: u64,
+    router_address: Option<Bytes>,
+    permit2_address: Bytes,
+    version: String,
+}
+
+impl InstanceInfoBuilder {
+    /// Sets the Fynd binary version.
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
+    }
+
+    /// Finalizes into an [`InstanceInfo`].
+    pub fn build(self) -> InstanceInfo {
+        InstanceInfo {
+            chain_id: self.chain_id,
+            router_address: self.router_address,
+            permit2_address: self.permit2_address,
+            version: self.version,
+        }
     }
 }
 
@@ -1487,6 +1538,7 @@ mod wire_format_tests {
     #[test]
     fn instance_info_deserializes_and_ignores_unknown_fields() {
         let json = r#"{
+            "version": "1.2.3",
             "chain_id": 1,
             "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1494,9 +1546,37 @@ mod wire_format_tests {
         }"#;
 
         let info: InstanceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.version(), "1.2.3");
         assert_eq!(info.chain_id(), 1);
-        assert_eq!(info.router_address().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
         assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
+    }
+
+    #[test]
+    fn instance_info_builder_sets_fields() {
+        let info =
+            InstanceInfo::builder(1, Some(Bytes::from([0xAAu8; 20])), Bytes::from([0xBBu8; 20]))
+                .version("0.1.0")
+                .build();
+
+        assert_eq!(info.version(), "0.1.0");
+        assert_eq!(info.chain_id(), 1);
+        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
+    }
+
+    #[test]
+    fn instance_info_deserializes_without_version() {
+        // A new client talking to an older server (no `version` field) must still deserialize.
+        let json = r#"{
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }"#;
+
+        let info: InstanceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.version(), "");
+        assert_eq!(info.chain_id(), 1);
     }
 }
 

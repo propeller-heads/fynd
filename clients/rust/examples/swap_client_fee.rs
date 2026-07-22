@@ -85,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     let info = client.info().await?;
-    let router_address = info.router_address().clone();
+    let router_address = info
+        .router_address()
+        .expect("example requires a chain with encoding support")
+        .clone();
     let chain_id = info.chain_id();
 
     // Approve the router to spend WETH if the current allowance is insufficient.

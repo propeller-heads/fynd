@@ -6,15 +6,17 @@
 //! # Architecture
 //!
 //! - **Computations**: Implement the `DerivedComputation` trait to define new data types
-//! - **Manager**: `ComputationManager` explicitly owns each computation type
-//! - **Store**: `DerivedDataStore` with typed fields (no type erasure)
+//! - **Manager**: `ComputationManager` holds a registry of computations and runs them in
+//!   dependency-stage order each block
+//! - **Store**: `DerivedData` keeps each computation's output in a type-keyed slot, read back
+//!   through typed getters
 //! - **Events**: Broadcast notifications when computations complete
 //! - **Tracker**: Per-worker readiness tracking based on algorithm requirements
 //!
 //! # Computation Dependencies
 //!
-//! Computations may depend on other computations' outputs via the `DerivedDataStore`.
-//! The dependency graph must be respected when running computations:
+//! Each computation declares its upstream dependencies via
+//! `DerivedComputation::requirements`, and the manager runs them in dependency order:
 //!
 //! ```text
 //!                 SpotPriceComputation
@@ -31,7 +33,7 @@
 //!
 //! ```ignore
 //! // Create the computation manager
-//! let config = ComputationManagerConfig::new(weth_address);
+//! let config = ComputationManagerConfig::new().with_gas_token(weth_address);
 //! let manager = ComputationManager::new(config, shared_market_data)?;
 //!
 //! // Get a reference to the store for workers
@@ -52,6 +54,7 @@ pub(crate) mod computations;
 pub(crate) mod error;
 pub(crate) mod events;
 mod manager;
+mod registry;
 mod store;
 pub(crate) mod tracker;
 pub(crate) mod types;
