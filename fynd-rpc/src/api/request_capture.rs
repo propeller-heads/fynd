@@ -101,6 +101,7 @@ pub(crate) fn no_route_reason_code(reason: Option<NoPathReason>) -> &'static str
         Some(NoPathReason::DestinationTokenNotInGraph) => "destination_token_not_in_graph",
         Some(NoPathReason::NoGraphPath) => "no_graph_path",
         Some(NoPathReason::NoScorablePaths) => "no_scorable_paths",
+        Some(NoPathReason::AmountTooSmall) => "amount_too_small",
         Some(_) => "unknown",
     }
 }
@@ -392,6 +393,7 @@ mod tests {
         );
         assert_eq!(no_route_reason_code(Some(NoPathReason::NoGraphPath)), "no_graph_path");
         assert_eq!(no_route_reason_code(Some(NoPathReason::NoScorablePaths)), "no_scorable_paths");
+        assert_eq!(no_route_reason_code(Some(NoPathReason::AmountTooSmall)), "amount_too_small",);
     }
 
     #[test]
