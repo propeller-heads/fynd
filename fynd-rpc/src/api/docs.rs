@@ -5,7 +5,8 @@
 //! - `/docs/` + `/api-docs/openapi.json` — self-hosted deployments, describing the paths this
 //!   process routes (`/v1/quote`) on the origin it is reached at, with no authentication.
 //! - `/docs/hosted/` + `/api-docs/hosted/openapi.json` — the hosted gateway, which routes per chain
-//!   (`/v1/{chain}/quote`) and authenticates requests with a bearer token.
+//!   (`/v1/{chain}/quote`) and authenticates requests with an API key sent as the raw
+//!   `Authorization` header value.
 
 use std::env;
 
@@ -14,7 +15,7 @@ use serde_json::json;
 use utoipa::{
     openapi::{
         path::{Operation, Parameter, ParameterBuilder, ParameterIn},
-        security::{Http, HttpAuthScheme, SecurityScheme},
+        security::{ApiKey, ApiKeyValue, SecurityScheme},
         Components, ObjectBuilder, OpenApi, PathItem, Required, SecurityRequirement, Server, Type,
     },
     OpenApi as _,
@@ -31,8 +32,8 @@ const HOSTED_SERVER_URL_ENV: &str = "FYND_HOSTED_SWAGGER_URL";
 /// Server URL advertised by the hosted spec when [`HOSTED_SERVER_URL_ENV`] is unset.
 const DEFAULT_HOSTED_SERVER_URL: &str = "https://fynd-api.propellerheads.xyz";
 
-/// Name of the bearer security scheme declared by the hosted spec.
-const BEARER_SCHEME_NAME: &str = "BearerAuth";
+/// Name of the API key security scheme declared by the hosted spec.
+const API_KEY_SCHEME_NAME: &str = "ApiKeyAuth";
 
 /// Registers both Swagger UIs and the specs they load.
 ///
@@ -59,8 +60,10 @@ fn self_hosted_spec() -> OpenApi {
 ///
 /// The gateway picks a backend from a chain segment in the path, so every `/v1/<endpoint>` becomes
 /// `/v1/{chain}/<endpoint>` and gains a `chain` path parameter. It also authenticates every
-/// request; declaring the bearer scheme is what gives Swagger UI its "Authorize" button, without
-/// which "Try it out" can only produce 401s.
+/// request; declaring the security scheme is what gives Swagger UI its "Authorize" button, without
+/// which "Try it out" can only produce 401s. The gateway matches the entire `Authorization`
+/// header value against its key store, so the scheme is an API key in that header — an HTTP
+/// bearer scheme would add a `Bearer ` prefix the gateway rejects.
 fn hosted_spec(server_url: &str) -> OpenApi {
     let mut openapi = self_hosted_spec();
 
@@ -89,11 +92,14 @@ fn hosted_spec(server_url: &str) -> OpenApi {
         .components
         .get_or_insert_with(Components::new)
         .add_security_scheme(
-            BEARER_SCHEME_NAME,
-            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            API_KEY_SCHEME_NAME,
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                "Authorization",
+                "Fynd API key, sent as the raw header value (no `Bearer ` prefix).",
+            ))),
         );
     openapi.security =
-        Some(vec![SecurityRequirement::new(BEARER_SCHEME_NAME, Vec::<String>::new())]);
+        Some(vec![SecurityRequirement::new(API_KEY_SCHEME_NAME, Vec::<String>::new())]);
     openapi.servers = Some(vec![Server::new(server_url)]);
 
     openapi
@@ -239,15 +245,17 @@ mod tests {
         }
     }
 
+    /// The gateway matches the raw `Authorization` header value, so the scheme must make
+    /// Swagger UI send the key without a `Bearer ` prefix.
     #[test]
-    fn hosted_spec_declares_bearer_auth() {
+    fn hosted_spec_declares_api_key_auth() {
         let spec = hosted_spec_json(TEST_SERVER_URL);
 
-        assert_eq!(
-            spec["components"]["securitySchemes"]["BearerAuth"],
-            json!({"type": "http", "scheme": "bearer"})
-        );
-        assert_eq!(spec["security"], json!([{"BearerAuth": []}]))
+        let scheme = &spec["components"]["securitySchemes"]["ApiKeyAuth"];
+        assert_eq!(scheme["type"], "apiKey", "{scheme}");
+        assert_eq!(scheme["in"], "header", "{scheme}");
+        assert_eq!(scheme["name"], "Authorization", "{scheme}");
+        assert_eq!(spec["security"], json!([{"ApiKeyAuth": []}]))
     }
 
     #[test]
@@ -304,6 +312,9 @@ mod tests {
         )
         .await;
         assert!(hosted["paths"]["/v1/{chain}/quote"].is_object(), "{hosted}");
-        assert!(hosted["components"]["securitySchemes"][BEARER_SCHEME_NAME].is_object(), "{hosted}")
+        assert!(
+            hosted["components"]["securitySchemes"][API_KEY_SCHEME_NAME].is_object(),
+            "{hosted}"
+        )
     }
 }

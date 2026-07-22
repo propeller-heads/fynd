@@ -34,7 +34,7 @@ Two Swagger UIs are served, both built from the same `ApiDoc` annotations:
 | Path | Spec | Describes |
 |---|---|---|
 | `/docs/` | `/api-docs/openapi.json` | Self-hosted deployments: `/v1/quote` on the origin it is reached at, no authentication |
-| `/docs/hosted/` | `/api-docs/hosted/openapi.json` | The hosted gateway: `/v1/{chain}/quote` with a `chain` path parameter, bearer auth, and a server URL from `FYND_HOSTED_SWAGGER_URL` (default `https://fynd-api.propellerheads.xyz`) |
+| `/docs/hosted/` | `/api-docs/hosted/openapi.json` | The hosted gateway: `/v1/{chain}/quote` with a `chain` path parameter, an API key sent as the raw `Authorization` header value, and a server URL from `FYND_HOSTED_SWAGGER_URL` (default `https://fynd-api.propellerheads.xyz`) |
 
 `api/docs.rs` derives the hosted spec from the self-hosted one at startup, so endpoint
 annotations live in one place.
