@@ -220,6 +220,56 @@
         "defaults": {},
         "overrides": []
       }
+    },
+    {
+      "id": 10,
+      "title": "Pools per Protocol",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "market_pools_per_protocol",
+          "legendFormat": "{{protocol}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Protocol Sync Status",
+      "type": "state-timeline",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "market_protocol_sync_state == 1",
+          "legendFormat": "{{protocol}}: {{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 70 },
+          "mappings": [
+            {
+              "type": "value",
+              "options": { "1": { "text": "active", "color": "green" } }
+            }
+          ]
+        },
+        "overrides": []
+      }
     }
   ],
   "schemaVersion": 39

@@ -254,6 +254,7 @@ impl FyndRPCBuilder {
             _derived_data,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx,
@@ -296,6 +297,7 @@ impl FyndRPCBuilder {
             worker_pools,
             feed_handle,
             gas_price_worker_handle: gas_price_handle,
+            metrics_sampler_handle,
             router_fee_worker_handle: router_fee_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
@@ -311,6 +313,7 @@ pub struct FyndRPC {
     worker_pools: Vec<WorkerPool>,
     feed_handle: JoinHandle<()>,
     gas_price_worker_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
     router_fee_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
@@ -330,6 +333,7 @@ impl FyndRPC {
             worker_pools,
             mut feed_handle,
             mut gas_price_worker_handle,
+            metrics_sampler_handle,
             router_fee_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
@@ -377,6 +381,7 @@ impl FyndRPC {
             }
         }
 
+        metrics_sampler_handle.abort();
         router_fee_worker_handle.abort();
 
         info!("shutting down worker pools");
