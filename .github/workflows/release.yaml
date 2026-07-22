@@ -1,7 +1,6 @@
 name: Release
 
 on:
-  workflow_dispatch:
   release:
     types: [created]
 
@@ -82,6 +81,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm --dir clients/typescript install --frozen-lockfile
+
+      - name: Set client version from release tag
+        if: ${{ github.event.release.tag_name != '' }}
+        working-directory: clients/typescript/client
+        run: npm version "${{ github.event.release.tag_name }}" --no-git-tag-version --allow-same-version
 
       - name: Build client
         run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run build
