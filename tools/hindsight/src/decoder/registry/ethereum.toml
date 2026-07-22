@@ -147,6 +147,13 @@ entry_points = [
 # Coinbase's 0x integration fee, taken from the output token and sent to this wallet.
 fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]
 
+[venues.rainbow]
+# Rainbow's own router ("Rainbow: Router"; same address on ETH/Base/Arb/OP/Polygon). It wraps 0x
+# and takes its fee on the input side, passed as the call's feeAmount argument and kept by the
+# router — no fee transfer, so the fee is read from calldata (see rainbow.rs). No fee collector.
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
 # Order-flow clients identified by the trader address that owns the order, not by tx.to. kpk is a
 # treasury manager whose Safes trade through CoW: tx.from is the CoW solver, so the client is only
 # visible as the Safe owning the settled order. Addresses from docs.kpk.io / karpatkey.

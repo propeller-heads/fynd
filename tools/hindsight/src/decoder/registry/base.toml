@@ -89,5 +89,11 @@ hashflow = "hashflow"
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
 fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
+# Rainbow's own router — same address as mainnet (Rainbow deploys it identically across chains).
+# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+[venues.rainbow]
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
 # No Base-specific label data yet (display-only tier).
 [labels]

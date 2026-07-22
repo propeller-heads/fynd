@@ -27,6 +27,7 @@
 pub(crate) mod coinbase;
 pub(crate) mod metamask;
 pub(crate) mod rabby;
+pub(crate) mod rainbow;
 pub(crate) mod relay;
 
 use alloy::providers::{Provider, RootProvider};
@@ -42,6 +43,7 @@ pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<
         "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
         "rabby" => vec![Box::new(rabby::RabbyNetting)],
         "coinbase" => vec![Box::new(coinbase::CoinbaseNetting)],
+        "rainbow" => vec![Box::new(rainbow::RainbowCalldata)],
         _ => vec![],
     }
 }
