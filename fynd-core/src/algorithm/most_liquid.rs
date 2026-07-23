@@ -24,6 +24,7 @@ use tycho_simulation::{
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
+    algorithm::sim_guard::GuardedProtocolSim,
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
@@ -396,7 +397,7 @@ impl MostLiquidAlgorithm {
 
             // Simulate the swap
             let result = state
-                .get_amount_out(current_amount.clone(), token_in, token_out)
+                .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
                 .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
 
             // Record the swap
