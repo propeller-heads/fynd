@@ -947,6 +947,91 @@ impl FyndBuilder {
         ))
     }
 
+    /// Combines [`build_with_pending`](Self::build_with_pending) and
+    /// [`build_with_step_controller`](Self::build_with_step_controller): assembles and starts
+    /// all solver components, returning the [`PendingBlockProcessor`] for ephemeral
+    /// pending-block simulation together with a [`BlockStepController`] that gates when each
+    /// buffered block is released for processing.
+    ///
+    /// Intended for deterministic pending-block harnesses that must evaluate every block in
+    /// lockstep with their own per-block inputs.
+    ///
+    /// Only valid when at least one non-RFQ protocol is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are
+    /// RFQ, or either delivery channel closes before its payload arrives.
+    #[cfg(feature = "experimental")]
+    pub async fn build_with_pending_and_step_controller(
+        self,
+    ) -> Result<(Solver, PendingBlockProcessor, BlockStepController), SolverBuildError> {
+        let mut c = self.assemble_components()?;
+
+        let (pending_tx, pending_rx) =
+            tokio::sync::oneshot::channel::<Result<PendingBlockProcessor, String>>();
+        let (controller_tx, controller_rx) =
+            tokio::sync::oneshot::channel::<Result<BlockStepController, String>>();
+
+        let pending_indexers = c.pending_indexers;
+        let feed_handle = tokio::spawn(async move {
+            if let Err(e) = c
+                .tycho_feed
+                .run_with_pending_and_step_controller(pending_tx, pending_indexers, controller_tx)
+                .await
+            {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
+                tracing::error!(error = %e, "tycho feed error");
+            }
+        });
+        let gas_price_handle = tokio::spawn(async move {
+            c.gas_price_fetcher.run().await;
+        });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
+        let computation_handle = tokio::spawn(async move {
+            c.computation_manager
+                .run(c.computation_event_rx, c.computation_shutdown_rx)
+                .await;
+        });
+
+        let pending = pending_rx
+            .await
+            .map_err(|_| SolverBuildError::PendingChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+
+        let controller = controller_rx
+            .await
+            .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+
+        Ok((
+            Solver {
+                router: c.router,
+                worker_pools: c.worker_pools,
+                market_data: c.market_data,
+                derived_data: c.derived_data,
+                router_fees: c.router_fees,
+                feed_handle,
+                gas_price_handle,
+                metrics_sampler_handle,
+                router_fee_handle,
+                computation_handle,
+                computation_shutdown_tx: c.computation_shutdown_tx,
+                chain: c.chain,
+                router_address: c.router_address,
+                market_event_tx: c.market_event_tx,
+            },
+            pending,
+            controller,
+        ))
+    }
+
     /// Assembles and starts all solver components, also returning a [`BlockStepController`]
     /// that lets the caller control when each buffered block is released for processing.
     ///
