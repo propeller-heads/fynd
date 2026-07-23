@@ -262,9 +262,9 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
-        // A client fingerprint (a kpk Safe owning the order, or a client fee wallet taking the fee
-        // on a shared router) overrides the entry-point label, backing any client fee out before
-        // the quote check reads the grossed output.
+        // A client fingerprint (owning trader, fee wallet, or integrator tag — see `clients`)
+        // overrides the entry-point label, backing any client fee out before the quote check reads
+        // the grossed output.
         let integrator = solvers::integrator(logs);
         let venue =
             clients::attribute(registry, &mut flow, &transfer_ledger, integrator.as_deref())

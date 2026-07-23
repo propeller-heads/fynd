@@ -51,7 +51,7 @@ All take `--chain` (selects the address book) and `--registry` /
            └────────┬────────┘   list several — a richer source first, a general one as fallback):
                     │
                     │   direct solver           →  [ SenderNetting ]
-                    │   batch settler / solver  →  [ IntentNetting ]
+                    │   batch settler / solver  →  [ CowSettlement, IntentNetting ]
                     │   venue relay             →  [ RelayNetting ]
                     │   venue metamask          →  [ MetaMaskNetting ]
                     │  TraderFlow
@@ -59,7 +59,7 @@ All take `--chain` (selects the address book) and `--registry` /
            ┌─────────────────┐  embedded_quote  ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  veto → attribution → gas → quote → sandwich scan
+                    │  veto → client attribution → solver attribution → gas → quote → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -84,7 +84,7 @@ trait TradeDecoder<P> {
 // decode.rs — the matched entity selects its decoders
 match role {
     Sender      => vec![Box::new(SenderNetting)],
-    Intent       => vec![Box::new(IntentNetting)],
+    Intent      => intents::decoders_for(),       // [CowSettlement, IntentNetting]
     Venue(name) => venues::decoders_for(name),   // e.g. "relay" → [RelayNetting]
 }
 ```
@@ -115,25 +115,27 @@ match role {
                       │                    │      TraderRole::Sender   TraderRole::Intent
                       │                    │             │                │
                       ▼                    ▼             ▼                ▼
-           venues::decoders_for(name)  IntentNetting  SenderNetting   IntentNetting
-                      │                 └──────── netting_decoders.rs ─────────┘
+           venues::decoders_for(name)  intents::decoders_for()  SenderNetting   intents::decoders_for()
+                      │                 └──── intents/ ────┘    netting_dec.rs  └──── intents/ ────┘
            ┌──────────┴───────────┐
            ▼                      ▼
      [RelayNetting]        [MetaMaskNetting]
      (venues/relay.rs)     (venues/metamask.rs)
 
    direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
-     0x called directly             → Sender → [ SenderNetting ]  (your own tx, your gas)
-     0x settling your intent order  → Intent → [ IntentNetting ]  (a solver settles for you)
-   when a solver settles an intent order, its own decoder can replace IntentNetting.
+     0x called directly             → Sender → [ SenderNetting ]        (your own tx, your gas)
+     0x settling your intent order  → Intent → intents::decoders_for()  (a solver settles for you)
+   an intent source with a richer signal gets its own decoder ahead of the netting fallback —
+   CoW reads its Trade event (intents/cow.rs), then IntentNetting catches the rest.
 
    implement a new decoder where the entity that carries the flow lives:
    ├─ new venue                       → venues/<name>.rs  +  arm in venues::decoders_for("<name>")
-   └─ new read for an existing venue  → another TradeDecoder in that venue's list (first-wins order)
+   ├─ new read for an existing venue  → another TradeDecoder in that venue's list (first-wins order)
+   └─ new intent source (a settler)   → intents/<name>.rs  +  entry in intents::decoders_for()
 
-   replace a Sender/Intent leaf in decode.rs decoders_for — the arm is global, so:
-     Intent => [ MyDecoder, IntentNetting ]   # prepend: self-guard; netting stays the fallback
-     Intent => [ MyDecoder ]                  # full swap: no fallback — must cover every intent trade
+   the Intent list lives in intents::decoders_for() (first-wins order):
+     [ MyDecoder, IntentNetting ]   # prepend: self-guard; netting stays the fallback
+     [ MyDecoder ]                  # full swap: no fallback — must cover every intent trade
 ```
 
 One transaction goes to one entity — a direct sender, an intent order, or a specific venue — and
@@ -156,10 +158,10 @@ the swap. `MetaMaskNetting` backs the fee out to 991.
 ### Solver knowledge (`solvers/`)
 
 What a solver's transactions reveal beyond its address — a calldata quote (KyberSwap's
-`clientData`, ParaSwap's word layout, 0x's `POSITIVE_SLIPPAGE` `expectedAmount`), a match-time
-veto (LiFi's bridge orders). Both methods default to "nothing to add", so most solvers are a
-single address-book line with no code; those with code are registered in
-`solvers::IMPLEMENTATIONS`.
+`clientData`, ParaSwap's word layout, 0x's positive-slippage action), a match-time veto (LiFi's
+bridge orders), or the integrator tag a frontend records in the solver's event (LiFi's Diamond).
+Every method defaults to "nothing to add", so most solvers are a single address-book line with no
+code; those with code are registered in `solvers::IMPLEMENTATIONS`.
 
 ```rust
 trait SolverKnowledge {
@@ -168,8 +170,27 @@ trait SolverKnowledge {
 
     /// The veto this solver's logs place on a matched transaction that is not a swap.
     fn solver_veto(&self, logs: &[Log]) -> Option<Veto> { None }
+
+    /// The order-flow integrator tag this solver records in its logs, when it exposes one.
+    fn integrator(&self, logs: &[Log]) -> Option<String> { None }
 }
 ```
+
+### Client attribution (`clients.rs`)
+
+The venue is normally the contract the trader entered through (`tx.to`). Some order-flow clients own
+the flow without being that contract, so after a flow is decoded one step can override the venue from
+a registry fingerprint. Nothing in `clients.rs` names a specific client — it reads three maps from
+the address book:
+
+- **owning trader** (`[client_owners]`) — the flow was read from a known client address (kpk's Safes,
+  surfaced from the CoW decoder's owner).
+- **fee wallet** (`[client_fees]`) — a known client fee wallet took the output-token fee (Phantom,
+  Robinhood, LlamaSwap's 0x surplus); the fee is grossed back. Only inside an already-matched trade,
+  so a dust spray to a fee wallet is not mistaken for flow.
+- **provider integrator tag** (`[client_integrators]`) — a provider's event carried an integrator
+  string mapped to a client (LiFi frontends). The tag is read by that provider's
+  `SolverKnowledge::integrator`, so `clients.rs` stays provider-agnostic.
 
 ### Per protocol, not per chain
 
@@ -193,6 +214,8 @@ collectors are re-verified on every chain a venue is added on.
 | Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and intent decoding then excludes the trader |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
+| Decode an intent settler (CoW-style) | A `TradeDecoder` in `intents/`, listed in `intents::decoders_for` ahead of the netting fallback | The settler's trades decode by net flow, losing exact amounts and (for contract owners) the client |
+| Attribute a new client (owner / fee wallet / integrator tag) | The matching address-book map (`[client_owners]` / `[client_fees]` / `[client_integrators]`); a new provider's tag also needs `SolverKnowledge::integrator` | The client's trades are attributed to the underlying router or settler, not the client |
 | Add a new decode method | A `TradeDecoder` (a `netting`/`calldata` toolkit function behind it), listed for the entities that use it | Transactions the existing decoders cannot read stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | The chain has no built-in book and must be passed via `--registry` |
