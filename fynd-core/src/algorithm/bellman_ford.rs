@@ -100,11 +100,8 @@ struct SPFAResult {
     edge_gas: Vec<BigUint>,
     /// Cumulative spot-price product from token_in to each node (for gas fallback).
     spot_product: Vec<f64>,
-    /// True if some hop's own input amount couldn't cover that single hop's gas cost
-    /// (gas-aware) or a literal zero output was produced (gas-unaware). Input-side and
-    /// single-hop, so it never trips for a healthy or too-large order (input stays
-    /// large); it catches dust at token_in and amounts that decay below a hop's gas
-    /// mid-route. Distinguishes a too-small amount from a genuinely missing route.
+    /// True if some hop's input couldn't cover that hop's own gas (gas-aware) or a sim
+    /// produced a literal zero output (gas-unaware) — i.e. the amount is dust, not unroutable.
     input_below_hop_gas: bool,
 }
 
@@ -272,13 +269,9 @@ impl BellmanFordAlgorithm {
 
         let out_idx = ctx.token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
-            // amount[out] == 0. If some hop's own input amount couldn't cover that single
-            // hop's gas cost (gas-aware), or a successful simulation produced a literal zero
-            // output (gas-unaware), the requested amount is too small to route to a usable
-            // output at some hop -> AmountTooSmall (dust or gas-unprofitable, mid-route
-            // included). A too-large amount instead fails by simulation error, so it never
-            // sets the flag. Anything else (unreachable, connector/forbid-revisits excluded,
-            // sim error, missing state, timeout) -> NoGraphPath.
+            // Dust (a hop's input below its own gas) -> AmountTooSmall; everything else
+            // (unreachable, filtered, sim error incl. too-large, missing state, timeout)
+            // -> NoGraphPath.
             let reason = if spfa.input_below_hop_gas {
                 NoPathReason::AmountTooSmall
             } else {
@@ -457,17 +450,10 @@ impl BellmanFordAlgorithm {
                             ctx.gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
                         );
-                        // Amount-too-small: the amount ENTERING this hop can't cover THIS hop's
-                        // own gas. Input-side + single-hop, so it never trips for a healthy order
-                        // (input stays large) nor a too-large amount (huge input); those fail via
-                        // other paths. Catches dust at token_in and amounts that decay below a
-                        // hop's gas mid-route.
-                        //
-                        // Probe the input-side dust signal only on uneconomic edges: an input
-                        // below this hop's gas implies net_candidate <= 0 (output value <=
-                        // input value < hop gas <= cumulative gas), so economic relaxing edges
-                        // can never trip it — gating keeps the extra price lookup and BigInt
-                        // math off the hot path (measured ~3-4% of quote time when unguarded).
+                        // Dust signal: this hop's input can't cover its own gas. Input-side, so
+                        // healthy and too-large orders (large inputs) never trip it. Gated on
+                        // net_candidate <= 0 (implied by input < hop gas) to keep the extra
+                        // price lookup off the hot path.
                         if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
                             let u_price = Self::resolve_token_price(
                                 ctx.node_address.get(&u),
@@ -1113,10 +1099,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_amount_too_small_when_dust_occurs_mid_route() {
-        // A->B floors 1*0.5 to 0: that successful sim produced a zero output, so
-        // input_below_hop_gas is set even though the dust occurs one hop before
-        // token_out. This must be AmountTooSmall, not NoGraphPath (catching dust
-        // anywhere along the route, not just on edges landing directly on token_out).
+        // A->B floors 1*0.5 to 0 one hop before token_out: dust mid-route must still
+        // be AmountTooSmall.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1138,11 +1122,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_graph_path_when_amount_too_large_for_liquidity() {
-        // pool_ab has liquidity=500; a 1000-unit input at rate 2.0 would produce 2000
-        // output, which exceeds liquidity, so get_amount_out returns Err and the edge is
-        // skipped without ever setting input_below_hop_gas. This is the key guard: a
-        // too-large amount must fail by simulation error, not by an economic comparison,
-        // so it is never mislabeled AmountTooSmall.
+        // Output 2000 exceeds liquidity 500, so the sim errors: a too-large amount must
+        // never be mislabeled AmountTooSmall.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let (market, manager) = setup_market_bf(vec![(
@@ -1187,10 +1168,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_graph_path_when_connector_tokens_exclude_intermediate() {
-        // A->B->C is topologically reachable (get_subgraph doesn't consult
-        // connector_tokens), but B is excluded from the allowlist and isn't an
-        // endpoint, so SPFA skips every edge into B: no edge simulation ever runs,
-        // so input_below_hop_gas stays false and this correctly reports NoGraphPath.
+        // B is not in the connector allowlist, so SPFA never simulates into it:
+        // policy exclusion reads as NoGraphPath, not AmountTooSmall.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1660,12 +1639,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_amount_too_small_when_net_uneconomic_after_gas() {
-        // The 1-unit input entering the only hop is worth 1 (price 1:1), but that hop's
-        // own gas cost is 10 units * gas_price=100 * price 1:1 = 1000, deeply exceeding
-        // it. The input-side check sets input_below_hop_gas, and since the resulting
-        // net_candidate (2 - 1000) does not beat the existing net (0), B is never
-        // relaxed -> amount[B] stays 0 -> AmountTooSmall via the gas-aware branch, not
-        // the gross-zero fallback.
+        // Gas-aware branch: the 1-unit input (worth 1 at 1:1) is far below the hop's
+        // gas cost of 1000 -> AmountTooSmall.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1692,13 +1667,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_graph_path_when_output_uneconomic_but_input_economic() {
-        // Single-hop A->B (B=token_out), gas-aware. The pool's low rate (0.05) makes the
-        // OUTPUT value (10_000 * 0.05 = 500) fall below the hop's gas cost (10 * 100 * 1/1
-        // = 1000), so B is never relaxed and amount[B] stays 0. But the INPUT (10_000)
-        // comfortably covers that same gas cost, so the input-side check must not flag
-        // this as AmountTooSmall. The old output-side/cumulative check would have set the
-        // flag here (net_candidate = 500 - 1000 <= 0), mislabeling a healthy-sized order
-        // whose pool simply has a low rate as AmountTooSmall.
+        // Output value (500) is below the hop's gas (1000) so the solve fails, but the
+        // input (10_000) covers it: a healthy-sized order on a low-rate pool must read
+        // NoGraphPath, not AmountTooSmall.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
