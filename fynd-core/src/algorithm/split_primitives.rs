@@ -13,7 +13,7 @@ use tycho_simulation::tycho_common::{
 };
 
 use crate::{
-    algorithm::{sim_guard::get_amount_out_guarded, AlgorithmError},
+    algorithm::{sim_guard::GuardedProtocolSim, AlgorithmError},
     feed::market_data::MarketState,
     types::{ComponentId, Order, Route, Swap},
 };
@@ -434,7 +434,8 @@ pub(crate) fn simulate_path(
             })?;
         marginal_price_product *= price;
 
-        let result = get_amount_out_guarded(sim, current_amount, &hop.token_in, &hop.token_out)
+        let result = sim
+            .get_amount_out_guarded(current_amount, &hop.token_in, &hop.token_out)
             .map_err(|e| AlgorithmError::SimulationFailed {
                 component_id: hop.component_id.clone(),
                 error: e.to_string(),
@@ -676,16 +677,16 @@ fn execute_split_plan(
                     id: Some(split_swap.hop.component_id.clone()),
                 })?;
 
-            let result = get_amount_out_guarded(
-                sim,
-                split_swap.amount_in.clone(),
-                &split_swap.hop.token_in,
-                &split_swap.hop.token_out,
-            )
-            .map_err(|e| AlgorithmError::SimulationFailed {
-                component_id: split_swap.hop.component_id.clone(),
-                error: e.to_string(),
-            })?;
+            let result = sim
+                .get_amount_out_guarded(
+                    split_swap.amount_in.clone(),
+                    &split_swap.hop.token_in,
+                    &split_swap.hop.token_out,
+                )
+                .map_err(|e| AlgorithmError::SimulationFailed {
+                    component_id: split_swap.hop.component_id.clone(),
+                    error: e.to_string(),
+                })?;
 
             let out_addr = split_swap.hop.token_out.address.clone();
             *available

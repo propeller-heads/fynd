@@ -41,7 +41,7 @@ use super::{
     split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
 };
 use crate::{
-    algorithm::sim_guard::get_amount_out_guarded,
+    algorithm::sim_guard::GuardedProtocolSim,
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
@@ -405,22 +405,18 @@ impl BellmanFordAlgorithm {
                             continue;
                         };
 
-                    let result = match get_amount_out_guarded(
-                        sim,
-                        amount[u_idx].clone(),
-                        token_u,
-                        token_v,
-                    ) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            trace!(
-                                component_id,
-                                error = %e,
-                                "simulation failed, skipping edge"
-                            );
-                            continue;
-                        }
-                    };
+                    let result =
+                        match sim.get_amount_out_guarded(amount[u_idx].clone(), token_u, token_v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                trace!(
+                                    component_id,
+                                    error = %e,
+                                    "simulation failed, skipping edge"
+                                );
+                                continue;
+                            }
+                        };
 
                     let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
 
