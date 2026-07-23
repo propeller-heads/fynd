@@ -12,12 +12,14 @@
 //! 3. Add the algorithm name to `AVAILABLE_ALGORITHMS`
 
 use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     algorithm::{
@@ -38,6 +40,10 @@ pub(crate) const AVAILABLE_ALGORITHMS: &[&str] =
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
+
+/// Pause before respawning a panicked worker, so a panic during worker
+/// initialization cannot turn the respawn loop into a hot spin.
+const RESPAWN_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Parameters for spawning workers.
 pub(crate) struct SpawnWorkersParams {
@@ -190,7 +196,10 @@ where
         let event_rx = params.event_rx.resubscribe();
         let derived_event_rx = params.derived_event_rx.resubscribe();
         let algorithm_config = params.algorithm_config.clone();
-        let shutdown_rx = params.shutdown_tx.subscribe();
+        // Subscribed before the thread starts so shutdown signals sent at any point,
+        // including while the worker is recovering from a panic, are never missed.
+        let mut shutdown_rx = params.shutdown_tx.subscribe();
+        let shutdown_tx = params.shutdown_tx.clone();
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
@@ -201,30 +210,85 @@ where
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to create tokio runtime");
+                // Run worker sessions until clean shutdown. A panic while solving (e.g. pool
+                // math dividing by zero) only ends the current session: it is reported loudly
+                // and the worker is respawned, instead of silently losing the thread until
+                // every worker in the pool is dead.
+                loop {
+                    // Fresh receivers for this session; the previous session's receivers are
+                    // consumed (or poisoned) when it panics.
+                    let session_event_rx = event_rx.resubscribe();
+                    let session_derived_event_rx = derived_event_rx.resubscribe();
+                    let session_shutdown_rx = shutdown_tx.subscribe();
 
-                rt.block_on(async move {
-                    let algorithm = factory(algorithm_config);
+                    // A shutdown sent while no session was listening (e.g. mid-respawn) is
+                    // buffered in the receiver created before the thread started.
+                    match shutdown_rx.try_recv() {
+                        Err(broadcast::error::TryRecvError::Empty) => {}
+                        // Received a shutdown, or the pool dropped the sender.
+                        _ => break,
+                    }
 
-                    let mut worker = SolverWorker::new(
-                        market_data,
-                        derived_data,
-                        algorithm,
-                        worker_id,
-                        pool_name,
-                    )
-                    .with_liquidity_scope(liquidity_scope)
-                    .with_exclude_protocols(exclude_protocols)
-                    .with_fallback_fee_tiers(fallback_fee_tiers);
+                    let session = catch_unwind(AssertUnwindSafe(|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("failed to create tokio runtime");
 
-                    worker.initialize_graph().await;
-                    worker
-                        .run(event_rx, derived_event_rx, task_rx, shutdown_rx)
-                        .await;
-                });
+                        rt.block_on(async {
+                            let algorithm = factory(algorithm_config.clone());
+
+                            let mut worker = SolverWorker::new(
+                                market_data.clone(),
+                                Arc::clone(&derived_data),
+                                algorithm,
+                                worker_id,
+                                pool_name.clone(),
+                            )
+                            .with_liquidity_scope(liquidity_scope)
+                            .with_exclude_protocols(exclude_protocols.clone())
+                            .with_fallback_fee_tiers(fallback_fee_tiers.clone());
+
+                            worker.initialize_graph().await;
+                            worker
+                                .run(
+                                    session_event_rx,
+                                    session_derived_event_rx,
+                                    task_rx.clone(),
+                                    session_shutdown_rx,
+                                )
+                                .await;
+                        });
+                    }));
+
+                    match session {
+                        Ok(()) => break,
+                        Err(panic_payload) => {
+                            let panic_message = panic_payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| {
+                                    panic_payload
+                                        .downcast_ref::<String>()
+                                        .map(String::as_str)
+                                })
+                                .unwrap_or("<non-string panic payload>");
+                            error!(
+                                pool = %pool_name,
+                                algorithm = %algorithm_name,
+                                worker_id,
+                                panic = %panic_message,
+                                "worker thread panicked; respawning worker"
+                            );
+                            metrics::counter!(
+                                "worker_pool_worker_panics_total",
+                                "pool" => pool_name.clone()
+                            )
+                            .increment(1);
+                            thread::sleep(RESPAWN_BACKOFF);
+                        }
+                    }
+                }
             })
             .expect("failed to spawn worker thread");
 
@@ -276,8 +340,22 @@ fn spawn_water_fill_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
 mod tests {
     use std::time::Duration;
 
+    use num_bigint::BigUint;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+
     use super::*;
-    use crate::{derived::DerivedData, feed::market_data::MarketData};
+    use crate::{
+        algorithm::{
+            most_liquid::DepthAndPrice,
+            test_utils::{order, setup_market_weighted, token},
+            Algorithm, AlgorithmError,
+        },
+        derived::{computation::ComputationRequirements, DerivedData},
+        feed::market_data::{MarketData, StateLabel},
+        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        types::{quote::OrderSide, Order, RouteResult, SolveError},
+    };
 
     fn make_params(algorithm: &str, num_workers: usize) -> SpawnWorkersParams {
         let (_task_tx, task_rx) = async_channel::bounded(10);
@@ -421,6 +499,111 @@ mod tests {
         assert_eq!(workers.unwrap().len(), 2);
 
         let _ = shutdown_tx.send(());
+    }
+
+    /// Amount marking the order whose solve panics in [`PanicOnPoisonAlgorithm`].
+    const POISON_AMOUNT: u64 = 666;
+
+    /// Algorithm that panics while solving the poison order and returns an error
+    /// otherwise. Used to verify that a panicking task does not kill the worker.
+    #[derive(Clone)]
+    struct PanicOnPoisonAlgorithm;
+
+    impl Algorithm for PanicOnPoisonAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "panic_on_poison"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<StateLabel>,
+            _derived: Option<crate::derived::SharedDerivedDataRef>,
+            order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            if order.amount() == &BigUint::from(POISON_AMOUNT) {
+                panic!("poison order");
+            }
+            Err(AlgorithmError::Other("no route in mock".to_string()))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_respawns_after_panic_and_processes_next_task() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived_data = DerivedData::new_shared();
+        let (task_tx, task_rx) = async_channel::bounded(10);
+        let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let params = SpawnWorkersParams {
+            algorithm: "panic_on_poison".to_string(),
+            pool_name: "test_pool".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data: market,
+            derived_data,
+            event_rx: event_tx.subscribe(),
+            derived_event_rx: derived_event_tx.subscribe(),
+            shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
+        };
+        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let workers = spawn_workers_generic(params, &factory);
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        // The poison task panics mid-solve; its response channel is dropped.
+        let (poison_tx, poison_rx) = oneshot::channel();
+        let poison_order = order(&token_a, &token_b, POISON_AMOUNT as u128, OrderSide::Sell);
+        task_tx
+            .send(SolveTask::new(Uuid::new_v4(), poison_order, poison_tx))
+            .await
+            .unwrap();
+        let _ = poison_rx.await;
+
+        // The worker must come back and answer the next task.
+        let (ok_tx, ok_rx) = oneshot::channel();
+        let normal_order = order(&token_a, &token_b, 100, OrderSide::Sell);
+        task_tx
+            .send(SolveTask::new(Uuid::new_v4(), normal_order, ok_tx))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), ok_rx)
+            .await
+            .expect("worker should respawn after the panic and process the next task")
+            .expect("worker should respond to the task");
+        match response {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("no route in mock"), "unexpected message: {msg}");
+            }
+            other => panic!("expected AlgorithmError from mock, got {other:?}"),
+        }
+
+        let _ = shutdown_tx.send(());
+        drop(task_tx);
+        for handle in workers {
+            handle
+                .join()
+                .expect("worker thread should shut down cleanly");
+        }
     }
 
     #[test]
