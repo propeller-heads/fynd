@@ -25,6 +25,7 @@ use tycho_simulation::{
 };
 
 use crate::{
+    algorithm::sim_guard::get_amount_out_guarded,
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -305,11 +306,17 @@ impl DerivedComputation for PoolDepthComputation {
                         succeeded += 1;
                     }
                     Err(e) => {
-                        // Diagnostic: probe with 1 unit to understand why depth search failed
-                        let probe_info = sim_state
-                            .get_amount_out(BigUint::from(1u32), token_in, token_out)
-                            .map(|r| format!("amount_out={}", r.amount))
-                            .unwrap_or_else(|e| format!("sim_error={e}"));
+                        // Diagnostic: probe with 1 unit to understand why depth search failed.
+                        // Guarded so a panicking pool degrades to a diagnostic string instead of
+                        // killing the computation worker.
+                        let probe_info = get_amount_out_guarded(
+                            sim_state,
+                            BigUint::from(1u32),
+                            token_in,
+                            token_out,
+                        )
+                        .map(|r| format!("amount_out={}", r.amount))
+                        .unwrap_or_else(|e| format!("sim_error={e}"));
                         let limits_info = sim_state
                             .get_limits(token_in.address.clone(), token_out.address.clone())
                             .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
