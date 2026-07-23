@@ -405,9 +405,18 @@ pub fn token_with_decimals(addr_b: u8, symbol: &str, decimals: u32) -> Token {
 
 /// Creates a test ProtocolComponent with the given ID and tokens.
 pub fn component(id: &str, tokens: &[Token]) -> ProtocolComponent {
+    component_with_protocol(id, "uniswap_v2", tokens)
+}
+
+/// Creates a test ProtocolComponent with the given ID, protocol system, and tokens.
+pub fn component_with_protocol(
+    id: &str,
+    protocol_system: &str,
+    tokens: &[Token],
+) -> ProtocolComponent {
     ProtocolComponent::new(
         id,
-        "uniswap_v2",
+        protocol_system,
         "swap",
         Chain::Ethereum,
         tokens
