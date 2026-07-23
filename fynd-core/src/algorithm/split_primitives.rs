@@ -13,7 +13,7 @@ use tycho_simulation::tycho_common::{
 };
 
 use crate::{
-    algorithm::AlgorithmError,
+    algorithm::{sim_guard::get_amount_out_guarded, AlgorithmError},
     feed::market_data::MarketState,
     types::{ComponentId, Order, Route, Swap},
 };
@@ -95,8 +95,6 @@ impl PathAllocation {
 /// Output of simulating one path at a given input amount.
 pub(crate) struct SimResult {
     pub(crate) amount_out: BigUint,
-    /// Raw per-hop sum; use only via `evaluate_total_output`.
-    pub(crate) gas: u64,
     pub(crate) marginal_price_product: f64,
     /// Per-hop `(amount_out, gas)` in path order.
     pub(crate) hop_results: Vec<(BigUint, BigUint)>,
@@ -399,8 +397,8 @@ pub(crate) fn compute_marginal_price_product(
 ///
 /// For each hop, the path's own post-swap states are checked first, then
 /// `overrides`, then the live market state. Returns the final output amount,
-/// raw gas sum, marginal price product (spot prices at the state each hop
-/// executed against), and the post-swap pool states.
+/// marginal price product (spot prices at the state each hop executed
+/// against), per-hop results, and the post-swap pool states.
 pub(crate) fn simulate_path(
     hops: &[HopDescriptor],
     amount_in: &BigUint,
@@ -408,7 +406,6 @@ pub(crate) fn simulate_path(
     overrides: &MarketOverrides,
 ) -> Result<SimResult, AlgorithmError> {
     let mut current_amount = amount_in.clone();
-    let mut total_gas: u64 = 0;
     let mut hop_results = Vec::with_capacity(hops.len());
     let mut post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
         Vec::with_capacity(hops.len());
@@ -437,15 +434,12 @@ pub(crate) fn simulate_path(
             })?;
         marginal_price_product *= price;
 
-        let result = sim
-            .get_amount_out(current_amount, &hop.token_in, &hop.token_out)
+        let result = get_amount_out_guarded(sim, current_amount, &hop.token_in, &hop.token_out)
             .map_err(|e| AlgorithmError::SimulationFailed {
                 component_id: hop.component_id.clone(),
                 error: e.to_string(),
             })?;
 
-        // Cap at u64::MAX instead of panicking on overflow.
-        total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
         hop_results.push((result.amount.clone(), result.gas));
         current_amount = result.amount;
         post_swap_states.push((hop.component_id.clone(), result.new_state));
@@ -453,7 +447,6 @@ pub(crate) fn simulate_path(
 
     Ok(SimResult {
         amount_out: current_amount,
-        gas: total_gas,
         marginal_price_product,
         hop_results,
         post_swap_states,
@@ -683,16 +676,16 @@ fn execute_split_plan(
                     id: Some(split_swap.hop.component_id.clone()),
                 })?;
 
-            let result = sim
-                .get_amount_out(
-                    split_swap.amount_in.clone(),
-                    &split_swap.hop.token_in,
-                    &split_swap.hop.token_out,
-                )
-                .map_err(|e| AlgorithmError::SimulationFailed {
-                    component_id: split_swap.hop.component_id.clone(),
-                    error: e.to_string(),
-                })?;
+            let result = get_amount_out_guarded(
+                sim,
+                split_swap.amount_in.clone(),
+                &split_swap.hop.token_in,
+                &split_swap.hop.token_out,
+            )
+            .map_err(|e| AlgorithmError::SimulationFailed {
+                component_id: split_swap.hop.component_id.clone(),
+                error: e.to_string(),
+            })?;
 
             let out_addr = split_swap.hop.token_out.address.clone();
             *available
@@ -933,7 +926,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, order, token, ConstantProductSim, MockProtocolSim},
+        algorithm::test_utils::{
+            component, order, token, ConstantProductSim, DivByZeroSim, MockProtocolSim,
+        },
         types::OrderSide,
     };
 
@@ -1235,6 +1230,32 @@ mod tests {
     }
 
     #[test]
+    fn test_simulate_path_contains_simulation_panic() {
+        // Pool math that panics (e.g. U256 division by zero on degenerate amounts) must
+        // surface as a SimulationFailed error, not unwind through the solver thread.
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = make_market(vec![(
+            "pool_ab",
+            vec![token_a.clone(), token_b.clone()],
+            Box::new(DivByZeroSim::default()),
+        )]);
+
+        let hops = [HopDescriptor::new("pool_ab".to_string(), token_a, token_b)];
+        let result =
+            simulate_path(&hops, &BigUint::from(1000u64), &market, &MarketOverrides::empty());
+
+        match result {
+            Err(AlgorithmError::SimulationFailed { component_id, error }) => {
+                assert_eq!(component_id, "pool_ab");
+                assert!(error.contains("panic"), "error should mention the panic: {error}");
+            }
+            Err(other) => panic!("expected SimulationFailed, got {other:?}"),
+            Ok(_) => panic!("expected SimulationFailed, got Ok"),
+        }
+    }
+
+    #[test]
     fn test_market_overrides_with_zero_gas() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
@@ -1256,17 +1277,32 @@ mod tests {
         let hops_bc = [HopDescriptor::new("pool_bc".to_string(), token_b, token_c)];
         let amount_in = BigUint::from(1000u64);
 
+        let hop_gas_sum = |sim: &SimResult| -> BigUint {
+            sim.hop_results
+                .iter()
+                .map(|(_, gas)| gas)
+                .sum()
+        };
+
         let normal_ab =
             simulate_path(&hops_ab, &amount_in, &market, &MarketOverrides::empty()).unwrap();
         let zero_gas_ab = simulate_path(&hops_ab, &amount_in, &market, &overrides).unwrap();
 
         assert_eq!(normal_ab.amount_out, zero_gas_ab.amount_out);
-        assert!(normal_ab.gas > 0, "normal gas should be non-zero");
-        assert_eq!(zero_gas_ab.gas, 0, "zero-gas override should report gas=0");
+        assert!(hop_gas_sum(&normal_ab) > BigUint::ZERO, "normal gas should be non-zero");
+        assert_eq!(
+            hop_gas_sum(&zero_gas_ab),
+            BigUint::ZERO,
+            "zero-gas override should report gas=0"
+        );
 
         // pool_bc is a normal override — its gas should be unaffected.
         let result_bc = simulate_path(&hops_bc, &amount_in, &market, &overrides).unwrap();
-        assert_eq!(result_bc.gas, 70_000, "non-zero-gas override should keep its gas");
+        assert_eq!(
+            hop_gas_sum(&result_bc),
+            BigUint::from(70_000u64),
+            "non-zero-gas override should keep its gas"
+        );
     }
 
     #[test]
