@@ -1639,7 +1639,7 @@ mod tests {
     /// Across every shared split scenario: never lose to the best single path, land within 5% of
     /// the analytical optimum, and return a structurally valid route.
     #[tokio::test]
-    async fn water_fill_all_scenarios() {
+    async fn test_water_fill_all_scenarios() {
         let algo = water_fill_default();
         for scenario in split_scenarios::all() {
             let name = scenario.name;
@@ -1668,7 +1668,7 @@ mod tests {
     /// When the extra-hop gas exceeds the split's gross benefit, the portfolio returns a single
     /// path rather than a net-negative split.
     #[tokio::test]
-    async fn water_fill_gas_kills_split() {
+    async fn test_water_fill_gas_kills_split() {
         let scenario = split_scenarios::gas_kills_split();
         let (market, gm) = scenario.build_market_weighted();
         let result = evaluate_scenario(&water_fill_default(), &scenario, market, gm).await;
@@ -1679,7 +1679,7 @@ mod tests {
     /// the analytical two-pool optimum (a 50/50 split): the fine 256-chunk allocation finds the
     /// optimal allocation, not just any splitting one.
     #[tokio::test]
-    async fn portfolio_output_near_two_pool_optimum() {
+    async fn test_portfolio_output_near_two_pool_optimum() {
         let m = two_equal_weth_usdc(1);
         let trade = 500u64;
         let order = whole_weth_order(&m.weth, &m.usdc, trade);
@@ -1720,7 +1720,7 @@ mod tests {
     /// 50ms budget comfortably exceeds this scenario's few-ms full solve, so the comparison is
     /// always exercised.
     #[tokio::test]
-    async fn portfolio_no_loss_under_tight_timeout() {
+    async fn test_portfolio_no_loss_under_tight_timeout() {
         for ms in [1u64, 5, 50] {
             let m = two_equal_weth_usdc(1_000_000_000);
             let order = whole_weth_order(&m.weth, &m.usdc, 500);
@@ -1764,7 +1764,7 @@ mod tests {
     /// first by simulated full-amount output, using live simulation only (no precomputed edge
     /// weights on the weightless graph).
     #[tokio::test]
-    async fn discovery_finds_and_ranks_parallel_pools() {
+    async fn test_discovery_finds_and_ranks_parallel_pools() {
         let link = token_with_decimals(0x01, "LINK", 18);
         let weth = token_with_decimals(0x02, "WETH", 18);
         let (market, graph_manager) = setup_market_unweighted(vec![
@@ -1820,7 +1820,7 @@ mod tests {
 
     /// An invalid hop configuration is rejected before any graph work.
     #[tokio::test]
-    async fn discovery_rejects_invalid_hop_configuration() {
+    async fn test_discovery_rejects_invalid_hop_configuration() {
         let link = token_with_decimals(0x01, "LINK", 18);
         let weth = token_with_decimals(0x02, "WETH", 18);
         let (market, graph_manager) = setup_market_unweighted(vec![(
@@ -1863,7 +1863,7 @@ mod tests {
     /// Anchors are the most-connected tokens (highest pool-edge degree) plus the native-ETH
     /// sentinel, derived from the graph rather than a hardcoded list.
     #[test]
-    fn derive_anchor_tokens_ranks_hub_and_includes_native_sentinel() {
+    fn test_derive_anchor_tokens_ranks_hub_and_includes_native_sentinel() {
         let hub = token_with_decimals(0x01, "HUB", 18);
         let a = token_with_decimals(0x02, "A", 18);
         let b = token_with_decimals(0x03, "B", 18);

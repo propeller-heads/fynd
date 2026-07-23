@@ -107,11 +107,6 @@ shared clock. Because `water_fill` always returns at least the best single path,
 pool for a chain — a split router that returned nothing whenever it declined to split would need a
 single-path pool running alongside it to answer those orders.
 
-The property is enforced by unit tests: `water_fill_all_scenarios` runs the shared `split_scenarios`
-harness (symmetric, asymmetric, gas-kills, single-pool, multi-hop, double-split) and asserts the
-result never loses to the single-path floor; `portfolio_output_near_two_pool_optimum` asserts within
-0.1% of the analytical two-pool optimum; and `portfolio_no_loss_under_tight_timeout` asserts no loss
-under 1/5/50 ms timeouts.
 
 ## Configuration
 
