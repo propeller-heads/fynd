@@ -1,3 +1,10 @@
+
+## [0.97.2](https://github.com/propeller-heads/fynd/compare/0.97.1...0.97.2) (2026-07-23)
+
+### Features
+
+* export per-protocol pool count and sync status metrics ([fcb5970](https://github.com/propeller-heads/fynd/commit/fcb597018edb4d9368b2a45e896d6984eba961f1))
+
 ## [0.97.1](https://github.com/propeller-heads/fynd/compare/0.97.0...0.97.1) (2026-07-22)
 
 
