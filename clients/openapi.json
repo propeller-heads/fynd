@@ -356,7 +356,7 @@
           },
           "num_solver_pools": {
             "type": "integer",
-            "description": "Number of active solver pools.",
+            "description": "Number of solver pools configured at startup.\n\nThis is the configured/registered count, not a live count of healthy worker\nthreads — it does not decrease if individual workers stop or panic.",
             "example": 2,
             "minimum": 0
           }

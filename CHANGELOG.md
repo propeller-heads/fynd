@@ -1,3 +1,27 @@
+## [0.97.1](https://github.com/propeller-heads/fynd/compare/0.97.0...0.97.1) (2026-07-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes the --reconnect-delay-secs CLI flag and the public
+reconnect_delay builder methods / RECONNECT_DELAY constant (all dead code).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+### Bug Fixes
+
+* correct hosted-api onboarding docs and improve serve-path observability ([595385c](https://github.com/propeller-heads/fynd/commit/595385c8c62d3f1588b68b22709bb5ff0af891f3))
+
+
+### Reverts
+
+* keep the reconnect_delay knob (avoid breaking change) ([c509a04](https://github.com/propeller-heads/fynd/commit/c509a040b79b36a32a4424c95aefab933dab4173))
+
+
+### Code Refactoring
+
+* address PR review comments ([aa2916c](https://github.com/propeller-heads/fynd/commit/aa2916c45100f1412a5851015f406b96824f8c7a))
+
 ## [0.97.0](https://github.com/propeller-heads/fynd/compare/0.96.0...0.97.0) (2026-07-21)
 
 
