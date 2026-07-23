@@ -251,6 +251,77 @@ impl ProtocolSim for MockProtocolSim {
     }
 }
 
+// ==================== DivByZeroSim ====================
+
+/// ProtocolSim whose `get_amount_out` performs a real U256 division by zero.
+///
+/// Reproduces pool math panicking inside a simulation call instead of returning a
+/// `SimulationError`, so tests can assert that callers contain the panic. All other
+/// methods delegate to a [`MockProtocolSim`].
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DivByZeroSim {
+    inner: MockProtocolSim,
+}
+
+#[typetag::serde]
+impl ProtocolSim for DivByZeroSim {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.inner.spot_price(base, quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        _amount_in: BigUint,
+        _token_in: &Token,
+        _token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        use alloy::primitives::U256;
+        let _ = U256::from(1u64) / U256::ZERO;
+        unreachable!("U256 division by zero panics");
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        _delta: ProtocolStateDelta,
+        _tokens: &HashMap<Bytes, Token>,
+        _balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        unimplemented!("delta_transition not implemented in DivByZeroSim")
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn eq(&self, other: &dyn ProtocolSim) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some()
+    }
+}
+
 // ==================== ConstantProductSim ====================
 
 /// xy=k AMM simulator for testing. Uses pure `BigUint` arithmetic; No fees — pure constant-product
