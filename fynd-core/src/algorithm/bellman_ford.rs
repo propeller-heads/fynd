@@ -462,20 +462,28 @@ impl BellmanFordAlgorithm {
                         // (input stays large) nor a too-large amount (huge input); those fail via
                         // other paths. Catches dust at token_in and amounts that decay below a
                         // hop's gas mid-route.
-                        let u_price = Self::resolve_token_price(
-                            ctx.node_address.get(&u),
-                            ctx.token_prices.as_ref(),
-                            spot_product[u_idx],
-                            ctx.node_address.get(&ctx.token_in_node),
-                        );
-                        if Self::gas_adjusted_amount(
-                            &amount[u_idx],
-                            &result.gas,
-                            ctx.gas_price_wei.as_ref().unwrap(),
-                            u_price.as_ref(),
-                        ) <= BigInt::ZERO
-                        {
-                            input_below_hop_gas = true;
+                        //
+                        // Probe the input-side dust signal only on uneconomic edges: an input
+                        // below this hop's gas implies net_candidate <= 0 (output value <=
+                        // input value < hop gas <= cumulative gas), so economic relaxing edges
+                        // can never trip it — gating keeps the extra price lookup and BigInt
+                        // math off the hot path (measured ~3-4% of quote time when unguarded).
+                        if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
+                            let u_price = Self::resolve_token_price(
+                                ctx.node_address.get(&u),
+                                ctx.token_prices.as_ref(),
+                                spot_product[u_idx],
+                                ctx.node_address.get(&ctx.token_in_node),
+                            );
+                            if Self::gas_adjusted_amount(
+                                &amount[u_idx],
+                                &result.gas,
+                                ctx.gas_price_wei.as_ref().unwrap(),
+                                u_price.as_ref(),
+                            ) <= BigInt::ZERO
+                            {
+                                input_below_hop_gas = true;
+                            }
                         }
                         let net_existing = Self::gas_adjusted_amount(
                             &amount[v_idx],
