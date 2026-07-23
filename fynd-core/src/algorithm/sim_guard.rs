@@ -9,6 +9,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use num_bigint::BigUint;
+use tracing::warn;
 use tycho_simulation::tycho_common::{
     models::token::Token,
     simulation::{
@@ -18,25 +19,41 @@ use tycho_simulation::tycho_common::{
 };
 
 /// Calls `sim.get_amount_out`, converting a panic into a `SimulationError::FatalError`.
+///
+/// On a contained panic, logs the input that triggered it (amount and token pair) so the
+/// offending pool/quote can be tracked down from the logs.
 pub(crate) fn get_amount_out_guarded(
     sim: &dyn ProtocolSim,
     amount_in: BigUint,
     token_in: &Token,
     token_out: &Token,
 ) -> Result<GetAmountOutResult, SimulationError> {
-    catch_unwind(AssertUnwindSafe(|| sim.get_amount_out(amount_in, token_in, token_out)))
-        .unwrap_or_else(|panic_payload| {
-            let message = panic_payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| {
-                    panic_payload
-                        .downcast_ref::<String>()
-                        .map(String::as_str)
-                })
-                .unwrap_or("<non-string panic payload>");
-            Err(SimulationError::FatalError(format!("get_amount_out panicked: {message}")))
-        })
+    // `amount_in` is cloned into the call so the original stays available for the panic log.
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        sim.get_amount_out(amount_in.clone(), token_in, token_out)
+    }));
+
+    outcome.unwrap_or_else(|panic_payload| {
+        let message = panic_payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("<non-string panic payload>");
+        warn!(
+            %amount_in,
+            token_in = %token_in.address,
+            token_out = %token_out.address,
+            token_in_symbol = %token_in.symbol,
+            token_out_symbol = %token_out.symbol,
+            panic = message,
+            "pool simulation panicked; skipping pool"
+        );
+        Err(SimulationError::FatalError(format!("get_amount_out panicked: {message}")))
+    })
 }
 
 #[cfg(test)]
