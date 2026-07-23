@@ -100,6 +100,12 @@ struct SPFAResult {
     edge_gas: Vec<BigUint>,
     /// Cumulative spot-price product from token_in to each node (for gas fallback).
     spot_product: Vec<f64>,
+    /// True if some hop's own input amount couldn't cover that single hop's gas cost
+    /// (gas-aware) or a literal zero output was produced (gas-unaware). Input-side and
+    /// single-hop, so it never trips for a healthy or too-large order (input stays
+    /// large); it catches dust at token_in and amounts that decay below a hop's gas
+    /// mid-route. Distinguishes a too-small amount from a genuinely missing route.
+    input_below_hop_gas: bool,
 }
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
@@ -266,10 +272,22 @@ impl BellmanFordAlgorithm {
 
         let out_idx = ctx.token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
+            // amount[out] == 0. If some hop's own input amount couldn't cover that single
+            // hop's gas cost (gas-aware), or a successful simulation produced a literal zero
+            // output (gas-unaware), the requested amount is too small to route to a usable
+            // output at some hop -> AmountTooSmall (dust or gas-unprofitable, mid-route
+            // included). A too-large amount instead fails by simulation error, so it never
+            // sets the flag. Anything else (unreachable, connector/forbid-revisits excluded,
+            // sim error, missing state, timeout) -> NoGraphPath.
+            let reason = if spfa.input_below_hop_gas {
+                NoPathReason::AmountTooSmall
+            } else {
+                NoPathReason::NoGraphPath
+            };
             return Err(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
+                reason,
             });
         }
 
@@ -340,6 +358,8 @@ impl BellmanFordAlgorithm {
         let mut spot_product: Vec<f64> = vec![0.0; ctx.max_idx];
         spot_product[ctx.token_in_node.index()] = 1.0;
 
+        let mut input_below_hop_gas = false;
+
         let gas_aware = matches!(ctx.scoring, RouteScoringMode::NetOutput) &&
             ctx.gas_price_wei.is_some() &&
             ctx.token_prices.is_some();
@@ -382,15 +402,8 @@ impl BellmanFordAlgorithm {
 
                     // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
                     // always permitted regardless of the allowlist.
-                    if let (Some(tokens), Some(v_addr)) =
-                        (&self.connector_tokens, ctx.node_address.get(v))
-                    {
-                        if v_addr != order.token_in() &&
-                            v_addr != order.token_out() &&
-                            !tokens.contains(v_addr)
-                        {
-                            continue;
-                        }
+                    if !self.connector_allows(ctx, order, *v) {
+                        continue;
                     }
 
                     let Some(token_v) = ctx.token_map.get(v) else { continue };
@@ -444,6 +457,26 @@ impl BellmanFordAlgorithm {
                             ctx.gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
                         );
+                        // Amount-too-small: the amount ENTERING this hop can't cover THIS hop's
+                        // own gas. Input-side + single-hop, so it never trips for a healthy order
+                        // (input stays large) nor a too-large amount (huge input); those fail via
+                        // other paths. Catches dust at token_in and amounts that decay below a
+                        // hop's gas mid-route.
+                        let u_price = Self::resolve_token_price(
+                            ctx.node_address.get(&u),
+                            ctx.token_prices.as_ref(),
+                            spot_product[u_idx],
+                            ctx.node_address.get(&ctx.token_in_node),
+                        );
+                        if Self::gas_adjusted_amount(
+                            &amount[u_idx],
+                            &result.gas,
+                            ctx.gas_price_wei.as_ref().unwrap(),
+                            u_price.as_ref(),
+                        ) <= BigInt::ZERO
+                        {
+                            input_below_hop_gas = true;
+                        }
                         let net_existing = Self::gas_adjusted_amount(
                             &amount[v_idx],
                             &cumul_gas[v_idx],
@@ -452,6 +485,9 @@ impl BellmanFordAlgorithm {
                         );
                         net_candidate > net_existing
                     } else {
+                        if result.amount.is_zero() {
+                            input_below_hop_gas = true;
+                        }
                         result.amount > amount[v_idx]
                     };
 
@@ -474,7 +510,17 @@ impl BellmanFordAlgorithm {
             active_nodes.sort_unstable();
         }
 
-        SPFAResult { amount, predecessor, edge_gas, spot_product }
+        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas }
+    }
+
+    /// Whether the connector-token allowlist permits routing *into* node `v`.
+    /// Endpoints (token_in / token_out) are always permitted. No allowlist => all allowed.
+    fn connector_allows(&self, ctx: &BellmanFordContext, order: &Order, v: NodeIndex) -> bool {
+        let (Some(tokens), Some(v_addr)) = (&self.connector_tokens, ctx.node_address.get(&v))
+        else {
+            return true;
+        };
+        v_addr == order.token_in() || v_addr == order.token_out() || tokens.contains(v_addr)
     }
 
     /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
@@ -1039,6 +1085,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_amount_too_small_when_reachable_but_zero_output() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        // Reachable pool, but rate 0.5 on a 1-unit input floors to 0 output.
+        let (market, manager) =
+            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(0.5))]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_dust_occurs_mid_route() {
+        // A->B floors 1*0.5 to 0: that successful sim produced a zero output, so
+        // input_below_hop_gas is set even though the dust occurs one hop before
+        // token_out. This must be AmountTooSmall, not NoGraphPath (catching dust
+        // anywhere along the route, not just on edges landing directly on token_out).
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(0.5)),
+            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_c, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_amount_too_large_for_liquidity() {
+        // pool_ab has liquidity=500; a 1000-unit input at rate 2.0 would produce 2000
+        // output, which exceeds liquidity, so get_amount_out returns Err and the edge is
+        // skipped without ever setting input_below_hop_gas. This is the key guard: a
+        // too-large amount must fail by simulation error, not by an economic comparison,
+        // so it is never mislabeled AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_bf(vec![(
+            "pool_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_liquidity(500),
+        )]);
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_unreachable_within_hops() {
+        // A->B->C exists, but max_hops=1 leaves C out of the subgraph.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_connector_tokens_exclude_intermediate() {
+        // A->B->C is topologically reachable (get_subgraph doesn't consult
+        // connector_tokens), but B is excluded from the allowlist and isn't an
+        // endpoint, so SPFA skips every edge into B: no edge simulation ever runs,
+        // so input_below_hop_gas stays false and this correctly reports NoGraphPath.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = BellmanFordAlgorithm::with_config(
+            AlgorithmConfig::new(1, 3, Duration::from_millis(1000), None)
+                .unwrap()
+                .with_connector_tokens(HashSet::new()),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn test_destination_not_in_graph() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1478,6 +1648,71 @@ mod tests {
         assert_eq!(result.route().swaps().len(), 2);
         assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
         assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_net_uneconomic_after_gas() {
+        // The 1-unit input entering the only hop is worth 1 (price 1:1), but that hop's
+        // own gas cost is 10 units * gas_price=100 * price 1:1 = 1000, deeply exceeding
+        // it. The input-side check sets input_below_hop_gas, and since the resulting
+        // net_candidate (2 - 1000) does not beat the existing net (0), B is never
+        // relaxed -> amount[B] stays 0 -> AmountTooSmall via the gas-aware branch, not
+        // the gross-zero fallback.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "pool_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_output_uneconomic_but_input_economic() {
+        // Single-hop A->B (B=token_out), gas-aware. The pool's low rate (0.05) makes the
+        // OUTPUT value (10_000 * 0.05 = 500) fall below the hop's gas cost (10 * 100 * 1/1
+        // = 1000), so B is never relaxed and amount[B] stays 0. But the INPUT (10_000)
+        // comfortably covers that same gas cost, so the input-side check must not flag
+        // this as AmountTooSmall. The old output-side/cumulative check would have set the
+        // flag here (net_candidate = 500 - 1000 <= 0), mislabeling a healthy-sized order
+        // whose pool simply has a low rate as AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "pool_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(0.05).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
     }
 
     // ==================== Connector token tests ====================

@@ -744,7 +744,7 @@ mod tests {
                 order, setup_market_unweighted, token, token_with_decimals, ConstantProductSim,
                 MockProtocolSim,
             },
-            AlgorithmConfig,
+            AlgorithmConfig, NoPathReason,
         },
         derived::{types::TokenGasPrices, DerivedData, SharedDerivedDataRef},
         graph::GraphManager,
@@ -1416,6 +1416,34 @@ mod tests {
             AlgorithmConfig::new(1, max_hops, StdDuration::from_millis(5000), None).unwrap(),
             pfw_config,
         )
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_surfaces_from_inner_bf() {
+        // Reachable pool, but rate 0.5 on a 1-unit input floors to 0 output.
+        // find_best_route propagates the inner BF error with `?`, so
+        // AmountTooSmall reaches the caller unchanged.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, graph_manager) = setup_market_unweighted(vec![(
+            "pool_ab",
+            &token_a,
+            &token_b,
+            Box::new(MockProtocolSim::new(0.5)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let algo = pfw_algo(3);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(graph_manager.graph(), market, None, None, &ord)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
     }
 
     #[tokio::test]
