@@ -686,9 +686,10 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 ///
 /// Per-leg attribution: the route's excess over the committed amount (`realized − committed`)
 /// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
-/// in route order. Public branches of a split cannot be skimmed, so the whole excess
-/// comes out of the exclusive legs; if they cannot absorb all of it, the remainder is
-/// under-captured (user-safe: the user then receives more than the committed amount).
+/// in route order. Only exclusive legs can withhold output, so the whole
+/// excess must come out of them; public branches pay out in full. If the exclusive legs cannot
+/// absorb all of it, the remainder is left with the user (who then receives more than the
+/// committed amount).
 ///
 /// Exact-in orders only: the commitment, both gates, and the surplus are all denominated in
 /// `amount_out`. Exact-out support would invert the logic — fixed output, commitment and surplus
@@ -1948,9 +1949,10 @@ mod tests {
             .expect("should have a public swap");
         assert_eq!(public_leg.committed_amount_out(), None);
 
-        // The public branch (600) can't be skimmed, so the full excess (1100 − 1000 = 100) is
-        // deducted from the exclusive leg: committed_leg = 500 − 100 = 400. The user receives
-        // 600 + 400 = 1000 (exactly the committed amount) and the hook captures all 100.
+        // The public branch (600) pays out in full, so the entire excess
+        // (1100 − 1000 = 100) is deducted from the exclusive leg: committed_leg = 500 − 100 =
+        // 400. The user receives 600 + 400 = 1000 (exactly the committed amount) and the hook
+        // captures all 100.
         let exclusive_leg = route
             .swaps()
             .iter()
