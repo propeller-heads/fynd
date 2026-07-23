@@ -8,6 +8,10 @@
 # version-bumped via the shared workspace version, but excluded from changelog/tag/publish.
 [workspace]
 changelog_update = false
+# All crates share the workspace version, so they all resolve to the same bare tag name.
+# Only `fynd` creates it (git_tag_enable below); a second crate creating the same tag in one
+# release run fails with "Reference already exists".
+git_tag_enable = false
 git_tag_name = "{{ version }}"
 git_release_enable = false
 semver_check = false
@@ -17,6 +21,7 @@ pr_labels = ["release"]
 [[package]]
 name = "fynd"
 changelog_update = true
+git_tag_enable = true
 git_release_enable = true
 changelog_include = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "fynd-client"]
 
