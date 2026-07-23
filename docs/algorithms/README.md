@@ -4,9 +4,10 @@ icon: compass
 
 # Overview
 
-Fynd ships four built-in routing algorithms: three single-route finders (Most Liquid, Bellman-Ford,
-Path Frank-Wolfe) and the [Water-fill](water_fill.md) portfolio router. This section explains the problem they
-solve and how each one works.
+Fynd ships four built-in routing algorithms. Most Liquid and Bellman-Ford each return a single
+route. Path Frank-Wolfe and [Water-fill](water_fill.md) split one order across several parallel
+routes to cut price impact on large trades. This section explains the routing problem and how each
+algorithm works.
 
 ## The routing problem
 
@@ -38,10 +39,10 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 
 ## Built-in algorithms
 
-|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Water-fill (portfolio)](water_fill.md)                                   |
+|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Water-fill](water_fill.md)                                   |
 | ---------------------- | ------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Portfolio: best net of best single path, coarse disjoint floor, refined 256-chunk disjoint split, and shared-pool fill-and-spill; exhaustive plus bounded candidate discovery |
-| **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Never loses to the single path; covers every order (can run as the only pool); captures the large-trade gains |
-| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Pays the full candidate-simulation cost on every order (offline 10k p50 ~15 ms vs bounded's ~2 ms), higher for VM-simulated protocols; pair with a Bellman-Ford pool |
+| **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Tries the best single path and three ways to split the order, then returns whichever gives the most output net of gas |
+| **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Never returns less than the best single path; handles every order, so it can run as the only pool; captures the gains on large trades |
+| **Weaknesses**         | Path count explodes at high hop counts; heuristic can misjudge      | Single path only; suboptimal for large trades      | More simulation work per request; overkill for small trades                 | Simulates every candidate on every order, so it is slower than the single-route finders (offline 10k p50 ~15 ms) and slower still on VM-simulated protocols; run it alongside a Bellman-Ford pool |
 | **Default config**     | _(not in default `worker_pools.toml`)_                              | 2 hops, 3 workers (see `worker_pools.toml`)        | _(not in default `worker_pools.toml`)_                                      | _(not in default `worker_pools.toml`)_                          |
 | **Derived data needs** | Spot prices + pool depths (scoring), token gas prices (gas ranking) | Token gas prices (optional, for gas-aware mode)    | Token gas prices + spot prices (price impact, probe amount, gas cost)       | Spot prices + pool depths (candidate ranking), token gas prices (optional, gas-aware net) |

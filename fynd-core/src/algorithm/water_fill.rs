@@ -1,34 +1,32 @@
 //! Water-fill split-routing algorithm (`water_fill`).
 //!
 //! For large orders, price impact makes it better to split the order across several parallel routes
-//! so the marginal price stays low. `WaterFillAlgorithm` is a portfolio router: it builds up to
-//! four split candidates and returns the one with the best net-of-gas output, never worse than the
-//! best single path.
+//! so the marginal price stays low. `WaterFillAlgorithm` builds up to four candidate routes and
+//! returns the one with the best output net of gas, never worse than the best single path.
 //!
-//! The candidates are the best single path, a coarse pool-disjoint floor, a refined pool-disjoint
-//! split, and a shared-pool fill-and-spill:
+//! The four candidates are the best single path plus three ways to split it:
 //!
-//! * **Floor** — a single gated coarse water-fill (20 chunks) over pool-disjoint paths. It does
-//!   exactly the classic split's allocation work at the same cost, so a tight timeout cannot starve
-//!   it into a single-path fallback while a split would still win — this is what makes the
-//!   never-lose guarantee hold under time pressure.
-//! * **Refined disjoint** — two-phase: pick the active path set at coarse granularity, where the
-//!   gas-activation gate is correct, then refine the allocation over that fixed set on a fine
-//!   256-chunk grid with the gate off (the gas is already justified).
-//! * **Fill-and-spill** — a shared-pool overlay allocation with marginal-probe candidate selection,
-//!   which reaches tree routes that split at an intermediate token (paths sharing a pool), which no
-//!   pool-disjoint allocation can express.
+//! * **20-chunk disjoint split** — splits across paths that share no pool, in 20 chunks. This is
+//!   the safety net: it is cheap and always finishes, so a tight timeout cannot cut off the split
+//!   while leaving the single path. That is what makes the never-lose guarantee hold under time
+//!   pressure.
+//! * **256-chunk disjoint split** — the same pool-disjoint paths in 256 chunks, in two phases:
+//!   first pick which paths to use at coarse (20-chunk) granularity, where each path's share is
+//!   large enough for its gas-activation gate to be meaningful; then allocate across the chosen
+//!   paths at fine (256-chunk) granularity with the gate off, since their gas is already covered.
+//! * **Fill-and-spill** — a split that lets paths share a pool and branch at an intermediate token
+//!   (a tree route), which the pool-disjoint splits cannot express.
 //!
-//! All allocation runs use an incremental water-fill: because constant-product / tick AMMs are
-//! path-independent in cumulative input (one swap of `x` equals two sequential swaps summing to
-//! `x`), probing the marginal of the *next* chunk against a committed pool overlay is identical to
-//! re-simulating at the cumulative amount, but costs O(chunks) instead of O(chunks^2). The saved
-//! work funds the fine grid.
+//! Every split fills the order in chunks: for each chunk, it checks how much each path returns for
+//! that chunk and gives the chunk to the best one. Because constant-product / tick AMMs are
+//! path-independent in cumulative input (one swap of `x` equals two back-to-back swaps summing to
+//! `x`), it simulates only the next chunk against the pool state committed so far — O(chunks)
+//! instead of O(chunks^2). That saved work makes the 256-chunk split affordable.
 //!
-//! Candidate discovery (the "Candidate discovery" section below) unions an exhaustive path
+//! Candidate discovery (the "Candidate discovery" section below) combines an exhaustive path
 //! enumeration with a bounded, amount-aware frontier search, so connector and anchor routes
-//! (including the native-ETH sentinel) survive spot × depth truncation. Every returned route is
-//! assembled through the shared, encoding-safe split primitives.
+//! (including the native-ETH sentinel) survive the spot × depth cutoff. Every returned route is
+//! assembled through the shared split primitives and can be encoded on-chain.
 
 use std::{
     cmp::{Ordering, Reverse},
