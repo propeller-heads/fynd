@@ -14,6 +14,7 @@ use tycho_simulation::{
                 balancer_v2_pool_filter, curve_filter, erc4626_filter, fluid_v1_paused_pools_filter,
             },
             fluid::FluidV1,
+            lunarbase::state::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -171,6 +172,9 @@ pub(crate) fn register_exchanges(
             "quickswap_v2" => {
                 builder =
                     builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None);
+            }
+            "lunarbase" => {
+                builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
             p if p.starts_with("rfq:") => {
                 // RFQ protocols are handled in register_rfq
