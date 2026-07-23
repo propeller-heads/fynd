@@ -181,3 +181,11 @@ fee_collectors = []
 [client_integrators]
 "infinex" = "infinex"
 "robinhood" = "robinhood"
+
+# Clients identified by the appData hash a CoW order carries: appCode names the frontend that
+# built the order. CoW commits this hash into each order; it appears in the settle calldata, not
+# the Trade event. Keyed by the 32-byte appData hash.
+[client_appdata]
+# LlamaSwap (DefiLlama): appCode "DefiLlama". A low-frequency, fee-free frontend whose other legs
+# (0x, Kyber) tag it only off-chain, so this CoW hash is its one on-chain fingerprint.
+"0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422" = "llamaswap"

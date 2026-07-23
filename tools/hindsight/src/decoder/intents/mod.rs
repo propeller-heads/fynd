@@ -8,12 +8,26 @@
 pub(crate) mod cow;
 pub(crate) mod netting;
 
-use alloy::providers::Provider;
+use alloy::{
+    primitives::{Address, B256},
+    providers::Provider,
+};
 
-use crate::decoder::decode::TradeDecoder;
+use crate::decoder::{decode::TradeDecoder, registry::Registry};
 
 /// The decoders tried for the Intent role, first flow wins: a source with a rich signal (`CoW`'s
 /// `Trade` event) is tried before the generic net-flow finder that works for any intent fill.
 pub(crate) fn decoders_for<P: Provider>() -> Vec<Box<dyn TradeDecoder<P>>> {
     vec![Box::new(cow::CowSettlement), Box::new(netting::IntentNetting)]
+}
+
+/// The order-flow tag a batch settlement carries for client attribution: `CoW`'s per-order
+/// `appData` hash, read from the settle calldata. `None` for entries that are not batch settlers
+/// and for multi-order batches. Mirrors `solvers::integrator` — the orchestrator asks for a tag
+/// without knowing which intent protocol produced it.
+pub(crate) fn client_tag(registry: &Registry, entry_point: Address, input: &[u8]) -> Option<B256> {
+    registry
+        .is_batch_settler(entry_point)
+        .then(|| cow::order_app_data(input))
+        .flatten()
 }

@@ -12,10 +12,10 @@
 //! compares like-for-like — modern `CoW` records a zero on-chain fee (it is priced into the order).
 
 use alloy::{
-    primitives::{address, Address},
+    primitives::{address, Address, B256},
     providers::Provider,
     sol,
-    sol_types::SolEvent,
+    sol_types::{SolCall, SolEvent},
 };
 use async_trait::async_trait;
 
@@ -35,6 +35,45 @@ sol! {
         uint256 feeAmount,
         bytes orderUid
     );
+
+    /// `GPv2Settlement.settle`, decoded only for the per-order `appData` hash — the frontend tag
+    /// (`appCode`) the event does not carry. The other fields are named to match the ABI so the
+    /// decode lines up; only `trades[].appData` is read.
+    struct SettleTrade {
+        uint256 sellTokenIndex;
+        uint256 buyTokenIndex;
+        address receiver;
+        uint256 sellAmount;
+        uint256 buyAmount;
+        uint32 validTo;
+        bytes32 appData;
+        uint256 feeAmount;
+        uint256 flags;
+        uint256 executedAmount;
+        bytes signature;
+    }
+    struct SettleInteraction {
+        address target;
+        uint256 value;
+        bytes callData;
+    }
+    function settle(
+        address[] tokens,
+        uint256[] clearingPrices,
+        SettleTrade[] trades,
+        SettleInteraction[][3] interactions
+    );
+}
+
+/// The settled order's `appData` hash, read from the `settle` calldata. `None` unless the batch
+/// settles exactly one order — the same single-order rule `CowSettlement` applies, since a
+/// multi-order batch has no single frontend to attribute.
+pub(crate) fn order_app_data(input: &[u8]) -> Option<B256> {
+    let call = settleCall::abi_decode(input).ok()?;
+    let [trade] = call.trades.as_slice() else {
+        return None;
+    };
+    Some(trade.appData)
 }
 
 /// `CoW`'s sentinel for native ETH in buy orders, mapped to the zero address like every other flow.
@@ -98,9 +137,10 @@ mod tests {
     use std::collections::HashMap;
 
     use alloy::{
-        primitives::{address, Bytes, U256},
+        primitives::{address, b256, Bytes, U256},
         providers::RootProvider,
         rpc::{client::RpcClient, types::Log},
+        sol_types::SolCall,
         transports::mock::Asserter,
     };
 
@@ -207,5 +247,48 @@ mod tests {
     async fn test_no_trade_event_declined() {
         // A non-CoW intent fill (no Trade event) is declined so intent netting runs instead.
         assert!(decode(vec![]).await.is_none());
+    }
+
+    fn settle_trade(app_data: B256) -> SettleTrade {
+        SettleTrade {
+            sellTokenIndex: U256::ZERO,
+            buyTokenIndex: U256::ZERO,
+            receiver: Address::ZERO,
+            sellAmount: U256::ZERO,
+            buyAmount: U256::ZERO,
+            validTo: 0,
+            appData: app_data,
+            feeAmount: U256::ZERO,
+            flags: U256::ZERO,
+            executedAmount: U256::ZERO,
+            signature: Bytes::new(),
+        }
+    }
+
+    fn settle_calldata(trades: Vec<SettleTrade>) -> Vec<u8> {
+        settleCall {
+            tokens: vec![],
+            clearingPrices: vec![],
+            trades,
+            interactions: Default::default(),
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn test_single_order_reads_app_data() {
+        let app = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
+        assert_eq!(order_app_data(&settle_calldata(vec![settle_trade(app)])), Some(app));
+    }
+
+    #[test]
+    fn test_multi_order_batch_has_no_single_app_data() {
+        let trades = vec![settle_trade(B256::ZERO), settle_trade(B256::ZERO)];
+        assert!(order_app_data(&settle_calldata(trades)).is_none());
+    }
+
+    #[test]
+    fn test_non_settle_calldata_has_no_app_data() {
+        assert!(order_app_data(&[0u8; 4]).is_none());
     }
 }

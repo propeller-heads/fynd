@@ -5,9 +5,13 @@
 //! overriding the venue label. Every fingerprint is registry-driven; nothing here knows about a
 //! specific client or provider.
 //!
-//! Three fingerprints, tried in order:
+//! Four fingerprints, tried in order:
 //! - **owning trader** — the swap's net flow was read from a known client address
 //!   (`[client_owners]`).
+//! - **`CoW` appData tag** — the settled order committed a frontend tag (`appCode`) whose appData
+//!   hash maps to a client (`[client_appdata]`). The hash is extracted by the caller (it is
+//!   `CoW`-specific; see `crate::decoder::intents::cow::order_app_data`), so this module stays
+//!   generic.
 //! - **fee wallet** — a known client fee wallet received the output-token fee (`[client_fees]`);
 //!   the fee is backed out so the settled output stays gross. Checked only inside an
 //!   already-matched solver trade, so a bare dust transfer to a fee wallet is not mistaken for
@@ -18,7 +22,7 @@
 
 use std::collections::HashSet;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 
 use crate::decoder::{decode::TraderFlow, registry::Registry, transfer_ledger::TransferLedger};
 
@@ -30,8 +34,12 @@ pub(crate) fn attribute(
     flow: &mut TraderFlow,
     ledger: &TransferLedger,
     integrator: Option<&str>,
+    app_data: Option<B256>,
 ) -> Option<String> {
     if let Some(client) = registry.client_for_owner(flow.tracked) {
+        return Some(client.to_string());
+    }
+    if let Some(client) = app_data.and_then(|hash| registry.client_for_appdata(hash)) {
         return Some(client.to_string());
     }
     if let Some((client, fee)) = fee_client(registry, ledger, flow.swap.token_out) {
@@ -68,7 +76,7 @@ fn fee_client(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::address;
+    use alloy::primitives::{address, b256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
@@ -80,7 +88,7 @@ mod tests {
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(kpk_safe, swap(addr(10), 1, addr(11), 2));
-        assert_eq!(attribute(&registry, &mut flow, &ledger, None).as_deref(), Some("kpk"));
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None, None).as_deref(), Some("kpk"));
     }
 
     #[test]
@@ -88,7 +96,22 @@ mod tests {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(addr(9), swap(addr(10), 1, addr(11), 2));
-        assert_eq!(attribute(&registry, &mut flow, &ledger, None), None);
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None, None), None);
+    }
+
+    #[test]
+    fn test_appdata_tag_attributes_client() {
+        // A CoW order carrying DefiLlama's appData hash is attributed to LlamaSwap; an unregistered
+        // hash is not.
+        let registry = Registry::ethereum();
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+        let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
+        let mut flow = TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2));
+        assert_eq!(
+            attribute(&registry, &mut flow, &ledger, None, Some(defillama)).as_deref(),
+            Some("llamaswap")
+        );
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None, Some(B256::ZERO)), None);
     }
 
     #[test]
@@ -109,7 +132,10 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 9915));
 
-        assert_eq!(attribute(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
+        assert_eq!(
+            attribute(&registry, &mut flow, &ledger, None, None).as_deref(),
+            Some("phantom")
+        );
         assert_eq!(flow.venue_fee_out, Some(U256::from(85)));
         assert_eq!(flow.swap.amount_out, U256::from(10000));
     }
@@ -122,10 +148,10 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2));
         assert_eq!(
-            attribute(&registry, &mut flow, &ledger, Some("Infinex")).as_deref(),
+            attribute(&registry, &mut flow, &ledger, Some("Infinex"), None).as_deref(),
             Some("infinex")
         );
-        assert_eq!(attribute(&registry, &mut flow, &ledger, Some("somedapp")), None);
+        assert_eq!(attribute(&registry, &mut flow, &ledger, Some("somedapp"), None), None);
     }
 
     #[test]
@@ -142,6 +168,6 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 2000));
-        assert_eq!(attribute(&registry, &mut flow, &ledger, None), None);
+        assert_eq!(attribute(&registry, &mut flow, &ledger, None, None), None);
     }
 }

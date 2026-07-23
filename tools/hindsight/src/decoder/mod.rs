@@ -262,13 +262,20 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
-        // A client fingerprint (owning trader, fee wallet, or integrator tag — see `clients`)
-        // overrides the entry-point label, backing any client fee out before the quote check reads
-        // the grossed output.
+        // A client fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
+        // `clients`) overrides the entry-point label, backing any client fee out before the quote
+        // check reads the grossed output. The appData tag is read from a batch settler's calldata;
+        // other transactions carry none.
         let integrator = solvers::integrator(logs);
-        let venue =
-            clients::attribute(registry, &mut flow, &transfer_ledger, integrator.as_deref())
-                .unwrap_or_else(|| registry.label(entry_point));
+        let app_data = intents::client_tag(registry, entry_point, &root.input);
+        let venue = clients::attribute(
+            registry,
+            &mut flow,
+            &transfer_ledger,
+            integrator.as_deref(),
+            app_data,
+        )
+        .unwrap_or_else(|| registry.label(entry_point));
 
         let attribution = solvers::attribution::attribute(
             flow.solver_override.take(),

@@ -12,7 +12,7 @@ use std::{
     path::Path,
 };
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use anyhow::Context;
 use serde::Deserialize;
 
@@ -47,6 +47,10 @@ struct AddressBook {
     /// books with no integrator-identified clients.
     #[serde(default)]
     client_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → client, for clients identified by the frontend tag (`appCode`)
+    /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified clients.
+    #[serde(default)]
+    client_appdata: HashMap<B256, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -119,6 +123,9 @@ pub(crate) struct Registry {
     /// Provider integrator tag (lowercase) → client name, for clients identified by the integrator
     /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
     client_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → client name, for clients identified by the frontend tag
+    /// (`appCode`) committed into an order (`LlamaSwap`).
+    client_appdata: HashMap<B256, String>,
 }
 
 impl Registry {
@@ -205,6 +212,7 @@ impl Registry {
                 .into_iter()
                 .map(|(tag, client)| (tag.to_lowercase(), client))
                 .collect(),
+            client_appdata: book.client_appdata,
         })
     }
 
@@ -279,6 +287,14 @@ impl Registry {
     pub(crate) fn client_for_integrator(&self, integrator: &str) -> Option<&str> {
         self.client_integrators
             .get(&integrator.to_lowercase())
+            .map(String::as_str)
+    }
+
+    /// The client for a `CoW` order `appData` hash, if one is registered. Used to attribute
+    /// frontends by the `appCode` tag committed into the order (`LlamaSwap`).
+    pub(crate) fn client_for_appdata(&self, app_data: B256) -> Option<&str> {
+        self.client_appdata
+            .get(&app_data)
             .map(String::as_str)
     }
 
