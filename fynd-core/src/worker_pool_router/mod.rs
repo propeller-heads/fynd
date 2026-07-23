@@ -1716,19 +1716,25 @@ mod tests {
     /// expected is `(head amount_out, captured surplus)`. A surplus win prepends the pinned
     /// quote to the public fallbacks; otherwise the public ranking is returned unchanged.
     #[rstest]
-    #[case::exclusive_beats_public((900, 900), (950, 950), (900, Some(50)))]
-    #[case::exclusive_below_public((950, 950), (900, 900), (950, None))]
-    #[case::exclusive_ties_public_net((900, 900), (900, 900), (900, None))]
-    #[case::exclusive_marginally_better((999, 999), (1000, 1000), (999, Some(1)))]
-    #[case::exclusive_cannot_cover_public_gross((1000, 950), (990, 980), (1000, None))]
+    #[case::exclusive_beats_public((900, 900), (950, 950), (900, 900, Some(50)))]
+    #[case::exclusive_below_public((950, 950), (900, 900), (950, 950, None))]
+    #[case::exclusive_ties_public_net((900, 900), (900, 900), (900, 900, None))]
+    #[case::exclusive_marginally_better((999, 999), (1000, 1000), (999, 999, Some(1)))]
+    #[case::exclusive_cannot_cover_public_gross((1000, 950), (990, 980), (1000, 950, None))]
+    // Gas-heavier exclusive route: the committed amount rises to max(1000, 950 + 140) = 1090 so
+    // the user still nets the public 950; the protocol captures 1100 - 1090 = 10.
+    #[case::exclusive_with_higher_gas((1000, 950), (1100, 960), (1090, 950, Some(10)))]
+    // Gas-cheaper exclusive route: the public floor binds (committed = 1000); the user keeps the
+    // gas saving (nets 960) and the protocol captures 100.
+    #[case::exclusive_with_lower_gas((1000, 950), (1100, 1060), (1000, 960, Some(100)))]
     fn combine_head_selection(
         #[case] public: (u64, u64),
         #[case] exclusive: (u64, u64),
-        #[case] expected: (u64, Option<u64>),
+        #[case] expected: (u64, u64, Option<u64>),
     ) {
         let (public_out, public_net) = public;
         let (exclusive_out, exclusive_net) = exclusive;
-        let (expected_amount_out, expected_surplus) = expected;
+        let (expected_amount_out, expected_net, expected_surplus) = expected;
 
         let responses = responses_with_gas(public_out, public_net, exclusive_out, exclusive_net);
         let public_ranked = vec![make_public_quote_with_net(public_out, public_net)
@@ -1746,6 +1752,7 @@ mod tests {
         let expected_surplus = expected_surplus.map(BigUint::from);
         assert_eq!(combined.len(), if expected_surplus.is_some() { 2 } else { 1 });
         assert_eq!(*combined[0].amount_out(), BigUint::from(expected_amount_out));
+        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(expected_net));
         assert_eq!(combined[0].surplus_amount(), expected_surplus.as_ref());
         if expected_surplus.is_some() {
             assert_eq!(
@@ -1893,55 +1900,6 @@ mod tests {
 
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].surplus_amount(), None);
-    }
-
-    #[test]
-    fn combine_gas_heavier_exclusive_compensates_user() {
-        // public 1000/950 (gas 50); exclusive 1100/960 (gas 140). The committed amount rises to
-        // max(1000, 950 + 140) = 1090 so the user still nets 950 after the pricier gas; the
-        // protocol captures 1100 − 1090 = 10 (the value the route actually created).
-        let responses = responses_with_gas(1000, 950, 1100, 960);
-        let public_ranked = vec![make_public_quote_with_net(1000, 950)
-            .order()
-            .clone()];
-        let policy = exclusive_policy();
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_roles(),
-            &QuoteOptions::default(),
-            public_ranked,
-            Some(&policy),
-        );
-
-        assert_eq!(combined.len(), 2);
-        assert_eq!(*combined[0].amount_out(), BigUint::from(1090u64));
-        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(950u64));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(10u64)));
-        assert_eq!(combined[0].committed_amount_out(), Some(&BigUint::from(1090u64)));
-    }
-
-    #[test]
-    fn combine_gas_cheaper_exclusive_keeps_public_amount() {
-        // public 1000/950 (gas 50); exclusive 1100/1060 (gas 40). The public floor dominates:
-        // committed = max(1000, 950 + 40) = 1000. The user keeps the gas saving (nets 960) and
-        // the protocol captures 100.
-        let responses = responses_with_gas(1000, 950, 1100, 1060);
-        let public_ranked = vec![make_public_quote_with_net(1000, 950)
-            .order()
-            .clone()];
-        let policy = exclusive_policy();
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_roles(),
-            &QuoteOptions::default(),
-            public_ranked,
-            Some(&policy),
-        );
-
-        assert_eq!(combined.len(), 2);
-        assert_eq!(*combined[0].amount_out(), BigUint::from(1000u64));
-        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(960u64));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(100u64)));
     }
 
     #[test]
