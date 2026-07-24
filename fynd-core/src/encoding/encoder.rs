@@ -277,17 +277,10 @@ impl Encoder {
             return Ok(solution);
         }
 
-        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution_swaps` are
+        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution.swaps()` are
         // built 1:1 from them by `Solution::try_from` and are what the router executes. We read the
         // committed amount from the route swap but stamp `user_data` onto the matching solution
-        // swap, so the two lists must stay index-aligned. A length divergence means that 1:1
-        // mapping broke upstream; bail rather than risk signing the wrong leg.
-        if route_swaps.len() != solution.swaps().len() {
-            return Err(SolveError::FailedEncoding(
-                "route and solution swap counts diverged".to_string(),
-            ));
-        }
-
+        // swap, matched by index via the zip below.
         let swaps = solution
             .swaps()
             .iter()
