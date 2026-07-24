@@ -248,6 +248,15 @@ impl WaterFillAlgorithm {
         Some(total_gas * gas_price_wei * &price.numerator / &price.denominator)
     }
 
+    /// A path's gas converted to output-token terms as a signed amount, or zero when no gas price
+    /// is available. Subtracted from gross output to get net, so gas-blind solves fall back to
+    /// gross ranking rather than erroring.
+    fn activation_cost(ctx: &SplitContext, gas: &BigUint) -> BigInt {
+        Self::gas_cost_in_token(gas, ctx.gas_price, ctx.token_prices, ctx.order.token_out())
+            .map(BigInt::from)
+            .unwrap_or_else(BigInt::zero)
+    }
+
     /// Picks up to `max_paths` paths that share no pool, so their outputs can be summed without
     /// re-simulating — two paths through the same pool compete for its liquidity, so their separate
     /// outputs would not add up.
@@ -618,14 +627,7 @@ impl WaterFillAlgorithm {
         }
         let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let step = Self::simulate_step(path, ctx.market, &empty, amount.clone())?;
-        let activation = Self::gas_cost_in_token(
-            &step.gas,
-            ctx.gas_price,
-            ctx.token_prices,
-            ctx.order.token_out(),
-        )
-        .map(BigInt::from)
-        .unwrap_or_else(BigInt::zero);
+        let activation = Self::activation_cost(ctx, &step.gas);
         Some(BigInt::from(step.amount_out) - activation)
     }
 
@@ -879,14 +881,7 @@ impl WaterFillAlgorithm {
                 let net_marginal = if activated[i] {
                     gross_marginal
                 } else {
-                    let activation = Self::gas_cost_in_token(
-                        &step.gas,
-                        ctx.gas_price,
-                        ctx.token_prices,
-                        ctx.order.token_out(),
-                    )
-                    .map(BigInt::from)
-                    .unwrap_or_else(BigInt::zero);
+                    let activation = Self::activation_cost(ctx, &step.gas);
                     gross_marginal - activation
                 };
                 if best
@@ -935,14 +930,7 @@ impl WaterFillAlgorithm {
             else {
                 continue;
             };
-            let activation = Self::gas_cost_in_token(
-                &step.gas,
-                ctx.gas_price,
-                ctx.token_prices,
-                ctx.order.token_out(),
-            )
-            .map(BigInt::from)
-            .unwrap_or_else(BigInt::zero);
+            let activation = Self::activation_cost(ctx, &step.gas);
             marginal.push((idx, BigInt::from(step.amount_out) - activation));
         }
         marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
@@ -1041,14 +1029,7 @@ impl WaterFillAlgorithm {
                 let net_marginal = if activated[i] {
                     gross_marginal
                 } else {
-                    let activation = Self::gas_cost_in_token(
-                        &step.gas,
-                        ctx.gas_price,
-                        ctx.token_prices,
-                        ctx.order.token_out(),
-                    )
-                    .map(BigInt::from)
-                    .unwrap_or_else(BigInt::zero);
+                    let activation = Self::activation_cost(ctx, &step.gas);
                     gross_marginal - activation
                 };
                 if best
@@ -1115,7 +1096,7 @@ impl WaterFillAlgorithm {
 }
 
 /// A path's identity for dedup: its ordered component-id sequence.
-fn path_key(path: &Path<DepthAndPrice>) -> Vec<ComponentId> {
+fn path_key<W>(path: &Path<'_, W>) -> Vec<ComponentId> {
     path.edge_iter()
         .iter()
         .map(|e| e.component_id.clone())
@@ -1477,12 +1458,7 @@ fn rank_found_candidate_paths<'a, W>(
     let mut scores = Vec::new();
 
     for (path, amount_out) in found {
-        let key: Vec<ComponentId> = path
-            .edge_iter()
-            .iter()
-            .map(|edge| edge.component_id.clone())
-            .collect();
-        if !keys.insert(key) {
+        if !keys.insert(path_key(&path)) {
             continue;
         }
         let idx = paths.len();
