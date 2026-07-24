@@ -1,0 +1,110 @@
+# Base (chain-id 8453) address book for trade decoding. Same structure as ethereum.toml — see it
+# and registry.rs for what each section drives. Addresses gathered 2026-07-21.
+#
+# Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
+# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
+# amounts). Every venue fee collector below was verified on-chain against live Base swaps
+# (2026-07-21), not assumed from the mainnet book.
+
+# Wrapped-native token: WETH on Base (canonical OP-stack predeploy).
+wrapped_native = "0x4200000000000000000000000000000000000006"
+
+# Permit2 — same deterministic address on every chain.
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+
+# CoW Protocol Settlement — same address on every chain.
+batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
+
+# Stablecoins anchoring the native token to USD (address = decimals).
+[usd_stablecoins]
+"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" = 6  # USDC (native, Circle)
+"0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca" = 6  # USDbC (bridged USDC)
+"0x50c5725949a6f0c72e6c4a641f24049a917db0cb" = 18 # DAI
+
+# Solver routers — the venue that actually settles a swap.
+[solvers]
+# 1inch v6 and v5 Aggregation Routers (same deterministic addresses as mainnet)
+"0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
+"0x1111111254eeb25477b68fb85ed929f73a960582" = "1inch"
+# 0x Settler AllowanceHolder (same address as mainnet)
+"0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# CoW Protocol Settlement
+"0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
+# ParaSwap Augustus v6.2 (same address as mainnet)
+"0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# KyberSwap MetaAggregationRouter v2 (same address as mainnet)
+"0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
+# LiFi Diamond (same address as mainnet)
+"0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae" = "lifi"
+# Uniswap Universal Router (V1_2) and SwapRouter02 on Base
+"0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
+"0x2626664c2603336e57b271c5c0b26f421741e481" = "uniswap"
+# OKX DEX Router on Base — router and exactOut router (OKX onchain-OS docs)
+"0x5e2f47bd7d4b357fcfd0bb224eb665773b1b9801" = "okx"
+"0x77449ff075c0a385796da0762bcb46fd5cc884c6" = "okx"
+# Tycho (PropellerHeads) router on Base (tycho-execution config/router_addresses.json)
+"0x2d3524b9b5dae34b646614eebb1e038d403e4cac" = "tycho"
+# Fly (formerly Magpie) DexAggregator — same address on Base and most chains
+# (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+
+# Venues. Relay's Base contracts and fee collector are the same addresses as mainnet — Relay docs
+# list the Base solver/fee collector as 0xf70da978…, so its fee back-out is verified. Its routers
+# are the Cancun-EVM deployment (Base is Cancun), identical to the mainnet book.
+[venues.relay]
+entry_points = [
+    "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
+    "0x3ec130b627944cad9b2750300ecb0a695da522b6",
+    "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+    "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
+    "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
+]
+fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
+
+# MetaMask Swap Router on Base. Verified on-chain: 25/25 sampled fee-paying swaps entered through
+# 0xdb9b1e94… (a contract), paying the fee to 0xe3478b0b… — the mainnet fee wallet 1; mainnet
+# wallet 2 is unused on Base. The Basescan-labelled "MetaMaskSwapRouter"
+# 0xb1aa0a09d43b6b4f289ef14f2441339acdb551ac is NOT the live entry point on Base.
+[venues.metamask]
+entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
+fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
+
+[venues.metamask.solver_aliases]
+oneinch = "1inch"
+zeroex = "0x"
+uniswap = "uniswap"
+okx = "okx"
+kyber = "kyberswap"
+paraswap = "paraswap"
+airswap = "airswap"
+openocean = "openocean"
+hashflow = "hashflow"
+
+# Rabby SwapProxy — same address as mainnet, deployed on Base. Verified on-chain: 837 fee legs in
+# a 10k-block sample were paid to 0xcd6b9800… (mainnet fee wallet 1) from the proxy and from
+# shared solver routers (1inch, 0x, KyberSwap, Uniswap); the mainnet historical wallet 0x39041f…
+# is unused on Base. As on mainnet, only the proxy is an entry point — shared-router Rabby swaps
+# are recognised by the fee leg (see rabby.rs), not by tx.to.
+[venues.rabby]
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
+
+# Rainbow's own router — same address as mainnet (Rainbow deploys it identically across chains).
+# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+[venues.rainbow]
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
+# LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
+# heavier on Base than on mainnet). Keys are lowercase.
+[client_integrators]
+"infinex" = "infinex"
+
+# Clients identified by the appData hash a CoW order carries (appCode names the frontend). CoW
+# settles on Base too, and the hash is the same across chains. Keyed by the 32-byte appData hash.
+[client_appdata]
+# LlamaSwap (DefiLlama): appCode "DefiLlama".
+"0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422" = "llamaswap"
+
+# No Base-specific label data yet (display-only tier).
+[labels]

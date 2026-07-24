@@ -10,6 +10,7 @@ pub(crate) mod attribution;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
+pub(crate) mod zeroex;
 
 use alloy::{
     primitives::{Address, U256},
@@ -52,11 +53,20 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     fn solver_veto(&self, _logs: &[Log]) -> Option<Veto> {
         None
     }
+
+    /// The order-flow integrator tag this solver records in its logs, when it exposes one. A
+    /// solver that fronts other apps (`LiFi`'s Diamond) carries the frontend's integrator string in
+    /// its swap event; client attribution maps that tag to a client (see
+    /// `crate::decoder::clients`).
+    fn integrator(&self, _logs: &[Log]) -> Option<String> {
+        None
+    }
 }
 
 /// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
 /// here needs none — its address-book entry alone is complete.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
+    ("0x", &zeroex::ZeroEx),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
     ("paraswap", &paraswap::Paraswap),
@@ -81,6 +91,15 @@ pub(crate) fn solver_veto(logs: &[Log], entry_point: Address, registry: &Registr
         }
     }
     None
+}
+
+/// The order-flow integrator tag declared in a transaction's logs, from whichever solver records
+/// one. Only a solver that fronts other apps (`LiFi`) returns a tag; the rest default to `None`, so
+/// the first hit is the answer.
+pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
+    IMPLEMENTATIONS
+        .iter()
+        .find_map(|(_, knowledge)| knowledge.integrator(logs))
 }
 
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed

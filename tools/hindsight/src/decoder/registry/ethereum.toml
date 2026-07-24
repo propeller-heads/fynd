@@ -121,3 +121,71 @@ paraswap = "paraswap"
 airswap = "airswap"
 openocean = "openocean"
 hashflow = "hashflow"
+
+[venues.rabby]
+# Rabby SwapProxy — the app-owned router `tx.to` for its Uniswap-routed swaps. Rabby also routes
+# through shared solver routers (0x, 1inch, Sushi), where `tx.to` is the solver's own contract and
+# the only Rabby fingerprint is the fee leg below; those are not keyed here (see rabby.rs).
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+# Rabby fee wallets: a flat 0.25% of the output token. Current wallet confirmed 2026-07-17 via two
+# decoded live swaps through different venues; the historical wallet took the fee through ~Sep 2025
+# before rotating. Both are listed so trades in either window decode with the fee backed out.
+fee_collectors = [
+    "0xcd6b980029e6e6e0733ac8ec3e02be9410d09799",
+    "0x39041f1b366fe33f9a5a79de5120f2aee2577ebc",
+]
+
+[venues.coinbase]
+# Coinbase Wallet's swap proxies — the app-owned `tx.to` for its 0x-powered swaps ("aggregation is
+# powered by 0x", docs.cdp.coinbase.com). These proxies have been quiet since late 2025 (flow may
+# have moved off them — see the Hindsight targets doc); kept so historical trades decode and to
+# catch a resumption.
+entry_points = [
+    "0x8df6084e3b84a65ab9dd2325b5422e5debd8944a",
+    "0xe66b31678d6c16e9ebf358268a790b763c133750",
+]
+# Coinbase's 0x integration fee, taken from the output token and sent to this wallet.
+fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]
+
+[venues.rainbow]
+# Rainbow's own router ("Rainbow: Router"; same address on ETH/Base/Arb/OP/Polygon). It wraps 0x
+# and takes its fee on the input side, passed as the call's feeAmount argument and kept by the
+# router — no fee transfer, so the fee is read from calldata (see rainbow.rs). No fee collector.
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
+# Order-flow clients identified by the trader address that owns the order, not by tx.to. kpk is a
+# treasury manager whose Safes trade through CoW: tx.from is the CoW solver, so the client is only
+# visible as the Safe owning the settled order. Addresses from docs.kpk.io / karpatkey.
+[client_owners]
+"0x4f2083f5fbede34c2714affb3105539775f7fe64" = "kpk" # ENS Endowment
+"0x38f6a1b46144faee6a6d9f79d8de264c18e23848" = "kpk" # USD Alpha
+"0x99b9f5f24205cb88e33b1cc72008f644fc23768b" = "kpk" # ETH Alpha
+
+# Clients identified by the fee they take on a shared router (0x): the entry point is 0x's shared
+# AllowanceHolder, so the only fingerprint is the fee transfer to the client's wallet. Recognized
+# inside a matched solver trade (never a bare transfer), so the dust-spray gotcha does not apply.
+# The fee is taken from the output (buy) token and backed out so the settled output is gross.
+[client_fees]
+# Phantom: 0.85% buy-token fee. Current wallet confirmed 2026-07-17; earlier wallet retired
+# 2025-07-25 — both kept so either window decodes.
+"0x2cffed5d56eb6a17662756ca0fdf350e732c9818" = "phantom"
+"0x7afa9d836d2fccf172b66622625e56404e465dbd" = "phantom"
+# Robinhood Wallet: fee wallet confirmed 2026-07-17 (swaps are ERC-4337; identify by the fee leg,
+# never the bundler sender).
+"0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+
+# Clients identified by the integrator tag a provider records in its swap event. LiFi frontends
+# route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /
+# LiFiSwappedGeneric is the only fingerprint. Keys are lowercase (matched case-insensitively).
+[client_integrators]
+"infinex" = "infinex"
+"robinhood" = "robinhood"
+
+# Clients identified by the appData hash a CoW order carries: appCode names the frontend that
+# built the order. CoW commits this hash into each order; it appears in the settle calldata, not
+# the Trade event. Keyed by the 32-byte appData hash.
+[client_appdata]
+# LlamaSwap (DefiLlama): appCode "DefiLlama". A low-frequency, fee-free frontend whose other legs
+# (0x, Kyber) tag it only off-chain, so this CoW hash is its one on-chain fingerprint.
+"0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422" = "llamaswap"

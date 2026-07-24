@@ -4,10 +4,9 @@
 //! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
 //! declared. It needs no knowledge of any router's format.
 //!
-//! This module is both a toolkit and two decoders. The toolkit — `sender_flow` and
-//! `venue_flow` — is the shared netting engine the venue decoders build on. The decoders are
-//! the venue-less cases: `SenderNetting` for direct solver swaps and `IntentNetting` for
-//! filler-initiated intent fills and batch settlements.
+//! This module is a toolkit plus one decoder. The toolkit — `sender_flow` and `venue_flow` — is
+//! the shared netting engine the venue decoders build on. The decoder is `SenderNetting`, for
+//! direct solver swaps; intent fills and batch settlements are decoded in `super::intents`.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to a
 //! different receiver, nothing nets against the trader's input and the transaction is declined —
@@ -20,7 +19,6 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
-    intent,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -119,27 +117,5 @@ impl<P: Provider> TradeDecoder<P> for SenderNetting {
 
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
         sender_flow(ctx.transfer_ledger, ctx.receipt.from, ctx.entry_point)
-    }
-}
-
-/// Solver-initiated intent fills and batch settlements: the sender acts on the swapper's behalf, so
-/// the real swap is the swapper's net flow.
-pub(crate) struct IntentNetting;
-
-#[async_trait]
-impl<P: Provider> TradeDecoder<P> for IntentNetting {
-    fn name(&self) -> &'static str {
-        "intent-netting"
-    }
-
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
-        intent::find_intent_trade(
-            ctx.provider,
-            ctx.transfer_ledger,
-            &[ctx.entry_point, ctx.receipt.from],
-            ctx.registry,
-            ctx.code_cache,
-        )
-        .await
     }
 }

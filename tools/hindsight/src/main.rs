@@ -40,7 +40,7 @@ enum Command {
 /// Chain-specific configuration beyond the RPC endpoint and address book belongs here too.
 #[derive(Args)]
 pub(crate) struct ChainArgs {
-    /// Chain to operate on — selects the decoder's address book (only ethereum is built in)
+    /// Chain to operate on — selects the decoder's address book
     #[arg(long = "chain", value_name = "CHAIN", default_value = "ethereum")]
     pub name: String,
 

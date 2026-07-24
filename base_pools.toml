@@ -1,0 +1,46 @@
+# Worker-pools config for running Fynd on Base (chain-id 8453) — pass with
+# `--worker-pools-config base_pools.toml` (e.g. `hindsight monitor --chain base`).
+#
+# Two pools run concurrently; the router keeps the best result by amount_out_net_gas.
+# most_liquid is the cheap single-path baseline; path_frank_wolfe adds split routing that
+# helps larger trades. Both restrict intermediate hops to Base's most-connected tokens, so
+# multi-hop routes can form (the Ethereum-shaped default has no Base connectors and dead-ends
+# most pairs). Counts are approximate Base pool counts and only explain the ordering.
+
+[pools.most_liquid_base]
+algorithm           = "most_liquid"
+num_workers         = 3
+task_queue_capacity = 1000
+max_hops            = 3
+timeout_ms          = 500
+connector_tokens = [
+    "0x4200000000000000000000000000000000000006", # WETH    — 565 pools
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", # USDC    — 259 pools
+    "0xb20a4bd059f5914a2f8b9c18881c637f79efb7df", # ADS     — 104 pools
+    "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", # VIRTUAL —  89 pools
+    "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf", # cbBTC   —  45 pools
+    "0x0000000000000000000000000000000000000000", # ETH     —  38 pools
+    "0x940181a94a35a4569e4529a3cdfb74e38fd98631", # AERO    —  13 pools
+    "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2", # USDT    —  11 pools
+    "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf", # VVV     —  11 pools
+    "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22", # cbETH   —  10 pools
+]
+
+[pools.path_frank_wolfe_base]
+algorithm           = "path_frank_wolfe"
+num_workers         = 3
+task_queue_capacity = 1000
+max_hops            = 3
+timeout_ms          = 1000
+connector_tokens = [
+    "0x4200000000000000000000000000000000000006", # WETH    — 565 pools
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", # USDC    — 259 pools
+    "0xb20a4bd059f5914a2f8b9c18881c637f79efb7df", # ADS     — 104 pools
+    "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", # VIRTUAL —  89 pools
+    "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf", # cbBTC   —  45 pools
+    "0x0000000000000000000000000000000000000000", # ETH     —  38 pools
+    "0x940181a94a35a4569e4529a3cdfb74e38fd98631", # AERO    —  13 pools
+    "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2", # USDT    —  11 pools
+    "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf", # VVV     —  11 pools
+    "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22", # cbETH   —  10 pools
+]
