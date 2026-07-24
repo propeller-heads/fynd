@@ -156,6 +156,17 @@ struct SplitContext<'a, 'g> {
     start: Instant,
 }
 
+/// Output of the shared setup pass: candidate paths ranked by full-amount output, the market
+/// subset they touch, the effective gas price, the best single path (if one fills the order), and
+/// token gas prices for gas-aware ranking.
+struct SetupResult<'a> {
+    ordered: Vec<Path<'a, DepthAndPrice>>,
+    market: MarketState,
+    gas_price: BigUint,
+    best_single: Option<RouteResult>,
+    token_prices: Option<TokenGasPrices>,
+}
+
 impl WaterFillAlgorithm {
     /// Creates a `WaterFillAlgorithm` from an `AlgorithmConfig`.
     pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
@@ -271,7 +282,6 @@ impl WaterFillAlgorithm {
 
     /// Shared setup: enumerate + rank candidates, simulate at full amount, pick the best single
     /// path if any (a path that fails at the full amount is kept as a split-only candidate).
-    #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
         &self,
@@ -281,16 +291,7 @@ impl WaterFillAlgorithm {
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
         start: Instant,
-    ) -> Result<
-        (
-            Vec<Path<'a, DepthAndPrice>>,
-            MarketState,
-            BigUint,
-            Option<RouteResult>,
-            Option<TokenGasPrices>,
-        ),
-        AlgorithmError,
-    > {
+    ) -> Result<SetupResult<'a>, AlgorithmError> {
         let token_prices = if let Some(ref derived) = derived {
             derived
                 .read()
@@ -455,7 +456,7 @@ impl WaterFillAlgorithm {
             elapsed_ms = start.elapsed().as_millis(),
             "water-fill discovery + full-amount ranking"
         );
-        Ok((ordered, market, gas_price, best_single, token_prices))
+        Ok(SetupResult { ordered, market, gas_price, best_single, token_prices })
     }
 }
 
@@ -481,7 +482,7 @@ impl Algorithm for WaterFillAlgorithm {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        let (ordered, market, gas_price, best_single, token_prices) = self
+        let SetupResult { ordered, market, gas_price, best_single, token_prices } = self
             .setup(graph, market, label, derived, order, start)
             .await?;
         let tp = token_prices.as_ref();
