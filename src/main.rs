@@ -160,7 +160,7 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 /// distribution and gets its own 0..=6 buckets.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
-fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
+fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
     const LATENCY_BUCKETS_SECONDS: &[f64] =
         &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     const SOLVER_RESPONSE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -181,6 +181,7 @@ fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()
 
     record_build_info();
 
+    let bind_host = host.to_string();
     tokio::spawn(async move {
         async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
             let metrics = handle.render();
@@ -198,7 +199,7 @@ fn create_metrics_exporter(port: u16, chain: &str) -> tokio::task::JoinHandle<()
                 }),
             )
         })
-        .bind(("0.0.0.0", port))
+        .bind((bind_host.as_str(), port))
         .expect("Failed to bind metrics server")
         .run()
         .await
@@ -348,7 +349,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     info!("Starting Fynd");
 
     #[cfg(feature = "metrics")]
-    let _metrics_task = create_metrics_exporter(args.metrics_port, &args.chain);
+    let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {

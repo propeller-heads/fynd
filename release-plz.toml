@@ -1,0 +1,71 @@
+# fynd publishes to crates.io, so release-plz runs in registry mode (no git_only): it detects
+# versions from the registry and compares per crate. One shared bare tag + one GitHub Release
+# (on `fynd`); crates + npm are published by release.yaml on the release event.
+#
+# Single root CHANGELOG.md: changelogs are disabled for every crate and enabled only on `fynd`,
+# which aggregates the published crates' commits (changelog_include) into one section per
+# release, in the conventional-changelog format. Internal tool crates are release=false: still
+# version-bumped via the shared workspace version, but excluded from changelog/tag/publish.
+[workspace]
+changelog_update = false
+# All crates share the workspace version, so they all resolve to the same bare tag name.
+# Only `fynd` creates it (git_tag_enable below); a second crate creating the same tag in one
+# release run fails with "Reference already exists".
+git_tag_enable = false
+git_tag_name = "{{ version }}"
+git_release_enable = false
+semver_check = false
+publish = false
+pr_labels = ["release"]
+
+[[package]]
+name = "fynd"
+changelog_update = true
+git_tag_enable = true
+git_release_enable = true
+changelog_include = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "fynd-client"]
+
+[[package]]
+name = "fynd-benchmark"
+release = false
+[[package]]
+name = "fynd-tools-common"
+release = false
+[[package]]
+name = "erc20-overrides"
+release = false
+[[package]]
+name = "fynd-swap-cli"
+release = false
+[[package]]
+name = "fynd-gas-audit"
+release = false
+[[package]]
+name = "hindsight"
+release = false
+[[package]]
+name = "record-market"
+release = false
+[[package]]
+name = "fynd-test-fixtures"
+release = false
+
+[changelog]
+header = ""
+body = """
+## [{{ version }}]{% if release_link %}({{ release_link }}){% endif %} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits %}{% if commit.scope %}* **{{ commit.scope }}:** {{ commit.message }} ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))
+{% else %}* {{ commit.message }} ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))
+{% endif %}{% endfor %}{% endfor %}
+
+"""
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance Improvements" },
+  { message = "^revert", group = "<!-- 3 -->Reverts" },
+  { message = ".*", skip = true },
+]

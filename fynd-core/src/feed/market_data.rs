@@ -318,6 +318,9 @@ pub struct MarketState {
     /// Block info for the last update (only updated when protocols reported "Ready" status).
     /// None if no block has been processed yet.
     last_updated: Option<BlockInfo>,
+    /// Number of components per protocol system, maintained incrementally on
+    /// upsert/remove so readers never scan the full component map.
+    pool_counts: HashMap<String, u64>,
 }
 
 impl MarketState {
@@ -331,6 +334,7 @@ impl MarketState {
             gas_price: None,
             protocol_sync_status: HashMap::new(),
             last_updated: None,
+            pool_counts: HashMap::new(),
         }
     }
 
@@ -352,6 +356,19 @@ impl MarketState {
     /// Number of tokens currently tracked.
     pub fn token_count(&self) -> usize {
         self.tokens.len()
+    }
+
+    /// Number of components (pools) per protocol system.
+    ///
+    /// Entries stay present at zero after all of a protocol's pools are
+    /// removed so exported gauges reset instead of freezing at the last value.
+    pub fn pool_counts_by_protocol(&self) -> &HashMap<String, u64> {
+        &self.pool_counts
+    }
+
+    /// Returns the sync status of every protocol system.
+    pub fn protocol_sync_states(&self) -> &HashMap<String, SynchronizerState> {
+        &self.protocol_sync_status
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
@@ -398,10 +415,17 @@ impl MarketState {
 
     /// Inserts or updates a component.
     pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
-        // Store component data in components map
         for component in components {
-            self.components
+            let protocol_system = component.protocol_system.clone();
+            let previous = self
+                .components
                 .insert(component.id.clone(), component);
+            if previous.is_none() {
+                *self
+                    .pool_counts
+                    .entry(protocol_system)
+                    .or_default() += 1;
+            }
         }
     }
 
@@ -427,7 +451,14 @@ impl MarketState {
     /// Removes a component.
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
-            self.components.remove(id);
+            if let Some(component) = self.components.remove(id) {
+                if let Some(count) = self
+                    .pool_counts
+                    .get_mut(&component.protocol_system)
+                {
+                    *count = count.saturating_sub(1);
+                }
+            }
             self.simulation_states.remove(id);
         }
     }
@@ -499,6 +530,7 @@ impl MarketState {
             gas_price: self.gas_price.clone(),
             protocol_sync_status: HashMap::new(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
+            pool_counts: HashMap::new(), // Not needed for simulation
         }
     }
 }
@@ -509,7 +541,51 @@ mod tests {
     use tycho_simulation::tycho_ethereum::gas::GasPrice;
 
     use super::*;
-    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+    use crate::algorithm::test_utils::{
+        component, component_with_protocol, token, MockProtocolSim,
+    };
+
+    #[test]
+    fn pool_counts_by_protocol_tracks_upserts_and_removals() {
+        let mut market = MarketState::new();
+        let pool_tokens = [token(0x0A, "A"), token(0x0B, "B")];
+
+        market.upsert_components([
+            component_with_protocol("pool_1", "uniswap_v2", &pool_tokens),
+            component_with_protocol("pool_2", "uniswap_v2", &pool_tokens),
+            component_with_protocol("pool_3", "uniswap_v3", &pool_tokens),
+        ]);
+        let counts = market.pool_counts_by_protocol();
+        assert_eq!(counts.get("uniswap_v2"), Some(&2));
+        assert_eq!(counts.get("uniswap_v3"), Some(&1));
+
+        // Re-upserting an existing component is an update, not a new pool.
+        market.upsert_components([component_with_protocol("pool_1", "uniswap_v2", &pool_tokens)]);
+        assert_eq!(
+            market
+                .pool_counts_by_protocol()
+                .get("uniswap_v2"),
+            Some(&2)
+        );
+
+        // Removals decrement; the entry stays at zero so exported gauges reset
+        // instead of freezing at the last non-zero value.
+        let removed_ids = ["pool_1".to_string(), "pool_3".to_string()];
+        market.remove_components(removed_ids.iter());
+        let counts = market.pool_counts_by_protocol();
+        assert_eq!(counts.get("uniswap_v2"), Some(&1));
+        assert_eq!(counts.get("uniswap_v3"), Some(&0));
+
+        // Removing an unknown id leaves counts untouched.
+        let unknown_ids = ["unknown_pool".to_string()];
+        market.remove_components(unknown_ids.iter());
+        assert_eq!(
+            market
+                .pool_counts_by_protocol()
+                .get("uniswap_v2"),
+            Some(&1)
+        );
+    }
 
     #[test]
     fn extract_subset_filters_by_component_ids() {

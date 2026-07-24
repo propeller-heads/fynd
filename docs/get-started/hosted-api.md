@@ -25,7 +25,7 @@ layout:
 **Beta.** The hosted Fynd API is in beta. Limits, supported chains, and the surface area may change as we scale the service. There is no SLA during beta — status and incidents are posted in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl). For production workloads with strict uptime or throughput requirements, see [Scaling beyond the hosted tiers](#scaling-beyond-the-hosted-tiers).
 {% endhint %}
 
-Fynd is an [open-source](https://github.com/propeller-heads/fynd) DEX aggregator: you send it a token pair and amount, it finds the best on-chain route across the liquidity venues it tracks, and returns the expected output plus a ready-to-submit transaction. You can run Fynd on your own hardware (see [Self-host quickstart](../quickstart/README.md)) — **or you can use our hosted API and skip the setup entirely.** This page covers the hosted path: get an API key, send a request, get a route.
+Fynd is an [open-source](https://github.com/propeller-heads/fynd) DEX aggregator: you send it a token pair and amount, it finds the best on-chain route across the liquidity venues it tracks, and returns the expected output plus a ready-to-submit transaction. You can run Fynd on your own hardware (see [Self-host quickstart](quickstart/README.md)) — **or you can use our hosted API and skip the setup entirely.** This page covers the hosted path: get an API key, send a request, get a route.
 
 The hosted API runs the **latest released Fynd** with **routing settings tuned per chain by the Fynd team**, so you always track the newest routing improvements without managing releases or worker pools yourself.
 
@@ -42,7 +42,7 @@ The hosted API runs the **latest released Fynd** with **routing settings tuned p
 
 ## Get an API key
 
-1. Open [@FyndPortalBot](https://t.me/fynd_portal_bot) on Telegram.
+1. Open [@fynd_portal_bot](https://t.me/fynd_portal_bot) on Telegram.
 2. Run `/start` and follow the prompts. You'll receive a **Fynd API key** (also valid for the [Tycho](https://docs.propellerheads.xyz/tycho) liquidity indexer that feeds Fynd).
 3. Save the key immediately. The bot won't show it again, and you get **3 self-service revocations** (rotations of your key) before you need to contact support in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl).
 
@@ -102,12 +102,15 @@ curl -H "Authorization: $FYND_API_KEY" \
 {
   "chain_id": 1,
   "router_address": "0xda892c989d07a18b5dd3f392d949f00df15c5736",
-  "permit2_address": "0x000000000022d473030f116ddee9f6b43ac78ba3"
+  "permit2_address": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+  "version": "0.97.0"
 }
 ```
 
+* `chain_id` — the EVM chain ID this backend serves (e.g. `1` for Ethereum). Corresponds to the `chain` path segment in the request URL.
 * `router_address` — the on-chain contract that executes swaps. Submit your encoded swap transaction to this address (it's already set as `transaction.to` in an encoded quote — you don't set it yourself). It is **chain-specific**: each chain returns its own router address.
 * `permit2_address` — the [Permit2](https://uniswap.org/blog/permit2) contract address. Used for permit-based token approvals (see [Approvals](#approvals) below).
+* `version` — the Fynd binary version serving this chain (the example value is illustrative). Hosted backends are updated on each production release, so the running version may lag the newest published Fynd release.
 
 ### 3. Request a quote
 
@@ -190,7 +193,9 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
 
 | Field | Meaning |
 | --- | --- |
-| `solve_time_ms` | Server-side time spent finding the route (excludes network/proxy overhead). |
+| `solve_time_ms` | Server-side time spent finding the route (excludes network/proxy overhead). Top-level, per response. |
+| `total_gas_estimate` | Sum of `gas_estimate` across all orders in the response. Top-level, per response. |
+| `amount_in` | The input amount for this order, in `token_in`'s smallest unit (echoes the requested `amount`). |
 | `amount_out` | Expected output, in the `token_out`'s smallest unit. |
 | `amount_out_net_gas` | `amount_out` minus the gas cost of executing the route, denominated in `token_out`. Use this to compare routes. |
 | `gas_estimate` | Gas units the swap will consume. |
@@ -347,7 +352,7 @@ const client = new FyndClient({
 // 1. Quote with encoding
 const quote = await client.quote({
   order: { tokenIn: WETH, tokenOut: USDC, amount: SELL_AMOUNT, side: 'sell', sender: account.address },
-  options: { encodingOptions: { slippage: '0.005' } },
+  options: { encodingOptions: { slippage: 0.005 } },
 });
 
 // 2. Approve if needed (checks on-chain allowance, skips if sufficient)
@@ -371,7 +376,8 @@ Full example: [`clients/typescript/examples/tutorial/main.ts`](https://github.co
 ```toml
 # Cargo.toml
 [dependencies]
-fynd-client = "0.92"
+# Pin to any recent release; check crates.io for the latest: https://crates.io/crates/fynd-client
+fynd-client = "0.97"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 alloy = { version = "0.3", features = ["full"] }
@@ -421,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
             ),
             QuoteOptions::default()
                 .with_timeout_ms(5_000)
-                .with_encoding_options(EncodingOptions::new("0.005")),
+                .with_encoding_options(EncodingOptions::new(0.005)),
         ))
         .await?;
 
@@ -482,7 +488,7 @@ Your API key belongs to a **plan** that sets your rate limit. Limits are enforce
 
 | Plan | Requests / second | Burst | How to get |
 | --- | ---: | ---: | --- |
-| **fynd-basic** (default) | 10 | 2× (20) | Self-service via [@FyndPortalBot](https://t.me/fynd_portal_bot) |
+| **fynd-basic** (default) | 10 | 2× (20) | Self-service via [@fynd_portal_bot](https://t.me/fynd_portal_bot) |
 | **basic** (tycho) | 10 | 2× (20) | Request via [@tanay_j](https://t.me/tanay_j) or [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl) |
 | **scale** | 25 | 2× (50) | Request via [@tanay_j](https://t.me/tanay_j) or [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl) |
 
@@ -490,13 +496,13 @@ Your API key belongs to a **plan** that sets your rate limit. Limits are enforce
 **Burst** is the bucket capacity = `rps × burst_multiplier`. A `fynd-basic` key can briefly sustain 20 requests in one second before being throttled back to the steady-state 10 rps. **All requests count against the bucket** — `/health`, `/info`, and `/quote` alike. The bucket is **per key, shared across all chains**.
 {% endhint %}
 
-When you exceed the limit you get `429 Too Many Requests` with a `Retry-After` header (seconds). The hosted API is **REST-only** today (no WebSocket); if you need streaming quotes, run your own stack (see below) or talk to us about a dedicated instance.
+When you exceed the limit you get `429 Too Many Requests` with a `Retry-After` header (seconds). The hosted API is **REST-only** today (no WebSocket); for higher throughput, run your own stack (see below) or talk to us about a dedicated instance.
 
-**Pricing:** The hosted API is **free to use during beta** — no platform fee on top of Fynd's standard 0.1 bps router fee on executed swaps (see [Fynd Fees](../guides/router-fees.md)). Quotes are always free. `scale` and `transition` are allocated case-by-case — reach out to discuss volume and needs.
+**Pricing:** The hosted API is **free to use during beta** — no platform fee on top of Fynd's standard 0.1 bps router fee on executed swaps (see [Fynd Fees](../guides/router-fees.md)). Quotes are always free. `scale` is allocated case-by-case — reach out to discuss volume and needs.
 
 ### Checking your plan
 
-The gateway returns your plan in the `X-User-Plan` response header on every authenticated request (use `curl -i` to see it). If you're unsure which plan your key is on, message [@FyndPortalBot](https://t.me/fynd_portal_bot) or ask in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl).
+The gateway returns your plan in the `X-User-Plan` response header on every authenticated request (use `curl -i` to see it). If you're unsure which plan your key is on, message [@fynd_portal_bot](https://t.me/fynd_portal_bot) or ask in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl).
 
 ## Errors
 
@@ -519,9 +525,8 @@ A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — i
 
 The hosted API is a shared, beta-rate-limited service designed for getting started and for moderate-volume integrations. If you need:
 
-* **Higher or unlimited rate limits** — run Fynd on your own hardware. The [self-host quickstart](../quickstart/README.md) has you serving in minutes, and there's no rate limiter in front of your own instance.
+* **Higher or unlimited rate limits** — run Fynd on your own hardware. The [self-host quickstart](quickstart/README.md) has you serving in minutes, and there's no rate limiter in front of your own instance.
 * **Custom algorithms, custom protocol sets, or RFQ integration** — self-host and pass `--protocols` / your algorithm config. See [Server Configuration](../guides/server-configuration.md) and [Custom Algorithm](../guides/custom-algorithm.md).
-* **Streaming quotes over WebSocket** — self-host and use `/v1/ws`; the hosted API is REST-only today.
 * **A dedicated hosted instance with guaranteed capacity and SLA** — reach out to our business team. Message [@tanay_j](https://t.me/tanay_j) on Telegram, or email us at [Propeller Heads](https://www.propellerheads.xyz).
 
 What the hosted API buys you (vs. self-hosting): no infrastructure to run, no Tycho indexer endpoint to source, no release tracking, and per-chain routing tuned by the Fynd team. Self-hosting gives you ~1,000 RPS on commodity hardware (see [Performance](../reference/benchmark-results.md)) and full control — pick the tradeoff that fits your scale.
@@ -549,4 +554,4 @@ No — the hosted API uses Propeller Heads' Tycho endpoints. To use your own, se
 * [Encoding Options](../guides/encoding-options.md) — turn a quote into a submittable transaction (Permit2, transfer types, price guard)
 * [Fynd Fees](../guides/router-fees.md) — fees Fynd charges on executed swaps
 * [Charge Fees on your Swaps](../guides/client-fees.md) — add an integrator fee
-* [Self-host Fynd](../quickstart/README.md) — when you're ready to outgrow the hosted tiers
+* [Self-host Fynd](quickstart/README.md) — when you're ready to outgrow the hosted tiers

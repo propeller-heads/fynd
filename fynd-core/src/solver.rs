@@ -35,6 +35,7 @@ use crate::{
         events::{MarketEvent, MarketEventHandler},
         gas::GasPriceFetcher,
         market_data::MarketData,
+        metrics_sampler::MetricsSampler,
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -67,6 +68,8 @@ pub mod defaults {
     pub const TVL_BUFFER_RATIO: f64 = 1.1;
     /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+    /// How often per-protocol market metrics are sampled and exported.
+    pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
@@ -841,6 +844,9 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
         let router_fee_handle = match c.router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
@@ -859,6 +865,7 @@ impl FyndBuilder {
             router_fees: c.router_fees,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx: c.computation_shutdown_tx,
@@ -901,6 +908,9 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
         let router_fee_handle = match c.router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
@@ -925,6 +935,7 @@ impl FyndBuilder {
                 router_fees: c.router_fees,
                 feed_handle,
                 gas_price_handle,
+                metrics_sampler_handle,
                 router_fee_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
@@ -971,6 +982,9 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
         let router_fee_handle = match c.router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
@@ -995,6 +1009,7 @@ impl FyndBuilder {
                 router_fees: c.router_fees,
                 feed_handle,
                 gas_price_handle,
+                metrics_sampler_handle,
                 router_fee_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
@@ -1016,6 +1031,7 @@ pub struct Solver {
     router_fees: SharedRouterFees,
     feed_handle: JoinHandle<()>,
     gas_price_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
     router_fee_handle: JoinHandle<()>,
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -1256,10 +1272,11 @@ impl Solver {
             tracing::warn!("no receivers for initial MarketUpdated broadcast");
         }
 
-        // Dummy handles for feed/gas/router-fees (not running in replay mode). The market
+        // Dummy handles for feed/gas/metrics/router-fees (not running in replay mode). The market
         // event channel stays alive through the `market_event_tx` field on `Solver`.
         let feed_handle = tokio::spawn(futures::future::pending::<()>());
         let gas_price_handle = tokio::spawn(async { /* no-op */ });
+        let metrics_sampler_handle = tokio::spawn(async { /* no-op */ });
         let router_fee_handle = tokio::spawn(async { /* no-op */ });
 
         Ok(Solver {
@@ -1270,6 +1287,7 @@ impl Solver {
             router_fees,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx,
@@ -1287,6 +1305,7 @@ impl Solver {
         }
         self.feed_handle.abort();
         self.gas_price_handle.abort();
+        self.metrics_sampler_handle.abort();
         self.router_fee_handle.abort();
     }
 
@@ -1300,6 +1319,7 @@ impl Solver {
             router_fees: self.router_fees,
             feed_handle: self.feed_handle,
             gas_price_handle: self.gas_price_handle,
+            metrics_sampler_handle: self.metrics_sampler_handle,
             router_fee_handle: self.router_fee_handle,
             computation_handle: self.computation_handle,
             computation_shutdown_tx: self.computation_shutdown_tx,
@@ -1327,6 +1347,8 @@ pub struct SolverParts {
     feed_handle: JoinHandle<()>,
     /// Background task polling the RPC node for gas prices.
     gas_price_handle: JoinHandle<()>,
+    /// Background task exporting per-protocol market metrics.
+    metrics_sampler_handle: JoinHandle<()>,
     /// Background task refreshing router fees from the on-chain FeeCalculator.
     router_fee_handle: JoinHandle<()>,
     /// Background task running the computation manager.
@@ -1388,6 +1410,7 @@ impl SolverParts {
         JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
+        JoinHandle<()>,
         broadcast::Sender<()>,
     ) {
         (
@@ -1397,6 +1420,7 @@ impl SolverParts {
             self.derived_data,
             self.feed_handle,
             self.gas_price_handle,
+            self.metrics_sampler_handle,
             self.router_fee_handle,
             self.computation_handle,
             self.computation_shutdown_tx,
