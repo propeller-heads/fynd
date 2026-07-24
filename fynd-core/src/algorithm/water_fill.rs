@@ -144,6 +144,18 @@ struct StepResult {
     new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
+/// Shared inputs threaded through every split-allocation pass: the ranked candidate paths, the
+/// market snapshot, gas pricing, and the order under a single solve clock. Bundled so the
+/// allocation methods take one context instead of the same six references each.
+struct SplitContext<'a, 'g> {
+    ordered: &'a [Path<'g, DepthAndPrice>],
+    market: &'a MarketState,
+    gas_price: &'a BigUint,
+    token_prices: Option<&'a TokenGasPrices>,
+    order: &'a Order,
+    start: Instant,
+}
+
 impl WaterFillAlgorithm {
     /// Creates a `WaterFillAlgorithm` from an `AlgorithmConfig`.
     pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
@@ -474,6 +486,14 @@ impl Algorithm for WaterFillAlgorithm {
             .await?;
         let tp = token_prices.as_ref();
         let token_out = order.token_out();
+        let ctx = SplitContext {
+            ordered: &ordered,
+            market: &market,
+            gas_price: &gas_price,
+            token_prices: tp,
+            order,
+            start,
+        };
 
         // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();
@@ -481,48 +501,24 @@ impl Algorithm for WaterFillAlgorithm {
         // and the refined split, so run it once. It is cheap and always finishes, so a tight
         // timeout cannot cut it off while leaving the single path — a winning split is never lost
         // to the clock.
-        let disjoint = Self::select_disjoint(&ordered, self.max_paths);
+        let disjoint = Self::select_disjoint(ctx.ordered, self.max_paths);
         let coarse = (disjoint.len() >= 2)
-            .then(|| {
-                self.disjoint_waterfill(
-                    &ordered,
-                    &disjoint,
-                    &market,
-                    &gas_price,
-                    tp,
-                    order,
-                    start,
-                    COARSE_CHUNKS,
-                    true,
-                )
-            })
+            .then(|| self.disjoint_waterfill(&ctx, &disjoint, COARSE_CHUNKS, true))
             .flatten();
         if let Some(coarse) = coarse.as_deref() {
             // The 20-chunk floor split: exactly the coarse allocation.
-            if let Some(c) = self.build_disjoint_legs(&ordered, &disjoint, coarse, &market, order) {
+            if let Some(c) = self.build_disjoint_legs(&ctx, &disjoint, coarse) {
                 candidates.push(c);
             }
             // Finer allocation over the same active set (a bonus; a timeout may cut it off, and
             // then the floor stands).
-            if let Some(c) = self.disjoint_refine(
-                &ordered,
-                &disjoint,
-                coarse,
-                &market,
-                &gas_price,
-                tp,
-                order,
-                start,
-                FINE_CHUNKS,
-            ) {
+            if let Some(c) = self.disjoint_refine(&ctx, &disjoint, coarse, FINE_CHUNKS) {
                 candidates.push(c);
             }
         }
         // Fill-and-spill: a split that lets paths share a pool and branch at an intermediate token
         // (a tree route), which the pool-disjoint splits cannot express.
-        if let Some(c) =
-            self.fillspill_alloc(&ordered, &market, &gas_price, tp, order, start, FINE_CHUNKS)
-        {
+        if let Some(c) = self.fillspill_alloc(&ctx, FINE_CHUNKS) {
             candidates.push(c);
         }
 
@@ -576,17 +572,11 @@ impl WaterFillAlgorithm {
     /// amount), re-allocates over that set on a fine grid with the gate off (gas already
     /// justified), then runs the exchange-refinement pass. If a tight timeout cuts off either pass
     /// this returns `None` and the caller falls back to the 20-chunk floor candidate.
-    #[allow(clippy::too_many_arguments)]
     fn disjoint_refine(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         disjoint: &[usize],
         coarse: &[BigUint],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
         fine_chunks: usize,
     ) -> Option<SplitCandidate> {
         // The active set is the coarse-gated paths that were allocated a nonzero amount.
@@ -603,33 +593,13 @@ impl WaterFillAlgorithm {
 
         // Fine water-fill over the fixed active set, no gate (gas already justified).
         let chunks = fine_chunks.max(COARSE_CHUNKS);
-        let fine = self.disjoint_waterfill(
-            ordered,
-            &active,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            chunks,
-            false,
-        )?;
+        let fine = self.disjoint_waterfill(ctx, &active, chunks, false)?;
 
         // Exchange refinement. The fine water-fill quantizes each path to a whole chunk, so it can
         // sit up to one chunk off the equal-marginal optimum. Nudge flow between paths at sub-chunk
         // resolution, accepting only strictly-improving moves (never-lose).
-        let refined = self.disjoint_exchange(
-            ordered,
-            &active,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            chunks,
-            fine,
-        );
-        self.build_disjoint_legs(ordered, &active, &refined, market, order)
+        let refined = self.disjoint_exchange(ctx, &active, chunks, fine);
+        self.build_disjoint_legs(ctx, &active, &refined)
     }
 
     /// Net output (gross output minus gas cost in output-token terms) of `path` simulated in
@@ -638,22 +608,23 @@ impl WaterFillAlgorithm {
     /// since it is no longer swapped, no gas — so dropping a donor credits its saved gas
     /// automatically.
     fn path_net(
+        ctx: &SplitContext,
         path: &Path<DepthAndPrice>,
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
         amount: &BigUint,
     ) -> Option<BigInt> {
         if amount.is_zero() {
             return Some(BigInt::zero());
         }
         let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-        let step = Self::simulate_step(path, market, &empty, amount.clone())?;
-        let activation =
-            Self::gas_cost_in_token(&step.gas, gas_price, token_prices, order.token_out())
-                .map(BigInt::from)
-                .unwrap_or_else(BigInt::zero);
+        let step = Self::simulate_step(path, ctx.market, &empty, amount.clone())?;
+        let activation = Self::gas_cost_in_token(
+            &step.gas,
+            ctx.gas_price,
+            ctx.token_prices,
+            ctx.order.token_out(),
+        )
+        .map(BigInt::from)
+        .unwrap_or_else(BigInt::zero);
         Some(BigInt::from(step.amount_out) - activation)
     }
 
@@ -665,16 +636,10 @@ impl WaterFillAlgorithm {
     /// so a trial re-simulates only the two paths it touches (unchanged paths keep their cached
     /// net). Only strictly-improving moves are accepted, so the result never scores below the split
     /// it started from.
-    #[allow(clippy::too_many_arguments)]
     fn disjoint_exchange(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         active: &[usize],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
         fine_chunks: usize,
         alloc: Vec<BigUint>,
     ) -> Vec<BigUint> {
@@ -682,7 +647,7 @@ impl WaterFillAlgorithm {
         if k < 2 {
             return alloc;
         }
-        let amount_in = order.amount().clone();
+        let amount_in = ctx.order.amount().clone();
         let fine_chunks = fine_chunks.max(1);
         let mut delta = &amount_in / fine_chunks;
         let min_delta = &amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR);
@@ -696,9 +661,7 @@ impl WaterFillAlgorithm {
         // re-simulates the two paths it moves flow between, not the whole active set.
         let mut net_cache: Vec<BigInt> = Vec::with_capacity(k);
         for (i, &path_idx) in active.iter().enumerate() {
-            let Some(net) =
-                Self::path_net(&ordered[path_idx], market, gas_price, token_prices, order, &cum[i])
-            else {
+            let Some(net) = Self::path_net(ctx, &ctx.ordered[path_idx], &cum[i]) else {
                 // The starting split does not simulate cleanly; refining it is unsafe, so keep it.
                 return cum;
             };
@@ -707,7 +670,7 @@ impl WaterFillAlgorithm {
 
         let mut sims = 0usize;
         while delta >= min_delta && !delta.is_zero() {
-            if start.elapsed().as_millis() as u64 > timeout_ms || sims >= EXCHANGE_MAX_SIMS {
+            if ctx.start.elapsed().as_millis() as u64 > timeout_ms || sims >= EXCHANGE_MAX_SIMS {
                 break;
             }
 
@@ -720,14 +683,8 @@ impl WaterFillAlgorithm {
                     continue;
                 }
                 let donor_amt = &cum[donor] - &delta;
-                let Some(donor_net) = Self::path_net(
-                    &ordered[active[donor]],
-                    market,
-                    gas_price,
-                    token_prices,
-                    order,
-                    &donor_amt,
-                ) else {
+                let Some(donor_net) = Self::path_net(ctx, &ctx.ordered[active[donor]], &donor_amt)
+                else {
                     continue;
                 };
                 sims += 1;
@@ -736,14 +693,9 @@ impl WaterFillAlgorithm {
                         continue;
                     }
                     let recip_amt = &cum[recipient] + &delta;
-                    let Some(recip_net) = Self::path_net(
-                        &ordered[active[recipient]],
-                        market,
-                        gas_price,
-                        token_prices,
-                        order,
-                        &recip_amt,
-                    ) else {
+                    let Some(recip_net) =
+                        Self::path_net(ctx, &ctx.ordered[active[recipient]], &recip_amt)
+                    else {
                         continue;
                     };
                     sims += 1;
@@ -831,12 +783,11 @@ impl WaterFillAlgorithm {
     /// order, tycho-execution remainder-split convention, route token map) and derives the
     /// candidate's gross output and gas from the assembled route.
     fn candidate_from_allocations(
+        ctx: &SplitContext,
         allocations: &[PathAllocation],
-        market: &MarketState,
-        order: &Order,
     ) -> Option<SplitCandidate> {
-        let route = build_split_route(allocations, market, order).ok()?;
-        let token_out = order.token_out();
+        let route = build_split_route(allocations, ctx.market, ctx.order).ok()?;
+        let token_out = ctx.order.token_out();
         let gross = route
             .swaps()
             .iter()
@@ -854,13 +805,11 @@ impl WaterFillAlgorithm {
     /// simulation.
     fn build_disjoint_legs(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         subset: &[usize],
         alloc: &[BigUint],
-        market: &MarketState,
-        order: &Order,
     ) -> Option<SplitCandidate> {
-        let amount_in = order.amount().clone();
+        let amount_in = ctx.order.amount().clone();
         let mut allocations = Vec::new();
         for (i, &path_idx) in subset.iter().enumerate() {
             if alloc[i].is_zero() {
@@ -870,8 +819,8 @@ impl WaterFillAlgorithm {
             // must still see its own first swap.
             let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
             let allocation = Self::allocation_commit(
-                &ordered[path_idx],
-                market,
+                &ctx.ordered[path_idx],
+                ctx.market,
                 &mut overrides,
                 alloc[i].clone(),
                 ratio(&alloc[i], &amount_in),
@@ -881,26 +830,20 @@ impl WaterFillAlgorithm {
         if allocations.is_empty() {
             return None;
         }
-        Self::candidate_from_allocations(&allocations, market, order)
+        Self::candidate_from_allocations(ctx, &allocations)
     }
 
     /// Incremental water-fill over a set of pool-disjoint paths. Returns the amount allocated to
     /// each path in `subset` order. With `gate`, a path only activates when its first chunk covers
     /// its gas; without it, every path is eligible (used once the active set is fixed).
-    #[allow(clippy::too_many_arguments)]
     fn disjoint_waterfill(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         subset: &[usize],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
         num_chunks: usize,
         gate: bool,
     ) -> Option<Vec<BigUint>> {
-        let amount_in = order.amount().clone();
+        let amount_in = ctx.order.amount().clone();
         let num_chunks = num_chunks.max(1);
         let base_chunk = &amount_in / num_chunks;
         if base_chunk.is_zero() {
@@ -916,16 +859,19 @@ impl WaterFillAlgorithm {
         let mut activated: Vec<bool> = vec![!gate; k];
 
         for chunk_idx in 0..num_chunks {
-            if start.elapsed().as_millis() as u64 > timeout_ms {
+            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
 
             let mut best: Option<(usize, BigInt, StepResult)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
-                let Some(step) =
-                    Self::simulate_step(&ordered[path_idx], market, &committed[i], chunk.clone())
-                else {
+                let Some(step) = Self::simulate_step(
+                    &ctx.ordered[path_idx],
+                    ctx.market,
+                    &committed[i],
+                    chunk.clone(),
+                ) else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
@@ -934,9 +880,9 @@ impl WaterFillAlgorithm {
                 } else {
                     let activation = Self::gas_cost_in_token(
                         &step.gas,
-                        gas_price,
-                        token_prices,
-                        order.token_out(),
+                        ctx.gas_price,
+                        ctx.token_prices,
+                        ctx.order.token_out(),
                     )
                     .map(BigInt::from)
                     .unwrap_or_else(BigInt::zero);
@@ -966,38 +912,36 @@ impl WaterFillAlgorithm {
     /// Selects fill-and-spill candidates: the top full-amount paths plus the best first-chunk
     /// marginal probes. The probe is what makes intermediate-token splits (tree routes) reachable:
     /// the extra path often ranks poorly at full size but wins on the margin.
-    fn select_shared_candidates(
-        &self,
-        ordered: &[Path<DepthAndPrice>],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
-    ) -> Vec<usize> {
-        let mut candidates: Vec<usize> = (0..ordered.len().min(SHARED_FULL_PATHS)).collect();
-        let first_chunk = order.amount() / COARSE_CHUNKS;
+    fn select_shared_candidates(&self, ctx: &SplitContext) -> Vec<usize> {
+        let mut candidates: Vec<usize> = (0..ctx.ordered.len().min(SHARED_FULL_PATHS)).collect();
+        let first_chunk = ctx.order.amount() / COARSE_CHUNKS;
         if first_chunk.is_zero() {
             return candidates;
         }
         let timeout_ms = self.timeout.as_millis() as u64;
         let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut marginal: Vec<(usize, BigInt)> = Vec::new();
-        for (idx, path) in ordered
+        for (idx, path) in ctx
+            .ordered
             .iter()
             .enumerate()
             .take(SHARED_MARGIN_PROBE_PATHS)
         {
-            if start.elapsed().as_millis() as u64 > timeout_ms {
+            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
-            let Some(step) = Self::simulate_step(path, market, &empty, first_chunk.clone()) else {
+            let Some(step) = Self::simulate_step(path, ctx.market, &empty, first_chunk.clone())
+            else {
                 continue;
             };
-            let activation =
-                Self::gas_cost_in_token(&step.gas, gas_price, token_prices, order.token_out())
-                    .map(BigInt::from)
-                    .unwrap_or_else(BigInt::zero);
+            let activation = Self::gas_cost_in_token(
+                &step.gas,
+                ctx.gas_price,
+                ctx.token_prices,
+                ctx.order.token_out(),
+            )
+            .map(BigInt::from)
+            .unwrap_or_else(BigInt::zero);
             marginal.push((idx, BigInt::from(step.amount_out) - activation));
         }
         marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
@@ -1019,35 +963,14 @@ impl WaterFillAlgorithm {
     }
 
     /// Coarse set-selection then fine allocation with shared-pool fill-and-spill.
-    #[allow(clippy::too_many_arguments)]
-    fn fillspill_alloc(
-        &self,
-        ordered: &[Path<DepthAndPrice>],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
-        fine_chunks: usize,
-    ) -> Option<SplitCandidate> {
-        let cand =
-            self.select_shared_candidates(ordered, market, gas_price, token_prices, order, start);
+    fn fillspill_alloc(&self, ctx: &SplitContext, fine_chunks: usize) -> Option<SplitCandidate> {
+        let cand = self.select_shared_candidates(ctx);
         if cand.len() < 2 {
             return None;
         }
 
         // Phase 1: coarse gated pass to choose the active candidate set.
-        let (coarse_counts, _) = self.fillspill_waterfill(
-            ordered,
-            &cand,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            COARSE_CHUNKS,
-            true,
-        )?;
+        let (coarse_counts, _) = self.fillspill_waterfill(ctx, &cand, COARSE_CHUNKS, true)?;
         let active: Vec<usize> = cand
             .iter()
             .copied()
@@ -1061,40 +984,25 @@ impl WaterFillAlgorithm {
 
         // Phase 2: fine ungated pass over the active set, with the commit schedule for replay.
         let chunks = fine_chunks.max(COARSE_CHUNKS);
-        let (_, schedule) = self.fillspill_waterfill(
-            ordered,
-            &active,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            chunks,
-            false,
-        )?;
+        let (_, schedule) = self.fillspill_waterfill(ctx, &active, chunks, false)?;
         if schedule.is_empty() {
             return None;
         }
 
-        self.build_fillspill_route(ordered, &active, market, &schedule, order)
+        self.build_fillspill_route(ctx, &active, &schedule)
     }
 
     /// Incremental fill-and-spill water-fill over a single shared overlay. Returns the chunk count
     /// each candidate received and the ordered commit schedule of `(active_index, chunk_amount)`.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     fn fillspill_waterfill(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         subset: &[usize],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
         num_chunks: usize,
         gate: bool,
     ) -> Option<(Vec<usize>, Vec<(usize, BigUint)>)> {
-        let amount_in = order.amount().clone();
+        let amount_in = ctx.order.amount().clone();
         let num_chunks = num_chunks.max(1);
         let base_chunk = &amount_in / num_chunks;
         if base_chunk.is_zero() {
@@ -1110,7 +1018,7 @@ impl WaterFillAlgorithm {
         let mut schedule: Vec<(usize, BigUint)> = Vec::with_capacity(num_chunks);
 
         for chunk_idx in 0..num_chunks {
-            if start.elapsed().as_millis() as u64 > timeout_ms {
+            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
@@ -1120,9 +1028,12 @@ impl WaterFillAlgorithm {
                 if !activated[i] && active_count >= self.max_paths {
                     continue;
                 }
-                let Some(step) =
-                    Self::simulate_step(&ordered[path_idx], market, &overlay, chunk.clone())
-                else {
+                let Some(step) = Self::simulate_step(
+                    &ctx.ordered[path_idx],
+                    ctx.market,
+                    &overlay,
+                    chunk.clone(),
+                ) else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
@@ -1131,9 +1042,9 @@ impl WaterFillAlgorithm {
                 } else {
                     let activation = Self::gas_cost_in_token(
                         &step.gas,
-                        gas_price,
-                        token_prices,
-                        order.token_out(),
+                        ctx.gas_price,
+                        ctx.token_prices,
+                        ctx.order.token_out(),
                     )
                     .map(BigInt::from)
                     .unwrap_or_else(BigInt::zero);
@@ -1169,13 +1080,11 @@ impl WaterFillAlgorithm {
     /// same execution model the router applies on-chain.
     fn build_fillspill_route(
         &self,
-        ordered: &[Path<DepthAndPrice>],
+        ctx: &SplitContext,
         active: &[usize],
-        market: &MarketState,
         schedule: &[(usize, BigUint)],
-        order: &Order,
     ) -> Option<SplitCandidate> {
-        let amount_in = order.amount().clone();
+        let amount_in = ctx.order.amount().clone();
         let mut cand_in: Vec<BigUint> = vec![BigUint::zero(); active.len()];
         for (i, chunk) in schedule {
             cand_in[*i] += chunk;
@@ -1192,15 +1101,15 @@ impl WaterFillAlgorithm {
         let mut allocations = Vec::new();
         for i in execution_order {
             let allocation = Self::allocation_commit(
-                &ordered[active[i]],
-                market,
+                &ctx.ordered[active[i]],
+                ctx.market,
                 &mut overrides,
                 cand_in[i].clone(),
                 ratio(&cand_in[i], &amount_in),
             )?;
             allocations.push(allocation);
         }
-        Self::candidate_from_allocations(&allocations, market, order)
+        Self::candidate_from_allocations(ctx, &allocations)
     }
 }
 
