@@ -225,24 +225,29 @@ impl WaterFillAlgorithm {
         Some(total_gas * gas_price_wei * &price.numerator / &price.denominator)
     }
 
-    /// Greedily selects pool-disjoint path indices from `ranked` (best first), up to `max_paths`.
+    /// Picks up to `max_paths` paths that share no pool, so their outputs can be summed without
+    /// re-simulating — two paths through the same pool compete for its liquidity, so their separate
+    /// outputs would not add up.
+    ///
+    /// Walks `ranked` best first and keeps a path only if none of its pools are already used by a
+    /// kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
     fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
-        let mut used: HashSet<&ComponentId> = HashSet::new();
+        let mut visited_pools: HashSet<&ComponentId> = HashSet::new();
         let mut selected = Vec::new();
         for (idx, path) in ranked.iter().enumerate() {
-            let components: Vec<&ComponentId> = path
+            let path_pools: Vec<&ComponentId> = path
                 .edge_iter()
                 .iter()
                 .map(|e| &e.component_id)
                 .collect();
-            if components
+            if path_pools
                 .iter()
-                .any(|c| used.contains(*c))
+                .any(|c| visited_pools.contains(*c))
             {
                 continue;
             }
-            for c in components {
-                used.insert(c);
+            for c in path_pools {
+                visited_pools.insert(c);
             }
             selected.push(idx);
             if selected.len() >= max_paths {
