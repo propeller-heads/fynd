@@ -347,16 +347,24 @@ impl WaterFillAlgorithm {
                     timeout_ms,
                 },
             );
-            if let Ok((bounded_paths, _)) = bounded {
-                let mut keys: HashSet<Vec<ComponentId>> = paths.iter().map(path_key).collect();
-                let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
-                for path in bounded_paths {
-                    if keys.insert(path_key(&path)) {
-                        union.push(path);
+            match bounded {
+                Ok((bounded_paths, _)) => {
+                    let mut keys: HashSet<Vec<ComponentId>> = paths.iter().map(path_key).collect();
+                    let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
+                    for path in bounded_paths {
+                        if keys.insert(path_key(&path)) {
+                            union.push(path);
+                        }
                     }
+                    union.append(&mut paths);
+                    paths = union;
                 }
-                union.append(&mut paths);
-                paths = union;
+                // Not fatal — the pre-ranked exhaustive set already guarantees a route — but log it
+                // so a misconfiguration or systematic discovery failure is visible rather than
+                // silently narrowing the candidate set.
+                Err(e) => {
+                    debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
+                }
             }
             let component_ids: HashSet<ComponentId> = paths
                 .iter()
