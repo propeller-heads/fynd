@@ -440,6 +440,19 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 pub fn setup_market_weighted(
     pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
 ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+    setup_market_weighted_boxed(
+        pools
+            .into_iter()
+            .map(|(id, a, b, sim)| (id, a, b, Box::new(sim) as Box<dyn ProtocolSim>))
+            .collect(),
+    )
+}
+
+/// Like [`setup_market_weighted`] but accepts any boxed [`ProtocolSim`], for tests that need a
+/// non-`MockProtocolSim` pool (e.g. a constant-product pool that reverts past its reserves).
+pub fn setup_market_weighted_boxed(
+    pools: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = MarketState::new();
     let mut component_weights = HashMap::new();
 
@@ -455,12 +468,14 @@ pub fn setup_market_weighted(
     for (pool_id, token_in, token_out, state) in pools {
         let tokens = vec![token_in.clone(), token_out.clone()];
         let comp = component(pool_id, &tokens);
-        let weight_to = DepthAndPrice::from_protocol_sim(&state, token_in, token_out).unwrap();
-        let weight_from = DepthAndPrice::from_protocol_sim(&state, token_out, token_in).unwrap();
+        let weight_to =
+            DepthAndPrice::from_protocol_sim(state.as_ref(), token_in, token_out).unwrap();
+        let weight_from =
+            DepthAndPrice::from_protocol_sim(state.as_ref(), token_out, token_in).unwrap();
 
         // Insert component, state, and tokens separately using new API
         market.upsert_components(std::iter::once(comp));
-        market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
+        market.update_states([(pool_id.to_string(), state)]);
         market.upsert_tokens(tokens);
 
         component_weights.insert(pool_id, (token_in, token_out, weight_to, weight_from));

@@ -257,7 +257,8 @@ impl WaterFillAlgorithm {
         selected
     }
 
-    /// Shared setup: enumerate + rank candidates, simulate at full amount, pick best single path.
+    /// Shared setup: enumerate + rank candidates, simulate at full amount, pick the best single
+    /// path if any (a path that fails at the full amount is kept as a split-only candidate).
     #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
@@ -269,7 +270,13 @@ impl WaterFillAlgorithm {
         order: &Order,
         start: Instant,
     ) -> Result<
-        (Vec<Path<'a, DepthAndPrice>>, MarketState, BigUint, RouteResult, Option<TokenGasPrices>),
+        (
+            Vec<Path<'a, DepthAndPrice>>,
+            MarketState,
+            BigUint,
+            Option<RouteResult>,
+            Option<TokenGasPrices>,
+        ),
         AlgorithmError,
     > {
         let token_prices = if let Some(ref derived) = derived {
@@ -392,32 +399,39 @@ impl WaterFillAlgorithm {
             if start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
-            let Ok(result) = MostLiquidAlgorithm::simulate_path(
+            match MostLiquidAlgorithm::simulate_path(
                 path,
                 &market,
                 token_prices.as_ref(),
                 amount_in.clone(),
-            ) else {
-                continue;
-            };
-            let gross = result
-                .route()
-                .swaps()
-                .last()
-                .map(|s| s.amount_out().clone())
-                .unwrap_or_else(BigUint::zero);
-            full_outputs.push((idx, gross));
-            if best_single
-                .as_ref()
-                .map(|b| result.net_amount_out() > b.net_amount_out())
-                .unwrap_or(true)
-            {
-                best_single = Some(result);
+            ) {
+                Ok(result) => {
+                    let gross = result
+                        .route()
+                        .swaps()
+                        .last()
+                        .map(|s| s.amount_out().clone())
+                        .unwrap_or_else(BigUint::zero);
+                    full_outputs.push((idx, gross));
+                    if best_single
+                        .as_ref()
+                        .map(|b| result.net_amount_out() > b.net_amount_out())
+                        .unwrap_or(true)
+                    {
+                        best_single = Some(result);
+                    }
+                }
+                // A path that can't take the whole order (e.g. concentrated liquidity exhausted at
+                // the full amount) may still be worth a fraction in a split, so keep it as a
+                // split-only candidate ranked last (gross 0). It never becomes the single-path
+                // baseline, and the allocation passes skip it at any chunk it still fails.
+                Err(_) => full_outputs.push((idx, BigUint::zero())),
             }
         }
 
-        let best_single = best_single.ok_or(AlgorithmError::InsufficientLiquidity)?;
-
+        // No early exit on a missing single path: a split across thin pools can fill an order that
+        // no single path can, so the caller decides — it only errors when neither a single path nor
+        // a split candidate fills the order.
         full_outputs.sort_by(|(_, a), (_, b)| b.cmp(a));
         let ordered: Vec<Path<DepthAndPrice>> = full_outputs
             .into_iter()
@@ -512,18 +526,25 @@ impl Algorithm for WaterFillAlgorithm {
             candidates.push(c);
         }
 
-        // Return the best candidate if it beats the single path, else the single path.
+        // Pick the best-net result. A split candidate must strictly beat the single-path baseline
+        // to win; with no baseline (no single path fills the order) the best split wins outright.
         let candidate_count = candidates.len();
-        let mut best_net = best_single.net_amount_out().clone();
-        let mut best_candidate: Option<SplitCandidate> = None;
+        let baseline_net = best_single
+            .as_ref()
+            .map(|b| b.net_amount_out().clone());
+        let mut best: Option<(BigInt, SplitCandidate)> = None;
         for cand in candidates {
             let net = cand.net(&gas_price, tp, token_out);
-            if net > best_net {
-                best_net = net;
-                best_candidate = Some(cand);
+            let beats = match (&best, &baseline_net) {
+                (Some((current, _)), _) => net > *current,
+                (None, Some(base)) => net > *base,
+                (None, None) => true,
+            };
+            if beats {
+                best = Some((net, cand));
             }
         }
-        let split_won = best_candidate.is_some();
+        let split_won = best.is_some();
         debug!(
             candidate_count,
             split_won,
@@ -531,9 +552,10 @@ impl Algorithm for WaterFillAlgorithm {
             "water-fill selected {}",
             if split_won { "split candidate" } else { "single path" }
         );
-        match best_candidate {
-            Some(cand) => Ok(RouteResult::new(cand.route, best_net, gas_price)),
-            None => Ok(best_single),
+        match best {
+            Some((net, cand)) => Ok(RouteResult::new(cand.route, net, gas_price)),
+            // No split won: return the single path if there is one, else nothing fills the order.
+            None => best_single.ok_or(AlgorithmError::InsufficientLiquidity),
         }
     }
 
@@ -1587,7 +1609,10 @@ mod tests {
                 evaluate_scenario, optimal_two_pool_output, split_metrics, split_scenarios,
                 two_equal_weth_usdc, TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
             },
-            test_utils::{addr, setup_market_unweighted, token_with_decimals},
+            test_utils::{
+                addr, setup_market_unweighted, setup_market_weighted_boxed, token_with_decimals,
+                ConstantProductSim,
+            },
         },
         graph::GraphManager,
         types::quote::OrderSide,
@@ -1664,6 +1689,51 @@ mod tests {
         let (market, gm) = scenario.build_market_weighted();
         let result = evaluate_scenario(&water_fill_default(), &scenario, market, gm).await;
         assert_eq!(result.path_count, 1, "high gas should prevent splitting");
+    }
+
+    /// A split fills an order that no single path can. Two parallel constant-product pools each
+    /// revert once the input reaches their reserve, so the full order overruns either pool alone;
+    /// split in half it fits both. The portfolio returns the split even though the single-path
+    /// baseline is absent — instead of the earlier `InsufficientLiquidity` short-circuit.
+    #[tokio::test]
+    async fn test_split_fills_when_no_single_path_can() {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        // reserve_0 (token A, the input side) = 800; a swap reverts once its input reaches it. The
+        // full order (1000 A) overruns either pool, but ~500 A per pool in a 50/50 split fits.
+        let pool = || {
+            Box::new(ConstantProductSim {
+                reserve_0: BigUint::from(800u64) * BigUint::from(10u64).pow(18),
+                reserve_1: BigUint::from(10_000u64) * BigUint::from(10u64).pow(18),
+                gas: 50_000,
+            }) as Box<dyn ProtocolSim>
+        };
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("pool_x", &a, &b, pool()),
+            ("pool_y", &a, &b, pool()),
+        ]);
+        let order = Order::new(
+            a.address.clone(),
+            b.address.clone(),
+            BigUint::from(1_000u64) * BigUint::from(10u64).pow(18),
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+
+        // Premise: no single path fills the full order.
+        let single = MostLiquidAlgorithm::with_config(config())
+            .unwrap()
+            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .await;
+        assert!(single.is_err(), "premise: no single path fills the full order");
+
+        // The portfolio still returns a split across both pools.
+        let split = WaterFillAlgorithm::with_config(config())
+            .unwrap()
+            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .await
+            .expect("water_fill returns a split when no single path fills");
+        assert!(split.route().swaps().len() >= 2, "expected a split across both pools");
     }
 
     /// On two equal fee-free pools the split's gross output must come within a tight tolerance of
