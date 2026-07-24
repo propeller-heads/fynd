@@ -13,6 +13,9 @@ changelog_update = false
 # release run fails with "Reference already exists".
 git_tag_enable = false
 git_tag_name = "{{ version }}"
+# Title the GitHub Release with the bare version too: the default is inconsistent
+# (0.97.1/0.97.2 got "{version}", 0.97.3 got "fynd-v{version}").
+git_release_name = "{{ version }}"
 git_release_enable = false
 semver_check = false
 publish = false
