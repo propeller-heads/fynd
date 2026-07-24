@@ -159,10 +159,11 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool liquidity scope: `public_only` (default) or `all` (routes through exclusive
-    /// liquidity as well).
+    /// Pool liquidity scope: `public_only` or `all` (routes through exclusive liquidity as
+    /// well). Setting this key (either value) declares exclusive routing intent and requires an
+    /// exclusivity policy; absent = plain deployment, no filtering.
     #[serde(default)]
-    liquidity_scope: LiquidityScope,
+    liquidity_scope: Option<LiquidityScope>,
 }
 
 impl PoolConfig {
@@ -177,7 +178,7 @@ impl PoolConfig {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            liquidity_scope: LiquidityScope::PublicOnly,
+            liquidity_scope: None,
         }
     }
 
@@ -187,13 +188,13 @@ impl PoolConfig {
     }
 
     /// Returns the pool's liquidity scope.
-    pub fn liquidity_scope(&self) -> LiquidityScope {
+    pub fn liquidity_scope(&self) -> Option<LiquidityScope> {
         self.liquidity_scope
     }
 
     /// Sets the pool's liquidity scope (public or exclusive-access).
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
-        self.liquidity_scope = scope;
+        self.liquidity_scope = Some(scope);
         self
     }
 
@@ -311,6 +312,14 @@ pub enum SolverBuildError {
     /// [`FyndBuilder::build`] was called without configuring any worker pools.
     #[error("no worker pools configured")]
     NoPools,
+    /// A worker pool sets `liquidity_scope` but no exclusivity policy is configured. The
+    /// policy is what public pools filter by and what the router identifies exclusive legs
+    /// with — without it, nothing distinguishes exclusive protocol components from public ones.
+    #[error(
+        "a worker pool sets liquidity_scope but no exclusivity policy is configured; \
+         set one via FyndBuilder::exclusivity_policy"
+    )]
+    LiquidityScopeWithoutPolicy,
     /// A recorded update failed to replay through the feed.
     #[cfg(feature = "test-utils")]
     #[error("replay failed: {0}")]
@@ -344,14 +353,14 @@ enum PoolEntry {
         timeout_ms: u64,
         max_routes: Option<usize>,
         connector_tokens: Option<HashSet<Address>>,
-        liquidity_scope: LiquidityScope,
+        liquidity_scope: Option<LiquidityScope>,
     },
     Custom(CustomPoolEntry),
 }
 
 impl PoolEntry {
     /// Returns the configured liquidity scope for this worker pool.
-    fn liquidity_scope(&self) -> LiquidityScope {
+    fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
             PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
             PoolEntry::Custom(custom) => custom.liquidity_scope,
@@ -369,7 +378,7 @@ struct CustomPoolEntry {
     timeout_ms: u64,
     max_routes: Option<usize>,
     /// Pool liquidity scope: public (default) or exclusive-access.
-    liquidity_scope: LiquidityScope,
+    liquidity_scope: Option<LiquidityScope>,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
@@ -563,7 +572,7 @@ impl FyndBuilder {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            liquidity_scope: LiquidityScope::PublicOnly,
+            liquidity_scope: None,
         });
         self
     }
@@ -590,7 +599,7 @@ impl FyndBuilder {
                 max_hops: defaults::POOL_MAX_HOPS,
                 timeout_ms: defaults::POOL_TIMEOUT_MS,
                 max_routes: None,
-                liquidity_scope: LiquidityScope::PublicOnly,
+                liquidity_scope: None,
                 configure,
             }));
         self
@@ -695,6 +704,19 @@ impl FyndBuilder {
             return Err(SolverBuildError::NoPools);
         }
 
+        // Setting `liquidity_scope` on any pool (either value) declares exclusive routing
+        // intent, which requires a policy: public pools filter by it and the router identifies
+        // exclusive legs with it. Without one, a `public_only` pool could not honor its label
+        // and an `all` pool could not produce anything distinct. Pools with the key absent are
+        // plain deployments and need no policy.
+        if self.exclusivity_policy.is_none() &&
+            self.pools
+                .iter()
+                .any(|p| p.liquidity_scope().is_some())
+        {
+            return Err(SolverBuildError::LiquidityScopeWithoutPolicy);
+        }
+
         // Add built-in providers if none were explicitly registered.
         if self.price_providers.is_empty() {
             self = self.add_default_price_providers();
@@ -755,9 +777,12 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            let pool_scope = pool_entry.liquidity_scope();
-            // Public pools get the policy so their workers filter exclusive components out;
-            // exclusive-access pools get `None` and ingest everything.
+            // Explicit `public_only` pools (and unscoped pools, harmlessly) get the policy so
+            // their workers filter exclusive components out; `all` pools get `None` and ingest
+            // everything.
+            let pool_scope = pool_entry
+                .liquidity_scope()
+                .unwrap_or_default();
             let pool_policy = match pool_scope {
                 LiquidityScope::PublicOnly => exclusivity_policy.clone(),
                 LiquidityScope::All => None,
@@ -1503,5 +1528,30 @@ impl SolverParts {
             self.computation_handle,
             self.computation_shutdown_tx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Setting `liquidity_scope` (either value) without an exclusivity policy fails the build.
+    #[rstest::rstest]
+    #[case::all(LiquidityScope::All)]
+    #[case::public_only(LiquidityScope::PublicOnly)]
+    fn test_build_rejects_scoped_pool_without_policy(#[case] scope: LiquidityScope) {
+        let config = PoolConfig::new("most_liquid").with_liquidity_scope(scope);
+        let result = FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .add_pool("surplus", &config)
+        .expect("add_pool should accept the config")
+        .build();
+
+        assert!(matches!(result, Err(SolverBuildError::LiquidityScopeWithoutPolicy)));
     }
 }

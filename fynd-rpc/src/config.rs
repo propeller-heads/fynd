@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(pool.max_hops(), 4);
         assert_eq!(pool.timeout_ms(), 200);
         assert_eq!(pool.max_routes(), Some(50));
-        assert_eq!(pool.liquidity_scope(), LiquidityScope::All);
+        assert_eq!(pool.liquidity_scope(), Some(LiquidityScope::All));
     }
 }
 
