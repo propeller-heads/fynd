@@ -10,7 +10,7 @@ use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
 };
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
@@ -341,6 +341,9 @@ impl FyndRPC {
 
         info!("HTTP server started");
 
+        // Set when a monitored task exits in a way that should fail the process (non-zero exit).
+        let mut fatal_error: Option<std::io::Error> = None;
+
         // Monitor server, feed, and gas price worker. If any errors, shutdown everything.
         tokio::select! {
             server_result = &mut server_task => {
@@ -375,9 +378,18 @@ impl FyndRPC {
                 info!("shutting down: gas price error path");
             }
             _ = &mut computation_manager_handle => {
-                // Computation manager completed unexpectedly
-                warn!("Computation manager stopped unexpectedly");
-                // Continue running - derived data won't be updated but solver can still work
+                // The derived-data pipeline task ended (event channel closed, shutdown, or a
+                // panic). It is never respawned, so continuing here would serve quotes on
+                // frozen derived data indefinitely with no path to recovery. Treat it as fatal,
+                // mirroring the feed/gas arms: stop the server gracefully and exit non-zero so
+                // the orchestrator restarts the instance (crash-only).
+                error!("Computation manager stopped unexpectedly, shutting down solver");
+                server_handle.stop(true).await;
+                server_task.await.ok();
+                feed_handle.abort();
+                gas_price_worker_handle.abort();
+                fatal_error =
+                    Some(std::io::Error::other("computation manager stopped unexpectedly"));
             }
         }
 
@@ -393,6 +405,10 @@ impl FyndRPC {
         }
 
         info!("shutdown complete");
-        Ok(())
+
+        match fatal_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
