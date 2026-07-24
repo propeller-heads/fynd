@@ -1891,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn surplus_round_trips_through_getters() {
+    fn test_surplus_round_trips_through_getters() {
         let committed = BigUint::from(990u64);
         let surplus = BigUint::from(15u64);
         let quote =

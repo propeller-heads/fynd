@@ -163,14 +163,14 @@ mod tests {
     }
 
     #[test]
-    fn is_exclusive_reflects_predicate() {
+    fn test_is_exclusive_reflects_predicate() {
         let policy = exclusive_protocol_policy();
         assert!(policy.is_exclusive(&exclusive_component("excl-1")));
         assert!(!policy.is_exclusive(&public_component("pub-1")));
     }
 
     #[test]
-    fn filter_topology_excludes_exclusive() {
+    fn test_filter_topology_excludes_exclusive() {
         let policy = exclusive_protocol_policy();
         let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
         let topology = market.component_topology();
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_event_excludes_exclusive() {
+    fn test_scope_event_excludes_exclusive() {
         let policy = exclusive_protocol_policy();
         let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
         let event = MarketEvent::MarketUpdated {

@@ -1728,7 +1728,7 @@ mod tests {
     // Gas-cheaper exclusive route: the public floor binds (committed = 1000); the user keeps the
     // gas saving (nets 960) and the protocol captures 100.
     #[case::exclusive_with_lower_gas((1000, 950), (1100, 1060), (1000, 960, Some(100)))]
-    fn combine_head_selection(
+    fn test_combine_head_selection(
         #[case] public: (u64, u64),
         #[case] exclusive: (u64, u64),
         #[case] expected: (u64, u64, Option<u64>),
@@ -1772,7 +1772,7 @@ mod tests {
         make_route_quote(&[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)]),
         None
     )]
-    fn combine_filters_exclusive_candidate(
+    fn test_combine_filters_exclusive_candidate(
         #[case] exclusive_quote: OrderQuote,
         #[case] max_gas: Option<u64>,
     ) {
@@ -1811,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_stamps_per_leg_committed_amount_out() {
+    fn test_combine_stamps_per_leg_committed_amount_out() {
         let responses = exclusive_access_responses(900, 1000);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
@@ -1841,7 +1841,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_committed_leg_deduction() {
+    fn test_combine_committed_leg_deduction() {
         // leg = 995, committed = 900, realized = 1000: the route's excess (100) is deducted from
         // the exclusive leg in full — committed_leg = 995 − 100 = 895, exactly, no rounding.
         let responses = OrderResponses {
@@ -1886,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_without_exclusivity_policy() {
+    fn test_combine_without_exclusivity_policy() {
         let responses = exclusive_access_responses(900, 950);
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
@@ -1904,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_split_route_attribution() {
+    fn test_combine_split_route_attribution() {
         // Split route: public branch 600 + exclusive branch 500 = 1100 realized vs 1000
         // committed (zero gas). Only the exclusive leg is stamped; the public branch flows to
         // the user untouched.
@@ -2059,7 +2059,7 @@ mod tests {
     // Two exclusive legs: out of scope for v1 (ambiguous per-pool attribution).
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
-    fn exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
+    fn test_exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
         let quote = make_route_quote(legs);
         assert_eq!(has_valid_exclusive_route(&quote, &exclusive_policy()), expected);
     }
