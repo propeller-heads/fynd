@@ -668,10 +668,20 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// holds the candidates from `ExclusiveAccess`-role pools (routes that may use exclusive
 /// components).
 ///
-/// The committed amount honors two floors: `max(public_amount_out, public_net + exclusive_gas)`.
-/// The first keeps the quoted `amount_out` from ever dropping below the public market's; the
-/// second keeps the user — who pays the exclusive route's gas — netting at least what the public
-/// route would leave them.
+/// The committed amount is the larger of two lower bounds:
+/// `max(public_amount_out, public_net + exclusive_gas)`. The first guarantees the quoted
+/// `amount_out` is never below the public market's; the second guarantees the user — who pays
+/// the exclusive route's gas — nets at least what the public route would leave them.
+///
+/// Which bound is larger depends on the gas comparison:
+/// - `exclusive_gas > public_gas`: committed = `public_net + exclusive_gas`, which exceeds
+///   `public_amount_out`. The user receives more tokens than the public quote and nets exactly
+///   `public_net`.
+/// - `exclusive_gas <= public_gas`: committed = `public_amount_out`. The user nets
+///   `public_amount_out − exclusive_gas`, which exceeds `public_net` by the gas difference. A
+///   commitment of `public_net + exclusive_gas` would still leave the user whole and capture more,
+///   but it is below `public_amount_out` — quoting less than the public market is ruled out, so the
+///   gas difference stays with the user.
 ///
 /// If the best exclusive-access candidate beats the public reference net-of-gas and produces at
 /// least the committed amount, this returns a new list whose head is the pinned surplus quote,
@@ -753,10 +763,10 @@ fn combine_with_surplus(
     // Gas the user pays to execute the exclusive route, in output-token terms.
     let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
 
-    // The commitment honors two floors: the quoted amount_out never drops below the public
-    // market's, and the user — who pays the exclusive route's gas — never nets less than the
-    // public route would leave them (public_net + gas). Together with the strict net check
-    // above, these gates guarantee the route covers the committed amount.
+    // The commitment is the larger of two lower bounds: the quoted amount_out is never below
+    // the public market's, and the user — who pays the exclusive route's gas — never nets less
+    // than the public route would leave them (public_net + gas). Together with the strict net
+    // check above, these gates guarantee the route covers the committed amount.
     let committed_amount_out =
         (committed.amount_out_net_gas() + &exclusive_gas_cost).max(public_amount_out.clone());
 
@@ -1725,7 +1735,8 @@ mod tests {
     // Gas-heavier exclusive route: the committed amount rises to max(1000, 950 + 140) = 1090 so
     // the user still nets the public 950; the protocol captures 1100 - 1090 = 10.
     #[case::exclusive_with_higher_gas((1000, 950), (1100, 960), (1090, 950, Some(10)))]
-    // Gas-cheaper exclusive route: the public floor binds (committed = 1000); the user keeps the
+    // Gas-cheaper exclusive route: the public amount is the larger bound (committed = 1000);
+    // the user keeps the
     // gas saving (nets 960) and the protocol captures 100.
     #[case::exclusive_with_lower_gas((1000, 950), (1100, 1060), (1000, 960, Some(100)))]
     fn test_combine_head_selection(
