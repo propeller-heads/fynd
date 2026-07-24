@@ -25,7 +25,7 @@ use crate::{
         MostLiquidAlgorithm, PathFrankWolfeAlgorithm, WaterFillAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
-    feed::{events::MarketEvent, market_data::MarketData, scope::LiquidityScope},
+    feed::{events::MarketEvent, exclusivity::ExclusivityPolicy, market_data::MarketData},
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
 };
@@ -59,13 +59,12 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
-    /// Liquidity scope applied to every worker in this pool.
+    /// Exclusivity policy applied to every worker in this pool, cloned per worker.
     ///
-    /// Cloned per worker so each gets its own [`LiquidityScope`]. Defaults to all liquidity
-    /// (no filtering) for public pools without an [`ExclusivityPolicy`] configured.
-    ///
-    /// [`ExclusivityPolicy`]: crate::feed::scope::ExclusivityPolicy
-    pub scope: LiquidityScope,
+    /// `Some(policy)` filters exclusive components out of each worker's graph (public pools);
+    /// `None` keeps every component (exclusive-access pools, or no exclusive components
+    /// configured).
+    pub exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 /// Error returned when algorithm registration fails.
@@ -171,7 +170,7 @@ where
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
-        let scope = params.scope.clone();
+        let exclusivity_policy = params.exclusivity_policy.clone();
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -191,7 +190,7 @@ where
                         worker_id,
                         pool_name,
                     )
-                    .with_scope(scope);
+                    .with_exclusivity_policy(exclusivity_policy);
 
                     worker.initialize_graph().await;
                     worker
@@ -270,7 +269,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
-            scope: LiquidityScope::All,
+            exclusivity_policy: None,
         }
     }
 
@@ -309,7 +308,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            scope: LiquidityScope::All,
+            exclusivity_policy: None,
         };
 
         let workers =
@@ -351,7 +350,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                scope: LiquidityScope::All,
+                exclusivity_policy: None,
             });
         assert!(registry_err.is_err());
 
@@ -379,7 +378,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
-                scope: LiquidityScope::All,
+                exclusivity_policy: None,
             });
 
         assert!(workers.is_ok());
@@ -408,7 +407,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            scope: LiquidityScope::All,
+            exclusivity_policy: None,
         };
 
         let workers =

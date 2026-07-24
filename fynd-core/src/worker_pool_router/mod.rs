@@ -41,47 +41,34 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder,
-    feed::scope::{ExclusivityPolicy, LiquidityScope},
-    price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle,
-    BlockInfo, EncodingOptions, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
-    SolveError, SolveParams, SurplusInfo,
+    encoding::encoder::Encoder, feed::exclusivity::ExclusivityPolicy,
+    price_guard::guard::PriceGuard, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
+    EncodingOptions, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
+    SolveParams, SurplusInfo,
 };
 
-/// The role a solver pool (a group of workers) plays in a quote.
+/// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
+/// candidates mean in a quote.
 ///
-/// A `Public` worker routes only through public liquidity and provides the committed (quoted)
-/// reference output. An `ExclusiveAccess` worker routes through all liquidity, public included,
-/// plus exclusive components, and may beat that reference — in which case the protocol captures
-/// the surplus.
+/// A `Public` pool routes only through public liquidity and provides the committed (quoted)
+/// reference output; its workers are given the [`ExclusivityPolicy`] so exclusive components
+/// never enter their graphs. An `ExclusiveAccess` pool routes through all liquidity, public and
+/// exclusive components alike, and may beat that reference — in which case the protocol
+/// captures the surplus.
 ///
-/// Serialized in snake_case (`"public"` / `"exclusive_access"`) in `worker_pools.toml` via
+/// Serialized in snake_case (`"public_only"` / `"all"`) in `worker_pools.toml` via
 /// [`PoolConfig`].
 ///
 /// [`PoolConfig`]: crate::PoolConfig
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PoolRole {
+pub enum LiquidityScope {
     /// Routes through public liquidity only. Establishes the committed reference output. Default.
     #[default]
-    Public,
+    PublicOnly,
     /// Routes through all liquidity, public and exclusive components alike; candidates from
-    /// this role may capture surplus above the public reference.
-    ExclusiveAccess,
-}
-
-impl PoolRole {
-    /// The per-worker liquidity scope for a pool of this role.
-    ///
-    /// Only a `Public` pool with a policy filters; an `ExclusiveAccess` pool (and any pool
-    /// without a policy) sees everything.
-    pub(crate) fn liquidity_scope(self, policy: Option<ExclusivityPolicy>) -> LiquidityScope {
-        match (self, policy) {
-            (PoolRole::Public, Some(policy)) => LiquidityScope::PublicOnly(policy),
-            (PoolRole::Public, None) | (PoolRole::ExclusiveAccess, _) => LiquidityScope::All,
-        }
-    }
+    /// this scope may capture surplus above the public reference.
+    All,
 }
 
 /// Handle to a solver pool for dispatching orders.
@@ -92,19 +79,20 @@ pub struct SolverPoolHandle {
     /// Queue handle for this pool.
     queue: TaskQueueHandle,
     /// Whether this pool routes public-only or all liquidity.
-    role: PoolRole,
+    liquidity_scope: LiquidityScope,
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`PoolRole::Public`] role.
+    /// Creates a new solver pool handle with the default [`LiquidityScope::PublicOnly`] scope.
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, role: PoolRole::Public }
+        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::PublicOnly }
     }
 
-    /// Sets the pool's role (e.g. [`PoolRole::ExclusiveAccess`] for a pool that routes through
-    /// exclusive liquidity as well).
-    pub fn with_role(mut self, role: PoolRole) -> Self {
-        self.role = role;
+    /// Sets the pool's liquidity scope (e.g. [`LiquidityScope::All`] for a pool
+    /// that routes
+    /// through exclusive liquidity as well).
+    pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.liquidity_scope = scope;
         self
     }
 
@@ -118,9 +106,9 @@ impl SolverPoolHandle {
         &self.queue
     }
 
-    /// Returns the pool's role.
-    pub fn role(&self) -> PoolRole {
-        self.role
+    /// Returns the pool's liquidity scope.
+    pub fn liquidity_scope(&self) -> LiquidityScope {
+        self.liquidity_scope
     }
 }
 
@@ -137,17 +125,17 @@ pub(crate) struct OrderResponses {
 }
 
 impl OrderResponses {
-    /// Returns a copy keeping only candidates from public-role pools.
+    /// Returns a copy keeping only candidates from public-scoped pools.
     ///
     /// These form the committed reference and the ranked fallback chain (ranked by `rank_quotes`,
     /// consumed by the price guard); exclusive-access candidates are overlaid separately by
     /// `combine_with_surplus`. `failed_solvers` is retained so placeholder construction is
     /// unchanged.
-    fn public_only(&self, pool_roles: &HashMap<String, PoolRole>) -> OrderResponses {
+    fn public_only(&self, pool_scopes: &HashMap<String, LiquidityScope>) -> OrderResponses {
         let quotes = self
             .quotes
             .iter()
-            .filter(|(pool, _)| pool_roles.get(pool) != Some(&PoolRole::ExclusiveAccess))
+            .filter(|(pool, _)| pool_scopes.get(pool) != Some(&LiquidityScope::All))
             .cloned()
             .collect();
         OrderResponses {
@@ -244,20 +232,20 @@ impl WorkerPoolRouter {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
         }
 
-        // Map each pool name to its role so candidate quotes can be split into public vs
+        // Map each pool name to its liquidity scope so candidate quotes can be split into public vs
         // exclusive-access.
-        let pool_roles: HashMap<String, PoolRole> = self
+        let pool_scopes: HashMap<String, LiquidityScope> = self
             .solver_pools
             .iter()
-            .map(|p| (p.name().to_string(), p.role()))
+            .map(|p| (p.name().to_string(), p.liquidity_scope()))
             .collect();
-        let has_exclusive_access_pool = pool_roles
+        let has_exclusive_access_pool = pool_scopes
             .values()
-            .any(|r| *r == PoolRole::ExclusiveAccess);
+            .any(|r| *r == LiquidityScope::All);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When an `ExclusiveAccess`-role pool is configured, the winning
+        // fallback chain. When an `ExclusiveAccess`-scoped pool is configured, the winning
         // exclusive-access candidate is overlaid
         // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
         // preserved.
@@ -266,10 +254,10 @@ impl WorkerPoolRouter {
             .map(|responses| {
                 if has_exclusive_access_pool {
                     let public_ranked =
-                        self.rank_quotes(&responses.public_only(&pool_roles), request.options());
+                        self.rank_quotes(&responses.public_only(&pool_scopes), request.options());
                     combine_with_surplus(
                         &responses,
-                        &pool_roles,
+                        &pool_scopes,
                         request.options(),
                         public_ranked,
                         self.exclusivity_policy.as_ref(),
@@ -366,11 +354,12 @@ impl WorkerPoolRouter {
             })
             .collect();
 
-        // Pre-compute which pool names have role All, for role-aware early return gating.
+        // Pre-compute which pool names have the ExclusiveAccess scope, for scope-aware early
+        // return gating.
         let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
-            .filter(|p| p.role() == PoolRole::ExclusiveAccess)
+            .filter(|p| p.liquidity_scope() == LiquidityScope::All)
             .map(|p| p.name().to_string())
             .collect();
         let has_exclusive_access_pool = !exclusive_access_pool_names.is_empty();
@@ -423,19 +412,19 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // Role-aware early return: when an exclusive-access pool is
+                            // Scope-aware early return: when an exclusive-access pool is
                             // configured, only fire once we have ≥1 public AND the
                             // exclusive-access pool (so the surplus overlay has both inputs).
                             // Without an exclusive-access pool, use pure
                             // count-based gating (original behaviour).
-                            let role_ready = if has_exclusive_access_pool {
+                            let scope_ready = if has_exclusive_access_pool {
                                 has_public_response && has_exclusive_access_response
                             } else {
                                 true
                             };
                             if min_responses > 0
                                 && quotes.len() >= min_responses
-                                && role_ready
+                                && scope_ready
                             {
                                 debug!(
                                     order_id = %order_id,
@@ -665,7 +654,7 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 ///
 /// Inputs: `public_ranked` is the ranking of public-pool quotes from `rank_quotes`; its head is
 /// the public reference from which the committed amount is derived. `responses` additionally
-/// holds the candidates from `ExclusiveAccess`-role pools (routes that may use exclusive
+/// holds the candidates from `ExclusiveAccess`-scoped pools (routes that may use exclusive
 /// components).
 ///
 /// The committed amount is the larger of two lower bounds:
@@ -706,7 +695,7 @@ fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
 /// on the input side — and needs its own treatment here.
 fn combine_with_surplus(
     responses: &OrderResponses,
-    pool_roles: &HashMap<String, PoolRole>,
+    pool_scopes: &HashMap<String, LiquidityScope>,
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
     exclusivity_policy: Option<&ExclusivityPolicy>,
@@ -724,7 +713,7 @@ fn combine_with_surplus(
     let best_exclusive_access_candidate = responses
         .quotes
         .iter()
-        .filter(|(pool, _)| pool_roles.get(pool) == Some(&PoolRole::ExclusiveAccess))
+        .filter(|(pool, _)| pool_scopes.get(pool) == Some(&LiquidityScope::All))
         .filter(|(_, q)| q.status() == QuoteStatus::Success)
         .filter(|(_, q)| {
             options
@@ -1207,7 +1196,7 @@ mod tests {
     #[case::pending_public_pool(300, Some(0), true)]
     #[case::failed_exclusive_pool(0, None, false)]
     #[tokio::test]
-    async fn test_router_early_return_role_gating(
+    async fn test_router_early_return_scope_gating(
         #[case] public_delay_ms: u64,
         #[case] exclusive_delay_ms: Option<u64>,
         #[case] expect_surplus: bool,
@@ -1220,7 +1209,7 @@ mod tests {
         };
         let (exclusive_pool, exclusive_worker) =
             create_mock_pool("exclusive_pool", exclusive_response, exclusive_delay_ms.unwrap_or(0));
-        let exclusive_pool = exclusive_pool.with_role(PoolRole::ExclusiveAccess);
+        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::All);
 
         let config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(2000))
@@ -1237,7 +1226,7 @@ mod tests {
             .expect("quote should succeed");
         let elapsed = start.elapsed();
 
-        // Well under the 2s timeout: the gate releases as soon as both roles have responded.
+        // Well under the 2s timeout: the gate releases as soon as both scopes have responded.
         assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
         let order = &result.orders()[0];
         assert_eq!(order.status(), QuoteStatus::Success);
@@ -1716,10 +1705,10 @@ mod tests {
         }
     }
 
-    fn exclusive_access_pool_roles() -> HashMap<String, PoolRole> {
+    fn exclusive_access_pool_scopes() -> HashMap<String, LiquidityScope> {
         HashMap::from([
-            ("public_pool".to_string(), PoolRole::Public),
-            ("exclusive_access_pool".to_string(), PoolRole::ExclusiveAccess),
+            ("public_pool".to_string(), LiquidityScope::PublicOnly),
+            ("exclusive_access_pool".to_string(), LiquidityScope::All),
         ])
     }
 
@@ -1755,7 +1744,7 @@ mod tests {
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1810,7 +1799,7 @@ mod tests {
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &options,
             public_ranked,
             Some(&policy),
@@ -1830,7 +1819,7 @@ mod tests {
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1879,7 +1868,7 @@ mod tests {
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
@@ -1904,7 +1893,7 @@ mod tests {
             .clone()];
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked.clone(),
             None,
@@ -1943,7 +1932,7 @@ mod tests {
         let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
-            &exclusive_access_pool_roles(),
+            &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),

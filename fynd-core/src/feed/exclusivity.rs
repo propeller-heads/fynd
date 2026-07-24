@@ -1,14 +1,14 @@
-//! Per-worker liquidity scoping for exclusive components.
+//! Exclusive-component classification and per-worker graph filtering.
 //!
 //! "Exclusive" means accessible only to Fynd: such components must never enter the route a
-//! public pool returns, while an exclusive-access pool ([`PoolRole::ExclusiveAccess`]) routes
-//! through them to capture the surplus they offer above the best public-market rate. Both pool
-//! kinds serve the same request; they differ only in which liquidity their workers may route
-//! through. Isolation is achieved by filtering each worker's local graph topology/events through
-//! its [`LiquidityScope`] — the shared `MarketState` is never duplicated.
-//!
-//! [`PoolRole::ExclusiveAccess`]: crate::PoolRole::ExclusiveAccess
-//! [`LiquidityScope`]: crate::feed::scope::LiquidityScope
+//! public pool returns, while an exclusive-access pool routes through them to capture the
+//! surplus they offer above the best public-market rate. Both pool kinds serve the same
+//! request; they differ only in which liquidity their workers may route through. Isolation is
+//! achieved by filtering each worker's local graph topology/events through the pool's
+//! [`ExclusivityPolicy`](crate::feed::exclusivity::ExclusivityPolicy) — the shared
+//! `MarketState` is never duplicated. Workers of public
+//! pools hold `Some(policy)` and filter; workers of exclusive-access pools hold `None` and
+//! ingest everything.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -19,7 +19,8 @@ use crate::{
     types::ComponentId,
 };
 
-/// Classifies a [`ProtocolComponent`] as exclusive or public.
+/// Classifies a [`ProtocolComponent`] as exclusive or public, and filters worker inputs
+/// accordingly.
 ///
 /// The predicate is supplied by the caller rather than hard-coded against an id or protocol name,
 /// so the notion of "exclusive" can evolve (e.g. a hook address allowlist) without touching the
@@ -44,92 +45,53 @@ impl ExclusivityPolicy {
     pub fn is_exclusive(&self, component: &ProtocolComponent) -> bool {
         (self.is_exclusive)(component)
     }
+
+    /// Removes exclusive components from a full topology map.
+    pub(crate) fn filter_topology(
+        &self,
+        market: &MarketState,
+        topology: HashMap<ComponentId, Vec<Address>>,
+    ) -> HashMap<ComponentId, Vec<Address>> {
+        topology
+            .into_iter()
+            .filter(|(id, _)| {
+                market
+                    .get_component(id)
+                    .is_none_or(|c| !self.is_exclusive(c))
+            })
+            .collect()
+    }
+
+    /// Removes exclusive component ids from a market event's added/updated/removed lists, so an
+    /// exclusive component is never ingested mid-stream.
+    pub(crate) fn scope_event(&self, market: &MarketState, event: MarketEvent) -> MarketEvent {
+        let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+            event;
+
+        let added_components = self.filter_topology(market, added_components);
+        let removed_components = self.filter_component_ids(market, &removed_components);
+        let updated_components = self.filter_component_ids(market, &updated_components);
+
+        MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
+    }
+
+    /// Keeps only the component ids that are NOT exclusive.
+    fn filter_component_ids(&self, market: &MarketState, ids: &[ComponentId]) -> Vec<ComponentId> {
+        ids.iter()
+            .filter(|id| {
+                market
+                    .get_component(id)
+                    .is_none_or(|c| !self.is_exclusive(c))
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for ExclusivityPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExclusivityPolicy")
             .finish_non_exhaustive()
-    }
-}
-
-/// Which components a worker may ingest into its local graph.
-///
-/// Each worker gets exactly one scope for its lifetime, derived from its pool's role. All graph
-/// filtering for a worker flows through this type, so the worker never reasons about
-/// exclusivity itself — it just hands its topology and incoming events here.
-#[derive(Clone, Debug)]
-pub enum LiquidityScope {
-    /// See every component — the default. No filtering is applied.
-    All,
-    /// See only public components — exclusive ones are filtered out by the attached policy.
-    PublicOnly(ExclusivityPolicy),
-}
-
-impl LiquidityScope {
-    /// Returns the policy to enforce, or `None` when this worker filters nothing.
-    fn active_policy(&self) -> Option<&ExclusivityPolicy> {
-        match self {
-            Self::PublicOnly(policy) => Some(policy),
-            Self::All => None,
-        }
-    }
-
-    /// Filters a full topology map to the components this worker may see.
-    ///
-    /// Public workers drop exclusive components; exclusive-access workers (and workers with no
-    /// policy) receive the map unchanged.
-    pub(crate) fn filter_topology(
-        &self,
-        market: &MarketState,
-        topology: HashMap<ComponentId, Vec<Address>>,
-    ) -> HashMap<ComponentId, Vec<Address>> {
-        let Some(policy) = self.active_policy() else {
-            return topology;
-        };
-        topology
-            .into_iter()
-            .filter(|(id, _)| {
-                market
-                    .get_component(id)
-                    .is_none_or(|c| !policy.is_exclusive(c))
-            })
-            .collect()
-    }
-
-    /// Restricts a market event to the components this worker may see.
-    ///
-    /// Public workers drop exclusive component ids from the added/updated/removed lists so an
-    /// exclusive component is never ingested mid-stream; other workers see the event unchanged.
-    pub(crate) fn scope_event(&self, market: &MarketState, event: MarketEvent) -> MarketEvent {
-        let Some(policy) = self.active_policy() else {
-            return event;
-        };
-        let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-            event;
-
-        let added_components = self.filter_topology(market, added_components);
-        let removed_components = self.filter_component_ids(policy, market, &removed_components);
-        let updated_components = self.filter_component_ids(policy, market, &updated_components);
-
-        MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
-    }
-
-    /// Keeps only the component ids that are NOT exclusive under `policy`.
-    fn filter_component_ids(
-        &self,
-        policy: &ExclusivityPolicy,
-        market: &MarketState,
-        ids: &[ComponentId],
-    ) -> Vec<ComponentId> {
-        ids.iter()
-            .filter(|id| {
-                market
-                    .get_component(id)
-                    .is_none_or(|c| !policy.is_exclusive(c))
-            })
-            .cloned()
-            .collect()
     }
 }
 
@@ -175,13 +137,9 @@ mod tests {
         let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
         let topology = market.component_topology();
 
-        let public = LiquidityScope::PublicOnly(policy);
-        let public_view = public.filter_topology(&market, topology.clone());
-        assert!(public_view.contains_key("pub-1"));
-        assert!(!public_view.contains_key("excl-1"));
-
-        let unfiltered_view = LiquidityScope::All.filter_topology(&market, topology.clone());
-        assert_eq!(unfiltered_view.len(), topology.len());
+        let filtered = policy.filter_topology(&market, topology);
+        assert!(filtered.contains_key("pub-1"));
+        assert!(!filtered.contains_key("excl-1"));
     }
 
     #[test]
@@ -197,9 +155,8 @@ mod tests {
             updated_components: vec!["pub-1".to_string(), "excl-1".to_string()],
         };
 
-        let public = LiquidityScope::PublicOnly(policy);
         let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-            public.scope_event(&market, event);
+            policy.scope_event(&market, event);
         assert!(added_components.contains_key("pub-1"));
         assert!(!added_components.contains_key("excl-1"));
         assert_eq!(removed_components, vec!["pub-1".to_string()]);

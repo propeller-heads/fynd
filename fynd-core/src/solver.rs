@@ -33,10 +33,10 @@ use crate::{
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
         events::{MarketEvent, MarketEventHandler},
+        exclusivity::ExclusivityPolicy,
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
-        scope::ExclusivityPolicy,
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -50,7 +50,7 @@ use crate::{
         registry::UnknownAlgorithmError,
     },
     worker_pool_router::{
-        config::WorkerPoolRouterConfig, PoolRole, SolverPoolHandle, WorkerPoolRouter,
+        config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
     },
     Algorithm, Quote, QuoteRequest, SolveError,
 };
@@ -159,10 +159,10 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool role: `public` (default) or `exclusive_access` (routes through exclusive
+    /// Pool liquidity scope: `public_only` (default) or `all` (routes through exclusive
     /// liquidity as well).
     #[serde(default)]
-    role: PoolRole,
+    liquidity_scope: LiquidityScope,
 }
 
 impl PoolConfig {
@@ -177,7 +177,7 @@ impl PoolConfig {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            role: PoolRole::Public,
+            liquidity_scope: LiquidityScope::PublicOnly,
         }
     }
 
@@ -186,14 +186,14 @@ impl PoolConfig {
         &self.algorithm
     }
 
-    /// Returns the pool role.
-    pub fn role(&self) -> PoolRole {
-        self.role
+    /// Returns the pool's liquidity scope.
+    pub fn liquidity_scope(&self) -> LiquidityScope {
+        self.liquidity_scope
     }
 
-    /// Sets the pool role (public or exclusive-access).
-    pub fn with_role(mut self, role: PoolRole) -> Self {
-        self.role = role;
+    /// Sets the pool's liquidity scope (public or exclusive-access).
+    pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.liquidity_scope = scope;
         self
     }
 
@@ -344,17 +344,17 @@ enum PoolEntry {
         timeout_ms: u64,
         max_routes: Option<usize>,
         connector_tokens: Option<HashSet<Address>>,
-        role: PoolRole,
+        liquidity_scope: LiquidityScope,
     },
     Custom(CustomPoolEntry),
 }
 
 impl PoolEntry {
-    /// Returns the configured role for this pool.
-    fn role(&self) -> PoolRole {
+    /// Returns the configured liquidity scope for this worker pool.
+    fn liquidity_scope(&self) -> LiquidityScope {
         match self {
-            PoolEntry::BuiltIn { role, .. } => *role,
-            PoolEntry::Custom(custom) => custom.role,
+            PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
+            PoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
 }
@@ -368,8 +368,8 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
-    /// Pool role: public (default) or exclusive-access.
-    role: PoolRole,
+    /// Pool liquidity scope: public (default) or exclusive-access.
+    liquidity_scope: LiquidityScope,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
@@ -563,7 +563,7 @@ impl FyndBuilder {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
-            role: PoolRole::Public,
+            liquidity_scope: LiquidityScope::PublicOnly,
         });
         self
     }
@@ -590,7 +590,7 @@ impl FyndBuilder {
                 max_hops: defaults::POOL_MAX_HOPS,
                 timeout_ms: defaults::POOL_TIMEOUT_MS,
                 max_routes: None,
-                role: PoolRole::Public,
+                liquidity_scope: LiquidityScope::PublicOnly,
                 configure,
             }));
         self
@@ -683,7 +683,7 @@ impl FyndBuilder {
             timeout_ms: config.timeout_ms(),
             max_routes: config.max_routes(),
             connector_tokens,
-            role: config.role(),
+            liquidity_scope: config.liquidity_scope(),
         });
         Ok(self)
     }
@@ -755,8 +755,13 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            let pool_role = pool_entry.role();
-            let scope = pool_role.liquidity_scope(exclusivity_policy.clone());
+            let pool_scope = pool_entry.liquidity_scope();
+            // Public pools get the policy so their workers filter exclusive components out;
+            // exclusive-access pools get `None` and ingest everything.
+            let pool_policy = match pool_scope {
+                LiquidityScope::PublicOnly => exclusivity_policy.clone(),
+                LiquidityScope::All => None,
+            };
 
             let (worker_pool, task_handle) = match pool_entry {
                 PoolEntry::BuiltIn {
@@ -769,7 +774,7 @@ impl FyndBuilder {
                     timeout_ms,
                     max_routes,
                     connector_tokens,
-                    role: _,
+                    liquidity_scope: _,
                 } => {
                     let mut algo_cfg = AlgorithmConfig::new(
                         min_hops,
@@ -786,7 +791,7 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .scope(scope);
+                        .exclusivity_policy(pool_policy.clone());
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -806,7 +811,7 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .scope(scope);
+                        .exclusivity_policy(pool_policy.clone());
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -817,8 +822,10 @@ impl FyndBuilder {
                 }
             };
 
-            solver_pool_handles
-                .push(SolverPoolHandle::new(worker_pool.name(), task_handle).with_role(pool_role));
+            solver_pool_handles.push(
+                SolverPoolHandle::new(worker_pool.name(), task_handle)
+                    .with_liquidity_scope(pool_scope),
+            );
             worker_pools.push(worker_pool);
         }
 

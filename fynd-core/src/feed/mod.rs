@@ -4,6 +4,8 @@ use tycho_simulation::tycho_common::models::Chain;
 
 /// Market events broadcast by the Tycho feed on every block update.
 pub mod events;
+/// Exclusive-component classification and per-worker graph filtering.
+pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
@@ -11,8 +13,6 @@ pub mod market_data;
 pub(crate) mod metrics_sampler;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
-/// Per-worker liquidity scoping for exclusive components.
-pub mod scope;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.
 pub mod tycho_feed;
 

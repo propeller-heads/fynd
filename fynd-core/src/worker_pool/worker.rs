@@ -25,8 +25,8 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
+        exclusivity::ExclusivityPolicy,
         market_data::MarketData,
-        scope::LiquidityScope,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
@@ -69,12 +69,13 @@ where
     worker_id: usize,
     /// Pool name (used as the `pool` metric label).
     pool_name: String,
-    /// Liquidity scope for this worker's local graph.
+    /// When set, exclusive components are filtered out of this worker's local graph
+    /// (public-pool workers). `None` means the worker ingests everything.
     ///
     /// `All` (the default) preserves the original non-filtered behaviour. A public worker
     /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; an
     /// exclusive-access worker uses `All`.
-    scope: LiquidityScope,
+    exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl<A> SolverWorker<A>
@@ -112,15 +113,15 @@ where
             initialized: false,
             worker_id,
             pool_name,
-            scope: LiquidityScope::All,
+            exclusivity_policy: None,
         }
     }
 
-    /// Configures this worker's liquidity scope.
+    /// Configures the policy that filters exclusive components out of this worker's graph.
     ///
     /// Public workers use `PublicOnly(policy)`; exclusive-access workers use `All`.
-    pub(crate) fn with_scope(mut self, scope: LiquidityScope) -> Self {
-        self.scope = scope;
+    pub(crate) fn with_exclusivity_policy(mut self, policy: Option<ExclusivityPolicy>) -> Self {
+        self.exclusivity_policy = policy;
         self
     }
 
@@ -133,8 +134,10 @@ where
             // read lock on market data
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
-            self.scope
-                .filter_topology(market.base_market_state(), topology)
+            match &self.exclusivity_policy {
+                Some(policy) => policy.filter_topology(market.base_market_state(), topology),
+                None => topology,
+            }
         };
 
         self.graph_manager
@@ -146,8 +149,10 @@ where
     pub async fn process_event(&mut self, event: MarketEvent) {
         let event = {
             let market = self.market_data.read().await;
-            self.scope
-                .scope_event(market.base_market_state(), event)
+            match &self.exclusivity_policy {
+                Some(policy) => policy.scope_event(market.base_market_state(), event),
+                None => event,
+            }
         };
         match event {
             MarketEvent::MarketUpdated { .. } => {
