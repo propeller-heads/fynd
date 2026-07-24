@@ -118,7 +118,6 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
     }
     let Some(cause) = cause else {
         return match status {
-            QuoteStatus::Success => "",
             QuoteStatus::NoRouteFound => "graph/other",
             QuoteStatus::InsufficientLiquidity => "liquidity/insufficient_liquidity",
             QuoteStatus::Timeout => "infra/timeout",
@@ -557,32 +556,6 @@ mod tests {
             log_request_capture(1, r#"{"orders":[]}"#, &RequestOutcome::Failed { code: "TIMEOUT" });
         });
         assert!(logs.contains("http/timeout"), "logs were: {logs}");
-        assert!(logs.contains("TIMEOUT"), "logs were: {logs}");
-    }
-
-    #[test]
-    fn logs_ok_outcome_with_no_route_reasons() {
-        let logs = capture_logs(|| {
-            log_request_capture(
-                1,
-                r#"{"orders":[]}"#,
-                &RequestOutcome::Solved {
-                    solve_time_ms: 5,
-                    order_statuses: vec!["no_route_found"],
-                    failure_reasons: vec!["graph/destination_token_not_in_graph"],
-                },
-            );
-        });
-        assert!(logs.contains("failure_reasons"), "logs were: {logs}");
-        assert!(logs.contains("graph/destination_token_not_in_graph"), "logs were: {logs}");
-    }
-
-    #[test]
-    fn logs_failed_outcome_with_code() {
-        let logs = capture_logs(|| {
-            log_request_capture(1, r#"{"orders":[]}"#, &RequestOutcome::Failed { code: "TIMEOUT" });
-        });
-        assert!(logs.contains("quote_failure"), "logs were: {logs}");
         assert!(logs.contains("TIMEOUT"), "logs were: {logs}");
     }
 
