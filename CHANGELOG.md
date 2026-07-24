@@ -1,4 +1,11 @@
 
+## [0.97.4](https://github.com/propeller-heads/fynd/compare/0.97.3...0.97.4) (2026-07-24)
+
+### Bug Fixes
+
+* **rpc:** fail fast when the computation manager task exits ([dd5755a](https://github.com/propeller-heads/fynd/commit/dd5755a9b00af21447a942b86b8999a369cc701f))
+
+
 ## [0.97.3](https://github.com/propeller-heads/fynd/compare/0.97.2...0.97.3) (2026-07-23)
 
 ### Features
