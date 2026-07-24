@@ -1,7 +1,7 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::{NoPathReason, QuoteStatus};
+use fynd_core::{NoPathReason, QuoteStatus, SolveError};
 use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
 use serde::Serialize;
 use tracing::{info, warn};
@@ -107,17 +107,49 @@ pub(crate) fn quote_status_code(status: QuoteStatus) -> &'static str {
     }
 }
 
-/// Stable snake_case code for a no-route [`NoPathReason`]. `""` when absent;
-/// wildcard guards the `#[non_exhaustive]` enum.
-pub(crate) fn no_route_reason_code(reason: Option<NoPathReason>) -> &'static str {
-    match reason {
-        None => "",
-        Some(NoPathReason::SourceTokenNotInGraph) => "source_token_not_in_graph",
-        Some(NoPathReason::DestinationTokenNotInGraph) => "destination_token_not_in_graph",
-        Some(NoPathReason::NoGraphPath) => "no_graph_path",
-        Some(NoPathReason::NoScorablePaths) => "no_scorable_paths",
-        Some(NoPathReason::AmountTooSmall) => "amount_too_small",
-        Some(_) => "unknown",
+/// Namespaced `group/reason` slug for a failed order slot, `""` for success.
+///
+/// Derived from the recorded [`SolveError`] cause when present, else from the
+/// order status (price-guard rejections and legacy paths carry no cause).
+/// Wildcard arms guard the foreign `#[non_exhaustive]` enums.
+pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError>) -> &'static str {
+    if status == QuoteStatus::Success {
+        return "";
+    }
+    let Some(cause) = cause else {
+        return match status {
+            QuoteStatus::Success => "",
+            QuoteStatus::NoRouteFound => "graph/other",
+            QuoteStatus::InsufficientLiquidity => "liquidity/insufficient_liquidity",
+            QuoteStatus::Timeout => "infra/timeout",
+            QuoteStatus::NotReady => "data/not_ready",
+            QuoteStatus::PriceCheckFailed => "guard/price_check_failed",
+            _ => "unknown",
+        };
+    };
+    match cause {
+        SolveError::NoRouteFound { reason, .. } => match reason {
+            Some(NoPathReason::SourceTokenNotInGraph) => "graph/source_token_not_in_graph",
+            Some(NoPathReason::DestinationTokenNotInGraph) => {
+                "graph/destination_token_not_in_graph"
+            }
+            Some(NoPathReason::NoGraphPath) => "graph/no_graph_path",
+            Some(NoPathReason::NoScorablePaths) => "graph/no_scorable_paths",
+            Some(NoPathReason::AmountTooSmall) => "graph/amount_too_small",
+            Some(_) | None => "graph/other",
+        },
+        SolveError::InsufficientLiquidity { .. } => "liquidity/insufficient_liquidity",
+        SolveError::MaxGasExceeded => "liquidity/max_gas_exceeded",
+        SolveError::MissingData(_) => "data/missing_data",
+        SolveError::MarketDataStale { .. } => "data/market_data_stale",
+        SolveError::ComputationFailed(_) => "data/computation_failed",
+        SolveError::NotReady(_) => "data/not_ready",
+        SolveError::SimulationFailed(_) => "algorithm/simulation_failed",
+        SolveError::AlgorithmError(_) => "algorithm/algorithm_error",
+        SolveError::QueueFull => "infra/queue_full",
+        SolveError::Timeout { .. } => "infra/timeout",
+        SolveError::Internal(_) => "infra/internal_error",
+        _ => "unknown",
     }
 }
 
@@ -129,9 +161,9 @@ pub(crate) enum RequestOutcome {
         solve_time_ms: u64,
         /// One [`quote_status_code`] per order, in request order.
         order_statuses: Vec<&'static str>,
-        /// One [`no_route_reason_code`] per order, aligned with `order_statuses`
-        /// (`""` for non-`no_route_found` orders).
-        no_route_reasons: Vec<&'static str>,
+        /// One [`failure_reason_slug`] per order, aligned with `order_statuses`
+        /// (`""` for successful orders).
+        failure_reasons: Vec<&'static str>,
     },
     /// Solve failed; carries the [`crate::api::error::solve_error_code`].
     Failed {
@@ -162,23 +194,27 @@ impl RequestOutcome {
 /// `event="quote_failure"`.
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {
     match outcome {
-        RequestOutcome::Solved { solve_time_ms, order_statuses, no_route_reasons } => info!(
+        RequestOutcome::Solved { solve_time_ms, order_statuses, failure_reasons } => info!(
             event = "quote_failure",
             num_orders,
             solve_time_ms = *solve_time_ms,
             outcome = "ok",
             order_statuses = ?order_statuses,
-            no_route_reasons = ?no_route_reasons,
+            failure_reasons = ?failure_reasons,
             request = %request_json,
             "quote failure captured"
         ),
-        RequestOutcome::Failed { code } => info!(
-            event = "quote_failure",
-            num_orders,
-            outcome = *code,
-            request = %request_json,
-            "quote failure captured"
-        ),
+        RequestOutcome::Failed { code } => {
+            let failure_reasons = [format!("http/{}", code.to_lowercase())];
+            info!(
+                event = "quote_failure",
+                num_orders,
+                outcome = *code,
+                failure_reasons = ?failure_reasons,
+                request = %request_json,
+                "quote failure captured"
+            )
+        }
     }
 }
 
@@ -413,7 +449,7 @@ mod tests {
                 &RequestOutcome::Solved {
                     solve_time_ms: 12,
                     order_statuses: vec!["success", "no_route_found"],
-                    no_route_reasons: vec!["", "no_graph_path"],
+                    failure_reasons: vec!["", "graph/no_graph_path"],
                 },
             );
         });
@@ -426,20 +462,102 @@ mod tests {
     }
 
     #[test]
-    fn no_route_reason_code_maps_variants() {
-        use fynd_core::NoPathReason;
-        assert_eq!(no_route_reason_code(None), "");
+    fn test_failure_reason_slug_maps_cause_classes() {
+        use fynd_core::SolveError;
+        let s = QuoteStatus::NoRouteFound;
         assert_eq!(
-            no_route_reason_code(Some(NoPathReason::SourceTokenNotInGraph)),
-            "source_token_not_in_graph"
+            failure_reason_slug(
+                s,
+                Some(&SolveError::no_route_found_with_reason("o", NoPathReason::NoGraphPath))
+            ),
+            "graph/no_graph_path"
         );
         assert_eq!(
-            no_route_reason_code(Some(NoPathReason::DestinationTokenNotInGraph)),
-            "destination_token_not_in_graph"
+            failure_reason_slug(
+                s,
+                Some(&SolveError::no_route_found_with_reason("o", NoPathReason::AmountTooSmall))
+            ),
+            "graph/amount_too_small"
         );
-        assert_eq!(no_route_reason_code(Some(NoPathReason::NoGraphPath)), "no_graph_path");
-        assert_eq!(no_route_reason_code(Some(NoPathReason::NoScorablePaths)), "no_scorable_paths");
-        assert_eq!(no_route_reason_code(Some(NoPathReason::AmountTooSmall)), "amount_too_small");
+        assert_eq!(failure_reason_slug(s, Some(&SolveError::no_route_found("o"))), "graph/other");
+        assert_eq!(
+            failure_reason_slug(
+                s,
+                Some(&SolveError::insufficient_liquidity(1u32.into(), 0u32.into()))
+            ),
+            "liquidity/insufficient_liquidity"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::MaxGasExceeded)),
+            "liquidity/max_gas_exceeded"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::MissingData("gas price".to_string()))),
+            "data/missing_data"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::SimulationFailed("p: e".to_string()))),
+            "algorithm/simulation_failed"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::AlgorithmError("x".to_string()))),
+            "algorithm/algorithm_error"
+        );
+        assert_eq!(failure_reason_slug(s, Some(&SolveError::QueueFull)), "infra/queue_full");
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::Internal("x".to_string()))),
+            "infra/internal_error"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::NotReady("x".to_string()))),
+            "data/not_ready"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::ComputationFailed("x".to_string()))),
+            "data/computation_failed"
+        );
+    }
+
+    #[test]
+    fn test_failure_reason_slug_falls_back_to_status() {
+        assert_eq!(failure_reason_slug(QuoteStatus::Success, None), "");
+        assert_eq!(failure_reason_slug(QuoteStatus::Timeout, None), "infra/timeout");
+        assert_eq!(failure_reason_slug(QuoteStatus::NotReady, None), "data/not_ready");
+        assert_eq!(
+            failure_reason_slug(QuoteStatus::PriceCheckFailed, None),
+            "guard/price_check_failed"
+        );
+        assert_eq!(failure_reason_slug(QuoteStatus::NoRouteFound, None), "graph/other");
+        assert_eq!(
+            failure_reason_slug(QuoteStatus::InsufficientLiquidity, None),
+            "liquidity/insufficient_liquidity"
+        );
+    }
+
+    #[test]
+    fn test_logs_ok_outcome_with_failure_reasons() {
+        let logs = capture_logs(|| {
+            log_request_capture(
+                2,
+                r#"{"orders":[]}"#,
+                &RequestOutcome::Solved {
+                    solve_time_ms: 12,
+                    order_statuses: vec!["success", "no_route_found"],
+                    failure_reasons: vec!["", "graph/no_graph_path"],
+                },
+            );
+        });
+        assert!(logs.contains("failure_reasons"), "logs were: {logs}");
+        assert!(logs.contains("graph/no_graph_path"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn test_logs_failed_outcome_with_http_slug() {
+        let logs = capture_logs(|| {
+            log_request_capture(1, r#"{"orders":[]}"#, &RequestOutcome::Failed { code: "TIMEOUT" });
+        });
+        assert!(logs.contains("http/timeout"), "logs were: {logs}");
+        assert!(logs.contains("TIMEOUT"), "logs were: {logs}");
     }
 
     #[test]
@@ -451,12 +569,12 @@ mod tests {
                 &RequestOutcome::Solved {
                     solve_time_ms: 5,
                     order_statuses: vec!["no_route_found"],
-                    no_route_reasons: vec!["destination_token_not_in_graph"],
+                    failure_reasons: vec!["graph/destination_token_not_in_graph"],
                 },
             );
         });
-        assert!(logs.contains("no_route_reasons"), "logs were: {logs}");
-        assert!(logs.contains("destination_token_not_in_graph"), "logs were: {logs}");
+        assert!(logs.contains("failure_reasons"), "logs were: {logs}");
+        assert!(logs.contains("graph/destination_token_not_in_graph"), "logs were: {logs}");
     }
 
     #[test]
@@ -478,7 +596,7 @@ mod tests {
         let outcome = RequestOutcome::Solved {
             solve_time_ms: 5,
             order_statuses: vec!["success", "success"],
-            no_route_reasons: vec!["", ""],
+            failure_reasons: vec!["", ""],
         };
         assert!(!outcome.is_failure());
     }
@@ -488,7 +606,7 @@ mod tests {
         let outcome = RequestOutcome::Solved {
             solve_time_ms: 5,
             order_statuses: vec!["success", "no_route_found"],
-            no_route_reasons: vec!["", "no_graph_path"],
+            failure_reasons: vec!["", "graph/no_graph_path"],
         };
         assert!(outcome.is_failure());
     }

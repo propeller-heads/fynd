@@ -53,6 +53,9 @@ pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
         SolveError::FailedEncoding(_) => "FAILED_ENCODING",
         SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
         SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
+        SolveError::MaxGasExceeded => "MAX_GAS_EXCEEDED",
+        SolveError::MissingData(_) => "MISSING_DATA",
+        SolveError::SimulationFailed(_) => "SIMULATION_FAILED",
         other => {
             warn!(?other, "unhandled SolveError variant");
             "INTERNAL_ERROR"
