@@ -119,7 +119,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
     let Some(cause) = cause else {
         return match status {
             QuoteStatus::NoRouteFound => "graph/other",
-            QuoteStatus::InsufficientLiquidity => "liquidity/insufficient_liquidity",
+            QuoteStatus::InsufficientLiquidity => "graph/insufficient_liquidity",
             QuoteStatus::Timeout => "infra/timeout",
             QuoteStatus::NotReady => "data/not_ready",
             QuoteStatus::PriceCheckFailed => "guard/price_check_failed",
@@ -137,8 +137,8 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             Some(NoPathReason::AmountTooSmall) => "graph/amount_too_small",
             Some(_) | None => "graph/other",
         },
-        SolveError::InsufficientLiquidity { .. } => "liquidity/insufficient_liquidity",
-        SolveError::MaxGasExceeded => "liquidity/max_gas_exceeded",
+        SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
+        SolveError::MaxGasExceeded => "request/max_gas_exceeded",
         SolveError::MissingData(_) => "data/missing_data",
         SolveError::MarketDataStale { .. } => "data/market_data_stale",
         SolveError::ComputationFailed(_) => "data/computation_failed",
@@ -484,11 +484,11 @@ mod tests {
                 s,
                 Some(&SolveError::insufficient_liquidity(1u32.into(), 0u32.into()))
             ),
-            "liquidity/insufficient_liquidity"
+            "graph/insufficient_liquidity"
         );
         assert_eq!(
             failure_reason_slug(s, Some(&SolveError::MaxGasExceeded)),
-            "liquidity/max_gas_exceeded"
+            "request/max_gas_exceeded"
         );
         assert_eq!(
             failure_reason_slug(s, Some(&SolveError::MissingData("gas price".to_string()))),
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(failure_reason_slug(QuoteStatus::NoRouteFound, None), "graph/other");
         assert_eq!(
             failure_reason_slug(QuoteStatus::InsufficientLiquidity, None),
-            "liquidity/insufficient_liquidity"
+            "graph/insufficient_liquidity"
         );
     }
 
