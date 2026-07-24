@@ -494,13 +494,12 @@ impl Algorithm for WaterFillAlgorithm {
         let SetupResult { ordered, market, gas_price, best_single, token_prices } = self
             .setup(graph, market, label, derived, order, start)
             .await?;
-        let tp = token_prices.as_ref();
         let token_out = order.token_out();
         let ctx = SplitContext {
             ordered: &ordered,
             market: &market,
             gas_price: &gas_price,
-            token_prices: tp,
+            token_prices: token_prices.as_ref(),
             order,
             start,
         };
@@ -540,7 +539,7 @@ impl Algorithm for WaterFillAlgorithm {
             .map(|b| b.net_amount_out().clone());
         let mut best: Option<(BigInt, SplitCandidate)> = None;
         for cand in candidates {
-            let net = cand.net(&gas_price, tp, token_out);
+            let net = cand.net(&gas_price, token_prices.as_ref(), token_out);
             let beats = match (&best, &baseline_net) {
                 (Some((current, _)), _) => net > *current,
                 (None, Some(base)) => net > *base,
@@ -646,8 +645,8 @@ impl WaterFillAlgorithm {
         fine_chunks: usize,
         alloc: Vec<BigUint>,
     ) -> Vec<BigUint> {
-        let k = active.len();
-        if k < 2 {
+        let path_count = active.len();
+        if path_count < 2 {
             return alloc;
         }
         let amount_in = ctx.order.amount().clone();
@@ -662,7 +661,7 @@ impl WaterFillAlgorithm {
         let mut cum = alloc;
         // Cache each active path's net at its current cumulative amount so a pair trial only
         // re-simulates the two paths it moves flow between, not the whole active set.
-        let mut net_cache: Vec<BigInt> = Vec::with_capacity(k);
+        let mut net_cache: Vec<BigInt> = Vec::with_capacity(path_count);
         for (i, &path_idx) in active.iter().enumerate() {
             let Some(net) = Self::path_net(ctx, &ctx.ordered[path_idx], &cum[i]) else {
                 // The starting split does not simulate cleanly; refining it is unsafe, so keep it.
@@ -678,7 +677,7 @@ impl WaterFillAlgorithm {
             }
 
             let mut best: Option<ExchangeMove> = None;
-            for donor in 0..k {
+            for donor in 0..path_count {
                 if sims >= EXCHANGE_MAX_SIMS {
                     break;
                 }
@@ -691,7 +690,7 @@ impl WaterFillAlgorithm {
                     continue;
                 };
                 sims += 1;
-                for recipient in 0..k {
+                for recipient in 0..path_count {
                     if recipient == donor || sims >= EXCHANGE_MAX_SIMS {
                         continue;
                     }
@@ -854,12 +853,13 @@ impl WaterFillAlgorithm {
         }
         let remainder = &amount_in - &base_chunk * num_chunks;
         let timeout_ms = self.timeout.as_millis() as u64;
-        let k = subset.len();
+        let path_count = subset.len();
 
-        let mut committed: Vec<HashMap<ComponentId, Box<dyn ProtocolSim>>> =
-            (0..k).map(|_| HashMap::new()).collect();
-        let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); k];
-        let mut activated: Vec<bool> = vec![!gate; k];
+        let mut committed: Vec<HashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
+            .map(|_| HashMap::new())
+            .collect();
+        let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
+        let mut activated: Vec<bool> = vec![!gate; path_count];
 
         for chunk_idx in 0..num_chunks {
             if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
@@ -953,14 +953,14 @@ impl WaterFillAlgorithm {
 
     /// Coarse set-selection then fine allocation with shared-pool fill-and-spill.
     fn fillspill_alloc(&self, ctx: &SplitContext, fine_chunks: usize) -> Option<SplitCandidate> {
-        let cand = self.select_shared_candidates(ctx);
-        if cand.len() < 2 {
+        let candidates = self.select_shared_candidates(ctx);
+        if candidates.len() < 2 {
             return None;
         }
 
         // Phase 1: coarse gated pass to choose the active candidate set.
-        let (coarse_counts, _) = self.fillspill_waterfill(ctx, &cand, COARSE_CHUNKS, true)?;
-        let active: Vec<usize> = cand
+        let (coarse_counts, _) = self.fillspill_waterfill(ctx, &candidates, COARSE_CHUNKS, true)?;
+        let active: Vec<usize> = candidates
             .iter()
             .copied()
             .zip(coarse_counts.iter())
