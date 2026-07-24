@@ -5,7 +5,7 @@ icon: compass
 # Overview
 
 Fynd ships four built-in routing algorithms. Most Liquid and Bellman-Ford each return a single
-route. Path Frank-Wolfe and [Water-fill](water_fill.md) split one order across several parallel
+route. Path Frank-Wolfe and [Water-fill](water-fill.md) split one order across several parallel
 routes to cut price impact on large trades. This section explains the routing problem and how each
 algorithm works.
 
@@ -39,7 +39,7 @@ See [Architecture](../ARCHITECTURE.md) for the full system design and [Custom Al
 
 ## Built-in algorithms
 
-|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Water-fill](water_fill.md)                                   |
+|                        | [Most Liquid](most-liquid.md)                                       | [Bellman-Ford](bellman-ford.md)                    | [Path Frank-Wolfe](path-frank-wolfe.md)                                     | [Water-fill](water-fill.md)                                   |
 | ---------------------- | ------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **Approach**           | Enumerate paths, score by heuristic, simulate top-N                 | Simulate every reachable edge, keep best amounts   | Bellman-Ford path discovery plus Frank-Wolfe split optimization             | Tries the best single path and three ways to split the order, then returns whichever gives the most output net of gas |
 | **Strengths**          | Fast; good at common, high-liquidity pairs                          | Finds non-obvious routes; no heuristic blind spots | Reduces price impact by splitting flow across parallel paths                | Never returns less than the best single path; handles every order, so it can run as the only pool; captures the gains on large trades |
