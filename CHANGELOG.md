@@ -1,3 +1,47 @@
+
+## [0.97.3](https://github.com/propeller-heads/fynd/compare/0.97.2...0.97.3) (2026-07-23)
+
+### Features
+
+* log inputs on contained pool simulation panic ([ee04f07](https://github.com/propeller-heads/fynd/commit/ee04f07e441ddf09fab508e6437a509c94b50471))
+* add lunarbase to the protocol registry ([bcc69ae](https://github.com/propeller-heads/fynd/commit/bcc69ae4b5737e16c1e0771b0c454a9674205aaf))
+
+### Bug Fixes
+
+* guard pool depth diagnostic probe against panics ([b54c4ed](https://github.com/propeller-heads/fynd/commit/b54c4ed2094a885955e9eadc8801799b7160e420))
+* contain pool simulation panics in solver algorithms ([7d3a070](https://github.com/propeller-heads/fynd/commit/7d3a070f7e7b8efa5d48a0ced4001cb32f76ad1b))
+
+
+## [0.97.2](https://github.com/propeller-heads/fynd/compare/0.97.1...0.97.2) (2026-07-23)
+
+### Features
+
+* export per-protocol pool count and sync status metrics ([fcb5970](https://github.com/propeller-heads/fynd/commit/fcb597018edb4d9368b2a45e896d6984eba961f1))
+
+## [0.97.1](https://github.com/propeller-heads/fynd/compare/0.97.0...0.97.1) (2026-07-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes the --reconnect-delay-secs CLI flag and the public
+reconnect_delay builder methods / RECONNECT_DELAY constant (all dead code).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+### Bug Fixes
+
+* correct hosted-api onboarding docs and improve serve-path observability ([595385c](https://github.com/propeller-heads/fynd/commit/595385c8c62d3f1588b68b22709bb5ff0af891f3))
+
+
+### Reverts
+
+* keep the reconnect_delay knob (avoid breaking change) ([c509a04](https://github.com/propeller-heads/fynd/commit/c509a040b79b36a32a4424c95aefab933dab4173))
+
+
+### Code Refactoring
+
+* address PR review comments ([aa2916c](https://github.com/propeller-heads/fynd/commit/aa2916c45100f1412a5851015f406b96824f8c7a))
+
 ## [0.97.0](https://github.com/propeller-heads/fynd/compare/0.96.0...0.97.0) (2026-07-21)
 
 

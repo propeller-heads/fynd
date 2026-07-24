@@ -1,7 +1,6 @@
 name: Release
 
 on:
-  workflow_dispatch:
   release:
     types: [created]
 
@@ -15,8 +14,8 @@ jobs:
   publish-crates:
     name: Publish Crates
     # Pre-releases build a Docker image only; registry publishing happens on
-    # full releases (or manual dispatch).
-    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    # full releases.
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -33,20 +32,33 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Publish fynd-core
-        run: cargo publish --locked --verbose --package fynd-core
-
-      - name: Publish fynd-rpc-types
-        run: cargo publish --locked --verbose --package fynd-rpc-types
-
-      - name: Publish fynd-client
-        run: cargo publish --locked --verbose --package fynd-client
-
-      - name: Publish fynd-rpc
-        run: cargo publish --locked --verbose --package fynd-rpc
-
-      - name: Publish fynd
-        run: cargo publish --locked --verbose --package fynd
+      # Publishes in dependency order, skipping versions already on crates.io so a
+      # partially failed release run can be recovered by re-running the job. A single
+      # retry (with an index re-check) covers crates.io index propagation lag between
+      # consecutive publishes.
+      - name: Publish crates
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "fynd") | .version')"
+          published() {
+            curl -sf "https://crates.io/api/v1/crates/$1/${version}" \
+              -H "User-Agent: fynd-ci (github.com/propeller-heads/fynd)" >/dev/null
+          }
+          for crate in fynd-core fynd-rpc-types fynd-client fynd-rpc fynd; do
+            if published "${crate}"; then
+              echo "${crate} ${version} already on crates.io, skipping"
+              continue
+            fi
+            if cargo publish --locked --package "${crate}"; then
+              continue
+            fi
+            echo "publish of ${crate} failed, re-checking index and retrying in 30s"
+            sleep 30
+            if ! published "${crate}"; then
+              cargo publish --locked --package "${crate}"
+            fi
+          done
 
   publish-npm:
     name: Publish TypeScript packages to npm
@@ -83,9 +95,24 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir clients/typescript install --frozen-lockfile
 
+      - name: Set client version from release tag
+        if: ${{ github.event.release.tag_name != '' }}
+        working-directory: clients/typescript/client
+        run: npm version "${{ github.event.release.tag_name }}" --no-git-tag-version --allow-same-version
+
       - name: Build client
         run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run build
 
+      # Skip when this version is already on npm so a recovered/re-fired release
+      # event doesn't fail the job on a duplicate publish.
       - name: Publish client
-        run: npm publish --provenance --access public
         working-directory: clients/typescript/client
+        run: |
+          set -euo pipefail
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} already on npm, skipping"
+            exit 0
+          fi
+          npm publish --provenance --access public

@@ -6,6 +6,9 @@ use fynd_rpc::config::defaults;
 #[cfg(feature = "metrics")]
 pub(crate) const METRICS_PORT: u16 = 9898;
 
+#[cfg(feature = "metrics")]
+pub(crate) const METRICS_HOST: &str = "0.0.0.0";
+
 use crate::commands::derive_connector_tokens::DeriveConnectorTokensArgs;
 
 /// Fynd - High-performance DEX solver built on Tycho
@@ -137,6 +140,12 @@ pub struct ServeArgs {
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
     pub metrics_port: u16,
+
+    /// Host/address the Prometheus metrics HTTP server binds to (requires `metrics` feature).
+    /// Defaults to all interfaces; set to `127.0.0.1` to expose metrics on loopback only.
+    #[cfg(feature = "metrics")]
+    #[arg(long, default_value = METRICS_HOST, env)]
+    pub metrics_host: String,
 }
 
 #[cfg(test)]

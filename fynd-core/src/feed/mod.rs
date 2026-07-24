@@ -7,6 +7,8 @@ pub mod events;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
+/// Background sampler exporting per-protocol market metrics.
+pub(crate) mod metrics_sampler;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.

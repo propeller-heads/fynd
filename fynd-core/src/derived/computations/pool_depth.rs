@@ -25,6 +25,7 @@ use tycho_simulation::{
 };
 
 use crate::{
+    algorithm::sim_guard::GuardedProtocolSim,
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -305,9 +306,11 @@ impl DerivedComputation for PoolDepthComputation {
                         succeeded += 1;
                     }
                     Err(e) => {
-                        // Diagnostic: probe with 1 unit to understand why depth search failed
+                        // Diagnostic: probe with 1 unit to understand why depth search failed.
+                        // Guarded so a panicking pool degrades to a diagnostic string instead of
+                        // killing the computation worker.
                         let probe_info = sim_state
-                            .get_amount_out(BigUint::from(1u32), token_in, token_out)
+                            .get_amount_out_guarded(BigUint::from(1u32), token_in, token_out)
                             .map(|r| format!("amount_out={}", r.amount))
                             .unwrap_or_else(|e| format!("sim_error={e}"));
                         let limits_info = sim_state

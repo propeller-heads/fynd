@@ -82,10 +82,14 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
-    /// Runs the indexer event loop.
+    /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
     ///
-    /// This method runs indefinitely, reconnecting on failures.
-    /// It is recommended to call this in a dedicated tokio task.
+    /// This method does not itself reconnect. Transient transport failures are absorbed
+    /// by tycho-client's internal reconnection, but a hard stream error propagates out as
+    /// an `Err` and a clean stream end returns `Ok(())`. In either case the feed stops,
+    /// which tears down the solver and exits the process (crash-only design — the
+    /// orchestrator is expected to restart it). It is recommended to call this in a
+    /// dedicated tokio task.
     pub(crate) async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
