@@ -601,13 +601,12 @@ impl WaterFillAlgorithm {
         }
 
         // Fine water-fill over the fixed active set, no gate (gas already justified).
-        let chunks = fine_chunks.max(COARSE_CHUNKS);
-        let fine = self.disjoint_waterfill(ctx, &active, chunks, false)?;
+        let fine = self.disjoint_waterfill(ctx, &active, fine_chunks, false)?;
 
         // Exchange refinement. The fine water-fill quantizes each path to a whole chunk, so it can
         // sit up to one chunk off the equal-marginal optimum. Nudge flow between paths at sub-chunk
         // resolution, accepting only strictly-improving moves (never-lose).
-        let refined = self.disjoint_exchange(ctx, &active, chunks, fine);
+        let refined = self.disjoint_exchange(ctx, &active, fine_chunks, fine);
         self.build_disjoint_legs(ctx, &active, &refined)
     }
 
@@ -972,8 +971,7 @@ impl WaterFillAlgorithm {
         }
 
         // Phase 2: fine ungated pass over the active set, with the commit schedule for replay.
-        let chunks = fine_chunks.max(COARSE_CHUNKS);
-        let (_, schedule) = self.fillspill_waterfill(ctx, &active, chunks, false)?;
+        let (_, schedule) = self.fillspill_waterfill(ctx, &active, fine_chunks, false)?;
         if schedule.is_empty() {
             return None;
         }
