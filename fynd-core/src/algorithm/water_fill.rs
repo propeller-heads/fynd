@@ -57,12 +57,12 @@ use crate::{
 
 /// Maximum candidate paths simulated per order after heuristic ranking.
 const DEFAULT_MAX_CANDIDATES: usize = 5000;
-/// Cap on candidates from the bounded amount-aware discovery unioned into the candidate set
-/// (matches the bounded discovery's own candidate cap; see the discovery section below).
+/// Cap on candidates from the bounded amount-aware discovery added to the candidate set
+/// (matches the bounded discovery's own cap; see the discovery section below).
 const BOUNDED_DISCOVERY_CANDIDATES: usize = 128;
-/// Maximum number of parallel paths in a split (matches the incumbent).
+/// Maximum number of parallel paths in a split.
 const DEFAULT_MAX_PATHS: usize = 4;
-/// Chunk grid for the coarse set-selection pass (matches the incumbent's granularity).
+/// Chunk grid for the coarse set-selection pass.
 const COARSE_CHUNKS: usize = 20;
 /// Chunk grid for the fine allocation pass over the fixed active set.
 const FINE_CHUNKS: usize = 256;
@@ -115,9 +115,8 @@ impl SplitCandidate {
     }
 }
 
-/// Portfolio split router: splits orders across pool-disjoint (and, via fill-and-spill,
-/// pool-sharing) paths to minimize price impact, returning the best net of the single path and
-/// several split allocations.
+/// Splits an order across pool-disjoint (and, via fill-and-spill, pool-sharing) paths to reduce
+/// price impact, returning the best net of the single path and several split allocations.
 pub struct WaterFillAlgorithm {
     min_hops: usize,
     max_hops: usize,
@@ -146,7 +145,7 @@ struct StepResult {
 }
 
 impl WaterFillAlgorithm {
-    /// Creates a new `WaterFillAlgorithm` from an [`AlgorithmConfig`].
+    /// Creates a `WaterFillAlgorithm` from an `AlgorithmConfig`.
     pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
         Ok(Self {
             min_hops: config.min_hops(),
@@ -438,16 +437,16 @@ impl Algorithm for WaterFillAlgorithm {
         let tp = token_prices.as_ref();
         let token_out = order.token_out();
 
-        // Build the portfolio's split candidates, best-net of which competes with the single path.
+        // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();
-        // Floor first: a single gated coarse pass, same cost as the classic split, so a tight
-        // timeout cannot starve it into a single-path fallback while a split would still win.
+        // The 20-chunk split first: a single coarse pass, cheap enough that a tight timeout cannot
+        // cut it off while leaving the single path, so a winning split is never lost to the clock.
         if let Some(c) =
             self.floor_alloc(&ordered, &market, &gas_price, tp, order, start, self.max_paths)
         {
             candidates.push(c);
         }
-        // Refined fine allocation over the same active set (bonus; may be starved by a timeout).
+        // Finer allocation over the same active set (a bonus; a timeout may cut it off).
         if let Some(c) = self.disjoint_alloc(
             &ordered,
             &market,
@@ -460,9 +459,8 @@ impl Algorithm for WaterFillAlgorithm {
         ) {
             candidates.push(c);
         }
-        // Shared-pool fill-and-spill with marginal-probe candidate selection. It captures wins that
-        // are tree routes splitting at an intermediate token (paths sharing a pool), which no
-        // pool-disjoint allocation can express.
+        // Fill-and-spill: a split that lets paths share a pool and branch at an intermediate token
+        // (a tree route), which the pool-disjoint splits cannot express.
         if let Some(c) =
             self.fillspill_alloc(&ordered, &market, &gas_price, tp, order, start, FINE_CHUNKS)
         {
@@ -485,7 +483,7 @@ impl Algorithm for WaterFillAlgorithm {
             candidate_count,
             split_won,
             elapsed_ms = start.elapsed().as_millis(),
-            "water-fill portfolio selected {}",
+            "water-fill selected {}",
             if split_won { "split candidate" } else { "single path" }
         );
         match best_candidate {
@@ -506,12 +504,10 @@ impl Algorithm for WaterFillAlgorithm {
 }
 
 impl WaterFillAlgorithm {
-    /// Incumbent-equivalent floor split: a single gated coarse water-fill over the disjoint set,
-    /// same chunk grid and cost as the incumbent split allocation. Because it
-    /// does exactly the incumbent's allocation work on the shared clock, it cannot be starved
-    /// by a tighter timeout when the incumbent would still produce a split — this is what makes
-    /// the portfolio's never-lose guarantee hold under time pressure, not just in the untimed
-    /// case.
+    /// The 20-chunk disjoint split (candidate 2): a single coarse water-fill over the disjoint path
+    /// set, with the gas-activation gate on. It is cheap and always finishes, so a tight timeout
+    /// cannot cut it off while leaving the single path — that is what makes the never-lose
+    /// guarantee hold under time pressure.
     #[allow(clippy::too_many_arguments)]
     fn floor_alloc(
         &self,
@@ -541,9 +537,9 @@ impl WaterFillAlgorithm {
         self.build_disjoint_legs(ordered, &disjoint, &alloc, market, token_prices, order)
     }
 
-    /// Coarse set-selection then fine allocation over pool-disjoint paths. Refines the floor split
-    /// on a finer grid; if a tight timeout starves either pass this returns `None` and the caller
-    /// falls back to the floor candidate.
+    /// Coarse set-selection then fine allocation over pool-disjoint paths. Refines the 20-chunk
+    /// split on a finer grid; if a tight timeout cuts off either pass this returns `None` and the
+    /// caller falls back to the 20-chunk candidate.
     #[allow(clippy::too_many_arguments)]
     fn disjoint_alloc(
         &self,
@@ -641,14 +637,14 @@ impl WaterFillAlgorithm {
         Some(BigInt::from(step.amount_out) - activation)
     }
 
-    /// Exchange-refinement pass over the fixed active set, warm-started from the fine water-fill.
-    /// Water-fill can never un-commit a chunk, so its allocation is quantized to one fine chunk and
+    /// Exchange-refinement pass over the fixed active set, starting from the fine water-fill split.
+    /// Water-fill can never un-commit a chunk, so its split is only accurate to one fine chunk and
     /// can miss the equal-marginal split. This shifts `delta` of input from an over-allocated donor
     /// to an under-allocated recipient whenever the pair's summed net output strictly improves,
-    /// then halves `delta` once no move helps, down to a sub-chunk floor. Paths are
-    /// pool-disjoint, so a trial re-simulates only the two paths it touches (unchanged paths
-    /// keep their cached net), and only strictly-improving moves are accepted, so the result
-    /// never scores below the warm start.
+    /// then halves `delta` once no move helps, down to a sub-chunk floor. Paths are pool-disjoint,
+    /// so a trial re-simulates only the two paths it touches (unchanged paths keep their cached
+    /// net). Only strictly-improving moves are accepted, so the result never scores below the split
+    /// it started from.
     #[allow(clippy::too_many_arguments)]
     fn disjoint_exchange(
         &self,
@@ -683,7 +679,7 @@ impl WaterFillAlgorithm {
             let Some(net) =
                 Self::path_net(&ordered[path_idx], market, gas_price, token_prices, order, &cum[i])
             else {
-                // The warm start does not even simulate cleanly; refining it is unsafe, so keep it.
+                // The starting split does not simulate cleanly; refining it is unsafe, so keep it.
                 return cum;
             };
             net_cache.push(net);
@@ -766,7 +762,7 @@ impl WaterFillAlgorithm {
     }
 
     /// Simulates `amount` through `path`, reading and committing pool states via `overrides`, and
-    /// returns the allocation consumed by [`build_split_route`].
+    /// returns the allocation the route assembly consumes.
     fn allocation_commit(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
@@ -1211,11 +1207,11 @@ fn ratio(numerator: &BigUint, denominator: &BigUint) -> f64 {
 
 // ==================== Candidate discovery ====================
 //
-// Bounded, amount-aware frontier search, unioned into the portfolio's exhaustive enumeration by
-// `setup`. A Penumbra-inspired expansion from the sell token: simulate frontier edges live and
-// prefer edges into the output token, the configured connector-token allowlist, or a set of anchor
-// tokens (a soft ranking hint) derived per solve from the graph — the most-connected tokens plus
-// the native-ETH sentinel (see `derive_anchor_tokens`). Generic over the graph's edge weight `W`
+// Bounded, amount-aware frontier search, combined with the exhaustive enumeration by `setup`. It
+// expands from the sell token: simulate frontier edges live and prefer edges into the output token,
+// the configured connector-token allowlist, or a set of anchor tokens (a soft ranking hint) derived
+// per solve from the graph — the most-connected tokens plus the native-ETH sentinel (see
+// `derive_anchor_tokens`). Generic over the graph's edge weight `W`
 // (discovery only reads `component_id`s) so it runs on the production `DepthAndPrice` graph while
 // tests exercise it on a bare topology graph.
 
@@ -1663,8 +1659,8 @@ mod tests {
         }
     }
 
-    /// When the extra-hop gas exceeds the split's gross benefit, the portfolio returns a single
-    /// path rather than a net-negative split.
+    /// When the extra-hop gas exceeds the split's gross benefit, water-fill returns a single path
+    /// rather than a net-negative split.
     #[tokio::test]
     async fn test_water_fill_gas_kills_split() {
         let scenario = split_scenarios::gas_kills_split();
@@ -1675,9 +1671,9 @@ mod tests {
 
     /// On two equal fee-free pools the split's gross output must come within a tight tolerance of
     /// the analytical two-pool optimum (a 50/50 split): the fine 256-chunk allocation finds the
-    /// optimal allocation, not just any splitting one.
+    /// optimal split, not just any splitting one.
     #[tokio::test]
-    async fn test_portfolio_output_near_two_pool_optimum() {
+    async fn test_water_fill_output_near_two_pool_optimum() {
         let m = two_equal_weth_usdc(1);
         let trade = 500u64;
         let order = whole_weth_order(&m.weth, &m.usdc, trade);
@@ -1710,15 +1706,14 @@ mod tests {
         );
     }
 
-    /// Under a tight timeout the split must never lose to the best single path: the floor pass does
-    /// exactly the classic split's coarse work, so truncating later refinement cannot starve it
-    /// into a worse-than-single result. A budget too tight for either algorithm to finish yields no
-    /// route (the router falls back to other pools) — that is a no-answer, not a loss, so the
-    /// never-lose invariant is asserted only for budgets where both algorithms return a route. The
-    /// 50ms budget comfortably exceeds this scenario's few-ms full solve, so the comparison is
-    /// always exercised.
+    /// Under a tight timeout the split must never lose to the best single path: the 20-chunk split
+    /// does the cheap coarse allocation, so cutting off later refinement cannot drop the result
+    /// below the single path. A budget too tight to finish yields no route at all (the router falls
+    /// back to other pools) — a no-answer, not a loss — so the never-lose check runs only for
+    /// budgets where water-fill returns a route. The 50ms budget comfortably exceeds this
+    /// scenario's few-ms solve, so the comparison is always exercised.
     #[tokio::test]
-    async fn test_portfolio_no_loss_under_tight_timeout() {
+    async fn test_water_fill_no_loss_under_tight_timeout() {
         for ms in [1u64, 5, 50] {
             let m = two_equal_weth_usdc(1_000_000_000);
             let order = whole_weth_order(&m.weth, &m.usdc, 500);

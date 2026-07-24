@@ -69,9 +69,8 @@ output, the result is never worse than the split it started from.
 Water-fill finds candidate routes two ways and combines them, so no useful route is dropped:
 
 1. **Exhaustive enumeration** — lists paths between the sell and buy tokens (breadth-first) and
-   ranks them by a spot-price × depth heuristic. This reuses [Most Liquid](most-liquid.md):
-   `find_paths` to enumerate, `try_score_path` to rank, and `simulate_path` to simulate a
-   full-amount single-path route. Water-fill runs on the same `DepthAndPrice` graph.
+   ranks them by a spot-price × depth heuristic, reusing [Most Liquid](most-liquid.md) on the same
+   `DepthAndPrice` graph (see the Dependency note below).
 2. **Bounded amount-aware search** — a frontier search (the discovery section of `water_fill.rs`)
    that expands from the sell token with the full order amount, preferring edges toward the buy
    token, the `connector_tokens` allowlist, or a set of anchor tokens.
