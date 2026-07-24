@@ -463,25 +463,46 @@ impl Algorithm for WaterFillAlgorithm {
 
         // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();
-        // The 20-chunk split first: a single coarse pass, cheap enough that a tight timeout cannot
-        // cut it off while leaving the single path, so a winning split is never lost to the clock.
-        if let Some(c) =
-            self.floor_alloc(&ordered, &market, &gas_price, tp, order, start, self.max_paths)
-        {
-            candidates.push(c);
-        }
-        // Finer allocation over the same active set (a bonus; a timeout may cut it off).
-        if let Some(c) = self.disjoint_alloc(
-            &ordered,
-            &market,
-            &gas_price,
-            tp,
-            order,
-            start,
-            FINE_CHUNKS,
-            self.max_paths,
-        ) {
-            candidates.push(c);
+        // One coarse (20-chunk) water-fill over the pool-disjoint paths feeds both the floor split
+        // and the refined split, so run it once. It is cheap and always finishes, so a tight
+        // timeout cannot cut it off while leaving the single path — a winning split is never lost
+        // to the clock.
+        let disjoint = Self::select_disjoint(&ordered, self.max_paths);
+        let coarse = (disjoint.len() >= 2)
+            .then(|| {
+                self.disjoint_waterfill(
+                    &ordered,
+                    &disjoint,
+                    &market,
+                    &gas_price,
+                    tp,
+                    order,
+                    start,
+                    COARSE_CHUNKS,
+                    true,
+                )
+            })
+            .flatten();
+        if let Some(coarse) = coarse.as_deref() {
+            // The 20-chunk floor split: exactly the coarse allocation.
+            if let Some(c) = self.build_disjoint_legs(&ordered, &disjoint, coarse, &market, order) {
+                candidates.push(c);
+            }
+            // Finer allocation over the same active set (a bonus; a timeout may cut it off, and
+            // then the floor stands).
+            if let Some(c) = self.disjoint_refine(
+                &ordered,
+                &disjoint,
+                coarse,
+                &market,
+                &gas_price,
+                tp,
+                order,
+                start,
+                FINE_CHUNKS,
+            ) {
+                candidates.push(c);
+            }
         }
         // Fill-and-spill: a split that lets paths share a pool and branch at an intermediate token
         // (a tree route), which the pool-disjoint splits cannot express.
@@ -528,71 +549,25 @@ impl Algorithm for WaterFillAlgorithm {
 }
 
 impl WaterFillAlgorithm {
-    /// The 20-chunk disjoint split (candidate 2): a single coarse water-fill over the disjoint path
-    /// set, with the gas-activation gate on. It is cheap and always finishes, so a tight timeout
-    /// cannot cut it off while leaving the single path — that is what makes the never-lose
-    /// guarantee hold under time pressure.
+    /// Refines the 20-chunk floor split on a finer grid. Given the shared coarse water-fill the
+    /// floor is built from, it fixes the active path set (the coarse-gated paths with a nonzero
+    /// amount), re-allocates over that set on a fine grid with the gate off (gas already
+    /// justified), then runs the exchange-refinement pass. If a tight timeout cuts off either pass
+    /// this returns `None` and the caller falls back to the 20-chunk floor candidate.
     #[allow(clippy::too_many_arguments)]
-    fn floor_alloc(
+    fn disjoint_refine(
         &self,
         ordered: &[Path<DepthAndPrice>],
-        market: &MarketState,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        order: &Order,
-        start: Instant,
-        max_paths: usize,
-    ) -> Option<SplitCandidate> {
-        let disjoint = Self::select_disjoint(ordered, max_paths);
-        if disjoint.len() < 2 {
-            return None;
-        }
-        let alloc = self.disjoint_waterfill(
-            ordered,
-            &disjoint,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            COARSE_CHUNKS,
-            true,
-        )?;
-        self.build_disjoint_legs(ordered, &disjoint, &alloc, market, token_prices, order)
-    }
-
-    /// Coarse set-selection then fine allocation over pool-disjoint paths. Refines the 20-chunk
-    /// split on a finer grid; if a tight timeout cuts off either pass this returns `None` and the
-    /// caller falls back to the 20-chunk candidate.
-    #[allow(clippy::too_many_arguments)]
-    fn disjoint_alloc(
-        &self,
-        ordered: &[Path<DepthAndPrice>],
+        disjoint: &[usize],
+        coarse: &[BigUint],
         market: &MarketState,
         gas_price: &BigUint,
         token_prices: Option<&TokenGasPrices>,
         order: &Order,
         start: Instant,
         fine_chunks: usize,
-        max_paths: usize,
     ) -> Option<SplitCandidate> {
-        let disjoint = Self::select_disjoint(ordered, max_paths);
-        if disjoint.len() < 2 {
-            return None;
-        }
-
-        // Phase 1: coarse water-fill with the gas-activation gate to pick the active set.
-        let coarse = self.disjoint_waterfill(
-            ordered,
-            &disjoint,
-            market,
-            gas_price,
-            token_prices,
-            order,
-            start,
-            COARSE_CHUNKS,
-            true,
-        )?;
+        // The active set is the coarse-gated paths that were allocated a nonzero amount.
         let active: Vec<usize> = disjoint
             .iter()
             .copied()
@@ -604,7 +579,7 @@ impl WaterFillAlgorithm {
             return None;
         }
 
-        // Phase 2: fine water-fill over the fixed active set, no gate (gas already justified).
+        // Fine water-fill over the fixed active set, no gate (gas already justified).
         let chunks = fine_chunks.max(COARSE_CHUNKS);
         let fine = self.disjoint_waterfill(
             ordered,
@@ -618,10 +593,9 @@ impl WaterFillAlgorithm {
             false,
         )?;
 
-        // Phase 3: exchange refinement. The fine water-fill quantizes each path to a whole chunk,
-        // so it can sit up to one chunk off the equal-marginal optimum. Nudge flow between
-        // paths at sub-chunk resolution, accepting only strictly-improving moves
-        // (never-lose).
+        // Exchange refinement. The fine water-fill quantizes each path to a whole chunk, so it can
+        // sit up to one chunk off the equal-marginal optimum. Nudge flow between paths at sub-chunk
+        // resolution, accepting only strictly-improving moves (never-lose).
         let refined = self.disjoint_exchange(
             ordered,
             &active,
@@ -633,7 +607,7 @@ impl WaterFillAlgorithm {
             chunks,
             fine,
         );
-        self.build_disjoint_legs(ordered, &active, &refined, market, token_prices, order)
+        self.build_disjoint_legs(ordered, &active, &refined, market, order)
     }
 
     /// Net output (gross output minus gas cost in output-token terms) of `path` simulated in
@@ -862,7 +836,6 @@ impl WaterFillAlgorithm {
         subset: &[usize],
         alloc: &[BigUint],
         market: &MarketState,
-        _token_prices: Option<&TokenGasPrices>,
         order: &Order,
     ) -> Option<SplitCandidate> {
         let amount_in = order.amount().clone();
