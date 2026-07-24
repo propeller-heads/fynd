@@ -51,7 +51,7 @@ refactor the code instead. Comments explain WHY, not WHAT. Wrap comment lines at
   don't control.
 - **Verify tests catch failures.** Break the code, confirm the test fails, then fix.
 - **Concise test names.** Name tests after what is being tested, not the expected outcome. `test_find_route_options_default`
-  not `test_find_route_options_default_is_no_overrides`.
+  not `test_find_route_options_default_is_no_overrides`. Prepend all test names with 'test_'.
 
 After every task is done, run the `run-ci` skill. If that is done, check whether docs need updating with the sync-docs
 skill.
