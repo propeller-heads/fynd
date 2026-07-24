@@ -171,8 +171,17 @@ impl WaterFillAlgorithm {
     ) -> Option<StepResult> {
         let mut current = amount;
         let mut total_gas = BigUint::zero();
-        // Intra-path pool reuse: a pool touched twice in one path must see its own first swap.
-        let mut local: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        // A pool touched twice in one path must see its own first swap, which needs an intra-path
+        // overlay carried across hops. That reuse is rare, so only pay the per-hop state clone when
+        // the path actually repeats a pool; the common case skips the clone entirely.
+        let path_reuses_pool = {
+            let mut seen: HashSet<&ComponentId> = HashSet::with_capacity(path.len());
+            !path
+                .edge_iter()
+                .iter()
+                .all(|e| seen.insert(&e.component_id))
+        };
+        let mut intra_path_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
             Vec::with_capacity(path.len());
 
@@ -180,7 +189,7 @@ impl WaterFillAlgorithm {
             let token_in = market.get_token(address_in)?;
             let token_out = market.get_token(address_out)?;
             let component_id = &edge.component_id;
-            let state = local
+            let state = intra_path_states
                 .get(component_id)
                 .map(Box::as_ref)
                 .or_else(|| {
@@ -193,7 +202,9 @@ impl WaterFillAlgorithm {
                 .get_amount_out(current.clone(), token_in, token_out)
                 .ok()?;
             total_gas += &result.gas;
-            local.insert(component_id.clone(), result.new_state.clone_box());
+            if path_reuses_pool {
+                intra_path_states.insert(component_id.clone(), result.new_state.clone_box());
+            }
             new_states.push((component_id.clone(), result.new_state));
             current = result.amount;
         }
