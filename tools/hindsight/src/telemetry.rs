@@ -22,6 +22,7 @@ const VOLUME_USD: &str = "hindsight_volume_usd";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
+const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -127,6 +128,12 @@ pub(crate) fn describe() {
         FEED_REBUILDS,
         "Times the monitor declared its session unhealthy (feed died, or the monitor fell too \
          far behind chain head) and rebuilt the solver to resubscribe"
+    );
+    describe_counter!(
+        UNTRACED_TRANSACTIONS,
+        "Matched solver transactions dropped because the RPC could not trace them. Their block \
+         still contributes its other trades, so this counts trades missing from the aggregates \
+         rather than blocks"
     );
 }
 
@@ -303,6 +310,10 @@ pub(crate) fn record_block_seconds(seconds: f64) {
 
 pub(crate) fn record_skipped_block() {
     counter!(SKIPPED_BLOCKS).increment(1);
+}
+
+pub(crate) fn record_untraced_transaction() {
+    counter!(UNTRACED_TRANSACTIONS).increment(1);
 }
 
 pub(crate) fn record_feed_rebuild() {

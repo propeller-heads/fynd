@@ -40,7 +40,7 @@ use alloy::{
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
-use futures::stream::{StreamExt, TryStreamExt};
+use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
@@ -188,21 +188,38 @@ impl<P: Provider> Decoder<P> {
         // collected in block order for deterministic output. Wall-clock cost is
         // one receipts call plus the slowest trace wave — not the sum of every
         // request — so a block stays well inside its block time.
+        //
+        // Failures are collected per transaction rather than aborting the wave: one transaction the
+        // RPC cannot trace costs that trade, not the whole block. Failing the block instead drops
+        // its every trade from the aggregates, and the surviving sample is selected by which
+        // transactions the RPC happened to serve.
         let traces = futures::stream::iter(
             matched
                 .iter()
                 .map(|(_, m)| fetch_trace(&self.provider, m.receipt.transaction_hash)),
         )
         .buffered(TRACE_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect::<Vec<_>>()
+        .await;
 
         let mut trades = Vec::with_capacity(matched.len());
-        for ((index, matched), root) in matched.into_iter().zip(traces) {
+        for ((index, matched), trace) in matched.into_iter().zip(traces) {
             let tx_index = matched
                 .receipt
                 .transaction_index
                 .unwrap_or(index as u64);
+            let root = match trace {
+                Ok(root) => root,
+                Err(e) => {
+                    warn!(
+                        block = block_number,
+                        tx = %matched.receipt.transaction_hash,
+                        "skipping untraceable transaction: {e}"
+                    );
+                    crate::telemetry::record_untraced_transaction();
+                    continue;
+                }
+            };
             if let Some(mut trade) = self
                 .decode_transaction(matched, &root, block_number, tx_index)
                 .await
@@ -321,5 +338,58 @@ impl<P: Provider> Decoder<P> {
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
             sandwich: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{address, U256},
+        providers::{mock::Asserter, ProviderBuilder},
+    };
+
+    use super::*;
+    use crate::decoder::test_utils::{addr, frame, make_transfer_log, receipt, tx_hash};
+
+    /// 1inch v6 — a `[solvers]` entry in the ethereum address book, so a transaction into it
+    /// matches on its entry point alone.
+    const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+
+    /// A sender-netting swap through `ONEINCH`: `sender` pays one token and is paid another.
+    fn swap_receipt(hash: TxHash, sender: Address) -> AnyTransactionReceipt {
+        let pool = addr(0x50);
+        receipt(
+            hash,
+            sender,
+            Some(ONEINCH),
+            vec![
+                make_transfer_log(addr(0xaa), sender, pool, U256::from(1_000)),
+                make_transfer_log(addr(0xbb), pool, sender, U256::from(2_000)),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_untraceable_transaction_does_not_drop_the_block() {
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![
+            swap_receipt(tx_hash(1), addr(1)),
+            swap_receipt(tx_hash(2), addr(2)),
+        ]);
+        asserter.push_failure_msg("debug_traceTransaction unavailable");
+        asserter.push_success(&frame("CALL", addr(2), ONEINCH, 0));
+
+        let mut decoder = Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        );
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .expect("an untraceable transaction must not fail the block");
+
+        // Only the untraceable transaction is lost; before, it took the whole block with it.
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].tx_hash, tx_hash(2));
     }
 }
