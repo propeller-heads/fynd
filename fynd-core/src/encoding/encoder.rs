@@ -22,8 +22,8 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
     encoding::{
-        router_fees::{FeeRates, RouterFees, SharedRouterFees},
         exclusive_swap::ExclusiveSwapSigner,
+        router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
@@ -277,10 +277,10 @@ impl Encoder {
             return Ok(solution);
         }
 
-        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution.swaps()` are
-        // built 1:1 from them by `Solution::try_from` and are what the router executes. We read the
-        // committed amount from the route swap but stamp `user_data` onto the matching solution
-        // swap, matched by index via the zip below.
+        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution.swaps()`
+        // are built 1:1 from them by `Solution::try_from` and are what the router executes.
+        // We read the committed amount from the route swap but stamp `user_data` onto the
+        // matching solution swap, matched by index via the zip below.
         let swaps = solution
             .swaps()
             .iter()
@@ -827,7 +827,7 @@ mod tests {
     fn test_stamp_exclusive_swaps(#[case] committed: Option<u64>, #[case] signed: bool) {
         let quote =
             make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, 0);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
 
         let solution =
             Encoder::stamp_exclusive_swaps(Solution::try_from(&quote).unwrap(), &quote, &signer)

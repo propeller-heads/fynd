@@ -35,19 +35,10 @@ const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
 /// Default validity window for a signed quote, in seconds. Well under the extension's 30-day cap.
 const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
 
-/// Environment variable setting the taker's price-improvement buffer, in basis points.
-const ENV_BUFFER_BPS: &str = "EXCLUSIVE_SWAP_BUFFER_BPS";
-
-/// Denominator for the buffer basis points (`10_000` bps = 100%).
-const BUFFER_BPS_DENOMINATOR: u32 = 10_000;
-
-/// Default taker buffer: 0 bps, so the realized output tracks the committed amount exactly.
-const DEFAULT_BUFFER_BPS: u32 = 0;
-
 /// Produces controller-signed `user_data` payloads for exclusive swaps.
 ///
 /// Holds the controller key, the chain id (bound into the EIP-712 domain), a monotonic nonce
-/// source, the deadline window, and the taker buffer. Construct it from the environment with
+/// source, and the deadline window. Construct it from the environment with
 /// [`ExclusiveSwapSigner::from_env`]; when the key variable is unset the encoder simply leaves
 /// exclusive legs unsigned.
 pub struct ExclusiveSwapSigner {
@@ -55,10 +46,6 @@ pub struct ExclusiveSwapSigner {
     chain_id: u64,
     nonce: AtomicU64,
     deadline_window_secs: u32,
-    /// Price-improvement buffer in basis points: raises the taker's output floor above the
-    /// committed amount, so the fee captures less surplus and the user's quote improves. `0` tracks
-    /// the committed amount exactly.
-    buffer_bps: u32,
 }
 
 impl ExclusiveSwapSigner {
@@ -77,40 +64,20 @@ impl ExclusiveSwapSigner {
             .map_err(|e| {
                 SolveError::FailedEncoding(format!("invalid {ENV_CONTROLLER_KEY}: {e}"))
             })?;
-        let buffer_bps = std::env::var(ENV_BUFFER_BPS)
-            .ok()
-            .map(|v| v.parse::<u32>())
-            .transpose()
-            .map_err(|e| SolveError::FailedEncoding(format!("invalid {ENV_BUFFER_BPS}: {e}")))?
-            .unwrap_or(DEFAULT_BUFFER_BPS);
-        Ok(Some(Self::new(
-            signer,
-            chain_id,
-            now_unix_secs(),
-            DEFAULT_DEADLINE_WINDOW_SECS,
-            buffer_bps,
-        )))
+        Ok(Some(Self::new(signer, chain_id, now_unix_secs(), DEFAULT_DEADLINE_WINDOW_SECS)))
     }
 
     /// Creates a signer from explicit parts.
     ///
     /// `nonce_seed` is the first nonce handed out; `deadline_window_secs` is added to the
-    /// signing-time timestamp to form each payload's deadline; `buffer_bps` raises the taker's
-    /// output floor above the committed amount (`0` tracks the committed amount exactly).
+    /// signing-time timestamp to form each payload's deadline.
     pub fn new(
         signer: PrivateKeySigner,
         chain_id: u64,
         nonce_seed: u64,
         deadline_window_secs: u32,
-        buffer_bps: u32,
     ) -> Self {
-        Self {
-            signer,
-            chain_id,
-            nonce: AtomicU64::new(nonce_seed),
-            deadline_window_secs,
-            buffer_bps,
-        }
+        Self { signer, chain_id, nonce: AtomicU64::new(nonce_seed), deadline_window_secs }
     }
 
     /// Builds the signed `user_data` for one exclusive swap leg.
@@ -134,7 +101,7 @@ impl ExclusiveSwapSigner {
                 )
             })?;
 
-        let fee = derive_fee_q32(swap.amount_out(), committed, self.buffer_bps);
+        let fee = derive_fee_q32(swap.amount_out(), committed);
         let nonce = self
             .nonce
             .fetch_add(1, Ordering::Relaxed);
@@ -194,24 +161,17 @@ fn min_balance_update_accept_any() -> B256 {
     B256::from(word)
 }
 
-/// Derives the extension's 0.32 fixed-point fee so the taker's realized output tracks a floor at
-/// or above `committed`.
+/// Derives the extension's 0.32 fixed-point fee so the taker's realized output tracks `committed`.
 ///
-/// `buffer_bps` raises that floor above `committed` to hand the taker part of the surplus;
-/// `buffer_bps = 0` targets `committed` exactly. The fee is rounded down so the taker always
-/// receives at least the floor.
-fn derive_fee_q32(gross: &BigUint, committed: &BigUint, buffer_bps: u32) -> u32 {
-    // Lift the floor by `buffer_bps` of the committed amount, capped at the gross output.
-    let floor =
-        (committed + committed * BigUint::from(buffer_bps) / BigUint::from(BUFFER_BPS_DENOMINATOR))
-            .min(gross.clone());
-    if gross <= &floor {
+/// The fee is rounded down so the taker always receives at least the committed amount.
+fn derive_fee_q32(gross: &BigUint, committed: &BigUint) -> u32 {
+    if gross <= committed {
         return 0;
     }
     // The extension charges `ceil(gross · (fee << 32) / 2⁶⁴)`, so the largest fee that never takes
-    // more than the surplus above the floor is `floor((gross − floor) · 2³² / gross)`. Rounding
-    // down biases toward under-capture, keeping the taker at or above the floor.
-    let surplus = gross - &floor;
+    // more than the surplus above the committed amount is `floor((gross − committed) · 2³² /
+    // gross)`. Rounding down biases toward under-capture, keeping the taker at or above it.
+    let surplus = gross - committed;
     let scaled = (surplus * BigUint::from(1u64 << 32)) / gross;
     scaled
         .min(BigUint::from(u32::MAX))
@@ -385,7 +345,7 @@ mod tests {
     #[case::committed_equals_gross(1000, 1000)]
     #[case::committed_exceeds_gross(1000, 2000)]
     fn test_derive_fee_q32_without_surplus(#[case] gross: u64, #[case] committed: u64) {
-        assert_eq!(derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed), 0), 0);
+        assert_eq!(derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed)), 0);
     }
 
     #[rstest]
@@ -394,27 +354,11 @@ mod tests {
     #[case::surplus_50_percent(1_000_000, 500_000)]
     #[case::near_total_surplus(1_000_000, 1)]
     fn test_derive_fee_q32_never_shorts_taker(#[case] gross: u128, #[case] committed: u128) {
-        let fee = derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed), 0);
+        let fee = derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed));
 
         let fee_amount = compute_fee(gross, u64::from(fee) << 32);
         assert!(fee_amount <= gross - committed, "capture exceeds surplus");
         assert!(gross - fee_amount >= committed, "taker receives less than committed");
-    }
-
-    #[test]
-    fn test_derive_fee_q32_buffer_raises_taker_floor() {
-        // A 100 bps (1%) buffer lifts the floor on committed 900_000 to 909_000, so the fee
-        // captures less surplus and the taker keeps more than the committed amount.
-        let gross = 1_000_000u128;
-        let committed = 900_000u128;
-        let floor = 909_000u128;
-
-        let no_buffer = derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed), 0);
-        let buffered = derive_fee_q32(&BigUint::from(gross), &BigUint::from(committed), 100);
-
-        assert!(buffered < no_buffer, "buffer must lower the captured fee");
-        let fee_amount = compute_fee(gross, u64::from(buffered) << 32);
-        assert!(gross - fee_amount >= floor, "taker receives less than the buffered floor");
     }
 
     fn ekubo_component() -> ProtocolComponent {
@@ -531,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_build_user_data_layout() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, 0);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
         let swap = signed_swap(Some(990_000));
 
         let user_data = signer.build_user_data(&swap).unwrap();
@@ -563,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_build_user_data_requires_committed_amount() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, 0);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
         assert!(signer
             .build_user_data(&signed_swap(None))
             .is_err());
@@ -571,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_nonce_increments_per_payload() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 0, 120, 0);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 0, 120);
         let swap = signed_swap(Some(990_000));
 
         let first = signer.build_user_data(&swap).unwrap();
