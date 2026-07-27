@@ -6,6 +6,7 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            aerodrome_v1::state::AerodromeV1State,
             curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
@@ -140,6 +141,10 @@ pub(crate) fn register_exchanges(
                     tvl_filter.clone(),
                     Some(fluid_v1_paused_pools_filter),
                 );
+            }
+            "aerodrome_v1" => {
+                builder =
+                    builder.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
             }
             "aerodrome_slipstreams" => {
                 builder = builder.exchange::<AerodromeSlipstreamsState>(
