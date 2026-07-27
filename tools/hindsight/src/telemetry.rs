@@ -28,6 +28,14 @@ const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 /// from the gas-token-anchored valuation).
 const USD_OUTLIER_THRESHOLD: f64 = 1_000.0;
 
+/// Settled USD notional below which a trade is excluded from the win-rate (`TRADES_TOTAL`) and bps
+/// (`SAVINGS_BPS`) metrics. On a dust trade a few wei of rounding is tens to thousands of bps, so
+/// dust dominates those unweighted quantiles and win counts while contributing nothing real. The
+/// USD-weighted histograms (`VOLUME_USD`/`SAVINGS_USD`/`IMPROVEMENT_USD`) keep every trade — a $5
+/// win adds $5 — so total savings and volume stay complete. A trade whose notional cannot be
+/// priced is kept: we do not drop what we cannot measure.
+const MIN_NOTIONAL_USD: f64 = 100.0;
+
 /// Whether a USD savings value is large enough to log for inspection.
 fn is_usd_outlier(usd: f64) -> bool {
     usd.abs() >= USD_OUTLIER_THRESHOLD
@@ -80,15 +88,18 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
 pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
-        "Re-solved trades, labeled by venue / solver / chain / outcome / state (top|back). \
-         Per-pair detail lives in the JSONL comparison output; a token-pair label here is unbounded \
-         on mainnet and would explode Prometheus series cardinality over a long run."
+        "Re-solved trades above the dust floor, labeled by venue / solver / chain / outcome / \
+         state (top|back). Sub-$100-notional trades are excluded so the win-rate reflects trades \
+         that matter; total volume stays complete in VOLUME_USD. Per-pair detail lives in the \
+         JSONL comparison output; a token-pair label here is unbounded on mainnet and would \
+         explode Prometheus series cardinality over a long run."
     );
     describe_histogram!(
         SAVINGS_BPS,
         Unit::Count,
         "Gross bps delta of Fynd vs settled (positive = Fynd better), labeled by venue / solver / \
-         chain / outcome / state (top|back)"
+         chain / outcome / state (top|back). Sub-$100-notional trades are excluded — a few wei of \
+         rounding is thousands of bps on dust and would swamp the quantiles."
     );
     describe_histogram!(
         SAVINGS_USD,
@@ -155,8 +166,13 @@ pub(crate) fn record_range(
         .record(volume);
     }
 
-    let savings_top = record_state(range, &range.top, "top", &labels, prices_top);
-    record_state(range, &range.back, "back", &labels, prices_back);
+    // Dust guard: sub-`MIN_NOTIONAL_USD` trades distort the unweighted win-rate and bps quantiles,
+    // so they are kept out of `TRADES_TOTAL` and `SAVINGS_BPS`. An unpriced trade has no known
+    // notional and is kept. The notional is a per-trade quantity, so both states share this gate.
+    let above_floor = volume.is_none_or(|usd| usd >= MIN_NOTIONAL_USD);
+
+    let savings_top = record_state(range, &range.top, "top", &labels, prices_top, above_floor);
+    record_state(range, &range.back, "back", &labels, prices_back, above_floor);
 
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
@@ -204,20 +220,23 @@ fn record_state(
     state_label: &'static str,
     labels: &MetricLabels<'_>,
     prices: &Prices,
+    above_floor: bool,
 ) -> Option<f64> {
-    counter!(
-        TRADES_TOTAL,
-        "venue" => labels.venue.to_string(),
-        "solver" => labels.solver.to_string(),
-        "chain" => labels.chain.to_string(),
-        "outcome" => outcome_label(state.verdict).to_string(),
-        "state" => state_label,
-    )
-    .increment(1);
+    if above_floor {
+        counter!(
+            TRADES_TOTAL,
+            "venue" => labels.venue.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
+            "outcome" => outcome_label(state.verdict).to_string(),
+            "state" => state_label,
+        )
+        .increment(1);
+    }
 
     let sandwiched = state.verdict == Verdict::Sandwiched;
 
-    if !sandwiched {
+    if above_floor && !sandwiched {
         if let Some(bps) = state.deltas.raw_bps {
             histogram!(
                 SAVINGS_BPS,
@@ -645,5 +664,64 @@ mod tests {
         assert!(!rendered.contains("hindsight_savings_bps"), "rendered: {rendered}");
         assert!(!rendered.contains("hindsight_savings_usd"), "rendered: {rendered}");
         assert!(!rendered.contains("hindsight_improvement_usd"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_below_notional_floor_excluded_from_quality_metrics() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        // A $1 trade (1e6 native units at the anchor below) that Fynd would win by ~50 bps: dust,
+        // whose bps and win count would swamp the unweighted metrics if it were recorded.
+        let range = build_range(
+            &trade(usdc, 1_000_000),
+            &empty_prices(),
+            solved(1_005_000, 1_005_000),
+            solved(1_005_000, 1_005_000),
+        );
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        // Kept out of the unweighted win-rate and bps quantiles...
+        assert!(!rendered.contains("hindsight_trades_total"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_savings_bps"), "rendered: {rendered}");
+        // ...but its USD contribution is still counted in the weighted histograms.
+        assert!(rendered.contains("hindsight_volume_usd"), "rendered: {rendered}");
+        assert!(rendered.contains("hindsight_savings_usd"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_unpriced_trade_passes_the_floor() {
+        // No prices → the notional is unknown, so the trade is kept rather than silently dropped;
+        // its count and (solved) bps still land in the metrics.
+        let range = build_range(
+            &trade(Address::repeat_byte(0x42), 1_000),
+            &empty_prices(),
+            solved(1_100, 1_050),
+            solved(1_100, 1_050),
+        );
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &range,
+                "ethereum",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::ethereum(),
+            );
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("hindsight_trades_total"), "rendered: {rendered}");
+        assert!(rendered.contains("hindsight_savings_bps"), "rendered: {rendered}");
     }
 }
