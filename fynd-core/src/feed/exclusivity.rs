@@ -5,10 +5,9 @@
 //! surplus they offer above the best public-market rate. Both pool kinds serve the same
 //! request; they differ only in which liquidity their workers may route through. Isolation is
 //! achieved by filtering each worker's local graph topology/events through the pool's
-//! [`ExclusivityPolicy`](crate::feed::exclusivity::ExclusivityPolicy) — the shared
-//! `MarketState` is never duplicated. Workers of public
-//! pools hold `Some(policy)` and filter; workers of exclusive-access pools hold `None` and
-//! ingest everything.
+//! `ExclusivityPolicy` — the shared `MarketState` is never duplicated. Workers of public pools
+//! hold `Some(policy)` and filter; workers of exclusive-access pools hold `None` and ingest
+//! everything.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -19,7 +18,7 @@ use crate::{
     types::ComponentId,
 };
 
-/// Classifies a [`ProtocolComponent`] as exclusive or public, and filters worker inputs
+/// Classifies a `ProtocolComponent` as exclusive or public, and filters worker inputs
 /// accordingly.
 ///
 /// The predicate is supplied by the caller rather than hard-coded against an id or protocol name,
