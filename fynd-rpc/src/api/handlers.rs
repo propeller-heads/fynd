@@ -14,7 +14,8 @@ use crate::api::prices::{
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
     request_capture::{
-        self, log_request_capture, no_route_reason_code, quote_status_code, RequestOutcome,
+        self, log_request_capture, log_slow_solve, no_route_reason_code, quote_status_code,
+        RequestOutcome,
     },
 };
 
@@ -66,9 +67,10 @@ pub(crate) async fn quote(
     }
 
     // Capture a re-issuable, signature-free copy of the request BEFORE the core
-    // conversion consumes `dto_request`.
+    // conversion consumes `dto_request`. This is cheap (no serialization); the
+    // JSON encoding is deferred to the failure-only task below.
     let num_orders = dto_request.orders().len();
-    let replay_json = request_capture::replay_json(&dto_request);
+    let replay_capture = request_capture::ReplayRequest::capture(&dto_request);
 
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
@@ -101,13 +103,42 @@ pub(crate) async fn quote(
         },
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
     };
-    // Only failed quotes are logged (successful quotes are the common case and
-    // would dominate log volume); see RequestOutcome::is_failure.
-    if outcome.is_failure() {
-        log_request_capture(num_orders, &replay_json, &outcome);
+    // Only failed quotes get a capture line (successful quotes are the common
+    // case and would dominate log volume; see RequestOutcome::is_failure), and
+    // successful solves above the slow threshold get a slow_solve line. Both
+    // are emitted from a detached task so serialization never adds latency to
+    // the response; the current tracing span is carried over so the lines keep
+    // their request context.
+    let slow_solve_time_ms = match &outcome {
+        RequestOutcome::Solved { solve_time_ms, .. }
+            if *solve_time_ms > request_capture::SLOW_SOLVE_THRESHOLD_MS =>
+        {
+            Some(*solve_time_ms)
+        }
+        RequestOutcome::Solved { .. } | RequestOutcome::Failed { .. } => None,
+    };
+    if outcome.is_failure() || slow_solve_time_ms.is_some() {
+        let span = tracing::Span::current();
+        actix_web::rt::spawn(async move {
+            span.in_scope(|| {
+                let replay_json = replay_capture.to_json();
+                if outcome.is_failure() {
+                    log_request_capture(num_orders, &replay_json, &outcome);
+                }
+                if let Some(solve_time_ms) = slow_solve_time_ms {
+                    log_slow_solve(
+                        solve_time_ms,
+                        num_orders,
+                        request_capture::SLOW_SOLVE_THRESHOLD_MS,
+                        &replay_json,
+                    );
+                }
+            });
+        });
     }
 
     let core_quote = result?;
+
     let dto_quote: dto::Quote = core_quote.into();
 
     Ok(HttpResponse::Ok().json(dto_quote))

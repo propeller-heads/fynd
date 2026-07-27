@@ -1,5 +1,7 @@
 //! HTTP API layer: endpoint handlers, OpenAPI docs, and shared application state.
 
+/// OpenAPI spec construction and Swagger UI registration.
+mod docs;
 /// Re-exports of wire-format DTO types from `fynd-rpc-types`.
 pub mod dto;
 /// [`ApiError`] type with HTTP status code mapping.
@@ -31,7 +33,6 @@ use handlers::configure_routes;
 use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::Bytes;
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api::error::ErrorResponse;
 
@@ -231,18 +232,18 @@ pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
 }
 
 /// Configures the Actix Web application with routes and state.
-pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
-    #[allow(unused_mut)]
-    let mut openapi = ApiDoc::openapi();
-    #[cfg(feature = "experimental")]
-    {
-        let experimental = ExperimentalApiDoc::openapi();
-        openapi.merge(experimental);
-    }
+///
+/// `hosted_swagger_url` names the hosted gateway the `/docs/hosted/` UI points at; when it is
+/// `None` that UI is not served.
+pub(crate) fn configure_app(
+    cfg: &mut web::ServiceConfig,
+    state: AppState,
+    hosted_swagger_url: Option<String>,
+) {
     cfg.configure(configure_error_handlers)
         .app_data(web::Data::new(state))
         .configure(configure_routes)
-        .service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi))
+        .configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
         .default_service(web::to(|| async {
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)

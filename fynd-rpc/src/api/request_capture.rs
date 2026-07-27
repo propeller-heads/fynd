@@ -4,7 +4,7 @@
 use fynd_core::{NoPathReason, QuoteStatus};
 use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Routing-essential view of a single order, serialized into the replay log.
 ///
@@ -13,9 +13,9 @@ use tracing::info;
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
 #[derive(Serialize)]
-struct ReplayOrder<'a> {
-    token_in: &'a Address,
-    token_out: &'a Address,
+struct ReplayOrder {
+    token_in: Address,
+    token_out: Address,
     amount: String,
     side: OrderSide,
 }
@@ -31,15 +31,7 @@ struct ReplayOptions {
     max_gas: Option<String>,
 }
 
-/// Routing-essential view of a whole quote request.
-#[derive(Serialize)]
-struct ReplayRequest<'a> {
-    orders: Vec<ReplayOrder<'a>>,
-    options: ReplayOptions,
-}
-
-/// Serializes `request` down to the routing-essential fields, as a JSON string,
-/// for the replay log.
+/// Owned, routing-essential view of a whole quote request.
 ///
 /// Captured (the fields that determine the route): per order `token_in`,
 /// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
@@ -49,32 +41,55 @@ struct ReplayRequest<'a> {
 /// (routing-irrelevant and PII). Built from an explicit allowlist, so no
 /// request field can leak into the logs.
 ///
-/// The result is NOT a full [`QuoteRequest`] — it omits the required `sender`,
-/// so a replay harness supplies a placeholder sender before re-issuing. An
-/// outcome that depended on `price_guard` may not reproduce on replay.
+/// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a
+/// replay harness supplies a placeholder sender before re-issuing. An outcome
+/// that depended on `price_guard` may not reproduce on replay.
+#[derive(Serialize)]
+pub(crate) struct ReplayRequest {
+    orders: Vec<ReplayOrder>,
+    options: ReplayOptions,
+}
+
+impl ReplayRequest {
+    /// Extracts the owned routing-essential capture from `request`. Cheap — a
+    /// few address clones and no JSON — so it is safe to run on the quote hot
+    /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
+    /// which the handler only calls off the response path.
+    pub(crate) fn capture(request: &QuoteRequest) -> Self {
+        let orders = request
+            .orders()
+            .iter()
+            .map(|order| ReplayOrder {
+                token_in: order.token_in().clone(),
+                token_out: order.token_out().clone(),
+                amount: order.amount().to_string(),
+                side: order.side(),
+            })
+            .collect();
+        let options = request.options();
+        Self {
+            orders,
+            options: ReplayOptions {
+                timeout_ms: options.timeout_ms(),
+                min_responses: options.min_responses(),
+                max_gas: options
+                    .max_gas()
+                    .map(ToString::to_string),
+            },
+        }
+    }
+
+    /// Serializes the capture to the replay-log JSON string.
+    pub(crate) fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
+    }
+}
+
+/// Serializes `request` down to the routing-essential fields, as a JSON string.
+/// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
+#[cfg(test)]
 pub(crate) fn replay_json(request: &QuoteRequest) -> String {
-    let orders = request
-        .orders()
-        .iter()
-        .map(|order| ReplayOrder {
-            token_in: order.token_in(),
-            token_out: order.token_out(),
-            amount: order.amount().to_string(),
-            side: order.side(),
-        })
-        .collect();
-    let options = request.options();
-    let capture = ReplayRequest {
-        orders,
-        options: ReplayOptions {
-            timeout_ms: options.timeout_ms(),
-            min_responses: options.min_responses(),
-            max_gas: options
-                .max_gas()
-                .map(ToString::to_string),
-        },
-    };
-    serde_json::to_string(&capture).unwrap_or_else(|_| "<unserializable>".to_string())
+    ReplayRequest::capture(request).to_json()
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
@@ -141,7 +156,8 @@ impl RequestOutcome {
 
 /// Emits the single `quote_failure` capture log line.
 ///
-/// `request_json` is the sanitized, re-issuable request from [`replay_json`].
+/// `request_json` is the sanitized, re-issuable request from
+/// [`ReplayRequest::to_json`].
 /// Only failed quotes are logged; filter these in Loki with
 /// `event="quote_failure"`.
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {
@@ -164,6 +180,36 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
             "quote failure captured"
         ),
     }
+}
+
+/// Threshold in milliseconds above which a successful solve is logged as slow.
+pub(crate) const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
+
+/// Emits a `slow_solve` warning when a successful solve exceeds the threshold.
+///
+/// Only successful quotes are logged here — failures are handled by
+/// [`log_request_capture`]. Filter in Loki with `event="slow_solve"`.
+///
+/// When `threshold_ms` is `0`, logging is bypassed entirely.
+/// `request_json` is the sanitized, re-issuable request from [`replay_json`],
+/// included so slow solves can be reproduced.
+pub(crate) fn log_slow_solve(
+    solve_time_ms: u64,
+    num_orders: usize,
+    threshold_ms: u64,
+    request_json: &str,
+) {
+    if threshold_ms == 0 || solve_time_ms <= threshold_ms {
+        return;
+    }
+    warn!(
+        event = "slow_solve",
+        solve_time_ms,
+        num_orders,
+        threshold_ms,
+        request = %request_json,
+        "solve exceeded slow threshold"
+    );
 }
 
 #[cfg(test)]
@@ -445,5 +491,56 @@ mod tests {
             no_route_reasons: vec!["", "no_graph_path"],
         };
         assert!(outcome.is_failure());
+    }
+
+    const TEST_REQUEST: &str = r#"{"orders":[]}"#;
+
+    #[test]
+    fn log_slow_solve_emits_when_above_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(250, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(logs.contains("slow_solve"), "logs were: {logs}");
+        assert!(logs.contains("solve_time_ms"), "logs were: {logs}");
+        assert!(logs.contains("250"), "logs were: {logs}");
+        assert!(logs.contains("request"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn log_slow_solve_silent_when_at_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(SLOW_SOLVE_THRESHOLD_MS, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(
+            !logs.contains("slow_solve"),
+            "should not log at exactly threshold; logs were: {logs}"
+        );
+    }
+
+    #[test]
+    fn log_slow_solve_silent_when_below_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(50, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(!logs.contains("slow_solve"), "should not log below threshold; logs were: {logs}");
+    }
+
+    #[test]
+    fn log_slow_solve_bypassed_when_threshold_zero() {
+        let logs = capture_logs(|| {
+            log_slow_solve(10_000, 1, 0, TEST_REQUEST);
+        });
+        assert!(
+            !logs.contains("slow_solve"),
+            "threshold=0 should bypass logging entirely; logs were: {logs}"
+        );
+    }
+
+    #[test]
+    fn log_slow_solve_includes_request_json() {
+        let logs = capture_logs(|| {
+            log_slow_solve(300, 2, SLOW_SOLVE_THRESHOLD_MS, r#"{"orders":[{"token_in":"0xaa"}]}"#);
+        });
+        assert!(logs.contains("0xaa"), "request JSON should appear in logs; logs were: {logs}");
     }
 }
