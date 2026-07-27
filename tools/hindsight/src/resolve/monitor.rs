@@ -26,7 +26,7 @@ use fynd_core::{
     BlockStepController, FyndBuilder, Solver,
 };
 use num_bigint::BigUint;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 
 use crate::{
@@ -50,11 +50,12 @@ const FEED_DEAD_TIMEOUT: Duration = Duration::from_mins(15);
 const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The HTTP RPC used to decode receipts can trail the Tycho stream by a few seconds, so `target`
-/// (which tracks the stream's tip) may not be indexed yet on the first look. Wait for the RPC head
-/// to reach it, retrying a bounded number of times before treating it as a genuine failure.
-const DECODE_RPC_LAG_RETRIES: usize = 5;
-const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
+/// How far the receipts RPC may trail the Tycho stream before the monitor decodes the target block
+/// anyway. In blocks, not seconds, because an RPC node trails by blocks.
+const DECODE_RPC_LAG_BUDGET_BLOCKS: u32 = 3;
+/// How often to re-check the RPC head while waiting out that lag. Well under a block time: the
+/// monitor only idles until the block lands, and `eth_blockNumber` is cheap.
+const DECODE_RPC_LAG_POLL: Duration = Duration::from_millis(250);
 
 /// Wall-clock budget behind chain head that `default_lag_blocks` converts into a block count.
 const LAG_BUDGET_SECS: u64 = 20 * 60;
@@ -244,14 +245,17 @@ fn biguint_to_u256(value: &BigUint) -> U256 {
 }
 
 /// Decode `block`, first waiting out any RPC lag. The HTTP RPC used for receipts can trail the
-/// Tycho stream that drives `block`, so poll the RPC head until it reaches `block` (bounded retries
-/// with backoff) — that distinguishes a transient race from a real failure. A block still
-/// undecodable once the RPC has indexed it is a genuine error and surfaces to the caller.
+/// Tycho stream that drives `block`, so poll the RPC head until it reaches `block` or `budget`
+/// expires — that distinguishes a transient race from a real failure. A block still undecodable
+/// once the RPC has indexed it is a genuine error and surfaces to the caller.
 async fn decode_block_when_available<P: Provider>(
     decoder: &mut Decoder<P>,
     block: u64,
+    budget: Duration,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
-    for attempt in 0..DECODE_RPC_LAG_RETRIES {
+    let started = Instant::now();
+    let mut logged_wait = false;
+    loop {
         let head = match decoder
             .provider()
             .get_block_number()
@@ -259,15 +263,28 @@ async fn decode_block_when_available<P: Provider>(
         {
             Ok(h) => h,
             Err(e) => {
-                warn!(block, attempt, "failed to fetch RPC block number: {e}");
+                warn!(block, "failed to fetch RPC block number: {e}");
                 0
             }
         };
         if head >= block {
             break;
         }
-        warn!(block, head, attempt, "RPC lags the tycho stream; waiting for it to index the block");
-        tokio::time::sleep(DECODE_RPC_LAG_BACKOFF).await;
+        // Once per block, not once per poll: at this cadence a per-poll line would bury the log.
+        if !logged_wait {
+            logged_wait = true;
+            debug!(block, head, "RPC lags the tycho stream; waiting for it to index the block");
+        }
+        if started.elapsed() >= budget {
+            warn!(
+                block,
+                head,
+                waited_ms = started.elapsed().as_millis(),
+                "RPC never indexed the block within its lag budget; decoding anyway"
+            );
+            break;
+        }
+        tokio::time::sleep(DECODE_RPC_LAG_POLL).await;
     }
     decoder.decode_block(block).await
 }
@@ -320,16 +337,38 @@ async fn build_solver(
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))
 }
 
-/// The default `--max-lag-blocks`: a ~20-minute wall-clock budget for how far behind chain head the
-/// monitor may fall before rebuilding, expressed as a block count at the chain's block time so the
-/// budget stays about the same wall-clock length on every chain. A custom chain with no registered
-/// block time falls back to 12-second blocks.
-fn default_lag_blocks(chain: Chain) -> u64 {
-    let block_secs = chain
+/// The chain's block time, which every pacing budget in the monitor is expressed against. A custom
+/// chain with no registered block time falls back to 12-second blocks.
+fn block_time(chain: Chain) -> Duration {
+    let secs = chain
         .try_block_time_secs()
         .unwrap_or(12)
         .max(1);
-    (LAG_BUDGET_SECS / block_secs).max(1)
+    Duration::from_secs(secs)
+}
+
+/// The default `--max-lag-blocks`: a ~20-minute wall-clock budget for how far behind chain head the
+/// monitor may fall before rebuilding, expressed as a block count at the chain's block time so the
+/// budget stays about the same wall-clock length on every chain.
+fn default_lag_blocks(chain: Chain) -> u64 {
+    (LAG_BUDGET_SECS / block_time(chain).as_secs()).max(1)
+}
+
+/// The pacing budgets one session runs against, both scaled to the chain's block time.
+struct Pacing {
+    /// Chain-head lag beyond which the session is unhealthy and the solver is rebuilt.
+    max_lag_blocks: u64,
+    /// How long to wait for the receipts RPC to index the target block before decoding regardless.
+    rpc_lag_budget: Duration,
+}
+
+impl Pacing {
+    fn for_chain(chain: Chain, max_lag_blocks: Option<u64>) -> Self {
+        Self {
+            max_lag_blocks: max_lag_blocks.unwrap_or_else(|| default_lag_blocks(chain)),
+            rpc_lag_budget: block_time(chain) * DECODE_RPC_LAG_BUDGET_BLOCKS,
+        }
+    }
 }
 
 /// Resolves when the process receives Ctrl-C (SIGINT), the signal the monitor treats as "stop".
@@ -427,10 +466,12 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     };
 
     let mut totals = Totals::default();
-    let max_lag_blocks = cfg
-        .max_lag_blocks
-        .unwrap_or_else(|| default_lag_blocks(chain));
-    info!(max_lag_blocks, "chain-head lag threshold");
+    let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
+    info!(
+        max_lag_blocks = pacing.max_lag_blocks,
+        rpc_lag_budget_ms = pacing.rpc_lag_budget.as_millis(),
+        "chain pacing budgets"
+    );
 
     // Resolves on Ctrl-C, so a long run stops cleanly at any await below — including the
     // multi-minute solver builds. On shutdown the in-flight block is abandoned, the solver's
@@ -456,7 +497,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             }
             end = run_session(
                 &cfg,
-                max_lag_blocks,
+                &pacing,
                 &adapter,
                 &mut decoder,
                 &mut comparisons,
@@ -486,7 +527,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 /// completes or the feed dies.
 async fn run_session<P: Provider>(
     cfg: &MonitorArgs,
-    max_lag_blocks: u64,
+    pacing: &Pacing,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
@@ -525,7 +566,7 @@ async fn run_session<P: Provider>(
             .get_block_number()
             .await
         {
-            if head.saturating_sub(target) > max_lag_blocks {
+            if head.saturating_sub(target) > pacing.max_lag_blocks {
                 return SessionEnd::Unhealthy(format!(
                     "monitor is {} blocks behind head {head}; presuming an unhealthy session",
                     head - target
@@ -533,7 +574,8 @@ async fn run_session<P: Provider>(
             }
         }
 
-        let trades = match decode_block_when_available(decoder, target).await {
+        let trades = match decode_block_when_available(decoder, target, pacing.rpc_lag_budget).await
+        {
             Ok(trades) => trades,
             Err(e) => {
                 totals.skipped_blocks += 1;
@@ -649,6 +691,63 @@ mod tests {
         assert_eq!(default_lag_blocks(Chain::Ethereum), 100); // 12s blocks
         assert_eq!(default_lag_blocks(Chain::Base), 600); // 2s blocks
         assert_eq!(default_lag_blocks(Chain::Unichain), 1200); // 1s blocks
+    }
+
+    #[test]
+    fn test_pacing_scales_both_budgets_with_block_time() {
+        // The RPC-lag budget is a block count, so it must shrink on a fast chain: a fixed
+        // seconds budget spends several Base blocks waiting for a block that already landed.
+        let base = Pacing::for_chain(Chain::Base, None);
+        assert_eq!(base.max_lag_blocks, 600);
+        assert_eq!(base.rpc_lag_budget, Duration::from_secs(6));
+
+        let ethereum = Pacing::for_chain(Chain::Ethereum, None);
+        assert_eq!(ethereum.max_lag_blocks, 100);
+        assert_eq!(ethereum.rpc_lag_budget, Duration::from_secs(36));
+
+        // An explicit --max-lag-blocks overrides only the lag threshold.
+        let overridden = Pacing::for_chain(Chain::Base, Some(7));
+        assert_eq!(overridden.max_lag_blocks, 7);
+        assert_eq!(overridden.rpc_lag_budget, Duration::from_secs(6));
+    }
+
+    /// A mocked provider whose `eth_blockNumber` answers come from `heads`, in order.
+    fn decoder_with_heads(heads: &[u64]) -> Decoder<impl Provider> {
+        use alloy::providers::{mock::Asserter, ProviderBuilder};
+
+        let asserter = Asserter::new();
+        for head in heads {
+            asserter.push_success(&format!("0x{head:x}"));
+        }
+        Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_decode_waits_only_while_the_rpc_lags() {
+        // Head already covers the target: no wait, straight to decoding (which then fails on the
+        // receipts call the mock has no answer for — proof it got that far).
+        let mut ready = decoder_with_heads(&[100]);
+        let started = Instant::now();
+        assert!(decode_block_when_available(&mut ready, 100, Duration::from_secs(6))
+            .await
+            .is_err());
+        assert!(started.elapsed() < DECODE_RPC_LAG_POLL, "waited despite an indexed block");
+    }
+
+    #[tokio::test]
+    async fn test_decode_gives_up_after_the_lag_budget() {
+        // Head never reaches the target. A zero budget proves the wait is bounded by the budget
+        // alone — the old fixed backoff slept before ever re-checking, so it could not express
+        // "don't wait".
+        let mut lagging = decoder_with_heads(&[99]);
+        let started = Instant::now();
+        assert!(decode_block_when_available(&mut lagging, 100, Duration::ZERO)
+            .await
+            .is_err());
+        assert!(started.elapsed() < DECODE_RPC_LAG_POLL, "slept despite a spent budget");
     }
 
     /// End-to-end smoke test of the live two-state monitor against a real solver.
