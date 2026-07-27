@@ -854,8 +854,10 @@ fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> 
     exclusive_count == 1
 }
 
-/// Shared-graph facts beat path-specific reasons, which beat liquidity, data,
-/// algorithm, and infrastructure errors; the first error wins within a tier.
+/// Shared-graph facts beat path-specific reasons (most specific first:
+/// amount-too-small, no-scorable-paths, no-graph-path), which beat liquidity,
+/// data, algorithm, and infrastructure errors; the first error wins within a
+/// tier.
 fn aggregate_no_route_cause(failed_solvers: &[(String, SolveError)]) -> Option<SolveError> {
     failed_solvers
         .iter()
@@ -869,9 +871,9 @@ fn cause_tier(error: &SolveError) -> u8 {
     match error {
         SolveError::NoRouteFound { reason: Some(reason), .. } => match reason {
             NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => 0,
-            NoPathReason::NoGraphPath |
-            NoPathReason::NoScorablePaths |
             NoPathReason::AmountTooSmall => 1,
+            NoPathReason::NoScorablePaths => 2,
+            NoPathReason::NoGraphPath => 3,
         },
         SolveError::InsufficientLiquidity { .. } | SolveError::MaxGasExceeded => 2,
         SolveError::MissingData(_) |
@@ -1427,6 +1429,21 @@ mod tests {
             aggregate_no_route_cause(&failed),
             Some(SolveError::NoRouteFound { reason: Some(NoPathReason::AmountTooSmall), .. })
         ));
+    }
+
+    #[test]
+    fn test_aggregate_no_route_cause_independent_of_pool_order() {
+        use crate::algorithm::NoPathReason;
+        let dust = || SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall);
+        let no_path = || SolveError::no_route_found_with_reason("o1", NoPathReason::NoGraphPath);
+        let forward = vec![("bf1".to_string(), no_path()), ("bf3".to_string(), dust())];
+        let reversed = vec![("bf3".to_string(), dust()), ("bf1".to_string(), no_path())];
+        for failed in [forward, reversed] {
+            assert!(matches!(
+                aggregate_no_route_cause(&failed),
+                Some(SolveError::NoRouteFound { reason: Some(NoPathReason::AmountTooSmall), .. })
+            ));
+        }
     }
 
     #[test]
