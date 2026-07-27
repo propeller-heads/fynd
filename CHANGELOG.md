@@ -1,4 +1,11 @@
 
+## [0.97.6](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.6) (2026-07-27)
+
+### Features
+
+* add aerodrome_v1 to protocol registry ([12c47ad](https://github.com/propeller-heads/fynd/commit/12c47ad482ec8559e03ff40c5680d63b84a06747))
+
+
 ## [0.97.5](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.5) (2026-07-27)
 
 ### Features
