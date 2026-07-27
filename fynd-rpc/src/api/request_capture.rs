@@ -393,7 +393,7 @@ mod tests {
         );
         assert_eq!(no_route_reason_code(Some(NoPathReason::NoGraphPath)), "no_graph_path");
         assert_eq!(no_route_reason_code(Some(NoPathReason::NoScorablePaths)), "no_scorable_paths");
-        assert_eq!(no_route_reason_code(Some(NoPathReason::AmountTooSmall)), "amount_too_small",);
+        assert_eq!(no_route_reason_code(Some(NoPathReason::AmountTooSmall)), "amount_too_small");
     }
 
     #[test]
