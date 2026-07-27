@@ -483,30 +483,31 @@ impl WorkerPoolRouter {
 
 /// Picks the most informative no-route reason across the failed pools.
 ///
-/// A token-not-in-graph reason is a shared-graph fact and wins over any
-/// path-specific reason; otherwise the first reason present is used.
+/// Reasons are ranked into tiers so the result does not depend on pool
+/// completion order: token-not-in-graph reasons are shared-graph facts and
+/// rank highest, then `AmountTooSmall`, `NoScorablePaths`, `NoGraphPath`.
 fn aggregate_no_route_reason(
     failed_solvers: &[(String, SolveError)],
 ) -> Option<crate::algorithm::NoPathReason> {
-    use crate::algorithm::NoPathReason;
-    let mut first = None;
+    let mut best = None;
     for (_, error) in failed_solvers {
         if let SolveError::NoRouteFound { reason: Some(reason), .. } = error {
-            match reason {
-                NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => {
-                    return Some(*reason)
-                }
-                NoPathReason::NoGraphPath |
-                NoPathReason::NoScorablePaths |
-                NoPathReason::AmountTooSmall => {
-                    if first.is_none() {
-                        first = Some(*reason);
-                    }
-                }
+            if best.is_none_or(|b| reason_tier(b) < reason_tier(*reason)) {
+                best = Some(*reason);
             }
         }
     }
-    first
+    best
+}
+
+fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
+    use crate::algorithm::NoPathReason;
+    match reason {
+        NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => 3,
+        NoPathReason::AmountTooSmall => 2,
+        NoPathReason::NoScorablePaths => 1,
+        NoPathReason::NoGraphPath => 0,
+    }
 }
 
 fn refine_gas_estimates(
@@ -970,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_quotes_no_route_reason_falls_back_to_first() {
+    fn test_rank_quotes_no_route_reason_single_failure() {
         use crate::algorithm::NoPathReason;
         let responses = OrderResponses {
             order_id: "test".to_string(),
@@ -994,6 +995,17 @@ mod tests {
             SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall),
         )];
         assert_eq!(aggregate_no_route_reason(&failed), Some(NoPathReason::AmountTooSmall));
+    }
+
+    #[test]
+    fn test_aggregate_no_route_reason_independent_of_pool_order() {
+        use crate::algorithm::NoPathReason;
+        let dust = || SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall);
+        let no_path = || SolveError::no_route_found_with_reason("o1", NoPathReason::NoGraphPath);
+        let forward = vec![("bf1".to_string(), no_path()), ("bf3".to_string(), dust())];
+        let reversed = vec![("bf3".to_string(), dust()), ("bf1".to_string(), no_path())];
+        assert_eq!(aggregate_no_route_reason(&forward), Some(NoPathReason::AmountTooSmall));
+        assert_eq!(aggregate_no_route_reason(&reversed), Some(NoPathReason::AmountTooSmall));
     }
 
     #[test]
