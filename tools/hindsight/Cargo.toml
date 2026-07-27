@@ -34,6 +34,7 @@ alloy = { workspace = true, features = [
     "provider-debug-api",
     "rpc-types-eth",
     "rpc-types-trace",
+    "network",
 ] }
 
 # HTTP (for RPC URL parsing) + metrics server

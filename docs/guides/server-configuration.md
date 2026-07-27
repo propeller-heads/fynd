@@ -158,7 +158,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 | Field | Default | <div style="width:40%">Description</div> |
 | ----- | ------- | ---------------------------------------- |
-| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, or `"path_frank_wolfe"`) |
+| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`, or `"water_fill"`) |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
@@ -187,6 +187,11 @@ connector_tokens = [
     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH
 ]
 ```
+
+> **Anchor tokens are not configured.** The `water_fill` algorithm's discovery uses a soft anchor
+> preference when no `connector_tokens` allowlist is set — it prefers to route through the most
+> connected tokens plus the native-ETH sentinel. This set is derived per solve from the live graph,
+> so it stays correct on every chain automatically and needs no configuration.
 
 Use `fynd derive-connector-tokens` to generate a ranked list for your chain from live Tycho data:
 

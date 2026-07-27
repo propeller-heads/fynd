@@ -15,14 +15,15 @@
 use std::collections::HashMap;
 
 use alloy::{
+    network::AnyTransactionReceipt,
     primitives::{Address, U256},
     providers::Provider,
-    rpc::types::TransactionReceipt,
 };
 use async_trait::async_trait;
 
 use crate::decoder::{
-    netting_decoders::{IntentNetting, SenderNetting},
+    intents,
+    netting_decoders::SenderNetting,
     registry::{Registry, VenueAddresses},
     transfer_ledger::{NetSwap, TransferLedger},
     venues,
@@ -77,7 +78,7 @@ impl<'a> TraderRole<'a> {
 fn decoders_for<P: Provider>(role: TraderRole<'_>) -> Vec<Box<dyn TradeDecoder<P>>> {
     match role {
         TraderRole::Sender => vec![Box::new(SenderNetting)],
-        TraderRole::Intent => vec![Box::new(IntentNetting)],
+        TraderRole::Intent => intents::decoders_for(),
         TraderRole::Venue(name) => venues::decoders_for(name),
     }
 }
@@ -120,7 +121,7 @@ pub(crate) struct DecodeContext<'a, P> {
     /// Cross-block contract-code cache, owned by the decoder.
     pub code_cache: &'a mut HashMap<Address, bool>,
     /// The matched transaction's receipt (sender, logs).
-    pub receipt: &'a TransactionReceipt,
+    pub receipt: &'a AnyTransactionReceipt,
     /// The contract the transaction entered through (`tx.to`).
     pub entry_point: Address,
     /// The transaction's flattened value movements.

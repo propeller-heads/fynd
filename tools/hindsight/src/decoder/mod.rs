@@ -14,8 +14,9 @@
 //! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
+mod clients;
 mod decode;
-mod intent;
+mod intents;
 mod matching;
 mod netting_decoders;
 mod registry;
@@ -32,6 +33,8 @@ mod test_utils;
 use std::collections::HashMap;
 
 use alloy::{
+    eips::BlockId,
+    network::AnyTransactionReceipt,
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::trace::geth::CallFrame,
@@ -155,9 +158,17 @@ impl<P: Provider> Decoder<P> {
         &mut self,
         block_number: u64,
     ) -> anyhow::Result<Vec<DecodedTrade>> {
-        let receipts = self
+        // Fetch receipts as `AnyTransactionReceipt` rather than the Ethereum-typed default:
+        // OP-stack chains (Base) put a system deposit transaction (type `0x7e`) first in
+        // every block, which the Ethereum receipt enum rejects — failing the whole
+        // `eth_getBlockReceipts` batch. The `Any` receipt tolerates unknown transaction
+        // types.
+        let receipts: Vec<AnyTransactionReceipt> = self
             .provider
-            .get_block_receipts(block_number.into())
+            .raw_request::<_, Option<Vec<AnyTransactionReceipt>>>(
+                "eth_getBlockReceipts".into(),
+                (BlockId::from(block_number),),
+            )
             .await
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
@@ -251,6 +262,21 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
+        // A client fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
+        // `clients`) overrides the entry-point label, backing any client fee out before the quote
+        // check reads the grossed output. The appData tag is read from a batch settler's calldata;
+        // other transactions carry none.
+        let integrator = solvers::integrator(logs);
+        let app_data = intents::client_tag(registry, entry_point, &root.input);
+        let venue = clients::attribute(
+            registry,
+            &mut flow,
+            &transfer_ledger,
+            integrator.as_deref(),
+            app_data,
+        )
+        .unwrap_or_else(|| registry.label(entry_point));
+
         let attribution = solvers::attribution::attribute(
             flow.solver_override.take(),
             root,
@@ -278,7 +304,7 @@ impl<P: Provider> Decoder<P> {
             tx_hash: receipt.transaction_hash,
             block_number,
             tx_index,
-            venue: registry.label(entry_point),
+            venue,
             solver: attribution.solver,
             solver_source: attribution.source,
             decoder,

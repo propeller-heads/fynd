@@ -1,7 +1,9 @@
 use alloy::{
-    consensus::{Eip658Value, Receipt, ReceiptEnvelope, ReceiptWithBloom},
+    consensus::{Eip658Value, Receipt, ReceiptWithBloom},
+    network::{AnyReceiptEnvelope, AnyTransactionReceipt},
     primitives::{address, Address, Bloom, Bytes, Log as PrimitiveLog, TxHash, B256, U256},
     rpc::types::{trace::geth::CallFrame, Log, TransactionReceipt},
+    serde::WithOtherFields,
     sol_types::SolEvent,
 };
 
@@ -92,12 +94,19 @@ pub(crate) fn receipt(
     from: Address,
     to: Option<Address>,
     logs: Vec<Log>,
-) -> TransactionReceipt {
-    TransactionReceipt {
-        inner: ReceiptEnvelope::Legacy(ReceiptWithBloom {
-            receipt: Receipt { status: Eip658Value::Eip658(true), cumulative_gas_used: 0, logs },
-            logs_bloom: Bloom::default(),
-        }),
+) -> AnyTransactionReceipt {
+    WithOtherFields::new(TransactionReceipt {
+        inner: AnyReceiptEnvelope {
+            inner: ReceiptWithBloom {
+                receipt: Receipt {
+                    status: Eip658Value::Eip658(true),
+                    cumulative_gas_used: 0,
+                    logs,
+                },
+                logs_bloom: Bloom::default(),
+            },
+            r#type: 0,
+        },
         transaction_hash: hash,
         transaction_index: None,
         block_hash: None,
@@ -109,5 +118,5 @@ pub(crate) fn receipt(
         from,
         to,
         contract_address: None,
-    }
+    })
 }

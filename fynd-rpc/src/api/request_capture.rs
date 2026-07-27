@@ -4,7 +4,7 @@
 use fynd_core::{NoPathReason, QuoteStatus};
 use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Routing-essential view of a single order, serialized into the replay log.
 ///
@@ -179,6 +179,36 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
             "quote failure captured"
         ),
     }
+}
+
+/// Threshold in milliseconds above which a successful solve is logged as slow.
+pub(crate) const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
+
+/// Emits a `slow_solve` warning when a successful solve exceeds the threshold.
+///
+/// Only successful quotes are logged here — failures are handled by
+/// [`log_request_capture`]. Filter in Loki with `event="slow_solve"`.
+///
+/// When `threshold_ms` is `0`, logging is bypassed entirely.
+/// `request_json` is the sanitized, re-issuable request from [`replay_json`],
+/// included so slow solves can be reproduced.
+pub(crate) fn log_slow_solve(
+    solve_time_ms: u64,
+    num_orders: usize,
+    threshold_ms: u64,
+    request_json: &str,
+) {
+    if threshold_ms == 0 || solve_time_ms <= threshold_ms {
+        return;
+    }
+    warn!(
+        event = "slow_solve",
+        solve_time_ms,
+        num_orders,
+        threshold_ms,
+        request = %request_json,
+        "solve exceeded slow threshold"
+    );
 }
 
 #[cfg(test)]
@@ -459,5 +489,56 @@ mod tests {
             no_route_reasons: vec!["", "no_graph_path"],
         };
         assert!(outcome.is_failure());
+    }
+
+    const TEST_REQUEST: &str = r#"{"orders":[]}"#;
+
+    #[test]
+    fn log_slow_solve_emits_when_above_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(250, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(logs.contains("slow_solve"), "logs were: {logs}");
+        assert!(logs.contains("solve_time_ms"), "logs were: {logs}");
+        assert!(logs.contains("250"), "logs were: {logs}");
+        assert!(logs.contains("request"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn log_slow_solve_silent_when_at_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(SLOW_SOLVE_THRESHOLD_MS, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(
+            !logs.contains("slow_solve"),
+            "should not log at exactly threshold; logs were: {logs}"
+        );
+    }
+
+    #[test]
+    fn log_slow_solve_silent_when_below_threshold() {
+        let logs = capture_logs(|| {
+            log_slow_solve(50, 1, SLOW_SOLVE_THRESHOLD_MS, TEST_REQUEST);
+        });
+        assert!(!logs.contains("slow_solve"), "should not log below threshold; logs were: {logs}");
+    }
+
+    #[test]
+    fn log_slow_solve_bypassed_when_threshold_zero() {
+        let logs = capture_logs(|| {
+            log_slow_solve(10_000, 1, 0, TEST_REQUEST);
+        });
+        assert!(
+            !logs.contains("slow_solve"),
+            "threshold=0 should bypass logging entirely; logs were: {logs}"
+        );
+    }
+
+    #[test]
+    fn log_slow_solve_includes_request_json() {
+        let logs = capture_logs(|| {
+            log_slow_solve(300, 2, SLOW_SOLVE_THRESHOLD_MS, r#"{"orders":[{"token_in":"0xaa"}]}"#);
+        });
+        assert!(logs.contains("0xaa"), "request JSON should appear in logs; logs were: {logs}");
     }
 }

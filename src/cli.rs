@@ -136,6 +136,12 @@ pub struct ServeArgs {
     #[arg(long)]
     pub enable_price_guard: bool,
 
+    /// URL of the hosted gateway fronting this instance. When set, a second Swagger UI is served
+    /// at /docs/hosted/, describing the gateway's per-chain paths and API-key auth. When unset,
+    /// only the self-hosted /docs/ is served.
+    #[arg(long, env = "FYND_HOSTED_SWAGGER_URL")]
+    pub hosted_swagger_url: Option<String>,
+
     /// Port for the Prometheus metrics HTTP server (requires `metrics` feature).
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
@@ -175,6 +181,8 @@ mod cli_tests {
             "20.0",
             "--worker-pools-config",
             "new_worker_pools.toml",
+            "--hosted-swagger-url",
+            "https://gateway.example.com",
         ])
         .expect("parse errored");
 
@@ -191,6 +199,7 @@ mod cli_tests {
         assert_eq!(args.min_tvl, Some(20.0));
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
         assert_eq!(args.blocklist_config, None);
+        assert_eq!(args.hosted_swagger_url, Some("https://gateway.example.com".to_string()));
     }
 
     #[test]
@@ -201,6 +210,7 @@ mod cli_tests {
         std::env::remove_var("TYCHO_URL");
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
+        std::env::remove_var("FYND_HOSTED_SWAGGER_URL");
         let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
@@ -220,6 +230,7 @@ mod cli_tests {
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.blocklist_config, None);
+        assert_eq!(args.hosted_swagger_url, None);
         assert!(!args.partial_blocks);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);

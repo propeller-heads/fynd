@@ -60,7 +60,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`, `GET /v1/info`
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
-4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in: `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`
+4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
+   `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
+   `WaterFillAlgorithm`
 5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices
@@ -106,6 +108,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
+| `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
 
 ### CLI Commands
 

@@ -13,8 +13,8 @@
 use std::collections::HashSet;
 
 use alloy::{
+    network::AnyTransactionReceipt,
     primitives::{Address, TxHash, U256},
-    rpc::types::TransactionReceipt,
     sol,
     sol_types::SolEvent,
 };
@@ -54,7 +54,7 @@ pub(crate) struct SandwichEvidence {
 /// both sides of their own trade is not a sandwich. Candidate pairs are tried closest front
 /// first, then closest back, so the first match found is the tightest bracket.
 pub(crate) fn detect(
-    receipts: &[TransactionReceipt],
+    receipts: &[AnyTransactionReceipt],
     victim_index: usize,
     victim: &DecodedTrade,
     registry: &Registry,
@@ -101,8 +101,8 @@ pub(crate) fn detect(
 /// real sandwich bots settle through private contracts. A link matching the victim's own sender
 /// is also excluded: a trader on both sides of their own trade is not a sandwich.
 fn shared_attacker(
-    front: &TransactionReceipt,
-    back: &TransactionReceipt,
+    front: &AnyTransactionReceipt,
+    back: &AnyTransactionReceipt,
     victim_sender: Address,
     registry: &Registry,
 ) -> Option<Address> {
@@ -123,8 +123,8 @@ fn shared_attacker(
 /// when either leg missed the overlap.
 fn overlapping_pools(
     victim_pools: &HashSet<Address>,
-    front: &TransactionReceipt,
-    back: &TransactionReceipt,
+    front: &AnyTransactionReceipt,
+    back: &AnyTransactionReceipt,
     registry: &Registry,
 ) -> Option<Vec<Address>> {
     let front_overlap: HashSet<Address> = pool_addresses(front, registry)
@@ -153,7 +153,7 @@ fn overlapping_pools(
 /// addresses (the wrapped-native token's `Deposit`/`Withdrawal`, Permit2's permit events) log on
 /// most swaps without being pools: counting any of them would give two transactions that merely
 /// share a token or an infrastructure contract a trivial "pool" overlap.
-fn pool_addresses(receipt: &TransactionReceipt, registry: &Registry) -> HashSet<Address> {
+fn pool_addresses(receipt: &AnyTransactionReceipt, registry: &Registry) -> HashSet<Address> {
     let mut pools = HashSet::new();
     for log in receipt.logs() {
         let token_event = log
@@ -185,8 +185,8 @@ fn direction_token(victim_token_out: Address, registry: &Registry) -> Address {
 /// itself, plus the pair's shared target contract when the link was a shared sender — a bot's
 /// inventory usually sits in its private contract, not in the EOA that signs.
 fn direction_entities(
-    front: &TransactionReceipt,
-    back: &TransactionReceipt,
+    front: &AnyTransactionReceipt,
+    back: &AnyTransactionReceipt,
     attacker: Address,
     victim_sender: Address,
     registry: &Registry,
@@ -212,8 +212,8 @@ fn direction_entities(
 /// is missing an attacker whose legs move only native ETH — invisible in receipts — which is rare:
 /// bots keep inventory wrapped precisely because pools settle in WETH.
 fn accumulates_then_disposes(
-    front: &TransactionReceipt,
-    back: &TransactionReceipt,
+    front: &AnyTransactionReceipt,
+    back: &AnyTransactionReceipt,
     entities: &[Address],
     token: Address,
 ) -> bool {
@@ -225,7 +225,7 @@ fn accumulates_then_disposes(
 }
 
 /// `(received, sent)` totals of `token` for `entity` across a receipt's ERC-20 `Transfer` logs.
-fn token_flow(receipt: &TransactionReceipt, entity: Address, token: Address) -> (U256, U256) {
+fn token_flow(receipt: &AnyTransactionReceipt, entity: Address, token: Address) -> (U256, U256) {
     let mut received = U256::ZERO;
     let mut sent = U256::ZERO;
     for log in receipt.logs() {

@@ -4,14 +4,17 @@
 //! anything costs a trace. It answers only "is this a solver trade at all" — how the trade is
 //! then decoded is the decoders' job (see `decode`).
 
-use alloy::{primitives::Address, rpc::types::TransactionReceipt};
+use alloy::{
+    network::{AnyTransactionReceipt, ReceiptResponse},
+    primitives::Address,
+};
 use tracing::debug;
 
 use crate::decoder::{registry::Registry, solvers};
 
 /// A transaction identified as a solver trade, ready to be traced and decoded.
 pub(crate) struct MatchedSolverTrade<'a> {
-    pub receipt: &'a TransactionReceipt,
+    pub receipt: &'a AnyTransactionReceipt,
     /// The contract the transaction entered through (`tx.to`).
     pub entry_point: Address,
 }
@@ -24,7 +27,7 @@ pub(crate) struct MatchedSolverTrade<'a> {
 /// Matched transactions whose logs mark a non-swap order shape are vetoed
 /// here (see `solvers::solver_veto`), before they cost a trace.
 pub(crate) fn select<'a>(
-    receipt: &'a TransactionReceipt,
+    receipt: &'a AnyTransactionReceipt,
     registry: &Registry,
 ) -> Option<MatchedSolverTrade<'a>> {
     let matched = match_entry(receipt, registry)?;
@@ -43,7 +46,7 @@ pub(crate) fn select<'a>(
 
 /// Match a receipt by its entry point or its solver logs.
 fn match_entry<'a>(
-    receipt: &'a TransactionReceipt,
+    receipt: &'a AnyTransactionReceipt,
     registry: &Registry,
 ) -> Option<MatchedSolverTrade<'a>> {
     if !receipt.status() {

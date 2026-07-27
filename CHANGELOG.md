@@ -1,4 +1,31 @@
 
+## [0.97.6](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.6) (2026-07-27)
+
+### Features
+
+* add aerodrome_v1 to protocol registry ([12c47ad](https://github.com/propeller-heads/fynd/commit/12c47ad482ec8559e03ff40c5680d63b84a06747))
+
+
+## [0.97.5](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.5) (2026-07-27)
+
+### Features
+
+* **rpc:** make the hosted Swagger UI opt-in via --hosted-swagger-url ([4e0b883](https://github.com/propeller-heads/fynd/commit/4e0b8839dd49011386ceea62bbf704b516a93d89))
+* **rpc:** serve a hosted-gateway Swagger UI at /docs/hosted/ ([473b18f](https://github.com/propeller-heads/fynd/commit/473b18f78cf288fd5c406be42021c702e4b4190b))
+* log solve requests that take more than 200ms ([7c54ab7](https://github.com/propeller-heads/fynd/commit/7c54ab719f0ceef765f9a64a7dd1ec68649c4560))
+
+### Bug Fixes
+
+* **rpc:** declare hosted auth as raw Authorization API key ([dd9667d](https://github.com/propeller-heads/fynd/commit/dd9667db21d2d9589bdefbed4babba0a6ba61c54))
+
+
+## [0.97.4](https://github.com/propeller-heads/fynd/compare/0.97.3...0.97.4) (2026-07-24)
+
+### Bug Fixes
+
+* **rpc:** fail fast when the computation manager task exits ([dd5755a](https://github.com/propeller-heads/fynd/commit/dd5755a9b00af21447a942b86b8999a369cc701f))
+
+
 ## [0.97.3](https://github.com/propeller-heads/fynd/compare/0.97.2...0.97.3) (2026-07-23)
 
 ### Features

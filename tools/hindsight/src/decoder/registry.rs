@@ -1,8 +1,8 @@
 //! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
-//! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
-//! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
+//! The data is pure configuration and lives in TOML — the built-in address books are embedded
+//! from the `registry/` directory; `--registry <path>` loads a modified or per-chain
 //! address book without recompiling. This module only holds the lookups the decoders ask
 //! (`Registry::is_solver`, `Registry::is_batch_settler`, `Registry::label`, …).
 
@@ -12,13 +12,14 @@ use std::{
     path::Path,
 };
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use anyhow::Context;
 use serde::Deserialize;
 
 /// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
 /// cannot fail to parse at runtime).
 const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
+const BASE_TOML: &str = include_str!("registry/base.toml");
 
 /// On-disk shape of a chain's address book. Field meanings are documented in
 /// `registry/ethereum.toml`.
@@ -32,6 +33,24 @@ struct AddressBook {
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
+    /// Trader addresses that identify an order-flow client (e.g. kpk's Safes on `CoW`). Absent in
+    /// books that have no owner-identified clients.
+    #[serde(default)]
+    client_owners: HashMap<Address, String>,
+    /// Fee-wallet address → client, for clients that route through a shared router and are only
+    /// identified by the fee transferred to their wallet (Phantom, Robinhood). Absent in books
+    /// with no fee-identified clients.
+    #[serde(default)]
+    client_fees: HashMap<Address, String>,
+    /// Provider integrator tag → client, for clients identified by the integrator string in a
+    /// provider's event (`LiFi` frontends: Infinex, Robinhood). Keys are lowercase. Absent in
+    /// books with no integrator-identified clients.
+    #[serde(default)]
+    client_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → client, for clients identified by the frontend tag (`appCode`)
+    /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified clients.
+    #[serde(default)]
+    client_appdata: HashMap<B256, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -95,6 +114,18 @@ pub(crate) struct Registry {
     usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
+    /// Trader address → order-flow client name, for clients identified by who owns the order
+    /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
+    client_owners: HashMap<Address, String>,
+    /// Fee-wallet address → client name, for clients identified by the fee they take on a shared
+    /// router rather than by the entry point (Phantom, Robinhood).
+    client_fees: HashMap<Address, String>,
+    /// Provider integrator tag (lowercase) → client name, for clients identified by the integrator
+    /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
+    client_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → client name, for clients identified by the frontend tag
+    /// (`appCode`) committed into an order (`LlamaSwap`).
+    client_appdata: HashMap<B256, String>,
 }
 
 impl Registry {
@@ -109,8 +140,9 @@ impl Registry {
         }
         match chain.to_lowercase().as_str() {
             "ethereum" => Ok(Self::ethereum()),
+            "base" => Ok(Self::base()),
             other => anyhow::bail!(
-                "no built-in decoder address registry for chain '{other}' (only ethereum); \
+                "no built-in decoder address registry for chain '{other}' (only ethereum, base); \
                  pass --registry with that chain's address book"
             ),
         }
@@ -119,6 +151,11 @@ impl Registry {
     /// The built-in Ethereum address book.
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
+    }
+
+    /// The built-in Base address book.
+    pub(crate) fn base() -> Self {
+        Self::from_toml(BASE_TOML).expect("embedded base registry must parse")
     }
 
     fn from_toml(text: &str) -> anyhow::Result<Self> {
@@ -168,6 +205,14 @@ impl Registry {
             infrastructure: book.infrastructure,
             usd_stablecoins,
             venues: book.venues,
+            client_owners: book.client_owners,
+            client_fees: book.client_fees,
+            client_integrators: book
+                .client_integrators
+                .into_iter()
+                .map(|(tag, client)| (tag.to_lowercase(), client))
+                .collect(),
+            client_appdata: book.client_appdata,
         })
     }
 
@@ -223,6 +268,36 @@ impl Registry {
         self.venues.get(name)
     }
 
+    /// The order-flow client that owns trades from this trader address, if any. Used to attribute
+    /// clients identified by who owns the order (e.g. kpk's Safes) rather than by `tx.to`.
+    pub(crate) fn client_for_owner(&self, address: Address) -> Option<&str> {
+        self.client_owners
+            .get(&address)
+            .map(String::as_str)
+    }
+
+    /// Fee-wallet → client map, for attributing clients identified only by their fee leg on a
+    /// shared router (see `crate::decoder::clients`).
+    pub(crate) fn client_fees(&self) -> &HashMap<Address, String> {
+        &self.client_fees
+    }
+
+    /// The client for a provider integrator tag (case-insensitive), if one is registered. Used to
+    /// attribute `LiFi` frontends by the integrator string in the swap event.
+    pub(crate) fn client_for_integrator(&self, integrator: &str) -> Option<&str> {
+        self.client_integrators
+            .get(&integrator.to_lowercase())
+            .map(String::as_str)
+    }
+
+    /// The client for a `CoW` order `appData` hash, if one is registered. Used to attribute
+    /// frontends by the `appCode` tag committed into the order (`LlamaSwap`).
+    pub(crate) fn client_for_appdata(&self, app_data: B256) -> Option<&str> {
+        self.client_appdata
+            .get(&app_data)
+            .map(String::as_str)
+    }
+
     /// The venue whose entry point this address is, if any.
     pub(crate) fn venue_name(&self, address: Address) -> Option<&str> {
         self.names
@@ -259,10 +334,23 @@ mod tests {
     }
 
     #[test]
-    fn test_load_ethereum() {
+    fn test_embedded_base_book() {
+        let registry = Registry::base();
+        assert!(!registry.solvers.is_empty());
+        assert!(!registry
+            .venue("relay")
+            .unwrap()
+            .entry_points
+            .is_empty());
+    }
+
+    #[test]
+    fn test_load_builtin_chains() {
         assert!(Registry::load("ethereum", None).is_ok());
         assert!(Registry::load("Ethereum", None).is_ok());
-        assert!(Registry::load("base", None).is_err());
+        assert!(Registry::load("base", None).is_ok());
+        assert!(Registry::load("BASE", None).is_ok());
+        assert!(Registry::load("arbitrum", None).is_err());
     }
 
     #[test]

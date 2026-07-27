@@ -23,6 +23,7 @@ pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub(crate) mod sim_guard;
 pub(crate) mod split_primitives;
+pub mod water_fill;
 
 #[cfg(test)]
 pub mod split_test_harness;
@@ -35,6 +36,7 @@ pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
+pub use water_fill::WaterFillAlgorithm;
 
 use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
