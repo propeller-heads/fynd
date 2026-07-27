@@ -14,7 +14,6 @@
 //! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
-mod clients;
 mod decode;
 mod intents;
 mod matching;
@@ -24,6 +23,7 @@ mod sandwich;
 mod solvers;
 mod trace;
 mod transfer_ledger;
+mod venue_attribution;
 pub(crate) mod venues;
 mod veto;
 
@@ -262,13 +262,13 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
-        // A client fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
-        // `clients`) overrides the entry-point label, backing any client fee out before the quote
-        // check reads the grossed output. The appData tag is read from a batch settler's calldata;
-        // other transactions carry none.
+        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
+        // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
+        // the quote check reads the grossed output. The appData tag is read from a batch settler's
+        // calldata; other transactions carry none.
         let integrator = solvers::integrator(logs);
-        let app_data = intents::client_tag(registry, entry_point, &root.input);
-        let venue = clients::attribute(
+        let app_data = intents::venue_tag(registry, entry_point, &root.input);
+        let venue = venue_attribution::attribute(
             registry,
             &mut flow,
             &transfer_ledger,

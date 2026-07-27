@@ -33,24 +33,24 @@ struct AddressBook {
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
-    /// Trader addresses that identify an order-flow client (e.g. kpk's Safes on `CoW`). Absent in
-    /// books that have no owner-identified clients.
+    /// Trader addresses that identify an order-flow venue (e.g. kpk's Safes on `CoW`). Absent in
+    /// books that have no owner-identified venues.
     #[serde(default)]
-    client_owners: HashMap<Address, String>,
-    /// Fee-wallet address → client, for clients that route through a shared router and are only
+    venue_owners: HashMap<Address, String>,
+    /// Fee-wallet address → venue, for venues that route through a shared router and are only
     /// identified by the fee transferred to their wallet (Phantom, Robinhood). Absent in books
-    /// with no fee-identified clients.
+    /// with no fee-identified venues.
     #[serde(default)]
-    client_fees: HashMap<Address, String>,
-    /// Provider integrator tag → client, for clients identified by the integrator string in a
+    venue_fees: HashMap<Address, String>,
+    /// Provider integrator tag → venue, for venues identified by the integrator string in a
     /// provider's event (`LiFi` frontends: Infinex, Robinhood). Keys are lowercase. Absent in
-    /// books with no integrator-identified clients.
+    /// books with no integrator-identified venues.
     #[serde(default)]
-    client_integrators: HashMap<String, String>,
-    /// `CoW` order `appData` hash → client, for clients identified by the frontend tag (`appCode`)
-    /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified clients.
+    venue_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → venue, for venues identified by the frontend tag (`appCode`)
+    /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified venues.
     #[serde(default)]
-    client_appdata: HashMap<B256, String>,
+    venue_appdata: HashMap<B256, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -114,18 +114,18 @@ pub(crate) struct Registry {
     usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
-    /// Trader address → order-flow client name, for clients identified by who owns the order
+    /// Trader address → order-flow venue name, for venues identified by who owns the order
     /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
-    client_owners: HashMap<Address, String>,
-    /// Fee-wallet address → client name, for clients identified by the fee they take on a shared
+    venue_owners: HashMap<Address, String>,
+    /// Fee-wallet address → venue name, for venues identified by the fee they take on a shared
     /// router rather than by the entry point (Phantom, Robinhood).
-    client_fees: HashMap<Address, String>,
-    /// Provider integrator tag (lowercase) → client name, for clients identified by the integrator
+    venue_fees: HashMap<Address, String>,
+    /// Provider integrator tag (lowercase) → venue name, for venues identified by the integrator
     /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
-    client_integrators: HashMap<String, String>,
-    /// `CoW` order `appData` hash → client name, for clients identified by the frontend tag
+    venue_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → venue name, for venues identified by the frontend tag
     /// (`appCode`) committed into an order (`LlamaSwap`).
-    client_appdata: HashMap<B256, String>,
+    venue_appdata: HashMap<B256, String>,
 }
 
 impl Registry {
@@ -205,14 +205,14 @@ impl Registry {
             infrastructure: book.infrastructure,
             usd_stablecoins,
             venues: book.venues,
-            client_owners: book.client_owners,
-            client_fees: book.client_fees,
-            client_integrators: book
-                .client_integrators
+            venue_owners: book.venue_owners,
+            venue_fees: book.venue_fees,
+            venue_integrators: book
+                .venue_integrators
                 .into_iter()
-                .map(|(tag, client)| (tag.to_lowercase(), client))
+                .map(|(tag, venue)| (tag.to_lowercase(), venue))
                 .collect(),
-            client_appdata: book.client_appdata,
+            venue_appdata: book.venue_appdata,
         })
     }
 
@@ -268,32 +268,32 @@ impl Registry {
         self.venues.get(name)
     }
 
-    /// The order-flow client that owns trades from this trader address, if any. Used to attribute
-    /// clients identified by who owns the order (e.g. kpk's Safes) rather than by `tx.to`.
-    pub(crate) fn client_for_owner(&self, address: Address) -> Option<&str> {
-        self.client_owners
+    /// The order-flow venue that owns trades from this trader address, if any. Used to attribute
+    /// venues identified by who owns the order (e.g. kpk's Safes) rather than by `tx.to`.
+    pub(crate) fn venue_for_owner(&self, address: Address) -> Option<&str> {
+        self.venue_owners
             .get(&address)
             .map(String::as_str)
     }
 
-    /// Fee-wallet → client map, for attributing clients identified only by their fee leg on a
-    /// shared router (see `crate::decoder::clients`).
-    pub(crate) fn client_fees(&self) -> &HashMap<Address, String> {
-        &self.client_fees
+    /// Fee-wallet → venue map, for attributing venues identified only by their fee leg on a
+    /// shared router (see `crate::decoder::venue_attribution`).
+    pub(crate) fn venue_fees(&self) -> &HashMap<Address, String> {
+        &self.venue_fees
     }
 
-    /// The client for a provider integrator tag (case-insensitive), if one is registered. Used to
+    /// The venue for a provider integrator tag (case-insensitive), if one is registered. Used to
     /// attribute `LiFi` frontends by the integrator string in the swap event.
-    pub(crate) fn client_for_integrator(&self, integrator: &str) -> Option<&str> {
-        self.client_integrators
+    pub(crate) fn venue_for_integrator(&self, integrator: &str) -> Option<&str> {
+        self.venue_integrators
             .get(&integrator.to_lowercase())
             .map(String::as_str)
     }
 
-    /// The client for a `CoW` order `appData` hash, if one is registered. Used to attribute
+    /// The venue for a `CoW` order `appData` hash, if one is registered. Used to attribute
     /// frontends by the `appCode` tag committed into the order (`LlamaSwap`).
-    pub(crate) fn client_for_appdata(&self, app_data: B256) -> Option<&str> {
-        self.client_appdata
+    pub(crate) fn venue_for_appdata(&self, app_data: B256) -> Option<&str> {
+        self.venue_appdata
             .get(&app_data)
             .map(String::as_str)
     }

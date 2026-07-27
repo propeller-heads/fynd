@@ -56,8 +56,8 @@ pub(crate) trait SolverKnowledge: Send + Sync {
 
     /// The order-flow integrator tag this solver records in its logs, when it exposes one. A
     /// solver that fronts other apps (`LiFi`'s Diamond) carries the frontend's integrator string in
-    /// its swap event; client attribution maps that tag to a client (see
-    /// `crate::decoder::clients`).
+    /// its swap event; venue attribution maps that tag to a venue (see
+    /// `crate::decoder::venue_attribution`).
     fn integrator(&self, _logs: &[Log]) -> Option<String> {
         None
     }

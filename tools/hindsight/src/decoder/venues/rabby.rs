@@ -41,7 +41,7 @@ impl<P: Provider> TradeDecoder<P> for RabbyNetting {
             &addresses.fee_collectors,
         )?;
 
-        if flow.swap.token_out == Address::ZERO && flow.venue_fee_out.is_none() {
+        if flow.swap.token_out == Address::ZERO {
             let wrapped_fee = ctx
                 .transfer_ledger
                 .received_by(&addresses.fee_collectors)
@@ -49,8 +49,7 @@ impl<P: Provider> TradeDecoder<P> for RabbyNetting {
                 .copied()
                 .filter(|fee| !fee.is_zero());
             if let Some(fee) = wrapped_fee {
-                flow.venue_fee_out = Some(fee);
-                flow.swap.amount_out = flow.swap.amount_out.saturating_add(fee);
+                flow.gross_output_fee(fee);
             }
         }
         Some(flow)
