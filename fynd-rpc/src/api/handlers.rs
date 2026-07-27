@@ -14,7 +14,8 @@ use crate::api::prices::{
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
     request_capture::{
-        self, log_request_capture, no_route_reason_code, quote_status_code, RequestOutcome,
+        self, log_request_capture, log_slow_solve, no_route_reason_code, quote_status_code,
+        RequestOutcome,
     },
 };
 
@@ -108,6 +109,17 @@ pub(crate) async fn quote(
     }
 
     let core_quote = result?;
+
+    // Log successful solves that exceed the slow threshold for latency
+    // monitoring. This is separate from the failure capture above — it covers
+    // the happy path, not errors.
+    log_slow_solve(
+        core_quote.solve_time_ms(),
+        num_orders,
+        request_capture::SLOW_SOLVE_THRESHOLD_MS,
+        &replay_json,
+    );
+
     let dto_quote: dto::Quote = core_quote.into();
 
     Ok(HttpResponse::Ok().json(dto_quote))
