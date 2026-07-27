@@ -286,6 +286,7 @@ async fn decode_block_when_available<P: Provider>(
         }
         tokio::time::sleep(DECODE_RPC_LAG_POLL).await;
     }
+    telemetry::record_rpc_index_wait(started.elapsed());
     decoder.decode_block(block).await
 }
 
@@ -566,6 +567,7 @@ async fn run_session<P: Provider>(
             .get_block_number()
             .await
         {
+            telemetry::record_head_lag_blocks(head.saturating_sub(target));
             if head.saturating_sub(target) > pacing.max_lag_blocks {
                 return SessionEnd::Unhealthy(format!(
                     "monitor is {} blocks behind head {head}; presuming an unhealthy session",
