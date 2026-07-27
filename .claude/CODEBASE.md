@@ -108,6 +108,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
+| `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
 
 ### CLI Commands
 
