@@ -111,8 +111,7 @@ pub(crate) async fn quote(
     if outcome.is_failure() {
         let span = tracing::Span::current();
         actix_web::rt::spawn(async move {
-            let _guard = span.enter();
-            log_request_capture(num_orders, &replay_capture.to_json(), &outcome);
+            span.in_scope(|| log_request_capture(num_orders, &replay_capture.to_json(), &outcome));
         });
     }
 
