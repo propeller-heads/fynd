@@ -311,8 +311,12 @@ pub enum NoPathReason {
     NoGraphPath,
     /// Paths exist but none could be scored (e.g., missing edge weights).
     NoScorablePaths,
-    /// A path exists, but the requested amount is too small to produce a
-    /// non-zero output (dust).
+    /// The requested amount is too small to route (dust). Detection depends
+    /// on scoring mode: gas-unaware scoring reports this when an explored
+    /// hop's output floors to zero; gas-aware scoring reports it when an
+    /// explored hop's input cannot cover that hop's gas cost. The signal
+    /// latches on any explored edge, so a usable path to the destination may
+    /// not have existed.
     AmountTooSmall,
 }
 
@@ -323,7 +327,7 @@ impl std::fmt::Display for NoPathReason {
             Self::DestinationTokenNotInGraph => write!(f, "destination token not in graph"),
             Self::NoGraphPath => write!(f, "no connecting path in graph"),
             Self::NoScorablePaths => write!(f, "no paths with valid scores"),
-            Self::AmountTooSmall => write!(f, "output amount too small to route"),
+            Self::AmountTooSmall => write!(f, "amount too small to route"),
         }
     }
 }
