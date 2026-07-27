@@ -29,12 +29,12 @@ infrastructure.
 
 ## API Documentation
 
-Two Swagger UIs are served, both built from the same `ApiDoc` annotations:
+Up to two Swagger UIs are served, both built from the same `ApiDoc` annotations:
 
 | Path | Spec | Describes |
 |---|---|---|
-| `/docs/` | `/api-docs/openapi.json` | Self-hosted deployments: `/v1/quote` on the origin it is reached at, no authentication |
-| `/docs/hosted/` | `/api-docs/hosted/openapi.json` | The hosted gateway: `/v1/{chain}/quote` with a `chain` path parameter, an API key sent as the raw `Authorization` header value, and a server URL from `FYND_HOSTED_SWAGGER_URL` (default `https://fynd-api.propellerheads.xyz`) |
+| `/docs/` | `/api-docs/openapi.json` | Self-hosted deployments: `/v1/quote` on the origin it is reached at, no authentication. Always served |
+| `/docs/hosted/` | `/api-docs/hosted/openapi.json` | The hosted gateway: `/v1/{chain}/quote` with a `chain` path parameter and an API key sent as the raw `Authorization` header value. Only served when a gateway URL is set via `--hosted-swagger-url` / `FYND_HOSTED_SWAGGER_URL` |
 
 `api/docs.rs` derives the hosted spec from the self-hosted one at startup, so endpoint
 annotations live in one place.

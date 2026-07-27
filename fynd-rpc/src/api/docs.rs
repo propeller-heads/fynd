@@ -6,9 +6,7 @@
 //!   process routes (`/v1/quote`) on the origin it is reached at, with no authentication.
 //! - `/docs/hosted/` + `/api-docs/hosted/openapi.json` — the hosted gateway, which routes per chain
 //!   (`/v1/{chain}/quote`) and authenticates requests with an API key sent as the raw
-//!   `Authorization` header value.
-
-use std::env;
+//!   `Authorization` header value. Only served when a gateway URL is configured.
 
 use actix_web::web;
 use serde_json::json;
@@ -26,25 +24,24 @@ use crate::api::ApiDoc;
 #[cfg(feature = "experimental")]
 use crate::api::ExperimentalApiDoc;
 
-/// Environment variable overriding the server URL advertised by the hosted spec.
-const HOSTED_SERVER_URL_ENV: &str = "FYND_HOSTED_SWAGGER_URL";
-
-/// Server URL advertised by the hosted spec when [`HOSTED_SERVER_URL_ENV`] is unset.
-const DEFAULT_HOSTED_SERVER_URL: &str = "https://fynd-api.propellerheads.xyz";
-
 /// Name of the API key security scheme declared by the hosted spec.
 const API_KEY_SCHEME_NAME: &str = "ApiKeyAuth";
 
-/// Registers both Swagger UIs and the specs they load.
+/// Registers the Swagger UIs and the specs they load.
+///
+/// The self-hosted UI is always served. The hosted one describes a gateway this process knows
+/// nothing about, so it is only served when `hosted_url` names that gateway.
 ///
 /// The hosted UI is registered first because actix matches resources in registration order:
 /// `/docs/{_:.*}` also matches `/docs/hosted/index.html` and would serve a 404 for it.
-pub(crate) fn configure_docs(cfg: &mut web::ServiceConfig) {
-    let hosted = SwaggerUi::new("/docs/hosted/{_:.*}")
-        .url("/api-docs/hosted/openapi.json", hosted_spec(&hosted_server_url()));
-    let self_hosted =
-        SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", self_hosted_spec());
-    cfg.service(hosted).service(self_hosted);
+pub(crate) fn configure_docs(cfg: &mut web::ServiceConfig, hosted_url: Option<&str>) {
+    if let Some(hosted_url) = hosted_url {
+        cfg.service(
+            SwaggerUi::new("/docs/hosted/{_:.*}")
+                .url("/api-docs/hosted/openapi.json", hosted_spec(hosted_url)),
+        );
+    }
+    cfg.service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", self_hosted_spec()));
 }
 
 /// Builds the spec describing the endpoints this process routes.
@@ -105,11 +102,6 @@ fn hosted_spec(server_url: &str) -> OpenApi {
     openapi
 }
 
-/// Returns the server URL the hosted spec points "Try it out" requests at.
-fn hosted_server_url() -> String {
-    env::var(HOSTED_SERVER_URL_ENV).unwrap_or_else(|_| DEFAULT_HOSTED_SERVER_URL.to_string())
-}
-
 /// Path parameter naming the chain the hosted gateway routes to.
 fn chain_parameter() -> Parameter {
     ParameterBuilder::new()
@@ -142,7 +134,7 @@ fn operations_mut(path_item: &mut PathItem) -> impl Iterator<Item = &mut Operati
 mod tests {
     // Aliased: an unqualified `test` import shadows the built-in `#[test]` attribute with
     // actix-web's, which rejects non-async test functions.
-    use actix_web::{test as actix_test, App};
+    use actix_web::{http::StatusCode, test as actix_test, App};
     use serde_json::Value;
 
     use super::*;
@@ -267,20 +259,14 @@ mod tests {
         assert_eq!(servers[0].url, TEST_SERVER_URL)
     }
 
-    #[test]
-    fn hosted_server_url_defaults() {
-        if env::var(HOSTED_SERVER_URL_ENV).is_ok() {
-            return
-        }
-
-        assert_eq!(hosted_server_url(), DEFAULT_HOSTED_SERVER_URL)
-    }
-
     /// Both UIs must resolve: `/docs/{_:.*}` matches `/docs/hosted/...` too, so registration order
     /// decides whether the hosted UI is reachable at all.
     #[actix_web::test]
     async fn both_swagger_uis_are_reachable() {
-        let app = actix_test::init_service(App::new().configure(configure_docs)).await;
+        let app = actix_test::init_service(
+            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL))),
+        )
+        .await;
 
         for path in ["/docs/", "/docs/hosted/"] {
             let request = actix_test::TestRequest::get()
@@ -291,9 +277,37 @@ mod tests {
         }
     }
 
+    /// Self-hosted deployments get no hosted UI, so nothing points them at a gateway they have
+    /// no key for.
+    #[actix_web::test]
+    async fn hosted_swagger_ui_needs_a_url() {
+        let app =
+            actix_test::init_service(App::new().configure(|cfg| configure_docs(cfg, None))).await;
+
+        let self_hosted = actix_test::call_service(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/docs/")
+                .to_request(),
+        )
+        .await;
+        assert!(self_hosted.status().is_success(), "{}", self_hosted.status());
+
+        for path in ["/docs/hosted/", "/api-docs/hosted/openapi.json"] {
+            let request = actix_test::TestRequest::get()
+                .uri(path)
+                .to_request();
+            let response = actix_test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}")
+        }
+    }
+
     #[actix_web::test]
     async fn spec_endpoints_serve_their_own_paths() {
-        let app = actix_test::init_service(App::new().configure(configure_docs)).await;
+        let app = actix_test::init_service(
+            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL))),
+        )
+        .await;
 
         let self_hosted: Value = actix_test::call_and_read_body_json(
             &app,

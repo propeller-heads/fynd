@@ -28,6 +28,9 @@ pub struct FyndRPCBuilder {
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
+    /// Hosted gateway URL advertised by the `/docs/hosted/` Swagger UI. Unset by default, which
+    /// leaves that UI unregistered.
+    hosted_swagger_url: Option<String>,
 }
 
 impl FyndRPCBuilder {
@@ -67,6 +70,7 @@ impl FyndRPCBuilder {
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
+            hosted_swagger_url: None,
         })
     }
 
@@ -187,6 +191,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets the hosted gateway URL the `/docs/hosted/` Swagger UI sends requests to.
+    ///
+    /// Leaving it unset (the default) leaves that UI unregistered, so self-hosted deployments
+    /// only serve `/docs/`.
+    pub fn hosted_swagger_url(mut self, url: Option<String>) -> Self {
+        self.hosted_swagger_url = url;
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -272,13 +285,14 @@ impl FyndRPCBuilder {
             gas_token,
         );
 
+        let hosted_swagger_url = self.hosted_swagger_url;
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
                 .wrap(actix_web::middleware::from_fn(
                     crate::api::middleware::http_metrics_middleware,
                 ))
-                .configure(|cfg| configure_app(cfg, app_state.clone()))
+                .configure(|cfg| configure_app(cfg, app_state.clone(), hosted_swagger_url.clone()))
         })
         .bind((self.http_host.as_str(), self.http_port))
         .context("failed to bind HTTP server")?

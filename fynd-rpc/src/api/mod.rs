@@ -232,11 +232,18 @@ pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
 }
 
 /// Configures the Actix Web application with routes and state.
-pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
+///
+/// `hosted_swagger_url` names the hosted gateway the `/docs/hosted/` UI points at; when it is
+/// `None` that UI is not served.
+pub(crate) fn configure_app(
+    cfg: &mut web::ServiceConfig,
+    state: AppState,
+    hosted_swagger_url: Option<String>,
+) {
     cfg.configure(configure_error_handlers)
         .app_data(web::Data::new(state))
         .configure(configure_routes)
-        .configure(docs::configure_docs)
+        .configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
         .default_service(web::to(|| async {
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)
