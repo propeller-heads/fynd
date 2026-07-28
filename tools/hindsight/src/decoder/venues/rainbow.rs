@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use alloy::{primitives::U256, providers::Provider};
+use alloy::{primitives::U256, providers::Provider, sol, sol_types::SolCall};
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -20,8 +20,10 @@ use crate::decoder::{
     netting_decoders::venue_flow,
 };
 
-/// Selector of Rainbow's ETH→token call, whose 4th argument is the input-side fee.
-const FILL_QUOTE_ETH_TO_TOKEN: [u8; 4] = [0x3c, 0x2b, 0x9a, 0x7d];
+sol! {
+    /// Rainbow's ETH→token entry; `feeAmount` is the input-side fee the router keeps.
+    function fillQuoteEthToToken(address buyToken, address to, bytes data, uint256 feeAmount);
+}
 
 /// Rainbow's calldata decoder.
 pub(crate) struct RainbowCalldata;
@@ -46,16 +48,12 @@ impl<P: Provider> TradeDecoder<P> for RainbowCalldata {
     }
 }
 
-/// The input-side fee of a `fillQuoteEthToToken` call — its 4th (static `uint256`) argument — or
-/// `None` for any other selector or a too-short input.
+/// The input-side fee of a `fillQuoteEthToToken` call, or `None` for any other selector or a
+/// malformed input.
 fn eth_to_token_fee(input: &[u8]) -> Option<U256> {
-    let (selector, args) = input.split_at_checked(4)?;
-    if selector != FILL_QUOTE_ETH_TO_TOKEN {
-        return None;
-    }
-    // Args are `buyToken, to, data (offset), feeAmount`; `feeAmount` is the 4th 32-byte word.
-    let word = args.get(3 * 32..4 * 32)?;
-    Some(U256::from_be_slice(word))
+    fillQuoteEthToTokenCall::abi_decode(input)
+        .ok()
+        .map(|call| call.feeAmount)
 }
 
 #[cfg(test)]
@@ -76,14 +74,15 @@ mod tests {
         transfer_ledger::TransferLedger,
     };
 
-    /// `fillQuoteEthToToken` calldata carrying `fee` as its 4th word.
+    /// `fillQuoteEthToToken` calldata carrying `fee` as its `feeAmount` argument.
     fn eth_to_token_calldata(fee: u64) -> Vec<u8> {
-        let mut input = FILL_QUOTE_ETH_TO_TOKEN.to_vec();
-        input.extend_from_slice(&[0u8; 32]); // buyToken
-        input.extend_from_slice(&[0u8; 32]); // to
-        input.extend_from_slice(&[0u8; 32]); // data offset
-        input.extend_from_slice(&U256::from(fee).to_be_bytes::<32>()); // feeAmount
-        input
+        fillQuoteEthToTokenCall {
+            buyToken: Address::ZERO,
+            to: Address::ZERO,
+            data: alloy::primitives::Bytes::default(),
+            feeAmount: U256::from(fee),
+        }
+        .abi_encode()
     }
 
     async fn decode(

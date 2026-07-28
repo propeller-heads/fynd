@@ -1,23 +1,22 @@
-//! Order-flow client attribution.
+//! Order-flow venue attribution.
 //!
-//! A trade's venue is normally the contract the trader entered through (`tx.to`). Some clients own
+//! A trade's venue is normally the contract the trader entered through (`tx.to`). Some venues own
 //! the order flow without being that contract, and are recognized here from the decoded flow —
-//! overriding the venue label. Every fingerprint is registry-driven; nothing here knows about a
-//! specific client or provider.
+//! overriding the entry-point label. Every fingerprint is registry-driven; nothing here knows
+//! about a specific venue or provider.
 //!
 //! Four fingerprints, tried in order:
-//! - **owning trader** — the swap's net flow was read from a known client address
-//!   (`[client_owners]`).
+//! - **owning trader** — the swap's net flow was read from a known venue address
+//!   (`[venue_owners]`).
 //! - **`CoW` appData tag** — the settled order committed a frontend tag (`appCode`) whose appData
-//!   hash maps to a client (`[client_appdata]`). The hash is extracted by the caller (it is
+//!   hash maps to a venue (`[venue_appdata]`). The hash is extracted by the caller (it is
 //!   `CoW`-specific; see `crate::decoder::intents::cow::order_app_data`), so this module stays
 //!   generic.
-//! - **fee wallet** — a known client fee wallet received the output-token fee (`[client_fees]`);
-//!   the fee is backed out so the settled output stays gross. Checked only inside an
-//!   already-matched solver trade, so a bare dust transfer to a fee wallet is not mistaken for
-//!   flow.
+//! - **fee wallet** — a known venue fee wallet received the output-token fee (`[venue_fees]`); the
+//!   fee is backed out so the settled output stays gross. Checked only inside an already-matched
+//!   solver trade, so a bare dust transfer to a fee wallet is not mistaken for flow.
 //! - **provider integrator tag** — a provider's event carried an integrator string mapped to a
-//!   client (`[client_integrators]`). The tag is extracted by the caller (it is provider-specific;
+//!   venue (`[venue_integrators]`). The tag is extracted by the caller (it is provider-specific;
 //!   see `crate::decoder::solvers::integrator`), so this module stays generic.
 
 use std::collections::HashSet;
@@ -26,8 +25,8 @@ use alloy::primitives::{Address, B256, U256};
 
 use crate::decoder::{decode::TraderFlow, registry::Registry, transfer_ledger::TransferLedger};
 
-/// The order-flow client for a decoded flow, when a fingerprint matches. On a fee-wallet match the
-/// client's fee is backed out of `flow` (added to the gross output) unless a venue decoder already
+/// The order-flow venue for a decoded flow, when a fingerprint matches. On a fee-wallet match the
+/// venue's fee is backed out of `flow` (added to the gross output) unless a venue decoder already
 /// accounted a fee.
 pub(crate) fn attribute(
     registry: &Registry,
@@ -36,39 +35,36 @@ pub(crate) fn attribute(
     integrator: Option<&str>,
     app_data: Option<B256>,
 ) -> Option<String> {
-    if let Some(client) = registry.client_for_owner(flow.tracked) {
-        return Some(client.to_string());
+    if let Some(venue) = registry.venue_for_owner(flow.tracked) {
+        return Some(venue.to_string());
     }
-    if let Some(client) = app_data.and_then(|hash| registry.client_for_appdata(hash)) {
-        return Some(client.to_string());
+    if let Some(venue) = app_data.and_then(|hash| registry.venue_for_appdata(hash)) {
+        return Some(venue.to_string());
     }
-    if let Some((client, fee)) = fee_client(registry, ledger, flow.swap.token_out) {
-        if flow.venue_fee_out.is_none() {
-            flow.venue_fee_out = Some(fee);
-            flow.swap.amount_out = flow.swap.amount_out.saturating_add(fee);
-        }
-        return Some(client);
+    if let Some((venue, fee)) = fee_venue(registry, ledger, flow.swap.token_out) {
+        flow.gross_output_fee(fee);
+        return Some(venue);
     }
     integrator
-        .and_then(|tag| registry.client_for_integrator(tag))
+        .and_then(|tag| registry.venue_for_integrator(tag))
         .map(str::to_string)
 }
 
-/// The client whose fee wallet received the output token in this trade, with the fee amount.
-/// `None` when no client fee wallet took a non-zero cut of the output token.
-fn fee_client(
+/// The venue whose fee wallet received the output token in this trade, with the fee amount.
+/// `None` when no venue fee wallet took a non-zero cut of the output token.
+fn fee_venue(
     registry: &Registry,
     ledger: &TransferLedger,
     token_out: Address,
 ) -> Option<(String, U256)> {
-    for (wallet, client) in registry.client_fees() {
+    for (wallet, venue) in registry.venue_fees() {
         let fee = ledger
             .received_by(&HashSet::from([*wallet]))
             .get(&token_out)
             .copied()
             .filter(|amount| !amount.is_zero());
         if let Some(fee) = fee {
-            return Some((client.clone(), fee));
+            return Some((venue.clone(), fee));
         }
     }
     None
@@ -82,8 +78,8 @@ mod tests {
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
     #[test]
-    fn test_attributes_owner_to_client() {
-        // A CoW-settled kpk trade nets to the Safe that owns the order; the client is that Safe.
+    fn test_attributes_owner_to_venue() {
+        // A CoW-settled kpk trade nets to the Safe that owns the order; the venue is that Safe.
         let registry = Registry::ethereum();
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
@@ -92,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_owner_is_not_a_client() {
+    fn test_unknown_owner_is_not_a_venue() {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = TraderFlow::without_fees(addr(9), swap(addr(10), 1, addr(11), 2));
@@ -100,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn test_appdata_tag_attributes_client() {
+    fn test_appdata_tag_attributes_venue() {
         // A CoW order carrying DefiLlama's appData hash is attributed to LlamaSwap; an unregistered
         // hash is not.
         let registry = Registry::ethereum();
@@ -141,8 +137,8 @@ mod tests {
     }
 
     #[test]
-    fn test_integrator_tag_attributes_client() {
-        // A provider integrator tag maps to its client, case-insensitively; an unknown tag does
+    fn test_integrator_tag_attributes_venue() {
+        // A provider integrator tag maps to its venue, case-insensitively; an unknown tag does
         // not.
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
@@ -155,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_fee_transfer_is_not_a_client() {
+    fn test_no_fee_transfer_is_not_a_venue() {
         // Dust to the fee wallet in a token other than the output is not this trade's fee.
         let registry = Registry::ethereum();
         let user = addr(1);

@@ -59,7 +59,7 @@ All take `--chain` (selects the address book) and `--registry` /
            ┌─────────────────┐  embedded_quote  ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  veto → client attribution → solver attribution → gas → quote → sandwich scan
+                    │  veto → venue attribution → solver attribution → gas → quote → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -176,24 +176,24 @@ trait SolverKnowledge {
 }
 ```
 
-### Client attribution (`clients.rs`)
+### Venue attribution (`venue_attribution.rs`)
 
-The venue is normally the contract the trader entered through (`tx.to`). Some order-flow clients own
+The venue is normally the contract the trader entered through (`tx.to`). Some order-flow venues own
 the flow without being that contract, so after a flow is decoded one step can override the venue from
-a registry fingerprint. Nothing in `clients.rs` names a specific client — it reads four maps from
-the address book:
+a registry fingerprint. Nothing in `venue_attribution.rs` names a specific venue — it reads four maps
+from the address book:
 
-- **owning trader** (`[client_owners]`) — the flow was read from a known client address (kpk's Safes,
+- **owning trader** (`[venue_owners]`) — the flow was read from a known venue address (kpk's Safes,
   surfaced from the CoW decoder's owner).
-- **CoW appData tag** (`[client_appdata]`) — the settled order committed a frontend tag (`appCode`)
-  whose appData hash maps to a client (LlamaSwap). The hash is read from the settle calldata by
-  `intents::client_tag`, so `clients.rs` stays protocol-agnostic.
-- **fee wallet** (`[client_fees]`) — a known client fee wallet took the output-token fee (Phantom,
+- **CoW appData tag** (`[venue_appdata]`) — the settled order committed a frontend tag (`appCode`)
+  whose appData hash maps to a venue (LlamaSwap). The hash is read from the settle calldata by
+  `intents::venue_tag`, so `venue_attribution.rs` stays protocol-agnostic.
+- **fee wallet** (`[venue_fees]`) — a known venue fee wallet took the output-token fee (Phantom,
   Robinhood); the fee is grossed back. Only inside an already-matched trade, so a dust spray to a
   fee wallet is not mistaken for flow.
-- **provider integrator tag** (`[client_integrators]`) — a provider's event carried an integrator
-  string mapped to a client (LiFi frontends). The tag is read by that provider's
-  `SolverKnowledge::integrator`, so `clients.rs` stays provider-agnostic.
+- **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
+  string mapped to a venue (LiFi frontends). The tag is read by that provider's
+  `SolverKnowledge::integrator`, so `venue_attribution.rs` stays provider-agnostic.
 
 ### Per protocol, not per chain
 
@@ -217,8 +217,8 @@ collectors are re-verified on every chain a venue is added on.
 | Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and intent decoding then excludes the trader |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
-| Decode an intent settler (CoW-style) | A `TradeDecoder` in `intents/`, listed in `intents::decoders_for` ahead of the netting fallback | The settler's trades decode by net flow, losing exact amounts and (for contract owners) the client |
-| Attribute a new client (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[client_owners]` / `[client_appdata]` / `[client_fees]` / `[client_integrators]`); a provider's integrator tag also needs `SolverKnowledge::integrator` | The client's trades are attributed to the underlying router or settler, not the client |
+| Decode an intent settler (CoW-style) | A `TradeDecoder` in `intents/`, listed in `intents::decoders_for` ahead of the netting fallback | The settler's trades decode by net flow, losing exact amounts and (for contract owners) the venue |
+| Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`); a provider's integrator tag also needs `SolverKnowledge::integrator` | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Add a new decode method | A `TradeDecoder` (a `netting`/`calldata` toolkit function behind it), listed for the entities that use it | Transactions the existing decoders cannot read stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | The chain has no built-in book and must be passed via `--registry` |

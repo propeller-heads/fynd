@@ -177,6 +177,17 @@ impl TraderFlow {
             gas_scope: GasScope::NotCharged,
         }
     }
+
+    /// Record `fee` as an output-token venue fee and gross it back into `swap.amount_out`, so the
+    /// settled output stays comparable to Fynd's gross re-solve. A no-op when an output fee was
+    /// already accounted, so a second matching fee leg cannot double-count.
+    pub(crate) fn gross_output_fee(&mut self, fee: U256) {
+        if self.venue_fee_out.is_some() {
+            return;
+        }
+        self.venue_fee_out = Some(fee);
+        self.swap.amount_out = self.swap.amount_out.saturating_add(fee);
+    }
 }
 
 #[cfg(test)]

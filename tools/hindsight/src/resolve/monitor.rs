@@ -56,6 +56,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DECODE_RPC_LAG_RETRIES: usize = 5;
 const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
 
+/// Wall-clock budget behind chain head that `default_lag_blocks` converts into a block count.
+const LAG_BUDGET_SECS: u64 = 20 * 60;
+
 /// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
 /// configuration.
 #[derive(clap::Args)]
@@ -317,15 +320,16 @@ async fn build_solver(
         .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))
 }
 
-/// Default chain-head lag threshold in blocks — about 20 minutes at the chain's block time, so the
-/// wall-clock tolerance stays roughly the same across chains. Used when `--max-lag-blocks` is not
-/// given; an unrecognised chain falls back to the 12-second-block assumption.
-fn default_lag_blocks(chain: &str) -> u64 {
-    let block_secs = match chain.to_lowercase().as_str() {
-        "base" => 2,
-        _ => 12,
-    };
-    (20 * 60 / block_secs).max(1)
+/// The default `--max-lag-blocks`: a ~20-minute wall-clock budget for how far behind chain head the
+/// monitor may fall before rebuilding, expressed as a block count at the chain's block time so the
+/// budget stays about the same wall-clock length on every chain. A custom chain with no registered
+/// block time falls back to 12-second blocks.
+fn default_lag_blocks(chain: Chain) -> u64 {
+    let block_secs = chain
+        .try_block_time_secs()
+        .unwrap_or(12)
+        .max(1);
+    (LAG_BUDGET_SECS / block_secs).max(1)
 }
 
 /// Resolves when the process receives Ctrl-C (SIGINT), the signal the monitor treats as "stop".
@@ -425,7 +429,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     let mut totals = Totals::default();
     let max_lag_blocks = cfg
         .max_lag_blocks
-        .unwrap_or_else(|| default_lag_blocks(&cfg.chain.name));
+        .unwrap_or_else(|| default_lag_blocks(chain));
     info!(max_lag_blocks, "chain-head lag threshold");
 
     // Resolves on Ctrl-C, so a long run stops cleanly at any await below — including the
@@ -642,10 +646,9 @@ mod tests {
 
     #[test]
     fn test_default_lag_blocks_scales_with_block_time() {
-        assert_eq!(default_lag_blocks("ethereum"), 100); // 12s blocks
-        assert_eq!(default_lag_blocks("base"), 600); // 2s blocks
-        assert_eq!(default_lag_blocks("BASE"), 600);
-        assert_eq!(default_lag_blocks("unknown"), 100);
+        assert_eq!(default_lag_blocks(Chain::Ethereum), 100); // 12s blocks
+        assert_eq!(default_lag_blocks(Chain::Base), 600); // 2s blocks
+        assert_eq!(default_lag_blocks(Chain::Unichain), 1200); // 1s blocks
     }
 
     /// End-to-end smoke test of the live two-state monitor against a real solver.

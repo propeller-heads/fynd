@@ -97,12 +97,12 @@ fee_collectors = []
 
 # LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
 # heavier on Base than on mainnet). Keys are lowercase.
-[client_integrators]
+[venue_integrators]
 "infinex" = "infinex"
 
-# Clients identified by the appData hash a CoW order carries (appCode names the frontend). CoW
+# Venues identified by the appData hash a CoW order carries (appCode names the frontend). CoW
 # settles on Base too, and the hash is the same across chains. Keyed by the 32-byte appData hash.
-[client_appdata]
+[venue_appdata]
 # LlamaSwap (DefiLlama): appCode "DefiLlama".
 "0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422" = "llamaswap"
 
