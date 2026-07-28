@@ -228,14 +228,19 @@ fn fmt_bps_signed(bps: Option<f64>) -> String {
     bps.map_or_else(|| "—".to_string(), |b| format!("{b:+.1}"))
 }
 
-/// A signed USD amount with a thousands-separated integer part, e.g. `-$1,234.56`.
+/// A signed USD amount with a thousands-separated integer part, e.g. `-$1,234.56`. A non-finite
+/// amount — an overflowed sum, or a `null` the aggregates turned into a NaN — has no digits to
+/// group and renders as an em dash.
 fn fmt_usd(value: f64) -> String {
+    if !value.is_finite() {
+        return "—".to_string();
+    }
     let sign = if value < 0.0 { "-$" } else { "$" };
     let rounded = format!("{:.2}", value.abs());
-    let (int_part, frac) = rounded
-        .split_once('.')
-        .unwrap_or((rounded.as_str(), "00"));
-    format!("{sign}{}.{frac}", group_thousands(int_part))
+    // `{:.2}` on a finite value always emits `<digits>.<2 digits>`, so the last three bytes are the
+    // fraction and everything before them is the integer part. Both are ASCII.
+    let (int_part, frac) = rounded.split_at(rounded.len() - 3);
+    format!("{sign}{}{frac}", group_thousands(int_part))
 }
 
 fn group_thousands(digits: &str) -> String {
@@ -377,6 +382,14 @@ mod tests {
         assert_eq!(fmt_usd(1_234_567.5), "$1,234,567.50");
         assert_eq!(fmt_usd(-260.03), "-$260.03");
         assert_eq!(fmt_usd(0.0), "$0.00");
+    }
+
+    #[test]
+    fn test_fmt_usd_non_finite() {
+        // `{:.2}` renders these without a decimal point, so they have no integer part to group.
+        assert_eq!(fmt_usd(f64::INFINITY), "—");
+        assert_eq!(fmt_usd(f64::NEG_INFINITY), "—");
+        assert_eq!(fmt_usd(f64::NAN), "—");
     }
 
     #[test]
