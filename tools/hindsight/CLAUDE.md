@@ -8,9 +8,10 @@ actually settled.
 
 ## Commands
 
-Three subcommands via `cargo run -p hindsight --release --`. All of them take `--chain`
-(default `ethereum`), which selects the decoder's address book, and `--registry <path>` /
-`HINDSIGHT_REGISTRY` to load a custom address book.
+Four subcommands via `cargo run -p hindsight --release --`. The on-chain ones (`decode`,
+`verify`, `monitor`) take `--chain` (default `ethereum`), which selects the decoder's address book,
+and `--registry <path>` / `HINDSIGHT_REGISTRY` to load a custom address book. `report` is offline
+and takes neither.
 
 - **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
   trades (token in/out, amounts, venue, solver, gas, sandwich evidence). Accepts `--block N`,
@@ -26,6 +27,13 @@ Three subcommands via `cargo run -p hindsight --release --`. All of them take `-
   back-of-block (state N), and emits `RangeComparison` JSONL records. Exposes a Prometheus
   metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default 100, ~20 min on mainnet)
   bounds how far it may fall behind chain head before rebuilding the solver.
+
+- **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
+  (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
+  `<dir>/report.html`) with the dashboard's value views — the headline Fynd savings, win rate, and
+  median savings bps; the verdict split by trade count and by volume; per-solver/venue breakdowns;
+  top-saving trades; and the unsolved token tail. `--venue <name>` (repeatable, case-insensitive)
+  restricts the report to those venues. No chain, Tycho, or network access.
 
 ## Environment
 
@@ -80,6 +88,18 @@ their solver in calldata — `solver_aliases`).
 | `compare.rs` | `Verdict` / `Deltas` — bps diff, win/loss/coverage-miss classification |
 | `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
 | `jsonl.rs` | Append-only JSONL writer used by `monitor` |
+
+### Report (`src/report/`)
+
+The offline `report` subcommand — reads a `monitor` run's comparison JSONL and writes one
+self-contained HTML file.
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | `ReportArgs`; reads every `.jsonl` in the dir, skipping malformed lines |
+| `record.rs` | The subset of the JSONL record the report deserializes; round-trip tested against `jsonl::write_comparisons` |
+| `aggregate.rs` | Pure aggregations over the records (verdicts, coverage, savings, per-group, movers) |
+| `html.rs` | Renders the aggregates to a self-contained HTML file (inline CSS, `<div>` bars, no assets) |
 
 ### Verdict model
 
