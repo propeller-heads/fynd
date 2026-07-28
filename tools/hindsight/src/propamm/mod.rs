@@ -89,16 +89,20 @@ const DERIVED_DATA_WAIT: Duration = Duration::from_secs(30);
 /// Poll interval while waiting for that recomputation.
 const DERIVED_DATA_POLL: Duration = Duration::from_millis(25);
 
-/// Which pool to mirror, and at what fee-free price.
+/// Which pool to mirror, and how far off the public best route to price it.
 #[derive(Debug, Clone)]
 pub(crate) struct MirrorConfig {
     /// First token of the mirrored pair.
     pub token_a: Address,
     /// Second token of the mirrored pair.
     pub token_b: Address,
-    /// The mock's fee-free price as a percentage of the best real pool's price for the pair.
-    /// `100.0` mirrors that pool exactly and must never win — the harness's control case.
-    pub price_pct: f64,
+    /// Price offsets, in basis points relative to the public best route's output for the order
+    /// being solved. Orders on the mirrored pair cycle through these, so one run fills every
+    /// group.
+    ///
+    /// A negative offset prices the mock below the public market and must never be selected; zero
+    /// matches it exactly; a positive offset is the underbid the pool would offer.
+    pub offsets_bps: Vec<i32>,
     /// `token_a` amount, in whole units, used to rank candidate source pools each block. Picking
     /// by realized output at a representative size, rather than by TVL, keeps the mirror on
     /// the pool that actually prices best for the sizes being re-solved.
@@ -120,6 +124,26 @@ impl MirrorConfig {
                 .map_err(|e| anyhow::anyhow!("invalid token address {token_b}: {e}"))?,
         ))
     }
+
+    /// Whether an order's tokens are exactly the mirrored pair, in either direction.
+    ///
+    /// Only these orders can be calibrated: the mock then serves the whole order in one hop, so its
+    /// route output is a known function of its scale. A multi-hop route's output is not, which is
+    /// why off-pair orders are solved normally and carry no offset label.
+    pub(crate) fn serves(&self, token_in: &Address, token_out: &Address) -> bool {
+        (*token_in == self.token_a && *token_out == self.token_b) ||
+            (*token_in == self.token_b && *token_out == self.token_a)
+    }
+
+    /// The offset this order should be priced at, cycling through `offsets_bps` by order index so
+    /// every group fills at the same rate. `None` when no offsets are configured.
+    pub(crate) fn offset_for(&self, order_index: u64) -> Option<i32> {
+        if self.offsets_bps.is_empty() {
+            return None;
+        }
+        let index = usize::try_from(order_index % self.offsets_bps.len() as u64).ok()?;
+        self.offsets_bps.get(index).copied()
+    }
 }
 
 /// What one injection did, for logging.
@@ -127,11 +151,9 @@ impl MirrorConfig {
 pub(crate) struct Injected {
     /// Component id of the pool that was mirrored this block.
     pub source_component: String,
-    /// The best real pool's price: `token_b` per whole unit of `token_a`, at the probe size.
+    /// The mirrored pool's price: `token_b` per whole unit of `token_a`, at the probe size.
     /// Watching this across blocks is how you tell a live mirror from one stuck on a stale state.
     pub source_price: f64,
-    /// The mock's fee-free price, i.e. `source_price` scaled by `--propamm-price-pct`.
-    pub mock_price: f64,
     /// Whether the mock's spot price was recomputed before the wait expired.
     pub derived_data_ready: bool,
     /// The mirrored pair as token symbols, e.g. `WETH/USDC`.
@@ -148,6 +170,54 @@ pub(crate) struct Injector {
     /// Whether the mock has been announced as an added component. Announcing twice would re-add an
     /// existing graph edge.
     announced: bool,
+    /// This block's mirrored pool, kept so per-order calibration can simulate it at the order's
+    /// own size without re-reading the market.
+    source: Option<CachedSource>,
+}
+
+/// The mirrored pool and its tokens, cached for the current block.
+struct CachedSource {
+    state: Box<dyn ProtocolSim>,
+    token_a: Token,
+    token_b: Token,
+}
+
+impl CachedSource {
+    /// The pair's tokens ordered as `(in, out)` for an order, or `None` if the order is off-pair.
+    fn order_tokens(&self, token_in: &Address) -> Option<(&Token, &Token)> {
+        if *token_in == self.token_a.address {
+            Some((&self.token_a, &self.token_b))
+        } else if *token_in == self.token_b.address {
+            Some((&self.token_b, &self.token_a))
+        } else {
+            None
+        }
+    }
+}
+
+/// What one per-order calibration set up.
+#[derive(Debug)]
+pub(crate) struct Calibration {
+    /// The public best route's output this offset was measured against.
+    pub public_best_out: BigUint,
+    /// The output the mock is expected to produce: `public_best_out` shifted by the offset.
+    pub target_out: BigUint,
+    /// The offset applied, in basis points.
+    pub offset_bps: i32,
+}
+
+impl Calibration {
+    /// The offset the mock's target actually lands on, in basis points — the calibration's own
+    /// error check. Integer division and the source's own rounding mean this can differ from
+    /// `offset_bps` by a fraction of a bps; a large gap means the source could not hold the
+    /// target.
+    pub(crate) fn realized_offset_bps(&self) -> f64 {
+        let public = report::biguint_to_f64(&self.public_best_out);
+        if public <= 0.0 {
+            return 0.0;
+        }
+        (report::biguint_to_f64(&self.target_out) - public) / public * 10_000.0
+    }
 }
 
 impl Injector {
@@ -158,6 +228,7 @@ impl Injector {
             events: solver.market_event_sender(),
             candidates: Vec::new(),
             announced: false,
+            source: None,
         }
     }
 
@@ -187,9 +258,12 @@ impl Injector {
             return Ok(None);
         };
 
-        let mock = MirrorPool::from_price_pct(source.state, self.config.price_pct);
-        let price_factor = mock.price_factor();
-        let mirrored: Box<dyn ProtocolSim> = Box::new(mock);
+        // The block's baseline: the mock mirrors the source exactly. Per-order calibration rescales
+        // it afterwards, but derived data is computed against this state, so an unscaled mirror
+        // keeps the mock's edge weight in the same range as the real pools it competes
+        // with.
+        let mirrored: Box<dyn ProtocolSim> =
+            Box::new(MirrorPool::from_price_pct(source.state.clone_box(), 100.0));
         let first_injection = !self.announced;
         {
             let mut state = market.write().await;
@@ -230,23 +304,94 @@ impl Injector {
             );
         }
 
-        let mock_price = source.price * price_factor;
         debug!(
             block,
             source_component = source.component_id,
             source_price = source.price,
-            mock_price,
-            price_pct = self.config.price_pct,
             "mirrored source pool onto the mock PropAMM component"
         );
+        let pair_label = source.pair_label.clone();
+        self.source = Some(CachedSource {
+            state: source.state,
+            token_a: source.token_a,
+            token_b: source.token_b,
+        });
         Ok(Some(Injected {
             source_component: source.component_id,
             source_price: source.price,
-            mock_price,
             derived_data_ready,
-            pair_label: source.pair_label,
+            pair_label,
         }))
     }
+
+    /// Rescales the mock so it quotes essentially nothing, and can therefore never be selected.
+    ///
+    /// This is how the harness reads the *public* best route while leaving the graph untouched: the
+    /// mock's edge stays in place, it just loses every comparison. Cheaper and less disruptive than
+    /// removing the component, which would mean a topology event and a graph rebuild per order.
+    pub(crate) async fn neutralize(&self, market: &MarketData) -> bool {
+        self.rescale(market, MirrorPool::neutral_scale_ppm())
+            .await
+    }
+
+    /// Rescales the mock so its output for this order lands `offset_bps` off `public_best_out`.
+    ///
+    /// Returns `None` when the order is off-pair, no source is cached yet, or the source cannot
+    /// price the order — in each case the caller leaves the order uncalibrated rather than
+    /// reporting an offset the mock is not actually holding.
+    ///
+    /// No derived-data wait here: the topology is unchanged and the scale moves the mock's price by
+    /// basis points, so its edge weight from the block's baseline injection is still the right
+    /// order of magnitude for pruning. Waiting per order would cost a recomputation cycle each
+    /// time.
+    pub(crate) async fn calibrate(
+        &self,
+        market: &MarketData,
+        token_in: &Address,
+        amount_in: &BigUint,
+        public_best_out: &BigUint,
+        offset_bps: i32,
+    ) -> Option<Calibration> {
+        let source = self.source.as_ref()?;
+        let (from, to) = source.order_tokens(token_in)?;
+        let target_out = shift_bps(public_best_out, offset_bps);
+        let scale = MirrorPool::scale_for_target(
+            source.state.as_ref(),
+            amount_in.clone(),
+            from,
+            to,
+            &target_out,
+        )?;
+        if !self.rescale(market, scale).await {
+            return None;
+        }
+        Some(Calibration { public_best_out: public_best_out.clone(), target_out, offset_bps })
+    }
+
+    /// Writes the mock's state at `scale_ppm`. Returns whether a source was cached to rescale.
+    async fn rescale(&self, market: &MarketData, scale_ppm: u32) -> bool {
+        let Some(source) = self.source.as_ref() else {
+            return false;
+        };
+        let scaled: Box<dyn ProtocolSim> =
+            Box::new(MirrorPool::from_scale_ppm(source.state.clone_box(), scale_ppm));
+        market
+            .write()
+            .await
+            .update_states([(MOCK_COMPONENT_ID.to_string(), scaled)]);
+        true
+    }
+}
+
+/// Shifts an amount by `offset_bps`, saturating at zero. A negative offset below -10000 bps would
+/// otherwise wrap; the mock's price is a ratio and cannot go negative.
+fn shift_bps(amount: &BigUint, offset_bps: i32) -> BigUint {
+    const BPS: i64 = 10_000;
+    let scaled = i64::from(offset_bps).saturating_add(BPS);
+    if scaled <= 0 {
+        return BigUint::ZERO;
+    }
+    amount * BigUint::from(scaled.unsigned_abs()) / BigUint::from(BPS.unsigned_abs())
 }
 
 /// Component ids holding both tokens of the configured pair, excluding the mock itself.
@@ -282,6 +427,11 @@ struct BestSource {
     price: f64,
     /// The pair as token symbols, e.g. `WETH/USDC`.
     pair_label: String,
+    /// First token of the pair, carried so calibration can simulate the source without a market
+    /// read.
+    token_a: Token,
+    /// Second token of the pair.
+    token_b: Token,
 }
 
 /// The candidate pool the mock mirrors this block.
@@ -326,6 +476,8 @@ async fn best_source(
         state,
         price,
         pair_label: format!("{}/{}", token_a.symbol, token_b.symbol),
+        token_a,
+        token_b,
     })
 }
 
@@ -426,7 +578,7 @@ mod tests {
         let config = MirrorConfig {
             token_a: Bytes::from(vec![0x11; 20]),
             token_b: Bytes::from(vec![0x22; 20]),
-            price_pct: 100.05,
+            offsets_bps: vec![-5, 0, 5],
             probe_units: 1.0,
             chain: Chain::Ethereum,
         };
@@ -446,7 +598,7 @@ mod tests {
         let config = MirrorConfig {
             token_a: Bytes::from(vec![0x11; 20]),
             token_b: Bytes::from(vec![0x22; 20]),
-            price_pct: 100.0,
+            offsets_bps: vec![-5, 0, 5],
             probe_units: 1.0,
             chain: Chain::Ethereum,
         };
@@ -458,7 +610,7 @@ mod tests {
         let config = MirrorConfig {
             token_a: Bytes::from(vec![0x11; 20]),
             token_b: Bytes::from(vec![0x22; 20]),
-            price_pct: 100.0,
+            offsets_bps: vec![-5, 0, 5],
             probe_units: 1.0,
             chain: Chain::Ethereum,
         };

@@ -128,12 +128,25 @@ pub(crate) struct MonitorArgs {
     #[arg(long, env = "PROPAMM_PAIR", value_delimiter = ',')]
     pub propamm_pair: Option<Vec<String>>,
 
-    /// The mock pool's fee-free price, as a percentage of the best real pool's price for the pair.
-    /// `100` positions it exactly at the best price we can see (the control case — it cannot then
-    /// strictly beat the public market); `100.05` positions it 5 bps better. The fee it could
-    /// charge on top is measured, not set here
-    #[arg(long, env = "PROPAMM_PRICE_PCT", default_value_t = 100.0)]
-    pub propamm_price_pct: f64,
+    /// Price offsets, in basis points relative to **the public best route's output for the order
+    /// being solved**. Orders on the mirrored pair cycle through this list, so one run fills every
+    /// group and each order becomes an assertion rather than a data point:
+    ///
+    /// - a negative offset prices the mock below the public market and must never be selected;
+    /// - `0` matches it exactly, so any selection is on gas alone and must carry a zero fee;
+    /// - a positive offset is the underbid, and the fee taken must not exceed it.
+    ///
+    /// The mock's fee-free price is set per order, so "5 bps better" means 5 bps better than the
+    /// route Fynd would otherwise have quoted — not 5 bps better than some single pool
+    // `allow_hyphen_values` so a negative offset reads as a value, not as a short flag.
+    #[arg(
+        long,
+        env = "PROPAMM_OFFSETS_BPS",
+        value_delimiter = ',',
+        allow_hyphen_values = true,
+        default_values_t = [-5, 0, 5]
+    )]
+    pub propamm_offsets_bps: Vec<i32>,
 
     /// Trade size, in whole units of the pair's first token, used each block to pick which real
     /// pool to mirror. Set it near the sizes being re-solved so the mirror tracks the pool that
@@ -149,6 +162,16 @@ pub(crate) struct MonitorArgs {
 struct PropAmmHarness {
     injector: tokio::sync::Mutex<propamm::Injector>,
     stats: Arc<propamm::report::Stats>,
+    /// The pair and offset ladder, kept outside the injector's mutex so the solve path can decide
+    /// whether an order is calibratable without taking that lock.
+    config: propamm::MirrorConfig,
+}
+
+impl PropAmmHarness {
+    /// The mirrored pair and offset ladder.
+    fn config(&self) -> &propamm::MirrorConfig {
+        &self.config
+    }
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -244,7 +267,6 @@ impl StepAdapter<'_> {
                     block,
                     source = injected.source_component,
                     source_price = injected.source_price,
-                    mock_price = injected.mock_price,
                     derived_data_ready = injected.derived_data_ready,
                     "mirrored the mock PropAMM pool"
                 );
@@ -305,12 +327,113 @@ impl StepAdapter<'_> {
     }
 }
 
-#[async_trait]
-impl SteppingSolver for StepAdapter<'_> {
-    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
+impl StepAdapter<'_> {
+    /// Solve an order twice so the mock is priced against what Fynd would otherwise have quoted.
+    ///
+    /// Pass one neutralises the mock, so the quote is the public best route. Pass two rescales the
+    /// mock to land `offset_bps` off that output and re-quotes, and its result is the one returned
+    /// — the order's real answer, with a known-by-construction competitive situation.
+    ///
+    /// Falls back to the pass-one result whenever calibration is impossible (no source cached yet,
+    /// or the source cannot price the order). The order then carries no offset and is reported
+    /// as an ordinary comparison rather than as a group member.
+    async fn solve_calibrated(
+        &self,
+        harness: &PropAmmHarness,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        offset_bps: i32,
+    ) -> (Outcome, Option<propamm::report::Observation>) {
+        let market = harness_market(self.solver);
+        let injector = harness.injector.lock().await;
+
+        if !injector.neutralize(&market).await {
+            return self
+                .quote_order(token_in, token_out, amount_in)
+                .await;
+        }
+        let (public_outcome, public_observed) = self
+            .quote_order(token_in, token_out, amount_in)
+            .await;
+        let Outcome::Solved(public) = &public_outcome else {
+            // Fynd cannot serve this order publicly, so there is no reference to underbid. Report
+            // the unsolvable outcome as-is rather than inventing a price for the mock
+            // to beat.
+            return (public_outcome, public_observed);
+        };
+        let Ok(public_best_out) = public
+            .amount_out
+            .to_string()
+            .parse::<BigUint>()
+        else {
+            return (public_outcome, public_observed);
+        };
+
+        let core_token_in = CoreAddress::from(token_in.into_array());
+        let Some(calibration) = injector
+            .calibrate(
+                &market,
+                &core_token_in,
+                &amount_in_biguint(amount_in),
+                &public_best_out,
+                offset_bps,
+            )
+            .await
+        else {
+            return (public_outcome, public_observed);
+        };
+        drop(injector);
+
+        // The calibration's own error check: integer division and the source pool's rounding mean
+        // the target lands a fraction of a bps off the requested offset. A large gap means
+        // the source could not hold the target, which would make the group's expectation
+        // untestable.
+        let realized_bps = calibration.realized_offset_bps();
+        if (realized_bps - f64::from(offset_bps)).abs() > 0.5 {
+            warn!(
+                offset_bps,
+                realized_bps,
+                "mock PropAMM calibration missed its target offset; this order's group result is \
+                 not trustworthy"
+            );
+        }
+        debug!(
+            offset_bps,
+            realized_bps, "calibrated the mock PropAMM against the public best route"
+        );
+
         let (outcome, observed) = self
             .quote_order(token_in, token_out, amount_in)
             .await;
+        let observed = observed.map(|o| o.with_calibration(&calibration));
+        (outcome, observed)
+    }
+}
+
+#[async_trait]
+impl SteppingSolver for StepAdapter<'_> {
+    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
+        let calibrated_offset = self.propamm.and_then(|harness| {
+            let config = harness.config();
+            let core_in = CoreAddress::from(token_in.into_array());
+            let core_out = CoreAddress::from(token_out.into_array());
+            config
+                .serves(&core_in, &core_out)
+                .then(|| config.offset_for(harness.stats.next_order_index()))
+                .flatten()
+        });
+
+        let (outcome, observed) = match (self.propamm, calibrated_offset) {
+            (Some(harness), Some(offset_bps)) => {
+                self.solve_calibrated(harness, token_in, token_out, amount_in, offset_bps)
+                    .await
+            }
+            _ => {
+                self.quote_order(token_in, token_out, amount_in)
+                    .await
+            }
+        };
         // Recorded on every path, including the ones that never produced a quote: the sink is
         // joined back to the block's trades by position, so a skipped solve would shift
         // every later observation onto the wrong trade. `Observation::solved` is what the
@@ -614,8 +737,9 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         let propamm = propamm_config
             .clone()
             .map(|config| PropAmmHarness {
-                injector: tokio::sync::Mutex::new(propamm::Injector::new(&solver, config)),
+                injector: tokio::sync::Mutex::new(propamm::Injector::new(&solver, config.clone())),
                 stats: Arc::clone(&propamm_stats),
+                config,
             });
         let adapter = StepAdapter {
             solver: &solver,
@@ -688,14 +812,14 @@ fn propamm_config(
     let config = propamm::MirrorConfig {
         token_a,
         token_b,
-        price_pct: cfg.propamm_price_pct,
+        offsets_bps: cfg.propamm_offsets_bps.clone(),
         probe_units: cfg.propamm_probe_units,
         chain,
     };
     info!(
         token_a = %config.token_a,
         token_b = %config.token_b,
-        price_pct = config.price_pct,
+        offsets_bps = ?config.offsets_bps,
         probe_units = config.probe_units,
         "mock PropAMM enabled; its quotes are not executable"
     );
@@ -706,7 +830,7 @@ fn propamm_config(
 /// headroom that came out.
 fn log_propamm_summary(config: &propamm::MirrorConfig, totals: &propamm::report::Totals) {
     info!(
-        price_pct = config.price_pct,
+        offsets_bps = ?config.offsets_bps,
         solved_orders = totals.solved,
         propamm_wins = totals.won,
         winrate_pct = format!("{:.1}", totals.winrate_pct()),
@@ -798,6 +922,16 @@ fn report_propamm_block(
         );
     }
     vec![None; trade_count]
+}
+
+/// The solver's market-data handle, which the injector writes the mock's state through.
+fn harness_market(solver: &Solver) -> fynd_core::feed::market_data::MarketData {
+    solver.market_data()
+}
+
+/// Converts a `U256` order size to `BigUint`, which is what the mock's calibration math uses.
+fn amount_in_biguint(amount_in: U256) -> BigUint {
+    BigUint::from_bytes_be(&amount_in.to_be_bytes::<32>())
 }
 
 /// Converts a `BigUint` to `U256`, or `None` when it does not fit — the amount is then left
@@ -1108,7 +1242,7 @@ mod tests {
             max_lag_blocks: Some(100),
             comparisons_dir: None,
             propamm_pair: None,
-            propamm_price_pct: 100.05,
+            propamm_offsets_bps: vec![-5, 0, 5],
             propamm_probe_units: 1.0,
         })
         .await

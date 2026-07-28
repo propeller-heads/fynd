@@ -10,6 +10,13 @@ use crate::report::record::Comparison;
 /// Number of order pairs listed in the mock-`PropAMM` breakdown table.
 const TOP_PROPAMM_PAIRS: usize = 10;
 
+/// Slack allowed when checking a group's fee against its offset, in basis points.
+///
+/// The calibration divides integer amounts and the source pool rounds its own output, so a fee
+/// lands a fraction of a bps off its target. Anything beyond this is a real discrepancy, not
+/// rounding.
+const FEE_TOLERANCE_BPS: f64 = 0.5;
+
 /// Number of trades listed in the biggest-wins and biggest-losses tables.
 const TOP_TRADES: usize = 10;
 /// Number of tokens listed in the unsolvable-tail table.
@@ -57,6 +64,67 @@ pub(crate) struct PropAmm {
     pub median_headroom_bps: Option<f64>,
     /// Per-order-pair breakdown, most wins first.
     pub by_pair: Vec<PropAmmPair>,
+    /// Per-offset groups, ascending. Empty for a run with no calibrated orders.
+    pub groups: Vec<PropAmmGroup>,
+}
+
+/// Whether an offset group behaved as its price implies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GroupVerdict {
+    /// The group met its expectation.
+    Pass,
+    /// The group violated it; the string says how.
+    Fail(String),
+    /// No calibrated order landed in this group, so there is nothing to conclude.
+    NoData,
+}
+
+/// One offset group: orders priced the same distance from the public best route, and whether the
+/// router treated them the way that price implies.
+///
+/// This is the harness's actual test. Each order's competitive situation is constructed, so the
+/// group is an assertion rather than a measurement:
+///
+/// - **below the market** (`offset_bps < 0`) — the mock is strictly worse, so it must never be
+///   selected;
+/// - **at the market** (`offset_bps == 0`) — it can only win on gas, and then there is no surplus,
+///   so any selection must carry a zero fee;
+/// - **above the market** (`offset_bps > 0`) — the fee taken cannot exceed the offset, because the
+///   offset is all the surplus there is.
+pub(crate) struct PropAmmGroup {
+    /// The offset these orders were priced at, in basis points off the public best route.
+    pub offset_bps: i32,
+    /// Calibrated orders in this group.
+    pub orders: usize,
+    /// Of those, how many the router routed through the mock.
+    pub selected: usize,
+    /// Largest fee taken in the group, in bps — the number the expectation is checked against.
+    pub max_fee_bps: Option<f64>,
+    /// Median fee taken, in bps.
+    pub median_fee_bps: Option<f64>,
+    /// Whether the group met its expectation.
+    pub verdict: GroupVerdict,
+}
+
+impl PropAmmGroup {
+    /// The expectation this group's price implies, as a short phrase for the report.
+    pub(crate) fn expectation(&self) -> &'static str {
+        match self.offset_bps.cmp(&0) {
+            std::cmp::Ordering::Less => "never selected",
+            std::cmp::Ordering::Equal => "selected only on gas, zero fee",
+            std::cmp::Ordering::Greater => "selected, fee at most the offset",
+        }
+    }
+
+    /// Share of the group's orders the mock was selected for, as a percentage.
+    // Precision loss is irrelevant: these are order counts, far below f64's exact-integer range.
+    #[expect(clippy::cast_precision_loss)]
+    pub(crate) fn selected_pct(&self) -> f64 {
+        if self.orders == 0 {
+            return 0.0;
+        }
+        self.selected as f64 / self.orders as f64 * 100.0
+    }
 }
 
 impl PropAmm {
@@ -196,7 +264,104 @@ fn propamm(records: &[Comparison]) -> Option<PropAmm> {
         fee_headroom_usd: sum_propamm(&wins, |p| p.fee_headroom_usd),
         median_headroom_bps: median(&mut headroom_bps),
         by_pair: propamm_by_pair(&scoped),
+        groups: propamm_groups(&scoped),
     })
+}
+
+/// Groups the calibrated orders by offset and judges each group against its price.
+///
+/// Orders with no offset are excluded: they were not calibrated, so no expectation applies to them.
+fn propamm_groups(scoped: &[&Comparison]) -> Vec<PropAmmGroup> {
+    let mut grouped: HashMap<i32, Vec<&Comparison>> = HashMap::new();
+    for record in scoped {
+        if let Some(offset) = record
+            .propamm
+            .as_ref()
+            .and_then(|p| p.offset_bps)
+        {
+            grouped
+                .entry(offset)
+                .or_default()
+                .push(record);
+        }
+    }
+
+    let mut groups: Vec<PropAmmGroup> = grouped
+        .into_iter()
+        .map(|(offset_bps, records)| {
+            let mut fees: Vec<f64> = records
+                .iter()
+                .filter(|r| {
+                    r.propamm
+                        .as_ref()
+                        .is_some_and(|p| p.won)
+                })
+                .filter_map(|r| {
+                    r.propamm
+                        .as_ref()
+                        .and_then(|p| p.fee_headroom_bps)
+                })
+                .collect();
+            let selected = records
+                .iter()
+                .filter(|r| {
+                    r.propamm
+                        .as_ref()
+                        .is_some_and(|p| p.won)
+                })
+                .count();
+            let max_fee_bps = fees
+                .iter()
+                .copied()
+                .fold(None::<f64>, |acc, fee| Some(acc.map_or(fee, |best| best.max(fee))));
+            let mut group = PropAmmGroup {
+                offset_bps,
+                orders: records.len(),
+                selected,
+                max_fee_bps,
+                median_fee_bps: median(&mut fees),
+                verdict: GroupVerdict::NoData,
+            };
+            group.verdict = judge_group(&group);
+            group
+        })
+        .collect();
+    groups.sort_by_key(|group| group.offset_bps);
+    groups
+}
+
+/// Judges one offset group against the expectation its price implies.
+fn judge_group(group: &PropAmmGroup) -> GroupVerdict {
+    if group.orders == 0 {
+        return GroupVerdict::NoData;
+    }
+    if group.offset_bps < 0 {
+        return if group.selected == 0 {
+            GroupVerdict::Pass
+        } else {
+            GroupVerdict::Fail(format!(
+                "priced {} bps below the public market, yet selected for {} of {} orders",
+                -group.offset_bps, group.selected, group.orders
+            ))
+        };
+    }
+    if group.selected == 0 {
+        // Not a failure at zero offset — the mock only wins there on gas, and it need not be
+        // cheaper. Above zero it should win, so say so without calling the run broken.
+        return GroupVerdict::NoData;
+    }
+    let Some(max_fee) = group.max_fee_bps else {
+        return GroupVerdict::NoData;
+    };
+    let ceiling = f64::from(group.offset_bps) + FEE_TOLERANCE_BPS;
+    if max_fee <= ceiling {
+        GroupVerdict::Pass
+    } else {
+        GroupVerdict::Fail(format!(
+            "priced {} bps above the public market, yet took a fee of {max_fee:.2} bps",
+            group.offset_bps
+        ))
+    }
 }
 
 /// Sums an optional USD field over records, skipping the ones where the token was not priced.
@@ -650,5 +815,136 @@ mod tests {
         assert_eq!(rows[1].token_in, "0xdai");
         assert_eq!(rows[1].won, 0);
         assert!(rows[1].median_headroom_bps.is_none());
+    }
+
+    /// A calibrated record: priced `offset_bps` off the public best route, selected or not.
+    fn calibrated(block: u64, offset_bps: i32, won: bool, fee_bps: f64) -> Comparison {
+        serde_json::from_value(serde_json::json!({
+            "block": block,
+            "settled_tx": format!("0x{block:064x}"),
+            "venue": "relay",
+            "solver": "1inch",
+            "token_in": "0xweth",
+            "token_out": "0xusdt",
+            "top": { "verdict": "win", "net_bps": 5.0, "settled_value_usd": 1000.0 },
+            "propamm": {
+                "pair": "WETH/USDT",
+                "offset_bps": offset_bps,
+                "won": won,
+                "fee_headroom_bps": won.then_some(fee_bps),
+                "committed_usd": won.then_some(1_000.0),
+                "fee_headroom_usd": won.then(|| fee_bps / 10_000.0 * 1_000.0),
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_groups_are_ordered_by_price_ascending() {
+        let records = vec![
+            calibrated(1, 5, true, 5.0),
+            calibrated(2, -5, false, 0.0),
+            calibrated(3, 0, true, 0.0),
+        ];
+        let groups = propamm(&records)
+            .expect("outcomes present")
+            .groups;
+        let offsets: Vec<i32> = groups
+            .iter()
+            .map(|g| g.offset_bps)
+            .collect();
+        assert_eq!(offsets, vec![-5, 0, 5], "cards read below-market to above-market");
+    }
+
+    #[test]
+    fn test_below_market_group_passes_only_when_never_selected() {
+        let never = vec![calibrated(1, -5, false, 0.0), calibrated(2, -5, false, 0.0)];
+        assert_eq!(propamm(&never).unwrap().groups[0].verdict, GroupVerdict::Pass);
+
+        // A single selection below the public market breaks the router's core promise, so the group
+        // must fail loudly rather than average the violation away.
+        let once = vec![calibrated(1, -5, false, 0.0), calibrated(2, -5, true, 3.0)];
+        let verdict = &propamm(&once).unwrap().groups[0].verdict;
+        assert!(
+            matches!(verdict, GroupVerdict::Fail(reason) if reason.contains("below the public")),
+            "expected a failure naming the violation, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_at_market_group_passes_on_a_zero_fee() {
+        // At the market the mock can only win on gas, and then there is no surplus to take.
+        let records = vec![calibrated(1, 0, true, 0.0), calibrated(2, 0, false, 0.0)];
+        let group = &propamm(&records).unwrap().groups[0];
+        assert_eq!(group.verdict, GroupVerdict::Pass);
+        assert_eq!(group.selected, 1);
+    }
+
+    #[test]
+    fn test_at_market_group_fails_on_a_non_zero_fee() {
+        // Charging a fee at the market price means the user was quoted below the public route.
+        let records = vec![calibrated(1, 0, true, 4.0)];
+        assert!(matches!(&propamm(&records).unwrap().groups[0].verdict, GroupVerdict::Fail(_)));
+    }
+
+    #[test]
+    fn test_above_market_group_caps_the_fee_at_the_offset() {
+        // The offset is all the surplus there is, so a fee within it passes...
+        let within = vec![calibrated(1, 5, true, 4.8), calibrated(2, 5, true, 5.0)];
+        assert_eq!(propamm(&within).unwrap().groups[0].verdict, GroupVerdict::Pass);
+
+        // ...and a fee beyond it means the pool signed more than it could charge.
+        let beyond = vec![calibrated(1, 5, true, 5.0), calibrated(2, 5, true, 9.0)];
+        let verdict = &propamm(&beyond).unwrap().groups[0].verdict;
+        assert!(
+            matches!(verdict, GroupVerdict::Fail(reason) if reason.contains("9.00")),
+            "expected the offending fee in the message, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_above_market_fee_tolerance_absorbs_rounding_only() {
+        // Integer division puts a fee a hair over its target; that is rounding, not a discrepancy.
+        let rounding = vec![calibrated(1, 5, true, 5.0 + FEE_TOLERANCE_BPS / 2.0)];
+        assert_eq!(propamm(&rounding).unwrap().groups[0].verdict, GroupVerdict::Pass);
+
+        let real = vec![calibrated(1, 5, true, 5.0 + FEE_TOLERANCE_BPS * 4.0)];
+        assert!(matches!(&propamm(&real).unwrap().groups[0].verdict, GroupVerdict::Fail(_)));
+    }
+
+    #[test]
+    fn test_group_with_no_selection_above_market_is_no_data_not_failure() {
+        // Winning above the market depends on gas as well as price, so never winning is
+        // inconclusive rather than a violation — the harness must not cry wolf.
+        let records = vec![calibrated(1, 5, false, 0.0)];
+        assert_eq!(propamm(&records).unwrap().groups[0].verdict, GroupVerdict::NoData);
+    }
+
+    #[test]
+    fn test_uncalibrated_orders_form_no_group() {
+        // Off-pair orders carry no offset, so no expectation applies and they must not dilute a
+        // group.
+        let records = vec![
+            propamm_record(1, "0xdai", "0xusdc", false, 0.0, 0.0),
+            calibrated(2, 5, true, 5.0),
+        ];
+        let propamm = propamm(&records).expect("outcomes present");
+        assert_eq!(propamm.groups.len(), 1);
+        assert_eq!(propamm.groups[0].orders, 1);
+        // Both still count toward the run's solved total.
+        assert_eq!(propamm.solved, 2);
+    }
+
+    #[test]
+    fn test_selected_pct_is_zero_rather_than_nan_when_empty() {
+        let group = PropAmmGroup {
+            offset_bps: 0,
+            orders: 0,
+            selected: 0,
+            max_fee_bps: None,
+            median_fee_bps: None,
+            verdict: GroupVerdict::NoData,
+        };
+        assert!(group.selected_pct().abs() < f64::EPSILON);
     }
 }

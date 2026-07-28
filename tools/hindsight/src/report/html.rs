@@ -9,7 +9,8 @@
 use std::fmt::Write as _;
 
 use crate::report::aggregate::{
-    Count, GroupStats, PropAmm, PropAmmPair, Report, Savings, Summary, TradeRow, VerdictStat,
+    Count, GroupStats, GroupVerdict, PropAmm, PropAmmGroup, PropAmmPair, Report, Savings, Summary,
+    TradeRow, VerdictStat,
 };
 
 /// Shortest share of a stacked column that gets an inline `12.3%` label. Below it the segment is
@@ -298,14 +299,78 @@ fn propamm_section(propamm: &PropAmm) -> String {
         stat(&fmt_bps(propamm.avg_headroom_bps()), "fee headroom bps (flow-weighted)"),
     );
     let body = format!(
-        "<p class=\"note\">Mirrored pool: <strong>{}</strong>, priced fee-free. \
-         <em>Fee headroom</em> is what the signed extension could have charged and still beaten the \
-         public market — measured, not assumed. Quotes from this pool are not executable.</p>\
-         {headline}{}",
+        "<p class=\"note\">Mirrored pool: <strong>{}</strong>, priced fee-free against the public \
+         best route for each order. <em>Fee headroom</em> is what the signed extension could have \
+         charged and still beaten that route — measured, not assumed. Quotes from this pool are not \
+         executable.</p>{}{headline}{}",
         escape(pair),
+        propamm_groups(&propamm.groups),
         propamm_pair_table(&propamm.by_pair),
     );
     section("Mock PropAMM (exclusive route)", &body)
+}
+
+/// The offset groups, one card each, ascending by price.
+///
+/// Each card leads with its verdict rather than its numbers: the whole point of calibrating every
+/// order is that the expected behaviour is known up front, so the reader should not have to work
+/// out whether 5.2% is good. The numbers are underneath for when it fails.
+fn propamm_groups(groups: &[PropAmmGroup]) -> String {
+    if groups.is_empty() {
+        return "<p class=\"nodata\">No calibrated orders — no settled trade in this run was on \
+                the mirrored pair.</p>"
+            .to_string();
+    }
+    let mut cards = String::new();
+    for group in groups {
+        let (chip, cls) = match &group.verdict {
+            GroupVerdict::Pass => ("pass".to_string(), "ok"),
+            GroupVerdict::Fail(_) => ("FAIL".to_string(), "bad"),
+            GroupVerdict::NoData => ("no data".to_string(), "idle"),
+        };
+        let detail = match &group.verdict {
+            GroupVerdict::Fail(reason) => {
+                format!("<p class=\"groupfail\">{}</p>", escape(reason))
+            }
+            GroupVerdict::Pass | GroupVerdict::NoData => String::new(),
+        };
+        let _ = write!(
+            cards,
+            "<div class=\"group\">\
+               <div class=\"grouphead\"><span class=\"groupoff\">{}</span>\
+                 <span class=\"chip {cls}\">{chip}</span></div>\
+               <div class=\"groupexp\">{}</div>\
+               <table class=\"groupnums\"><tbody>\
+                 <tr><td>orders</td><td class=\"num\">{}</td></tr>\
+                 <tr><td>selected</td><td class=\"num\">{} ({})</td></tr>\
+                 <tr><td>fee taken (median)</td><td class=\"num\">{}</td></tr>\
+                 <tr><td>fee taken (max)</td><td class=\"num\">{}</td></tr>\
+               </tbody></table>{detail}\
+             </div>",
+            escape(&fmt_offset(group.offset_bps)),
+            escape(group.expectation()),
+            group.orders,
+            group.selected,
+            share_pct_of(group.selected_pct()),
+            fmt_bps(group.median_fee_bps),
+            fmt_bps(group.max_fee_bps),
+        );
+    }
+    format!("<div class=\"groups\">{cards}</div>")
+}
+
+/// An offset as a signed bps label, so a column header reads as a price and not a bare number.
+fn fmt_offset(offset_bps: i32) -> String {
+    match offset_bps.cmp(&0) {
+        std::cmp::Ordering::Less => format!("{offset_bps} bps (below market)"),
+        std::cmp::Ordering::Equal => "at market".to_string(),
+        std::cmp::Ordering::Greater => format!("+{offset_bps} bps (above market)"),
+    }
+}
+
+/// A percentage that is already computed, rendered like the report's other shares.
+fn share_pct_of(pct: f64) -> String {
+    format!("{pct:.0}%")
 }
 
 /// Per-order-direction breakdown. A row's pair can differ from the mirrored pair: the mock serves
@@ -476,6 +541,19 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .nodata { color: #9a8bbf; margin: 0; }
 /* A section's framing sentence: what the numbers below mean, before they are read. */
 .note { color: #b9adcf; margin: 0 0 .5rem; max-width: 68ch; line-height: 1.55; }
+/* One card per offset group. They wrap rather than scroll, so a wider ladder stays readable. */
+.groups { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.25rem 0; }
+.group { flex: 1 1 15rem; border: 1px solid #2f2540; border-radius: 6px; padding: .9rem 1rem; }
+.grouphead { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.groupoff { font-weight: 600; }
+.groupexp { color: #9a8bbf; font-size: .75rem; margin-top: .2rem; min-height: 2.2em; }
+.groupnums { margin-top: .6rem; width: 100%; }
+.groupnums td { padding: .15rem 0; border: 0; }
+/* The verdict never rests on colour alone: each chip is also labelled pass / FAIL / no data. */
+.chip.ok { background: #1b3a1f; color: #a5d6a7; }
+.chip.bad { background: #4a1c1c; color: #ef9a9a; }
+.chip.idle { background: #2f2540; color: #9a8bbf; }
+.groupfail { color: #ef9a9a; font-size: .78rem; margin: .5rem 0 0; line-height: 1.45; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #362b4a; }
 th { color: #9a8bbf; font-weight: 600; font-size: .8rem; text-transform: uppercase; }
@@ -676,5 +754,64 @@ mod tests {
         let html = render(&propamm_report(false), None);
         assert!(html.contains("Mock PropAMM (exclusive route)"));
         assert!(html.contains("0.0%"), "a zero winrate must be stated, not omitted");
+    }
+
+    /// A report from calibrated records across the three offset groups.
+    fn group_report(above_fee_bps: f64) -> Report {
+        let record = |block: u64, offset: i32, won: bool, fee: f64| {
+            serde_json::json!({
+                "block": block,
+                "settled_tx": format!("0x{block:064x}"),
+                "venue": "relay", "solver": "1inch",
+                "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                "token_out": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                "top": {"verdict": "win", "net_bps": 5.0, "settled_value_usd": 1000.0},
+                "propamm": {
+                    "pair": "WETH/USDT", "offset_bps": offset, "won": won,
+                    "fee_headroom_bps": won.then_some(fee),
+                    "committed_usd": won.then_some(1_000.0),
+                    "fee_headroom_usd": won.then_some(fee / 10.0),
+                },
+            })
+        };
+        let records: Vec<Comparison> = vec![
+            record(1, -5, false, 0.0),
+            record(2, 0, true, 0.0),
+            record(3, 5, true, above_fee_bps),
+        ]
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap())
+        .collect();
+        build(&records)
+    }
+
+    #[test]
+    fn test_group_cards_lead_with_the_verdict_and_name_each_price() {
+        let html = render(&group_report(5.0), None);
+        assert!(html.contains("-5 bps (below market)"));
+        assert!(html.contains("at market"));
+        assert!(html.contains("+5 bps (above market)"));
+        // The verdict is a word, never colour alone.
+        assert!(html.contains(">pass<"), "a passing group must say so in text");
+        assert!(html.contains("never selected"));
+        assert!(html.contains("selected only on gas, zero fee"));
+    }
+
+    #[test]
+    fn test_a_failing_group_renders_the_reason_not_just_a_colour() {
+        let html = render(&group_report(20.0), None);
+        assert!(html.contains(">FAIL<"));
+        assert!(
+            html.contains("took a fee of 20.00 bps"),
+            "the reason must be readable without opening the JSONL"
+        );
+    }
+
+    #[test]
+    fn test_group_panel_says_so_when_nothing_was_calibrated() {
+        // A run whose settled trades never touched the mirrored pair must explain the empty panel
+        // rather than render three blank cards.
+        let html = render(&propamm_report(true), None);
+        assert!(html.contains("No calibrated orders"));
     }
 }

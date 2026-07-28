@@ -51,6 +51,49 @@ impl MirrorPool {
         Self { inner, price_ppm: price_pct_to_ppm(price_pct) }
     }
 
+    /// Wraps `inner` at an explicit parts-per-million scale, clamped to the same range.
+    ///
+    /// Used by the per-order calibration, which solves for the scale that lands the mock's output
+    /// on a target rather than expressing it as a percentage.
+    pub(crate) fn from_scale_ppm(inner: Box<dyn ProtocolSim>, scale_ppm: u32) -> Self {
+        Self { inner, price_ppm: scale_ppm.min(4 * PRICE_SCALE) }
+    }
+
+    /// The scale that makes this pool's output for `amount_in` land on `target_out`, in parts per
+    /// million, or `None` when `inner` cannot price the pair.
+    ///
+    /// Rounds down, so the calibrated output never overshoots the target — an overshoot at the
+    /// zero-offset group would manufacture surplus the test is asserting is absent.
+    pub(crate) fn scale_for_target(
+        inner: &dyn ProtocolSim,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+        target_out: &BigUint,
+    ) -> Option<u32> {
+        let unscaled = inner
+            .get_amount_out(amount_in, token_in, token_out)
+            .ok()?
+            .amount;
+        if unscaled == BigUint::ZERO {
+            return None;
+        }
+        let ppm = target_out * BigUint::from(PRICE_SCALE) / unscaled;
+        u32::try_from(ppm)
+            .ok()
+            .map(|ppm| ppm.min(4 * PRICE_SCALE))
+    }
+
+    /// The scale that makes this pool quote essentially nothing, so the router can never select it.
+    ///
+    /// One part per million of the mirrored price, not zero: a zero scale makes `spot_price` error,
+    /// which would keep the pool out of the graph entirely rather than merely out of the winning
+    /// route — and the point of neutralising it is to read the public best route *with the mock's
+    /// edge still present*.
+    pub(crate) const fn neutral_scale_ppm() -> u32 {
+        1
+    }
+
     /// The mock's fee-free price as a fraction of the mirrored pool's price.
     pub(crate) fn price_factor(&self) -> f64 {
         f64::from(self.price_ppm) / f64::from(PRICE_SCALE)
@@ -384,5 +427,97 @@ mod tests {
             .get_amount_out(BigUint::from(1u64), &token("A"), &token("B"))
             .expect("mirror quotes");
         assert_eq!(result.gas, BigUint::from(100_000u64));
+    }
+
+    #[test]
+    fn test_scale_for_target_lands_the_output_on_the_target() {
+        // The whole calibration rests on this: solve for the scale, apply it, land on the target.
+        let source = FlatPool { rate: 1_000 };
+        let amount = BigUint::from(1_000u64);
+        for offset_bps in [-50i64, -5, 0, 5, 50, 500] {
+            let unscaled = BigUint::from(1_000_000u64);
+            // Every offset in the table is well above -10_000 bps, so the sum is positive.
+            let shifted = (10_000 + offset_bps).unsigned_abs();
+            let target = &unscaled * BigUint::from(shifted) / BigUint::from(10_000u64);
+            let scale = MirrorPool::scale_for_target(
+                &source,
+                amount.clone(),
+                &token("A"),
+                &token("B"),
+                &target,
+            )
+            .expect("a flat pool can always be scaled");
+
+            let realized = MirrorPool::from_scale_ppm(Box::new(source.clone()), scale)
+                .get_amount_out(amount.clone(), &token("A"), &token("B"))
+                .expect("scaled pool quotes")
+                .amount;
+            // Rounding down twice can cost a couple of atomic units on a 1e6 output; the offset it
+            // represents is far below the 0.5 bps the report tolerates.
+            let realized = i128::try_from(realized).unwrap();
+            let target = i128::try_from(target).unwrap();
+            assert!(
+                (realized - target).abs() <= 2,
+                "offset {offset_bps}: landed on {realized}, wanted {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scale_for_target_rounds_down_so_it_never_overshoots() {
+        // An overshoot at the at-market group would manufacture surplus the test asserts is absent.
+        let source = FlatPool { rate: 3 };
+        let amount = BigUint::from(7u64);
+        // Unscaled output is 21; ask for 10, which is not a whole number of parts per million of
+        // it.
+        let target = BigUint::from(10u64);
+        let scale = MirrorPool::scale_for_target(
+            &source,
+            amount.clone(),
+            &token("A"),
+            &token("B"),
+            &target,
+        )
+        .unwrap();
+        let realized = MirrorPool::from_scale_ppm(Box::new(source), scale)
+            .get_amount_out(amount, &token("A"), &token("B"))
+            .unwrap()
+            .amount;
+        assert!(realized <= target, "{realized} overshot {target}");
+    }
+
+    #[test]
+    fn test_neutral_scale_quotes_essentially_nothing_but_still_prices() {
+        // Neutralising must keep the pool in the graph — the point is to read the public best route
+        // with the mock's edge present — so spot_price has to stay finite.
+        let neutral = MirrorPool::from_scale_ppm(
+            Box::new(FlatPool { rate: 1_000 }),
+            MirrorPool::neutral_scale_ppm(),
+        );
+        let out = neutral
+            .get_amount_out(BigUint::from(1_000u64), &token("A"), &token("B"))
+            .expect("still quotes")
+            .amount;
+        // One part per million of 1_000_000.
+        assert_eq!(out, BigUint::from(1u64));
+        let price = neutral
+            .spot_price(&token("A"), &token("B"))
+            .expect("neutralised pool still has a finite price");
+        assert!(price.is_finite() && price > 0.0, "got {price}");
+    }
+
+    #[test]
+    fn test_scale_for_target_declines_a_source_that_cannot_price() {
+        // A source quoting zero has no scale that reaches a positive target; the caller must leave
+        // the order uncalibrated rather than divide by zero.
+        let dead = FlatPool { rate: 0 };
+        assert!(MirrorPool::scale_for_target(
+            &dead,
+            BigUint::from(1_000u64),
+            &token("A"),
+            &token("B"),
+            &BigUint::from(500u64),
+        )
+        .is_none());
     }
 }

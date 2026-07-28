@@ -10,7 +10,10 @@
 //! Because the quoted `amount_out` is pinned to the commitment, the mock pool never changes
 //! hindsight's own win/loss verdict. It only adds this second, orthogonal measurement.
 
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 
 use alloy::primitives::Address;
 use fynd_core::OrderQuote;
@@ -37,6 +40,12 @@ pub(crate) struct Observation {
     /// Output the mock produced above the commitment — the fee it could have charged. `None` when
     /// it didn't win.
     pub fee_headroom: Option<BigUint>,
+    /// The offset the mock was priced at for this order, in basis points relative to the public
+    /// best route. `None` for an order that was not calibrated — off the mirrored pair, or
+    /// unsolvable publicly, so there was no reference to price against.
+    pub offset_bps: Option<i32>,
+    /// The public best route's output this order's offset was measured against.
+    pub public_best_out: Option<BigUint>,
 }
 
 impl Observation {
@@ -59,7 +68,16 @@ impl Observation {
             won,
             committed_amount_out: quote.committed_amount_out().cloned(),
             fee_headroom: quote.surplus_amount().cloned(),
+            offset_bps: None,
+            public_best_out: None,
         }
+    }
+
+    /// Labels this observation with the calibration the mock was priced under.
+    pub(crate) fn with_calibration(mut self, calibration: &crate::propamm::Calibration) -> Self {
+        self.offset_bps = Some(calibration.offset_bps);
+        self.public_best_out = Some(calibration.public_best_out.clone());
+        self
     }
 
     /// An observation for a solve that never produced a quote.
@@ -74,6 +92,8 @@ impl Observation {
             won: false,
             committed_amount_out: None,
             fee_headroom: None,
+            offset_bps: None,
+            public_best_out: None,
         }
     }
 
@@ -137,6 +157,10 @@ pub(crate) struct Stats {
     /// The mirrored pair as token symbols, e.g. `WETH/USDC`. Resolved once the feed has loaded the
     /// tokens, which is why it is set from the injection path rather than from the CLI.
     pair_label: Mutex<Option<String>>,
+    /// Monotonic counter over calibrated orders, which rotates the offset ladder. Counting only
+    /// the calibrated ones keeps the groups balanced regardless of how much off-pair flow a
+    /// block has.
+    order_index: AtomicU64,
 }
 
 impl Stats {
@@ -176,6 +200,12 @@ impl Stats {
         totals.headroom_usd += headroom_usd;
         totals.captured_flow_usd += captured_flow_usd;
         *totals
+    }
+
+    /// Hands out the next calibrated order's index, which selects its offset from the ladder.
+    pub(crate) fn next_order_index(&self) -> u64 {
+        self.order_index
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     /// Records the mirrored pair's symbol label, so the report can name it.
@@ -222,6 +252,9 @@ pub(crate) fn biguint_to_f64(value: &BigUint) -> f64 {
 pub(crate) struct Record {
     /// The mirrored pair as token symbols, e.g. `WETH/USDC` — which pool the mock stood in for.
     pub pair: Option<String>,
+    /// The offset the mock was priced at, in basis points relative to the public best route.
+    /// Absent for an order that was not calibrated.
+    pub offset_bps: Option<i32>,
     /// Whether the winning route ran through the mock `PropAMM` pool.
     pub won: bool,
     /// The public-market output the user is committed to.
@@ -246,6 +279,7 @@ impl Record {
     ) -> Self {
         Self {
             pair,
+            offset_bps: observed.offset_bps,
             won: observed.won,
             committed_amount_out: observed
                 .committed_amount_out
@@ -273,6 +307,8 @@ mod tests {
             won,
             committed_amount_out: won.then(|| BigUint::from(committed)),
             fee_headroom: won.then(|| BigUint::from(headroom)),
+            offset_bps: None,
+            public_best_out: None,
         }
     }
 

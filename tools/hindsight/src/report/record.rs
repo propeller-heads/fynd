@@ -34,6 +34,11 @@ pub(crate) struct PropAmm {
     /// The mirrored pair as token symbols, e.g. `WETH/USDC`.
     #[serde(default)]
     pub pair: Option<String>,
+    /// The offset the mock was priced at, in basis points relative to the public best route for
+    /// this order. Absent for an order that was not calibrated, which is excluded from the
+    /// group test.
+    #[serde(default)]
+    pub offset_bps: Option<i32>,
     /// Whether the winning route ran through the mock pool.
     pub won: bool,
     /// That headroom as a fraction of the committed output, in basis points.
@@ -161,6 +166,8 @@ mod tests {
             won: true,
             committed_amount_out: Some(1_000_000_000u64.into()),
             fee_headroom: Some(400_000u64.into()),
+            offset_bps: Some(5),
+            public_best_out: Some(1_000_000_000u64.into()),
         };
         let record =
             Record::new(&observed, Some("WETH/USDC".to_string()), Some(1_000.0), Some(0.4));
@@ -182,6 +189,7 @@ mod tests {
             .propamm
             .expect("the propamm field round-trips");
         assert_eq!(propamm.pair.as_deref(), Some("WETH/USDC"));
+        assert_eq!(propamm.offset_bps, Some(5));
         assert!(propamm.won);
         // 400_000 / 1_000_000_000 = 4 bps.
         assert!((propamm.fee_headroom_bps.unwrap() - 4.0).abs() < 1e-9);
